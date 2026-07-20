@@ -1,56 +1,65 @@
-# Session handoff — Phase 1, Task 6 done; Checkpoint B pending human sign-off
+# Session handoff — Phase 1, Task 7 done; Checkpoint B + Task 8 next
 
-> **Last session:** Tue Jul 21 2026. Task 6 landed green. Phase 1.B is
-> code-complete; one visibility check needs human eyes before Phase 1.C
-> starts.
-> **Next:** Checkpoint B sign-off (manual visibility check), then
-> Task 7 (core editor state machine + MockCanvas test infra). Replace
-> this file at the start of each session; the permanent record lives
-> in [`TODO.md`](TODO.md) under "Session notes".
+> **Last session:** Tue Jul 21 2026. Task 7 landed green. Phase 1.C
+> has its foundation: editor state machine, public `MockCanvas`, and
+> `render()` dispatch for every annotation variant. Task 8 (first
+> real annotation tool — Rectangle, end-to-end vertical slice) is
+> the natural next step.
+> **Next:** (optional) Checkpoint B human-eyes check for the editor
+> window on a real display, then Task 8. Replace this file at the
+> start of each session; the permanent record lives in
+> [`TODO.md`](TODO.md) under "Session notes".
 
 ## Where we are
 
-**Phase 1 — Capture + editor window.** Phase 1.A (capture path) and
-Phase 1.B (editor skeleton) are both code-complete. The standing gate
-is green. One carried-forward verification debt remains before
-Checkpoint B can be signed off: the maintainer needs to confirm with
-human eyes that the editor window visibly shows the screenshot and
-that Esc returns `EditorOutcome::Cancelled`.
+**Phase 1 — Capture + editor window.** Phase 1.A (capture path),
+Phase 1.B (editor skeleton), and the first half of Phase 1.C
+(editor state machine + MockCanvas infra) are code-complete. The
+standing gate is green. One carried-forward verification debt from
+Phase 1.B remains: the maintainer should confirm with human eyes
+that the editor window visibly shows the screenshot and that Esc
+returns `EditorOutcome::Cancelled`. This doesn't block Task 8 — it
+only blocks formal Checkpoint B sign-off.
 
 ```
 Phase 1.A — Capture path             Phase 1.B — Editor skeleton
   Task 1  config module     [x]        Task 4  EguiCanvas bg     [x]
   Task 2  capture module    [x]        Task 5  EguiShell run     [x]
   Task 3  CLI wiring        [x]        Task 6  CLI → editor      [x]
-  ▓▓▓ Checkpoint A (1/1)*            ▓▓▓ Checkpoint B (0/1)**
+  ▓▓▓ Checkpoint A implicitly clear   ▓▓▓ Checkpoint B (0/1)*
 
-`*`  Checkpoint A's only pending box was the human-review gate;
-     implicitly cleared by proceeding to Phase 1.B.
-`**` Checkpoint B's remaining work is the manual visibility check
-     described below — no further code changes expected.
+Phase 1.C — First annotation tool (vertical slice)
+  Task 7  state machine + MockCanvas  [x]
+  Task 8  Rectangle end-to-end        [ ]    ← next
+  ▓▓▓ Checkpoint C (0/1)
+
+`*` Checkpoint B's remaining work is the manual visibility check
+    described below — no further code changes expected. Can run in
+    parallel with Task 8 if you'd rather not context-switch.
 ```
 
 ## What landed this session
 
-- **Task 6** — `run_region` / `run_fullscreen` now share a
-  `capture_and_dispatch(monitor, mode, output)` helper. When `--out`
-  is omitted, the capture is routed through
-  `EguiShell::run_editor(EditorState::new(img))` and the outcome is
-  logged (`Saved(p)` logs the path, `Cancelled` exits cleanly with no
-  output file). The editor path is gated on `cfg(feature = "egui")`;
-  `--no-default-features` builds reject `region`/`fullscreen` without
-  `--out` with a clear error. Explicit `--out PATH` preserves Task 3's
-  PNG-write path byte-for-byte. Side cleanup: deleted
-  `time_util.rs` (lost its only caller), removed
-  `OutputArgs::resolve_path`, and deleted the now-redundant
-  `examples/open_editor.rs` Task 5 smoke probe.
+- **Task 7** — `EditorState` gained `pending: Option<Annotation>` and
+  the state-machine methods `begin_annotation` /
+  `update_annotation` / `commit_annotation` / `cancel_annotation` /
+  `undo` / `redo` / `hit_test`. `Annotation` gained
+  `bounding_box()` and `contains(point)` helpers. `render()` now
+  iterates `state.anns` and dispatches via the new public
+  `render_ann(canvas, ann)` helper, then draws `state.pending` on
+  top. The Task 4 inline `MockCanvas` is promoted to a public struct
+  with a full `DrawCall` enum (one variant per `Canvas` method). All
+  9 annotation variants have a dispatch path in `render_ann`; `Blur`
+  renders as a grey placeholder + `tracing::warn!` until Task 13's
+  `image_ops` lands, and `Number` renders as a square + text label
+  until Phase 2 adds a `draw_circle` primitive.
 
-Detailed deviations + downstream-impact notes for Task 6 are in
-[`TODO.md`](TODO.md) under "### Task 6 close-out". **Read those
-before starting Task 7** — they document the `cfg(feature = "egui")`
-split pattern Task 7 will need to stay compatible with, and the
-`clippy::wildcard_enum_match_arm` allow on the `EditorOutcome` match
-that any future outcome handling in `cli.rs` will inherit.
+Detailed deviations + downstream-impact notes for Task 7 are in
+[`TODO.md`](TODO.md) under "### Task 7 close-out". **Read those
+before starting Task 8** — they document the drag-anchor convention
+(`rect.min` is the begin point during drag, normalized at commit),
+the `undo()`-clears-`pending` contract, the `Blur` placeholder
+behaviour, and the `mem::take`-vs-`clone` snapshot pattern.
 
 ## Standing gate (last green run)
 
@@ -58,23 +67,20 @@ that any future outcome handling in `cli.rs` will inherit.
 cargo fmt --all --check                                          # clean
 cargo clippy --workspace --all-targets -- -D warnings            # clean
 cargo clippy --no-default-features -p flintshot-app \
-  --all-targets -- -D warnings                                   # clean (NEW — Task 6)
-cargo test --workspace --all-targets                             # 33 pass, 1 ignored, 0 fail
+  --all-targets -- -D warnings                                   # clean
+cargo test --workspace --all-targets                             # 52 pass, 1 ignored, 0 fail
 cargo test --doc -p flintshot-core -p flintshot-editor-egui      # 0 doc tests
 ```
 
-The `--no-default-features` clippy line is new — Task 6's
-`cfg(not(feature = "egui"))` fallback made it a required check.
-Consider folding it into `AGENTS.md`'s standing gate before Phase 2
-so future sessions don't regress the headless build silently.
+Test count grew from 33 → 52 (19 new Task 7 tests: 16 in `editor.rs`,
+3 in `render.rs`).
 
 ## Open verification debt (resolve before Checkpoint B sign-off)
 
-Task 5 first surfaced this; Task 6 carried it forward because
-`flintshot region` is now the proper CLI path. The maintainer's dev
-machine is **Wayland + XWayland**, and eframe uses native Wayland
-here (the window is invisible to `wmctrl`'s X11 polling, so the
-terminal can't drive a close event). Smoke-verified end-to-end:
+Carried forward from Phase 1.B. The maintainer's dev machine is
+**Wayland + XWayland**, and eframe uses native Wayland here (the
+window is invisible to `wmctrl`'s X11 polling, so the terminal can't
+drive a close event). Smoke-verified end-to-end:
 
 - ✅ Capture succeeds (2560×1440 RGBA PNG via PipeWire).
 - ✅ `EguiShell::run_editor` blocks for the full test window with no
@@ -89,50 +95,73 @@ terminal can't drive a close event). Smoke-verified end-to-end:
 cargo run -- region
 ```
 
-Watch the window that opens — does the screenshot render? Press Esc —
-does the window close cleanly and does the terminal print
-`editor cancelled; no file written`? If yes to all three, Checkpoint B
-is clear and Task 7 can start. If something looks wrong, capture the
-exact symptom and add a session note before opening a debugging pass.
+If the window shows the screenshot and Esc closes it cleanly with
+terminal log `editor cancelled; no file written`, Checkpoint B is
+clear. If something looks wrong, capture the exact symptom and add a
+session note before opening a debugging pass. **This can run in
+parallel with Task 8** — Task 8 doesn't touch the editor window
+itself, only the input-handling logic inside `EditorApp`.
 
-## Next: Checkpoint B sign-off, then Task 7
+## Next: Task 8 — Rectangle tool end-to-end
 
-**Checkpoint B** ([`PLAN.md`](PLAN.md) §"Checkpoint B"):
+**Task 8** ([`TODO.md`](TODO.md) §"Task 8"). Goal: vertical slice of
+a real annotation tool. With `Tool::Rect` active, the egui shell
+translates mouse-down / drag / up into
+`begin_annotation` / `update_annotation` / `commit_annotation` (the
+state machine landed in Task 7). The shared `render()` path already
+dispatches committed and pending Rects; no per-tool render code is
+needed. `Ctrl+Z` should undo the last commit (the state machine
+already supports it). Add a toolbar button for the Rect tool to
+prove the plumbing works (full picker UI is Task 15).
 
-- [ ] Standing gate green (already done).
-- [ ] `flintshot region` opens an egui window showing the captured
-      screenshot on at least one platform from `TEST_MATRIX.md`.
-      _(Pending the human-eyes check above.)_
-- [ ] Esc closes cleanly; no panics, no leaked GPU resources.
-      _(Pending the human-eyes check above.)_
-- [ ] **Review with human before starting Phase 1.C.**
+**Acceptance criteria** (from [`TODO.md`](TODO.md) §"Task 8"):
+- [ ] Mouse-down with `Tool::Rect` begins a rect annotation; drag
+      updates the opposite corner; mouse-up commits.
+- [ ] The in-progress rect is visible during drag (via `pending`).
+- [ ] Committed rect persists in `anns` across frames; visible after
+      next render.
+- [ ] `Ctrl+Z` undoes the last commit (visible immediately).
+- [ ] Toolbar shows at least one button (Rect); clicking sets
+      `state.tool`.
+- [ ] Clicking outside the canvas area doesn't begin an annotation.
+- [ ] No `egui::Painter` calls in the egui crate for the rect — only
+      `Canvas::draw_rect_*`.
 
-Once those boxes are ticked, **Task 7 — Core editor state machine +
-`MockCanvas` test infrastructure** ([`TODO.md`](TODO.md) §"Task 7").
-
-**Goal.** Add `EditorState::{begin_annotation, update_annotation,
-commit_annotation, cancel_annotation, undo, redo}`, a
-`pending: Option<Annotation>` field, hit-testing, and a public
-`MockCanvas` struct with a `DrawCall` enum (one variant per `Canvas`
-method) for snapshot tests. This is M-sized because every annotation
-tool in Phase 1.C–1.E will be exercised through this contract.
+**Verification:**
+- [ ] Standing gate passes.
+- [ ] `MockCanvas` test: render an `EditorState` with two committed
+      `Annotation::Rect`s; assert `draw_rect_outline` count and args.
+- [ ] Manual: `cargo run -- region`, draw a red rectangle, see it
+      persist, press `Ctrl+Z`, see it disappear.
 
 **Files likely touched:**
-- `crates/flintshot-core/src/editor.rs` — state machine.
-- `crates/flintshot-core/src/render.rs` — `MockCanvas` + `DrawCall`
-  enum, plus drawing the `pending` annotation.
-- `crates/flintshot-core/src/lib.rs` — re-export `MockCanvas` / `DrawCall`.
+- `crates/flintshot-core/src/render.rs` — Rect dispatch already lives
+  here (Task 7); Task 8 just exercises it.
+- `crates/flintshot-editor-egui/src/canvas.rs` — already has
+  `draw_rect_outline` / `draw_rect_filled` from Task 4; no change
+  expected unless the existing impl has bugs.
+- `crates/flintshot-editor-egui/src/shell.rs` (or `app.rs`) — add
+  pointer-event handling in `EditorApp::logic` (per Task 5's logic/ui
+  split), a one-button toolbar in `EditorApp::ui`, and `Ctrl+Z`
+  wiring.
 
 **Watch out for:**
-- Task 4's close-out flagged that the inline `MockCanvas` in
-  `render.rs`'s `#[cfg(test)] mod tests` needs promoting to a public
-  struct — that's the Task 7 deliverable.
-- The `&mut Option<C::Image>` background cache parameter on
-  `render()` (Task 4 deviation 1) must keep working unchanged.
-- `EditorOutcome` matching from `flintshot-app` already uses the
-  `#[non_exhaustive]` wildcard allow — Task 7 doesn't touch this, but
-  if it extends `EditorState` with new public fields, document them in
-  the docstring (currently every field has a `///` comment).
+- Task 5's logic/ui split (egui 0.35) — pointer events go in
+  `logic()`, drawing stays in `ui()`. See Task 5 close-out
+  deviation 1 in [`TODO.md`](TODO.md).
+- The drag-anchor convention (Task 7 deviation 1): `rect.min` is the
+  begin anchor during drag; `rect.max` is the current pointer.
+  `Rect::normalized()` is applied at commit / render / hit-test time.
+- The outcome-slot `Rc<RefCell<…>>` (Task 5 deviation 4) doesn't
+  need touching — Task 8 doesn't change outcome semantics.
+- `EditorState::begin_annotation` already constructs a Rect ann from
+  `self.color` / `self.stroke_width` — Task 8 just feeds pointer
+  events into the state machine.
+- `egui::PointerButton::Primary` is the button to match for
+  left-click drag; `ctx.input(|i| i.pointer.button_down(...))` and
+  `ctx.input(|i| i.pointer.interact_pos())` are the API entry points.
+- Convert egui's logical pixels to physical (`pos * ctx.pixels_per_point()`)
+  at the event boundary — the state machine works in physical px.
 
 ## How to resume in a new session
 
@@ -142,24 +171,25 @@ tool in Phase 1.C–1.E will be exercised through this contract.
    opencode
    ```
 
-2. **If Checkpoint B is already signed off**, ask for Task 7 directly:
+2. **If Checkpoint B is already signed off**, ask for Task 8 directly:
    ```
-   do Task 7 — Core editor state machine + MockCanvas test infrastructure
+   do Task 8 — Rectangle tool end-to-end
    ```
    Otherwise run the visibility check first (one `cargo run -- region`
-   invocation) and tick the two remaining Checkpoint B boxes by hand.
+   invocation) and tick the two remaining Checkpoint B boxes by hand,
+   in parallel with starting Task 8.
 
 3. **Read order for context-loading** (opencode does most of this
    automatically, but for manual context-checking):
    - [`AGENTS.md`](../AGENTS.md) — operational guide + commands.
-   - [`docs/TODO.md`](TODO.md) §"Session notes" — Tasks 3, 4, 5, 6
-     close-outs (deviations + downstream impact).
+   - [`docs/TODO.md`](TODO.md) §"Session notes" — Tasks 3–7 close-outs
+     (deviations + downstream impact).
    - [`docs/PLAN.md`](PLAN.md) — phase plan + risks; especially the
      Phase 1.C task list.
    - This file — for the resume checklist.
 
 4. **Run the standing gate first** as a sanity check that nothing
-   drifted between sessions (include the new `--no-default-features`
+   drifted between sessions (include the `--no-default-features`
    clippy line):
    ```sh
    cargo fmt --all --check
@@ -169,38 +199,28 @@ tool in Phase 1.C–1.E will be exercised through this contract.
    cargo test --doc -p flintshot-core -p flintshot-editor-egui
    ```
 
-5. **Pick up at the right place.** If Checkpoint B is signed off,
-   proceed to Task 7 and add a Task 7 close-out entry to
+5. **Pick up at Task 8.** Add a Task 8 close-out entry to
    [`TODO.md`](TODO.md) §"Session notes" (same Deviation / Change /
-   Downstream-impact format as Tasks 1–6). Then refresh this file for
+   Downstream-impact format as Tasks 1–7). Then refresh this file for
    whatever's next.
 
 ## Uncommitted state
 
-The Task 6 changes are **uncommitted** in the working tree, along with
-the carried-forward Task 3, 4, 5 changes from previous sessions.
-Suggested commit boundaries (one per task, to match the existing
-close-out notes):
+The Task 7 changes are **uncommitted** in the working tree. Previous
+sessions' Tasks 1–6 are already committed (Task 6 went in as
+`df58be7 update for task 5` — confusing message, correct contents).
+Suggested commit:
 
 ```sh
-git status                                       # survey
-# … (Tasks 3, 4, 5 commits per previous handoff, if not yet taken)
+git status                                                # survey
 
-git add crates/flintshot-app/src/cli.rs \
-        crates/flintshot-app/src/main.rs \
-        crates/flintshot-editor-egui/examples \
-        docs/TODO.md docs/PLAN.md docs/ROADMAP.md CHANGELOG.md
-git commit -m "Task 6: CLI routes region/fullscreen through EguiShell"
+git add crates/flintshot-core/src/editor.rs \
+        crates/flintshot-core/src/render.rs \
+        crates/flintshot-core/src/lib.rs \
+        CHANGELOG.md docs/TODO.md docs/PLAN.md docs/SESSION_HANDOFF.md
+git commit -m "Task 7: editor state machine + MockCanvas test infra"
 ```
 
-Notes:
-- `crates/flintshot-app/src/time_util.rs` is **deleted**, not added —
-  `git status` will show it under "deleted:". The `git commit -m`
-  above includes it implicitly via the pathspec if you use
-  `git add -A crates/flintshot-app/src/` instead.
-- `crates/flintshot-editor-egui/examples/open_editor.rs` is also
-  **deleted**; the now-empty `examples/` directory can stay (git
-  doesn't track empty dirs, so it'll just vanish from the tree).
-- Adjust paths against the actual `git status` output — these are
-  approximate. The maintainer's preference is one commit per task;
-  `git log --oneline -5` will show the existing pattern.
+Adjust the pathspec against the actual `git status` output. The
+maintainer's preference is one commit per task; `git log --oneline -5`
+will show the existing pattern.

@@ -118,7 +118,7 @@ phase until the previous checkpoint is signed off.
 **Checkpoint B** — editor opens over a real screenshot
 
 ### Phase 1.C — First annotation tool (Rect, end-to-end vertical slice)
-- [ ] Task 7 — Core editor state machine + `MockCanvas` test infra
+- [x] Task 7 — Core editor state machine + `MockCanvas` test infra
 - [ ] Task 8 — Rectangle tool end-to-end
 
 **Checkpoint C** — Rectangle draws, persists, renders correctly
