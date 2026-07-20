@@ -426,8 +426,8 @@ All choices are documented in [DECISIONS.md](DECISIONS.md).
   `EditorState`s. Toolkit-independent, runs without a GPU.
 
 ### Manual test matrix
-Tracked in `docs/TEST_MATRIX.md` (to be added in Phase 1). Platforms ×
-interaction modes × features.
+Tracked in [`TEST_MATRIX.md`](TEST_MATRIX.md). Platforms × interaction
+modes × features; live as of Phase 1.
 
 ## Build matrix & CI
 

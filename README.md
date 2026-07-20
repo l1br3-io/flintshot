@@ -19,10 +19,19 @@ and friendly to the [COSMIC desktop](https://system76.com/cosmic).
 
 ## Documentation
 
+Product & design:
+
 - [`docs/VISION.md`](docs/VISION.md) — product vision, scope, non-goals
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — phased delivery plan
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — workspace, crates, dependencies, data model
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — technical decision records (ADRs)
+- [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md) — cross-platform manual QA grid
+
+Working in the repo:
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, workflow, code style
+- [`AGENTS.md`](AGENTS.md) — operational guide for AI agents (build/test/lint commands)
+- [`CHANGELOG.md`](CHANGELOG.md) — release history
 
 ## Project name vs directory
 
