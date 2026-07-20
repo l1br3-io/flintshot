@@ -121,6 +121,32 @@ Categories used below:
   exits cleanly with no output file, `CopiedToClipboard` / `Uploaded`
   are wired for Tasks 9 / 4, and the `#[non_exhaustive]` wildcard arm
   warns on future variants.
+- `flintshot-core::EditorState` gains a `pending: Option<Annotation>`
+  field plus the state-machine methods `begin_annotation`,
+  `update_annotation`, `commit_annotation`, `cancel_annotation`,
+  `undo`, `redo`, and `hit_test` (Phase 1 Task 7). The pending
+  annotation holds the in-flight drag-based tool output; the shared
+  `render()` path now draws it on top of `anns` so the user sees live
+  feedback. `undo()` clears `pending` (Ctrl+Z mid-drag cancels the
+  in-flight stroke, matching typical editor semantics).
+- `flintshot-core::Annotation` gains `bounding_box() -> Option<Rect>`
+  and `contains(point: Point) -> bool` methods (Phase 1 Task 7).
+  These underpin `EditorState::hit_test`, which returns the topmost
+  annotation under the cursor — used in Phase 1.F's select tool.
+  `contains` uses stroke-width-aware tolerances so thin lines remain
+  selectable.
+- `flintshot-core::render` now exposes the public `MockCanvas` struct
+  and `DrawCall` enum (Phase 1 Task 7) for snapshot tests across the
+  annotation tools. `DrawCall` has one variant per `Canvas` method;
+  `MockCanvas` records every call into a public `Vec<DrawCall>`. The
+  inline `#[cfg(test)]`-only `MockCanvas` from Task 4 is replaced by
+  this public version.
+- `flintshot-core::render::render()` now iterates `state.anns` and
+  dispatches each annotation via the new public `render_ann(canvas,
+  ann)` helper (Phase 1 Task 7). `state.pending` is drawn last (on
+  top) so the user sees live feedback during drags. All 9 annotation
+  variants have a dispatch path; `Blur` renders as a grey placeholder
+  + `tracing::warn!` until Task 13 adds real `image_ops::blur`.
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from
@@ -205,9 +231,13 @@ Categories used below:
   blit + `EguiCanvas::upload_image` / `draw_image`), 5
   (`EguiShell::run_editor` opens an eframe window, displays the
   screenshot, returns `EditorOutcome::Cancelled` on `Esc` / close),
-  and 6 (`region` / `fullscreen` routed through `EguiShell` when
+   and 6 (`region` / `fullscreen` routed through `EguiShell` when
   `--out` is omitted; `--out PATH` preserved as the headless path;
-  `cfg(not(feature = "egui"))` fallback errors clearly).
+  `cfg(not(feature = "egui"))` fallback errors clearly), and 7
+  (editor state machine: `pending` field + `begin/update/commit/
+  cancel_annotation`, snapshot `undo`/`redo`, `hit_test`; public
+  `MockCanvas` + `DrawCall`; `render()` dispatches all 9 variants +
+  draws `pending` on top).
 
 ## Release cheat sheet (for maintainers)
 

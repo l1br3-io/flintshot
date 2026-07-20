@@ -342,30 +342,30 @@ This task delivers the *contract* every annotation tool will use; it's
 M-sized because getting it right pays off across Tasks 8 / 11 / 12 / 13.
 
 **Acceptance criteria:**
-- [ ] `EditorState::pending: Option<Annotation>` field added; documented.
-- [ ] `begin_annotation` / `update_annotation` / `commit_annotation`
+- [x] `EditorState::pending: Option<Annotation>` field added; documented.
+- [x] `begin_annotation` / `update_annotation` / `commit_annotation`
       drive `pending` correctly; commit pushes a snapshot of `anns`
       onto `undo`, clears `redo`, appends to `anns`.
-- [ ] `undo` / `redo` move `anns` snapshots correctly; `undo` with
+- [x] `undo` / `redo` move `anns` snapshots correctly; `undo` with
       empty history is a no-op; `redo` after a new commit is a no-op.
-- [ ] `cancel_annotation` drops `pending`.
-- [ ] `render()` draws `pending` on top of `anns`.
-- [ ] `MockCanvas` records every `Canvas` call into a public
+- [x] `cancel_annotation` drops `pending`.
+- [x] `render()` draws `pending` on top of `anns`.
+- [x] `MockCanvas` records every `Canvas` call into a public
       `Vec<DrawCall>`; `DrawCall` is an enum with one variant per
       Canvas method (with arguments).
-- [ ] Hit-testing helper `EditorState::hit_test(point: Point) ->
+- [x] Hit-testing helper `EditorState::hit_test(point: Point) ->
       Option<usize>` returns the topmost annotation under the cursor
       (used in Phase 1.F's select tool).
 
 **Verification:**
-- [ ] Standing gate passes.
-- [ ] Unit tests in `editor.rs`:
+- [x] Standing gate passes.
+- [x] Unit tests in `editor.rs`:
   - `undo_redo_snapshot_roundtrip` — push 3 anns, undo twice, redo
      once, verify exact `anns` contents at each step.
   - `commit_clears_redo` — committing after an undo wipes the redo
      stack.
   - `cancel_drops_pending` — pending is None after cancel.
-- [ ] Unit test in `render.rs` using `MockCanvas`: render an
+- [x] Unit test in `render.rs` using `MockCanvas`: render an
       `EditorState` with one Rect ann and one pending Rect; assert the
       recorded `DrawCall` sequence.
 
@@ -1476,6 +1476,142 @@ can be signed off and Phase 1.C / Task 7 can start.
   is the pattern Phase 2 will reuse when it adds `cfg(feature =
   "iced")` / `cfg(feature = "slint")` shells — one stub fn per
   inactive shell, gated on the corresponding feature flag.
+
+### Task 7 close-out — `<pending first commit hash>`
+
+**Implementation.** Added `EditorState::pending: Option<Annotation>`
+plus the state-machine methods `begin_annotation`, `update_annotation`,
+`commit_annotation`, `cancel_annotation`, `undo`, `redo`, and
+`hit_test`. Added `Annotation::bounding_box() -> Option<Rect>` and
+`Annotation::contains(point: Point) -> bool` for hit-testing. Promoted
+the Task 4 inline `MockCanvas`/`DrawCall` out of `#[cfg(test)] mod
+tests` to public types at module scope; extended `DrawCall` with one
+variant per `Canvas` method; implemented every `Canvas` method on
+`MockCanvas` to push the corresponding `DrawCall`. Extended
+`flintshot-core::render::render()` to iterate `state.anns` and dispatch
+each via the new public `render_ann(canvas, ann)` helper, then draw
+`state.pending` on top.
+
+**Deviation 1 — drag-anchor stays at `rect.min` during the drag;
+normalization happens at commit.** TODO spec doesn't specify when
+rect normalization happens. Initial instinct was to normalize in
+`update_annotation`, but that loses the begin anchor: if the user
+drags up-left from the begin point, normalizing on each update would
+move `rect.min` to the current pointer, so a subsequent drag down-right
+would extend from the wrong origin. Fixed by storing anchor as
+`rect.min` and current pointer as `rect.max` during the drag, then
+normalizing in `commit_annotation` (and at render / hit-test time via
+`Rect::normalized()`). Documented in `update_annotation`'s doc
+comment. Downstream impact: Tasks 8 / 11 / 13's drag input flows are
+already correct by construction; Task 14's select tool reuses the same
+rect-on-drag convention.
+
+**Deviation 2 — `undo()` clears `pending`.** TODO spec is silent on
+how `undo` interacts with `pending`. Per maintainer decision in the
+Task 7 plan, `undo()` clears `pending` (Ctrl+Z mid-drag cancels the
+in-flight annotation, matching Photoshop / GIMP / most editors). This
+gives a single keystroke to "reset" the editor if a drag goes wrong.
+`cancel_annotation()` remains the explicit cancel for non-undo
+contexts.
+
+**Deviation 3 — `Blur` renders as a grey placeholder + warn until
+Task 13.** `render_ann` must dispatch every variant — leaving `Blur`
+unmapped would `panic!`/`unreachable!` and break the render path when
+a committed Blur ann exists. Real blur computation needs the
+`image_ops` module (Task 13) plus the canvas's texture cache; pulling
+that into Task 7 would have ballooned the scope. Chose a visible grey
+`draw_rect_filled` overlay + `tracing::warn!` so a session trace shows
+the placeholder is in use. The annotation is *correctly stored* in
+`anns`; only the rendering is approximate. Task 13 swaps the
+placeholder for real `imageproc` blur.
+
+**Deviation 4 — `Number` renders as a square + placeholder text.**
+`Annotation::Number` is documented as a "bubble" but the `Canvas`
+trait has no `draw_circle` primitive. Phase 2 adds the bubble shape;
+for Task 7's "every variant must dispatch" requirement, `Number`
+renders as `draw_rect_filled` (square bbox) + `draw_text` (white
+label). Same pattern as Blur: correctly stored, approximate render.
+Task 11 / Phase 2 will refine.
+
+**Deviation 5 — `commit_annotation` uses `clone()` not `mem::take`
+for the undo snapshot.** Initial implementation used
+`self.undo.push(std::mem::take(&mut self.anns))` then
+`self.anns.push(ann)`. That empties `self.anns` before the new push,
+so after commit `self.anns = [new_ann]` instead of `[prior_anns...,
+new_ann]`. Tests caught it immediately (`undo_redo_snapshot_roundtrip`
+failed with `anns.len() == 1` after 3 commits). Fixed to
+`self.undo.push(self.anns.clone())`. The `mem::take` pattern is
+correct for `undo()` / `redo()` because those *replace* `self.anns`
+with the popped snapshot rather than appending to it.
+
+**Deviation 6 — `clippy::cast_precision_loss` allow on
+`bounding_box`'s text-width estimate.** `text.chars().count() as
+f32` triggers the lint because `usize` → `f32` can lose precision.
+For text-label lengths (realistically < 10K chars, well under 2^24)
+the cast is exact. Allow carries a justifying comment per AGENTS.md.
+Task 12 (cosmic-text) replaces this estimate with real glyph advance
+widths and the allow goes away.
+
+**No signature change to `render()`.** Task 4's
+`render(state, canvas, bg: &mut Option<C::Image>)` signature is
+preserved. The new anns iteration + pending draw happens entirely
+inside `render()`; no caller-visible change. Task 5's
+`EditorApp::ui` keeps calling `render(&state, &mut canvas, &mut bg)`
+unchanged.
+
+**Per-variant hit-test geometry.** `Annotation::contains` uses
+stroke-width-aware tolerances: thin lines (1–3 px stroke) get a
+3-pixel tolerance (`HIT_TEST_TOLERANCE_PX`) so they're grabbable;
+thick strokes get half their width plus the tolerance. `Text` uses a
+coarse bounding-box approximation (estimated advance width =
+`font_size × 0.5 × char_count`) until Task 12 adds real glyph
+metrics. `Ellipse` uses bbox inclusion, not the ellipse equation —
+sufficient for selection purposes; refined in Phase 2 if needed.
+
+**Test count.** Added 19 new tests (16 in `editor.rs`, 3 in
+`render.rs`). Standing gate: 52 pass (was 33), 1 ignored (capture
+smoke), 0 fail. The required Task 7 tests (`undo_redo_snapshot_roundtrip`,
+`commit_clears_redo`, `cancel_drops_pending`, and the committed +
+pending Rect render test) are all green. Extras cover:
+`begin_then_update_extends_pending`,
+`update_preserves_anchor_across_drag_direction_changes` (the
+deviation 1 contract), `commit_normalizes_rect`,
+`undo_with_empty_history_is_noop`, `redo_after_new_commit_is_noop`,
+`undo_clears_pending` (deviation 2 contract),
+`hit_test_returns_topmost`, `hit_test_returns_none_when_empty`,
+`hit_test_returns_none_when_miss`,
+`bounding_box_normalizes_unnormalized_rect`,
+`hit_test_line_uses_stroke_tolerance`,
+`begin_annotation_skips_non_drag_tools`, `pending_is_none_in_new_state`,
+plus two extra render tests (`render_ann_dispatches_each_variant`,
+`render_pending_marker_emits_segment_lines`) that lock in the
+per-variant dispatch contract for Tasks 8 / 11 / 12 / 13.
+
+**Downstream impact.**
+- Task 8 (Rect tool) is now a thin shell: translate egui pointer
+  events to `begin_annotation` / `update_annotation` / `commit_annotation`
+  in `EditorApp::logic`; the shared `render()` path already dispatches
+  committed and pending Rects.
+- Tasks 11 / 13 (Arrow / Blur) follow the same shape: tool-specific
+  `begin` constructs an Arrow / Blur annotation; `render_ann` already
+  dispatches both (Arrow for real; Blur as a placeholder pending Task
+  13's `image_ops` work).
+- Task 12 (Text) needs a separate `begin_text(at)` method on
+  `EditorState` (typing input model, not drag). The `pending` field
+  already supports holding a Text ann; `render_ann`'s Text arm is
+  wired for the toolkit default font.
+- Task 14 (Select / crop) reuses `hit_test` for the selection model
+  and `Annotation::bounding_box` for the selection rectangle
+  geometry. The drag-anchor convention (deviation 1) means Task 14's
+  selection rect should follow the same `rect.min`-as-anchor pattern.
+- Task 10 (keyboard shortcuts) will add a `dispatch_input(&mut
+  EditorState, &InputEvent)` pure function (per the Task 5 close-out's
+  forward-looking note). The new state-machine methods are pure
+  already; `dispatch_input` will just be a match over `InputEvent`
+  calling them.
+- Phase 2's select-tool will use `hit_test` directly; if it needs
+  multi-selection (shift-click), the API will need extension. Single-
+  selection as specified by Phase 1 is sufficient.
 
 <!-- Example entry format (commented out):
 ### Task 8 — Rectangle tool end-to-end
