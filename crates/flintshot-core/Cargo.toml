@@ -1,0 +1,22 @@
+[package]
+name = "flintshot-core"
+description = "Platform-agnostic core for flintshot: geometry, editor state, Canvas/EditorShell traits, Backend upload trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+image = { workspace = true }
+imageproc = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1"

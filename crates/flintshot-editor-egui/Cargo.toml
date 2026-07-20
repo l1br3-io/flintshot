@@ -1,0 +1,19 @@
+[package]
+name = "flintshot-editor-egui"
+description = "egui implementation of flintshot's Canvas and EditorShell traits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+flintshot-core = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+image = { workspace = true }
