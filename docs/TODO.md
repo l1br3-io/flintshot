@@ -747,6 +747,40 @@ from this plan during execution. Each entry: task number, what
 changed, why, and how it affects downstream tasks. Surfaced by the
 `/status` command._
 
+### Phase 0 close-out — `<pending first commit hash>`
+
+**Deviation.** Phase 0 deliverables landed in the initial scaffolding
+commits without the ROADMAP checkboxes being ticked; the
+`/start`-generated "next task" message treated the phase as
+incomplete when in fact all 16 deliverables and 5 exit criteria
+were already satisfied in the working tree.
+
+**Change.** Ticked all 12 previously-unchecked Phase 0 boxes in
+`ROADMAP.md`. Verified the standing gate end-to-end:
+`fmt --check`, `clippy --all-targets -- -D warnings`,
+`test --all-targets`, `test --doc -p flintshot-core` (doc tests
+scoped to lib crates — `cargo test --doc` fails on `flintshot-app`
+because it's a bin and has no doc tests to run). Also corrected the
+ROADMAP line that said the egui stubs return `todo!()` — they
+actually return `FlintshotError::NotImplemented`, which is
+non-panicking and better.
+
+**CI caveat.** No git remote is configured
+(`git remote -v` is empty), so CI has never actually run against a
+push. Per maintainer decision, the **local standing gate stands in
+for CI** for Phase 0 sign-off. The first push will run the real
+pipeline; if it fails on something the local gate didn't catch,
+that becomes the first entry in the next session's notes.
+
+**Cosmic build caveat.** `cargo build -p flintshot-cosmic` was
+verified locally after installing the two missing system deps
+(`libfreetype6-dev`, `libgfxbuffer-dev`) — all other cosmic system
+deps (cmake, fontconfig, glib, xkbcommon) were already present.
+CI's dedicated `cosmic-build` job will re-verify on push.
+
+**Downstream impact.** None. Phase 1 proceeds against
+`docs/PLAN.md` as written; Task 1 (config module) starts now.
+
 <!-- Example entry format (commented out):
 ### Task 8 — Rectangle tool end-to-end
 **Deviation.** Discovered egui 0.35's `Painter` API doesn't expose

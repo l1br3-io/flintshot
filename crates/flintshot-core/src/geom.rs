@@ -88,7 +88,10 @@ impl Rect {
 }
 
 /// An 8-bit sRGB color with alpha.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// Serializes as a CSS-style hex string (`"#rrggbb"` when opaque,
+/// `"#rrggbbaa"` otherwise). See [`crate::serde_util::color_hex`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Color {
     /// Red channel.
     pub r: u8,
@@ -98,6 +101,18 @@ pub struct Color {
     pub b: u8,
     /// Alpha channel (`0` = transparent, `255` = opaque).
     pub a: u8,
+}
+
+impl serde::Serialize for Color {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        crate::serde_util::color_hex::serialize(self, ser)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Color {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        crate::serde_util::color_hex::deserialize(de)
+    }
 }
 
 impl Color {

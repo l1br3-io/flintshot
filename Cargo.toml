@@ -23,13 +23,17 @@ flintshot-editor-egui = { path = "crates/flintshot-editor-egui", version = "0.0.
 
 clap = { version = "4.5", features = ["derive"] }
 color-eyre = "0.6"
+dirs = "6"
 eframe = "0.35"
 egui = "0.35"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 imageproc = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+toml = "1"
+toml_edit = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
