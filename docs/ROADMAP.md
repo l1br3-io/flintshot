@@ -63,7 +63,7 @@ lets the user annotate, save, or copy.
 
 **Deliverables:**
 - [x] `xcap` integration for single-monitor capture
-- [ ] `flintshot-editor-egui`: eframe window implementing `EditorShell`;
+- [x] `flintshot-editor-egui`: eframe window implementing `EditorShell`;
       screenshot uploaded via `Canvas::upload_image`
 - [ ] All annotation drawing routed through the `Canvas` trait from day
       one — no direct `egui::Painter` calls for annotations

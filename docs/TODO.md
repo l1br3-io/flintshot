@@ -280,22 +280,31 @@ captures / scripting). Wire the active shell via the `egui` Cargo
 feature flag — non-`egui` builds fall back to `--out` only.
 
 **Acceptance criteria:**
-- [ ] `flintshot region` opens the editor (no `--out`).
-- [ ] `flintshot region --out PATH` skips the editor and writes the
+- [x] `flintshot region` opens the editor (no `--out`).
+- [x] `flintshot region --out PATH` skips the editor and writes the
       PNG directly (Task 3's path preserved).
-- [ ] When the editor returns `EditorOutcome::Saved(p)`, the CLI logs
+- [x] When the editor returns `EditorOutcome::Saved(p)`, the CLI logs
       the path.
-- [ ] When the editor returns `Cancelled`, the CLI exits cleanly with
+- [x] When the editor returns `Cancelled`, the CLI exits cleanly with
       no output file.
-- [ ] `cfg(not(feature = "egui"))` build still works: `region` without
+- [x] `cfg(not(feature = "egui"))` build still works: `region` without
       `--out` errors clearly ("editor not built; pass --out").
 
 **Verification:**
-- [ ] Standing gate passes (including a `--no-default-features` build).
+- [x] Standing gate passes (including a `--no-default-features` build).
+      _(Both `cargo clippy --workspace --all-targets -- -D warnings`
+      and `cargo clippy --no-default-features -p flintshot-app
+      --all-targets -- -D warnings` clean. Tests: 33 pass, 1 ignored
+      [capture smoke], 0 fail.)_
 - [ ] Manual: `cargo run -- region` opens editor, Esc cancels, no file
-      written, clean exit code 0.
-- [ ] Manual: `cargo run --no-default-features -- region --out /tmp/x.png`
-      still works.
+      written, clean exit code 0. _(Smoke-verified that the editor
+      event loop starts and blocks without panic on the maintainer's
+      Wayland + XWayland box; `wmctrl` cannot see the window because
+      eframe uses native Wayland here, so the visibility + Esc-close
+      confirmation needs the maintainer's eyes on a real display —
+      same verification debt carried forward from Task 5.)_
+- [x] Manual: `cargo run --no-default-features -- region --out /tmp/x.png`
+      still works. _(Wrote a valid 2560×1440 RGBA PNG.)_
 
 **Dependencies:** Task 3, Task 5.
 
@@ -1362,6 +1371,111 @@ smoke-test fixture.
 - `FlintshotError::Shell` is now part of the public API; any code
   matching on `FlintshotError` exhaustively needs to add a
   `Shell { detail }` arm.
+
+### Task 6 close-out — `<pending first commit hash>`
+
+**Implementation.** Refactored `run_region` / `run_fullscreen` to
+share a `capture_and_dispatch(monitor, mode, output)` helper. When
+`--out` is `Some(path)`, the helper writes the PNG directly (Task 3's
+path, byte for byte). When `--out` is `None`, it hands the captured
+image to `EguiShell::new().run_editor(EditorState::new(img))` and
+logs the outcome. The editor path is gated on `cfg(feature = "egui")`
+via two definitions of `run_editor_for_capture` with matching
+signatures; the `cfg(not(feature = "egui"))` stub returns a clear
+error: "editor not built; pass --out PATH to capture headlessly
+(this binary was compiled without the `egui` feature)".
+
+**Deviation 1 — `time_util.rs` deleted entirely.** The Task 3
+close-out's "Downstream impact" line said "if any future crate wants
+ISO-8601 filenames, promote to `flintshot-core` rather than
+duplicating". With Task 6 removing `OutputArgs::resolve_path`,
+`iso8601_now` lost its only caller. Read strictly, that left the
+option of keeping the module as dead code (with `#[allow(dead_code)]`
+or a feature gate). Chose deletion: the algorithm is in git history,
+the Task 3 close-out explicitly prescribes the `flintshot-core`
+promotion path rather than revival of the `flintshot-app` copy, and
+5 unit tests of dead code is exactly the kind of "ash weight" the
+plan's code-simplification principle rejects. If Phase 4 upload-cache
+keys need ISO-8601, restore from `git show` and port to `flintshot-core`.
+
+**Deviation 2 — `OutputArgs::resolve_path` removed.** No callers
+remain after the Task 6 refactor. The `clap` flatten + `out:
+Option<PathBuf>` shape stays unchanged so `flintshot region --help`
+still shows `--out` exactly as in Task 3 — only the default behaviour
+shifted (was: write timestamped PNG; now: open editor or error).
+
+**Deviation 3 — `clippy::wildcard_enum_match_arm` allow on the
+`EditorOutcome` match.** `EditorOutcome` is `#[non_exhaustive]`;
+from outside `flintshot-core`, the compiler requires a `_` arm. The
+`clippy::pedantic` `wildcard_enum_match_arm` lint still fires on `_`
+even when `#[non_exhaustive]` mandates it, so the match carries an
+`#[allow(clippy::wildcard_enum_match_arm, reason = "EditorOutcome is
+#[non_exhaustive]; _ is mandatory")]`. The reason string spells out
+*why* the allow exists, matching the project's `clippy::pedantic`
+convention (justifying comment required per `AGENTS.md`). All four
+named variants are still spelled out — the wildcard only covers
+future additions.
+
+**Deviation 4 — `examples/open_editor.rs` deleted.** Per the Task 5
+close-out ("Example kept in tree … explicitly slated for deletion
+once Task 6 ships the real `flintshot region` editor path") and the
+`SESSION_HANDOFF.md` carry-forward ("After Task 6 lands, delete
+`crates/flintshot-editor-egui/examples/open_editor.rs`"). The
+`flinkshot region` CLI now covers that role end-to-end. The
+`examples/` directory is now empty; left in place (git tracks empty
+dirs via `.gitkeep` only if needed; here the absence is fine).
+
+**Verification.** Standing gate green end-to-end:
+- `cargo fmt --all --check` — clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- `cargo clippy --no-default-features -p flintshot-app --all-targets
+  -- -D warnings` — clean (new check, mandated by Task 6's "including
+  a `--no-default-features` build" verification line).
+- `cargo test --workspace --all-targets` — 33 pass, 1 ignored
+  (capture smoke), 0 fail.
+- `cargo test --doc -p flintshot-core -p flintshot-editor-egui` —
+  0 doc tests (unchanged).
+- `no_gui_types_in_core` integration test — still green; the new
+  editor wiring lives in `flintshot-app`, not core.
+
+End-to-end smoke on the maintainer's Wayland + XWayland box:
+- `cargo run -- region` — capture succeeds, eframe event loop starts,
+  blocks for the full 4s test window with no panic or error log
+  (terminated via SIGTERM, exit 143). Window visibility + Esc-close
+  behaviour could not be confirmed from the terminal (eframe uses
+  native Wayland here, so `wmctrl`'s X11 polling doesn't see the
+  window to send a close event). Needs maintainer's eyes — see
+  carry-forward note below.
+- `cargo run --no-default-features -- region` — exits 1 with the
+  clean error `"editor not built; pass --out PATH to capture
+  headlessly (this binary was compiled without the \`egui\` feature)"`.
+- `cargo run --no-default-features -- region --out /tmp/x.png` —
+  wrote a valid 2560×1440 RGBA PNG; Task 3's headless path preserved.
+
+**Carry-forward to Checkpoint B sign-off.** Task 5's "manual test on
+real display" debt is now consolidated into Task 6's outstanding
+checkbox: confirm by hand that (a) the screenshot is visible on
+window open, (b) Esc returns `EditorOutcome::Cancelled` and the
+process exits 0 with no output file. Once the maintainer runs
+`cargo run -- region` and confirms those three things, Checkpoint B
+can be signed off and Phase 1.C / Task 7 can start.
+
+**Downstream impact.**
+- Task 7's editor state machine is independent — `run_editor_for_capture`
+  doesn't touch `EditorState` internals beyond `EditorState::new(img)`.
+- Tasks 9 (Save/Copy) and 10 (shortcuts) will surface new
+  `EditorOutcome` paths; the `match` in `run_editor_for_capture`
+  already logs each named variant at `info`, and the wildcard arm at
+  `warn`, so when Task 9 lands the `Saved(p)` log line is already
+  wired (no further change needed in `cli.rs`).
+- Phase 2's daemon will spawn `flintshot region` / `flintshot
+  fullscreen` as separate processes — exactly the shape `run_editor`
+  expects (eframe blocks the calling thread). The Task 6 wiring
+  already matches that process model.
+- The `cfg(feature = "egui")` split in `run_editor_for_capture`
+  is the pattern Phase 2 will reuse when it adds `cfg(feature =
+  "iced")` / `cfg(feature = "slint")` shells — one stub fn per
+  inactive shell, gated on the corresponding feature flag.
 
 <!-- Example entry format (commented out):
 ### Task 8 — Rectangle tool end-to-end

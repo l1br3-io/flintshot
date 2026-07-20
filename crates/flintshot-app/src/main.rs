@@ -6,7 +6,6 @@
 #![warn(clippy::pedantic)]
 
 mod cli;
-mod time_util;
 
 use clap::Parser;
 use color_eyre::Result;
