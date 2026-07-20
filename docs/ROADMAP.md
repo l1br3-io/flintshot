@@ -62,7 +62,7 @@ types leaking into `flintshot-core`.
 lets the user annotate, save, or copy.
 
 **Deliverables:**
-- [ ] `xcap` integration for single-monitor capture
+- [x] `xcap` integration for single-monitor capture
 - [ ] `flintshot-editor-egui`: eframe window implementing `EditorShell`;
       screenshot uploaded via `Canvas::upload_image`
 - [ ] All annotation drawing routed through the `Canvas` trait from day
@@ -73,7 +73,7 @@ lets the user annotate, save, or copy.
 - [ ] Undo/redo with snapshot history
 - [ ] Keyboard: `Esc` cancel, `Ctrl+S` save, `Ctrl+C` copy,
       `Ctrl+Z`/`Ctrl+Y` undo/redo
-- [ ] Initial config file at platform-appropriate location (`dirs` crate)
+- [x] Initial config file at platform-appropriate location (`dirs` crate)
 - [ ] `cosmic-text` for text annotation rendering
 - [ ] HiDPI-aware coordinates
 

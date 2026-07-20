@@ -1,15 +1,15 @@
 //! `flintshot` binary entry point — CLI dispatch, daemon lifecycle,
 //! tray icon, hotkeys. Phase 0 wires up the CLI shape and logging; the
-//! subcommand bodies are stubs that get filled in across Phases 1–4.
+//! subcommand bodies are filled in across Phases 1–4.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
 mod cli;
+mod time_util;
 
 use clap::Parser;
 use color_eyre::Result;
-use flintshot_core::Config;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
@@ -18,28 +18,15 @@ fn main() -> Result<()> {
     init_reporting();
     let cli = Cli::parse();
 
-    if cli.dump_config {
-        return dump_config();
-    }
-
     match cli.command {
         Some(Command::Daemon(args)) => cli::run_daemon(&args),
         Some(Command::Region(args)) => cli::run_region(&args),
         Some(Command::Fullscreen(args)) => cli::run_fullscreen(&args),
+        Some(Command::Config) => cli::run_config(),
         Some(Command::Pin(args)) => cli::run_pin(&args),
         Some(Command::Upload(args)) => cli::run_upload(&args),
         None => Ok(()),
     }
-}
-
-/// Throwaway: print the resolved config TOML. Removed in Phase 1 Task 3
-/// when the real `config` subcommand lands.
-fn dump_config() -> Result<()> {
-    let cfg = Config::load().map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
-    let toml = toml::to_string_pretty(&cfg)
-        .map_err(|e| color_eyre::eyre::eyre!("serialization failure: {e}"))?;
-    print!("{toml}");
-    Ok(())
 }
 
 /// Initialise `color_eyre` + `tracing` with a sensible default filter.

@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::geom::Rect;
+
 /// Top-level error type for all fallible core operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -28,6 +30,49 @@ pub enum FlintshotError {
         /// File whose load/save failed. Empty for in-memory failures.
         path: PathBuf,
         /// Lower-level error description.
+        detail: String,
+    },
+
+    /// Screen capture failed (xcap returned an error, monitor selection
+    /// was out of range, or the platform denied permission). `detail`
+    /// is the lower-level message verbatim — on macOS permission
+    /// denials, it contains the substring `"permission"` so callers
+    /// can detect that case and guide the user. (Field is named
+    /// `detail` rather than `source` because `thiserror` treats a
+    /// field literally named `source` as the error-chain source and
+    /// requires it to be `dyn Error`; we want a plain `String` for
+    /// easy substring matching.)
+    #[error("capture error: {detail}")]
+    Capture {
+        /// Lower-level error message from `xcap` or our monitor picker.
+        detail: String,
+    },
+
+    /// A rectangle passed to [`crate::capture::capture_region`] (or any
+    /// other rect-consuming API) was degenerate: zero-area or with
+    /// corners in the wrong order. Carries the offending rect so the
+    /// caller can include it in user-facing diagnostics.
+    #[error("invalid rect ({reason}): {rect:?}")]
+    InvalidRect {
+        /// The rect that was rejected.
+        rect: Rect,
+        /// Short fixed keyword: `"empty"` for zero-area,
+        /// `"negative"` for inverted corners.
+        reason: &'static str,
+    },
+
+    /// The editor shell (window system, GPU surface, or runtime) failed
+    /// to start or sustained a fatal error mid-session. `detail` carries
+    /// the lower-level message verbatim. Used for `eframe::Error` and any
+    /// future toolkit-side failures (Phase 3 pin window, etc.).
+    ///
+    /// Named `detail` rather than `source` for the same reason as
+    /// [`FlintshotError::Capture`]: `thiserror` treats a field literally
+    /// named `source` as the error-chain source and requires it to be
+    /// `dyn Error`, but we want a plain `String` for cheap display.
+    #[error("editor shell error: {detail}")]
+    Shell {
+        /// Lower-level error message from the shell or window system.
         detail: String,
     },
 

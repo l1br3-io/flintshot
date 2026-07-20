@@ -35,27 +35,37 @@ All commands run from the repo root unless noted.
 ```sh
 cargo build                      # default-members (flintshot-app + deps)
 cargo build --all-targets        # default-members + tests/benches/examples
+cargo build --workspace          # all crates (incl. flintshot-core tests)
 cargo build -p flintshot-cosmic  # opt-in; needs system deps (see below)
 ```
 
 ### Test
 
 ```sh
-cargo test --all-targets         # unit + integration, default-members
-cargo test --doc                 # doc tests
-cargo test -p flintshot-core     # just the core crate
+cargo test --workspace --all-targets   # unit + integration, all crates
+cargo test --doc -p flintshot-core -p flintshot-editor-egui  # doc tests (lib crates only)
+cargo test -p flintshot-core           # just the core crate
 ```
+
+`cargo test --all-targets` without `--workspace` only exercises
+`default-members` (just `flintshot-app`, which currently has no tests).
+`cargo test --doc` errors on bin crates (`flintshot-app`,
+`flintshot-cosmic`) because they have no library target — scope it to
+lib crates explicitly.
 
 ### Lint / format (CI gate)
 
 ```sh
-cargo fmt --all --check          # formatting check (no writes)
-cargo fmt --all                  # apply formatting
-cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check                  # formatting check (no writes)
+cargo fmt --all                          # apply formatting
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 CI runs `RUSTFLAGS="-D warnings"`, so any clippy warning fails CI. Do
-not silence with `#[allow(...)]` without a justifying comment.
+not silence with `#[allow(...)]` without a justifying comment. Clippy
+needs `--workspace` for the same reason `cargo test` does — otherwise
+only `flintshot-app` is directly linted and `flintshot-core`'s lints
+go unchecked.
 
 ### Run
 
@@ -65,11 +75,32 @@ cargo run -- region              # Phase 1 (currently a stub)
 cargo run -- fullscreen          # Phase 1 (currently a stub)
 ```
 
+### Linux system deps (default builds)
+
+`flintshot-core` depends on `xcap` for screen capture, which needs
+native X11 / Wayland / PipeWire libraries at build time on Linux —
+even for `cargo check` or `cargo clippy`. On Debian / Ubuntu:
+
+```sh
+sudo apt-get install -y --no-install-recommends \
+  pkg-config libclang-dev libxcb1-dev libxrandr-dev \
+  libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev \
+  libgbm-dev
+```
+
+CI installs these in the `lint`, `test`, and `msrv` jobs (see the
+`XCAP_LINUX_DEPS` env in `.github/workflows/ci.yml`). macOS and
+Windows need no extra deps for Phase 1's capture path.
+
+> **Note:** `libgbm-dev` is required at link time even though xcap's
+> own README does not list it. The xcap README also omits
+> `pkg-config` in some forms; both are included above.
+
 ### COSMIC crate system deps (Linux only)
 
 The `flintshot-cosmic` crate is **not** in `default-members` because
-`libcosmic` pulls in system libraries. To build it locally on Debian /
-Ubuntu:
+`libcosmic` pulls in additional system libraries on top of the xcap
+deps above. To build it locally on Debian / Ubuntu:
 
 ```sh
 sudo apt-get install -y --no-install-recommends \
@@ -127,9 +158,9 @@ Run, in order, before declaring done:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-cargo test --doc
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cargo test --doc -p flintshot-core -p flintshot-editor-egui
 ```
 
 If the change is user-visible or modifies the workspace shape, update

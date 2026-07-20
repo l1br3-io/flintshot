@@ -41,7 +41,8 @@ Subcommand: `flintshot region`, `flintshot fullscreen`
 | Behavior                                                | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 | `cargo build` succeeds                                  |    |    |    |    |    |    |    |    |    |
-| `cargo test --all-targets` passes                       |    |    |    |    |    |    |    |    |    |
+| `cargo test --workspace --all-targets` passes         |    |    |    |    |    |    |    |    |    |
+| `cargo test -p flintshot-core --test capture -- --ignored smoke_can_grab_primary` returns a non-empty image |    |    |    |    |    |    |    |    |    |
 | `flintshot --help` lists all subcommands                |    |    |    |    |    |    |    |    |    |
 | Single-monitor capture, no portal prompt                |    |    |    |    |    |    |    |    |    |
 | Capture triggers xdg-desktop-portal prompt on first use | N/A |    |    |    |    | N/A | N/A | N/A | N/A |

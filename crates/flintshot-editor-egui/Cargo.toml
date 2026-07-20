@@ -17,3 +17,4 @@ flintshot-core = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
 image = { workspace = true }
+tracing = { workspace = true }

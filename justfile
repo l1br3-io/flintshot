@@ -20,16 +20,16 @@ ci:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "== fmt --check =="; cargo fmt --all -- --check
-    echo "== clippy ==";      cargo clippy --all-targets -- -D warnings
-    echo "== test ==";        cargo test --all-targets
-    echo "== test --doc ==";  cargo test --doc
+    echo "== clippy ==";      cargo clippy --workspace --all-targets -- -D warnings
+    echo "== test ==";        cargo test --workspace --all-targets
+    echo "== test --doc ==";  cargo test --doc -p flintshot-core -p flintshot-editor-egui
 
 # Run all tests: unit + integration + doc.
 test:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== test ==";      cargo test --all-targets
-    echo "== test --doc =="; cargo test --doc
+    echo "== test ==";      cargo test --workspace --all-targets
+    echo "== test --doc =="; cargo test --doc -p flintshot-core -p flintshot-editor-egui
 
 # Test only the core crate (the heavy-unit-coverage one).
 test-core:
