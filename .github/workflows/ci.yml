@@ -10,6 +10,14 @@ env:
   RUSTFLAGS: "-D warnings"
   # rust-toolchain.toml pins 1.95; this just makes the intent explicit in logs.
   FLINTSHOT_MSRV: "1.95"
+  # xcap (screen capture) needs these on Linux at build time — even for
+  # `cargo check` or `cargo clippy`. `libgbm-dev` is not in xcap's own
+  # README but is required at link time. Mirrors the apt line in AGENTS.md
+  # so the install step below stays a single env reference.
+  XCAP_LINUX_DEPS: >-
+    pkg-config libclang-dev libxcb1-dev libxrandr-dev
+    libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev
+    libgbm-dev
 
 jobs:
   lint:
@@ -17,39 +25,53 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install xcap Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.XCAP_LINUX_DEPS }}
       - name: Run cargo fmt --check
         run: cargo fmt --all --check
-      - name: Run cargo clippy (default-members)
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Run cargo clippy (workspace)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install xcap Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.XCAP_LINUX_DEPS }}
       - name: Run cargo test
-        run: cargo test --all-targets
-      - name: Run doc tests
-        run: cargo test --doc
+        run: cargo test --workspace --all-targets
+      - name: Run doc tests (lib crates only)
+        run: cargo test --doc -p flintshot-core -p flintshot-editor-egui
 
   msrv:
     name: MSRV (1.95) build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install xcap Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.XCAP_LINUX_DEPS }}
       - name: Install 1.95 toolchain
         run: |
           rustup toolchain install 1.95 --profile minimal --component rustfmt --component clippy
           rustup override set 1.95
-      - name: Verify build on MSRV (default-members)
-        run: cargo build --all-targets
+      - name: Verify build on MSRV (workspace)
+        run: cargo build --workspace --all-targets
 
   cosmic-build:
     name: cargo build -p flintshot-cosmic
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install libcosmic system deps
+      - name: Install libcosmic + xcap system deps
+        # Cosmic needs its own set; xcap deps are required because
+        # flintshot-cosmic depends on flintshot-core which now pulls xcap.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -59,6 +81,6 @@ jobs:
             libfreetype6-dev \
             libglib2.0-dev \
             libgfxbuffer-dev \
-            pkg-config
+            ${{ env.XCAP_LINUX_DEPS }}
       - name: Build the cosmic applet crate
         run: cargo build -p flintshot-cosmic

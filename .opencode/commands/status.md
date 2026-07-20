@@ -12,8 +12,8 @@ Produce a read-only snapshot of where the Flintshot project is right now. The
 
 - `/status` — parse docs + git only. Fast (~1s). Default.
 - `/status verify` — additionally run the four Rust quality commands:
-  `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo test --all-targets`, `cargo build`. Slower, but exposes stale
+  `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace --all-targets`, `cargo build`. Slower, but exposes stale
   "done" checkboxes. Treat `verify` (canonical) as the verify mode; anything
   else (or empty) is the default.
 
@@ -74,8 +74,8 @@ template with a one-line pass/fail for each command:
 ```markdown
 ### Verification
 - `cargo fmt --all --check`: ✅
-- `cargo clippy --all-targets -- -D warnings`: ✅
-- `cargo test --all-targets`: ✅ (N tests)
+- `cargo clippy --workspace --all-targets -- -D warnings`: ✅
+- `cargo test --workspace --all-targets`: ✅ (N tests)
 - `cargo build`: ✅
 ```
 

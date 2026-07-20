@@ -104,15 +104,15 @@ Per-task acceptance criteria, verification, and dependencies live in
 phase until the previous checkpoint is signed off.
 
 ### Phase 1.A — Capture path (CLI writes a real PNG)
-- [ ] Task 1 — Config module (`flintshot-core::config`)
-- [ ] Task 2 — Capture module (`flintshot-core::capture`)
-- [ ] Task 3 — CLI wiring: `region` / `fullscreen` → PNG to `/tmp`
+- [x] Task 1 — Config module (`flintshot-core::config`)
+- [x] Task 2 — Capture module (`flintshot-core::capture`)
+- [x] Task 3 — CLI wiring: `region` / `fullscreen` → PNG to `/tmp`
 
 **Checkpoint A** — capture stack proven end-to-end
 
 ### Phase 1.B — Editor skeleton (window opens with screenshot)
-- [ ] Task 4 — `EguiCanvas` background primitives
-- [ ] Task 5 — `EguiShell::run_editor` skeleton (eframe window)
+- [x] Task 4 — `EguiCanvas` background primitives
+- [x] Task 5 — `EguiShell::run_editor` skeleton (eframe window)
 - [ ] Task 6 — CLI routes capture → editor
 
 **Checkpoint B** — editor opens over a real screenshot
@@ -190,9 +190,9 @@ Standing gate (must be green before any task is marked done):
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-cargo test --doc
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cargo test --doc -p flintshot-core -p flintshot-editor-egui
 ```
 
 ## Session notes

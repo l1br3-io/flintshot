@@ -32,7 +32,7 @@ Clone and verify:
 git clone https://github.com/anomalyco/flintshot
 cd flintshot
 cargo build
-cargo test --all-targets
+cargo test --workspace --all-targets
 cargo run -- --help
 ```
 
@@ -44,9 +44,9 @@ If you intend to touch `flintshot-cosmic`, also install its system deps
 
 ```sh
 cargo fmt --all                 # format
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-cargo test --doc
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cargo test --doc -p flintshot-core -p flintshot-editor-egui
 ```
 
 CI runs all four with `-D warnings`; matching that locally saves a
