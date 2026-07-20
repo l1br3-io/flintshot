@@ -1,0 +1,200 @@
+//! Framework-free geometry primitives used throughout `flintshot`.
+//!
+//! These types appear in the shared data model ([`crate::EditorState`],
+//! [`crate::Annotation`]). They must never re-export or wrap a GUI
+//! toolkit's types (egui, iced, etc.) — that would couple core to a
+//! specific shell.
+
+use serde::{Deserialize, Serialize};
+
+/// A 2D point in image/logical space.
+///
+/// Coordinates are physical pixels relative to the captured image's
+/// top-left corner. `HiDPI` scaling is handled at the shell boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Point {
+    /// Horizontal component, increasing rightward.
+    pub x: f32,
+    /// Vertical component, increasing downward.
+    pub y: f32,
+}
+
+impl Point {
+    /// Construct a point from `(x, y)`.
+    #[must_use]
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
+    /// Linear interpolation toward `other` by `t` in `0.0..=1.0`.
+    #[must_use]
+    pub fn lerp(self, other: Self, t: f32) -> Self {
+        Self {
+            x: self.x + (other.x - self.x) * t,
+            y: self.y + (other.y - self.y) * t,
+        }
+    }
+}
+
+/// An axis-aligned rectangle defined by two corners.
+///
+/// `min` is the top-left corner; `max` is the bottom-right corner.
+/// Methods assume `min.x <= max.x` and `min.y <= max.y` but do not
+/// enforce it; callers building a rect from a drag should normalize.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Rect {
+    /// Top-left corner.
+    pub min: Point,
+    /// Bottom-right corner.
+    pub max: Point,
+}
+
+impl Rect {
+    /// Construct a rect from two corner points (not normalized).
+    #[must_use]
+    pub const fn new(min: Point, max: Point) -> Self {
+        Self { min, max }
+    }
+
+    /// Construct from `(x, y, w, h)`.
+    #[must_use]
+    pub const fn from_xywh(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self {
+            min: Point::new(x, y),
+            max: Point::new(x + w, y + h),
+        }
+    }
+
+    /// Width (assumes normalized).
+    #[must_use]
+    pub fn width(self) -> f32 {
+        self.max.x - self.min.x
+    }
+
+    /// Height (assumes normalized).
+    #[must_use]
+    pub fn height(self) -> f32 {
+        self.max.y - self.min.y
+    }
+
+    /// Return a rect with corners swapped so `min` is top-left.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        Self {
+            min: Point::new(self.min.x.min(self.max.x), self.min.y.min(self.max.y)),
+            max: Point::new(self.min.x.max(self.max.x), self.min.y.max(self.max.y)),
+        }
+    }
+}
+
+/// An 8-bit sRGB color with alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Color {
+    /// Red channel.
+    pub r: u8,
+    /// Green channel.
+    pub g: u8,
+    /// Blue channel.
+    pub b: u8,
+    /// Alpha channel (`0` = transparent, `255` = opaque).
+    pub a: u8,
+}
+
+impl Color {
+    /// Construct an opaque RGB color.
+    #[must_use]
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b, a: 255 }
+    }
+
+    /// Construct an RGBA color.
+    #[must_use]
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    /// Pure red convenience constant (default annotation color).
+    pub const RED: Self = Self::rgb(255, 0, 0);
+}
+
+/// Stroke style for outlined shapes.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Stroke {
+    /// Stroke color.
+    pub color: Color,
+    /// Stroke width in physical pixels.
+    pub width: f32,
+}
+
+impl Stroke {
+    /// Construct a stroke.
+    #[must_use]
+    pub const fn new(color: Color, width: f32) -> Self {
+        Self { color, width }
+    }
+}
+
+/// Toolkit-agnostic key representation for keyboard input.
+///
+/// Deliberately minimal — grows as new features require new keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum Key {
+    /// `Escape`.
+    Escape,
+    /// `Enter` / return.
+    Enter,
+    /// `Backspace`.
+    Backspace,
+    /// `Tab`.
+    Tab,
+    /// Left Ctrl.
+    Ctrl,
+    /// Left Shift.
+    Shift,
+    /// Left Alt / Option.
+    Alt,
+    /// Left Super / Cmd / Windows.
+    Super,
+    /// A printable character key.
+    Char(char),
+    /// Fallback for keys not yet modeled. Use sparingly.
+    #[default]
+    Other,
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rect_from_xywh_has_expected_corners() {
+        let r = Rect::from_xywh(10.0, 20.0, 30.0, 40.0);
+        assert_eq!(r.min, Point::new(10.0, 20.0));
+        assert_eq!(r.max, Point::new(40.0, 60.0));
+        assert_eq!(r.width(), 30.0);
+        assert_eq!(r.height(), 40.0);
+    }
+
+    #[test]
+    fn rect_normalized_swaps_flipped_corners() {
+        let r = Rect::new(Point::new(40.0, 60.0), Point::new(10.0, 20.0)).normalized();
+        assert_eq!(r.min, Point::new(10.0, 20.0));
+        assert_eq!(r.max, Point::new(40.0, 60.0));
+    }
+
+    #[test]
+    fn point_lerp_endpoints_and_midpoint() {
+        let a = Point::new(0.0, 0.0);
+        let b = Point::new(10.0, 20.0);
+        assert_eq!(a.lerp(b, 0.0), a);
+        assert_eq!(a.lerp(b, 1.0), b);
+        assert_eq!(a.lerp(b, 0.5), Point::new(5.0, 10.0));
+    }
+
+    #[test]
+    fn color_rgb_is_opaque() {
+        assert_eq!(Color::rgb(1, 2, 3).a, 255);
+    }
+}

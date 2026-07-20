@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flintshot-app",
+    "crates/flintshot-core",
+    "crates/flintshot-cosmic",
+    "crates/flintshot-editor-egui",
+]
+default-members = ["crates/flintshot-app"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anomalyco/flintshot"
+homepage = "https://github.com/anomalyco/flintshot"
+authors = ["flintshot contributors"]
+
+[workspace.dependencies]
+flintshot-core = { path = "crates/flintshot-core", version = "0.0.0" }
+flintshot-editor-egui = { path = "crates/flintshot-editor-egui", version = "0.0.0" }
+
+clap = { version = "4.5", features = ["derive"] }
+color-eyre = "0.6"
+eframe = "0.35"
+egui = "0.35"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+imageproc = { version = "0.25", default-features = false }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+panic = "abort"
+
+[profile.dev]
+debug = "line-tables-only"

@@ -1,0 +1,27 @@
+[package]
+name = "flintshot-app"
+description = "flintshot CLI: daemon, region capture, fullscreen, pin, upload."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "flintshot"
+path = "src/main.rs"
+
+[features]
+default = ["egui"]
+egui = ["dep:flintshot-editor-egui"]
+
+[dependencies]
+flintshot-core = { workspace = true }
+flintshot-editor-egui = { workspace = true, optional = true }
+clap = { workspace = true }
+color-eyre = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

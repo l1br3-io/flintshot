@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  # rust-toolchain.toml pins 1.95; this just makes the intent explicit in logs.
+  FLINTSHOT_MSRV: "1.95"
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run cargo fmt --check
+        run: cargo fmt --all --check
+      - name: Run cargo clippy (default-members)
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run cargo test
+        run: cargo test --all-targets
+      - name: Run doc tests
+        run: cargo test --doc
+
+  msrv:
+    name: MSRV (1.95) build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install 1.95 toolchain
+        run: |
+          rustup toolchain install 1.95 --profile minimal --component rustfmt --component clippy
+          rustup override set 1.95
+      - name: Verify build on MSRV (default-members)
+        run: cargo build --all-targets
+
+  cosmic-build:
+    name: cargo build -p flintshot-cosmic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libcosmic system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            libxkbcommon-dev \
+            libfontconfig-dev \
+            libfreetype6-dev \
+            libglib2.0-dev \
+            libgfxbuffer-dev \
+            pkg-config
+      - name: Build the cosmic applet crate
+        run: cargo build -p flintshot-cosmic
