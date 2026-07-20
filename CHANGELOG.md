@@ -31,6 +31,19 @@ Categories used below:
   the `Canvas` and `EditorShell` traits, and the `UploadBackend` trait
   with supporting types (`ImageMime`, `UploadContext`, `UploadOutcome`,
   `UploadError`).
+- `flintshot-core::config`: `Config`, `UiConfig`, `CaptureConfig` types
+  with `Config::load()` / `Config::save()` reading and writing
+  `<config_dir>/flintshot/config.toml`. Comment-preserving writes via
+  `toml_edit`; partial files fall back to documented defaults.
+- `flintshot-core::serde_util::color_hex` — `Color` now serializes as
+  `#rrggbb` (opaque) or `#rrggbbaa` (with alpha) everywhere it appears
+  (config, IPC, annotations). Reading accepts both forms with optional
+  leading `#`, any case.
+- New `FlintshotError::Config { path, detail }` variant for config
+  parse / serialize failures.
+- Hidden throwaway `flintshot --dump-config` flag that prints the
+  resolved TOML (removed in Phase 1 Task 3 when the real `config`
+  subcommand lands).
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from
@@ -47,10 +60,22 @@ Categories used below:
 - Dual licensing: `MIT OR Apache-2.0`, with both license files in the
   repo root and the `license` field on every crate.
 
+### Changed
+
+- `Color` (de)serialization switched from struct-of-fields (the default
+  `serde::Serialize` derive) to hex string (`#rrggbb` / `#rrggbbaa`).
+  Affects every type that embeds `Color` (currently `Annotation` and
+  `Config::UiConfig`); downstream consumers of `serde_json` /
+  `postcard` encoded `Color` values need to update.
+
 ### Notes
 
+- Phase 0 closed against the local standing gate (`fmt`, `clippy`,
+  `test`, MSRV build, cosmic build) — no git remote is configured yet,
+  so the GitHub Actions pipeline has not executed against a push.
+  First push will run the real CI; any failure becomes a session note.
 - No released versions yet. This unreleased section tracks Phase 0
-  scaffolding (see `docs/ROADMAP.md`).
+  scaffolding plus the start of Phase 1 (`config` module).
 
 ## Release cheat sheet (for maintainers)
 

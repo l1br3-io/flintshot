@@ -14,12 +14,19 @@ use color_eyre::{eyre::Context, Result};
     name = "flintshot",
     version,
     propagate_version = true,
+    subcommand_required = false,
     about = "Cross-platform screenshot capture and annotation",
     long_about = "Flameshot-inspired screenshot tool, written in pure Rust.\nSee docs/ROADMAP.md for current phase and available features."
 )]
 pub struct Cli {
+    /// Throwaway debug flag: load the config and print the resolved
+    /// TOML to stdout. Removed in Phase 1 Task 3 when the real
+    /// `config` subcommand lands.
+    #[arg(long, hide = true)]
+    pub dump_config: bool,
+
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 /// All `flintshot` subcommands.

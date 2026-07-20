@@ -17,28 +17,28 @@ Effort estimates are rough, solo-developer assumes; adjust to your own pace.
 layer in place, CI green, docs in place.
 
 **Deliverables:**
-- [ ] `Cargo.toml` workspace with 4 members: `flintshot-app`,
+- [x] `Cargo.toml` workspace with 4 members: `flintshot-app`,
       `flintshot-core`, `flintshot-editor-egui`, `flintshot-cosmic`
-- [ ] `default-members = ["crates/flintshot-app"]` so casual builds skip
+- [x] `default-members = ["crates/flintshot-app"]` so casual builds skip
       the COSMIC crate
-- [ ] `rust-toolchain.toml` pinning 1.95
-- [ ] `clap` CLI in `flintshot-app` with subcommands: `daemon`, `region`,
+- [x] `rust-toolchain.toml` pinning 1.95
+- [x] `clap` CLI in `flintshot-app` with subcommands: `daemon`, `region`,
       `fullscreen`, `pin`, `upload` (all stubs)
-- [ ] `flintshot-app` feature flags: `default = ["egui"]`, with optional
+- [x] `flintshot-app` feature flags: `default = ["egui"]`, with optional
       dep on `flintshot-editor-egui` (room for future `iced`, `slint`
       features)
-- [ ] `Backend` trait + types in `flintshot-core` (no impls yet)
-- [ ] Geometry types in `flintshot-core::geom` — `Point`, `Rect`,
+- [x] `Backend` trait + types in `flintshot-core` (no impls yet)
+- [x] Geometry types in `flintshot-core::geom` — `Point`, `Rect`,
       `Color`, `Stroke`, `Key` (replaces egui types in shared data
       model)
-- [ ] `Canvas` + `EditorShell` traits in `flintshot-core` (signatures
+- [x] `Canvas` + `EditorShell` traits in `flintshot-core` (signatures
       only, no impls)
-- [ ] Stub `flintshot-editor-egui` impl of `Canvas` + `EditorShell`
-      (returns `todo!()`)
-- [ ] `tracing` + `color-eyre` init
-- [ ] CI workflow: `fmt --check`, `clippy -- -D warnings`, `cargo test`,
+- [x] Stub `flintshot-editor-egui` impl of `Canvas` + `EditorShell`
+      (returns `FlintshotError::NotImplemented`)
+- [x] `tracing` + `color-eyre` init
+- [x] CI workflow: `fmt --check`, `clippy -- -D warnings`, `cargo test`,
       MSRV check
-- [ ] CI workflow: opt-in `cargo build -p flintshot-cosmic` (separate
+- [x] CI workflow: opt-in `cargo build -p flintshot-cosmic` (separate
       job, needs system deps)
 - [x] `LICENSE-MIT` + `LICENSE-APACHE` files,
       `license = "MIT OR Apache-2.0"` in every Cargo.toml

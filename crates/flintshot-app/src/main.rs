@@ -9,6 +9,7 @@ mod cli;
 
 use clap::Parser;
 use color_eyre::Result;
+use flintshot_core::Config;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
@@ -17,13 +18,28 @@ fn main() -> Result<()> {
     init_reporting();
     let cli = Cli::parse();
 
-    match cli.command {
-        Command::Daemon(args) => cli::run_daemon(&args),
-        Command::Region(args) => cli::run_region(&args),
-        Command::Fullscreen(args) => cli::run_fullscreen(&args),
-        Command::Pin(args) => cli::run_pin(&args),
-        Command::Upload(args) => cli::run_upload(&args),
+    if cli.dump_config {
+        return dump_config();
     }
+
+    match cli.command {
+        Some(Command::Daemon(args)) => cli::run_daemon(&args),
+        Some(Command::Region(args)) => cli::run_region(&args),
+        Some(Command::Fullscreen(args)) => cli::run_fullscreen(&args),
+        Some(Command::Pin(args)) => cli::run_pin(&args),
+        Some(Command::Upload(args)) => cli::run_upload(&args),
+        None => Ok(()),
+    }
+}
+
+/// Throwaway: print the resolved config TOML. Removed in Phase 1 Task 3
+/// when the real `config` subcommand lands.
+fn dump_config() -> Result<()> {
+    let cfg = Config::load().map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
+    let toml = toml::to_string_pretty(&cfg)
+        .map_err(|e| color_eyre::eyre::eyre!("serialization failure: {e}"))?;
+    print!("{toml}");
+    Ok(())
 }
 
 /// Initialise `color_eyre` + `tracing` with a sensible default filter.
