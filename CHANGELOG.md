@@ -111,6 +111,16 @@ Categories used below:
   / window-system failures (Phase 1 Task 5). Currently wraps
   `eframe::Error` via `to_string()`; will be reused for Task 9's
   `rfd` / `arboard` failures and Phase 3's pin window.
+- `flintshot region` / `flintshot fullscreen` now route through the
+  `EguiShell` editor when `--out` is omitted (Phase 1 Task 6). Capture
+  → `EditorShell::run_editor(state)` → log the outcome. The editor
+  path is gated on the `egui` Cargo feature; `--no-default-features`
+  builds reject `region` / `fullscreen` without `--out` with a clear
+  error ("editor not built; pass --out PATH to capture headlessly").
+  Outcome logging: `Saved(p)` logs the path, `Cancelled` logs and
+  exits cleanly with no output file, `CopiedToClipboard` / `Uploaded`
+  are wired for Tasks 9 / 4, and the `#[non_exhaustive]` wildcard arm
+  warns on future variants.
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from
@@ -153,6 +163,22 @@ Categories used below:
 
 - Throwaway `flintshot --dump-config` debug flag (Phase 1 Task 3).
   Replaced by the real `flintshot config` subcommand.
+- Default-timestamped `--out` path for `flintshot region` /
+  `flintshot fullscreen` (Phase 1 Task 6). When `--out` is omitted
+  the CLI now opens the editor instead of writing
+  `/tmp/flintshot-<ISO-8601>.png`. Explicit `--out PATH` still writes
+  a PNG (Task 3's path preserved as the headless / scripting escape
+  hatch).
+- `crates/flintshot-app/src/time_util.rs` (Phase 1 Task 6). Its only
+  caller was `OutputArgs::resolve_path`, removed alongside the
+  default-timestamp path above. The algorithm (Howard Hinnant's
+  `civil_from_days`) is recoverable from git history; per the Task 3
+  close-out note, Phase 4's upload-cache timestamps will promote it
+  to `flintshot-core` rather than re-derive it.
+- `crates/flintshot-editor-egui/examples/open_editor.rs` (Phase 1
+  Task 6). The example was the Task 5 smoke probe for
+  `EguiShell::run_editor`; the `flintshot region` CLI path now covers
+  that role end-to-end.
 
 ### Notes
 
@@ -176,9 +202,12 @@ Categories used below:
   scaffolding plus Phase 1 Tasks 1 (`config` module), 2 (`capture`
   module), 3 (CLI wiring: `region`/`fullscreen` write PNGs,
   `config` subcommand, `--out` flag), 4 (`render()` background
-  blit + `EguiCanvas::upload_image` / `draw_image`), and 5
+  blit + `EguiCanvas::upload_image` / `draw_image`), 5
   (`EguiShell::run_editor` opens an eframe window, displays the
-  screenshot, returns `EditorOutcome::Cancelled` on `Esc` / close).
+  screenshot, returns `EditorOutcome::Cancelled` on `Esc` / close),
+  and 6 (`region` / `fullscreen` routed through `EguiShell` when
+  `--out` is omitted; `--out PATH` preserved as the headless path;
+  `cfg(not(feature = "egui"))` fallback errors clearly).
 
 ## Release cheat sheet (for maintainers)
 

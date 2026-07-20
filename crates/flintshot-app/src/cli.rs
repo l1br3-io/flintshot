@@ -1,9 +1,12 @@
 //! CLI definition and subcommand dispatch.
 //!
-//! Phase 1 Task 3 wires `region` / `fullscreen` to real capture calls
-//! and adds the `config` subcommand. The editor wiring (Task 6) will
-//! reroute `region` / `fullscreen` through `EguiShell` when no `--out`
-//! is given; for now both subcommands write a PNG.
+//! Phase 1 Task 3 wired `region` / `fullscreen` to real capture calls
+//! and added the `config` subcommand. Task 6 rerouted both through
+//! [`EguiShell::run_editor`] when no `--out` is given; with `--out`,
+//! Task 3's PNG-write path is preserved (headless / scripting escape
+//! hatch). The editor path is gated on the `egui` Cargo feature.
+//!
+//! [`EguiShell::run_editor`]: flintshot_editor_egui::EguiShell::run_editor
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -12,8 +15,6 @@ use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
 use flintshot_core::{capture_fullscreen, Config};
 use image::ImageFormat;
-
-use crate::time_util::iso8601_now;
 
 /// Cross-platform screenshot capture and annotation.
 #[derive(Debug, Parser)]
@@ -63,23 +64,18 @@ pub struct DaemonArgs {
 /// "COMMON OPTIONS" section.
 #[derive(Debug, Args)]
 pub struct OutputArgs {
-    /// Where to write the PNG. Defaults to `/tmp/flintshot-<timestamp>.png`.
+    /// Write the PNG to `PATH` and skip the editor entirely
+    /// (headless / scripting path).
+    ///
+    /// When omitted, the captured screenshot is opened in the editor
+    /// (requires the `egui` Cargo feature, which is on by default;
+    /// `--no-default-features` builds reject `region` / `fullscreen`
+    /// without `--out` with a clear error).
     ///
     /// Format is always PNG regardless of the extension; a non-`.png`
     /// path still yields valid PNG bytes.
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
-}
-
-impl OutputArgs {
-    /// Resolve the output path, falling back to the timestamped default
-    /// when `--out` wasn't given. Pure — does not touch the filesystem.
-    fn resolve_path(&self) -> PathBuf {
-        match &self.out {
-            Some(p) => p.clone(),
-            None => PathBuf::from(format!("/tmp/flintshot-{}.png", iso8601_now())),
-        }
-    }
 }
 
 /// Arguments for `flintshot region`.
@@ -131,37 +127,91 @@ pub fn run_daemon(_args: &DaemonArgs) -> Result<()> {
     Ok(())
 }
 
-/// `flintshot region` — Phase 1 Task 3.
+/// `flintshot region` — Phase 1 Task 3 (capture) + Task 6 (editor wiring).
 ///
-/// Captures the primary monitor and writes a PNG. The interactive
-/// region-select tool lands in Task 14; for now `region` and
-/// `fullscreen` produce equivalent output (full primary monitor).
+/// Captures the primary monitor and either opens the editor (no `--out`)
+/// or writes a PNG (`--out PATH`). The interactive region-select tool
+/// lands in Task 14; for now `region` and `fullscreen` capture
+/// equivalent pixels (full primary monitor) — `region` only differs in
+/// accepting `--delay-ms`.
 pub fn run_region(args: &RegionArgs) -> Result<()> {
     if args.delay_ms > 0 {
         tracing::debug!(delay_ms = args.delay_ms, "sleeping before capture");
         std::thread::sleep(Duration::from_millis(u64::from(args.delay_ms)));
     }
+    capture_and_dispatch(args.monitor, "region", &args.output)
+}
 
-    let img = capture_fullscreen(args.monitor)
+/// `flintshot fullscreen` — Phase 1 Task 3 (capture) + Task 6 (editor wiring).
+pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
+    capture_and_dispatch(args.monitor, "fullscreen", &args.output)
+}
+
+/// Capture a monitor and either write a PNG (`--out`) or open the
+/// editor (no `--out`). Shared by [`run_region`] / [`run_fullscreen`];
+/// `mode` is just the log label ("region" / "fullscreen").
+fn capture_and_dispatch(monitor: Option<u32>, mode: &str, output: &OutputArgs) -> Result<()> {
+    let img = capture_fullscreen(monitor)
         .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
-        .with_context(|| format!("capturing region on monitor {:?}", args.monitor))?;
+        .with_context(|| format!("capturing {mode} on monitor {monitor:?}"))?;
 
-    let path = args.output.resolve_path();
-    write_png(&img, &path)?;
-    tracing::info!(path = %path.display(), "region capture saved");
+    match &output.out {
+        Some(path) => {
+            write_png(&img, path)?;
+            tracing::info!(path = %path.display(), "{mode} capture saved");
+        }
+        None => run_editor_for_capture(img, mode)?,
+    }
     Ok(())
 }
 
-/// `flintshot fullscreen` — Phase 1 Task 3.
-pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
-    let img = capture_fullscreen(args.monitor)
-        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
-        .with_context(|| format!("capturing fullscreen on monitor {:?}", args.monitor))?;
+/// Hand the captured image to the egui editor and log the outcome.
+/// Returns `Ok(())` regardless of which `EditorOutcome` the user picked
+/// (saved / copied / cancelled); only shell or render failures bubble
+/// up as `Err`.
+#[cfg(feature = "egui")]
+fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
+    use flintshot_core::{EditorOutcome, EditorShell, EditorState};
 
-    let path = args.output.resolve_path();
-    write_png(&img, &path)?;
-    tracing::info!(path = %path.display(), "fullscreen capture saved");
+    let outcome = flintshot_editor_egui::EguiShell::new()
+        .run_editor(EditorState::new(img))
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
+        .with_context(|| format!("running editor for {mode} capture"))?;
+
+    // `EditorOutcome` is `#[non_exhaustive]`; the wildcard arm is
+    // mandatory from outside `flintshot-core` and covers future
+    // variants we don't yet name.
+    #[allow(
+        clippy::wildcard_enum_match_arm,
+        reason = "EditorOutcome is #[non_exhaustive]; _ is mandatory"
+    )]
+    match outcome {
+        EditorOutcome::Saved(p) => {
+            tracing::info!(path = %p.display(), "editor saved");
+        }
+        EditorOutcome::CopiedToClipboard => {
+            tracing::info!("editor copied to clipboard");
+        }
+        EditorOutcome::Uploaded(url) => {
+            tracing::info!(%url, "editor uploaded");
+        }
+        EditorOutcome::Cancelled => {
+            tracing::info!("editor cancelled; no file written");
+        }
+        _ => tracing::warn!(?outcome, "editor returned unhandled outcome"),
+    }
     Ok(())
+}
+
+/// Headless-build fallback: editor is unavailable without the `egui`
+/// feature. The image argument is accepted (and dropped) purely so the
+/// call site in [`capture_and_dispatch`] is uniform across feature sets.
+#[cfg(not(feature = "egui"))]
+fn run_editor_for_capture(_img: image::RgbaImage, _mode: &str) -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "editor not built; pass --out PATH to capture headlessly \
+         (this binary was compiled without the `egui` feature)"
+    ))
 }
 
 /// `flintshot config` — Phase 1 Task 3.

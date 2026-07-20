@@ -113,7 +113,7 @@ phase until the previous checkpoint is signed off.
 ### Phase 1.B — Editor skeleton (window opens with screenshot)
 - [x] Task 4 — `EguiCanvas` background primitives
 - [x] Task 5 — `EguiShell::run_editor` skeleton (eframe window)
-- [ ] Task 6 — CLI routes capture → editor
+- [x] Task 6 — CLI routes capture → editor
 
 **Checkpoint B** — editor opens over a real screenshot
 
