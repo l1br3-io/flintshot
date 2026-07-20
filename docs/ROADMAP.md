@@ -40,10 +40,12 @@ layer in place, CI green, docs in place.
       MSRV check
 - [ ] CI workflow: opt-in `cargo build -p flintshot-cosmic` (separate
       job, needs system deps)
-- [ ] `LICENSE-MIT` + `LICENSE-APACHE` files,
+- [x] `LICENSE-MIT` + `LICENSE-APACHE` files,
       `license = "MIT OR Apache-2.0"` in every Cargo.toml
-- [ ] `README.md` at root
-- [ ] Docs in place (this file + VISION + ARCHITECTURE + DECISIONS)
+- [x] `README.md` at root
+- [x] Docs in place (this file + VISION + ARCHITECTURE + DECISIONS)
+- [x] Operational docs: `CONTRIBUTING.md`, `AGENTS.md`, `CHANGELOG.md`,
+      `docs/TEST_MATRIX.md`
 
 **Exit criteria:** `cargo build` and `cargo build -p flintshot-cosmic`
 both succeed on a clean checkout; CI is green; `flintshot --help` lists
