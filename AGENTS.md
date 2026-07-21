@@ -75,6 +75,28 @@ cargo run -- region              # Phase 1 (currently a stub)
 cargo run -- fullscreen          # Phase 1 (currently a stub)
 ```
 
+### Dev tooling (optional, recommended)
+
+The `justfile` defines `bootstrap`, `watch`, `nextest`, and `dev`
+recipes that wrap a few cargo subcommands. They fall back gracefully
+when the subcommand is missing, but work best with them installed.
+Get them all at once:
+
+```sh
+just bootstrap     # installs: cargo-watch, cargo-nextest
+```
+
+| Tool             | Used by            | Why                                    |
+| ---------------- | ------------------ | -------------------------------------- |
+| `cargo-watch`    | `just dev`, `just watch` | Rebuild / re-run on every save.   |
+| `cargo-nextest`  | `just test` (preferred), `just nextest` | Faster test runner, nicer UX. |
+
+CI does **not** use `cargo-nextest` — `just ci` and the `test` job in
+`.github/workflows/ci.yml` both invoke `cargo test` directly so local
+results match CI byte-for-byte. `just test` (without `ci`) prefers
+nextest when available for speed; doc tests always run via
+`cargo test` since nextest doesn't collect them.
+
 ### Linux system deps (default builds)
 
 `flintshot-core` depends on `xcap` for screen capture, which needs

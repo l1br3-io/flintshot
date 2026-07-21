@@ -21,6 +21,7 @@ authors = ["flintshot contributors"]
 flintshot-core = { path = "crates/flintshot-core", version = "0.0.0" }
 flintshot-editor-egui = { path = "crates/flintshot-editor-egui", version = "0.0.0" }
 
+arboard = { version = "3", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
 color-eyre = "0.6"
 dirs = "6"
@@ -28,6 +29,7 @@ eframe = "0.35"
 egui = "0.35"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 imageproc = { version = "0.25", default-features = false }
+rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"

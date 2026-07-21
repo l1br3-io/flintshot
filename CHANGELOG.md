@@ -147,6 +147,41 @@ Categories used below:
   top) so the user sees live feedback during drags. All 9 annotation
   variants have a dispatch path; `Blur` renders as a grey placeholder
   + `tracing::warn!` until Task 13 adds real `image_ops::blur`.
+- Rectangle annotation tool end-to-end (Phase 1 Task 8):
+  `Tool::Rect` is now interactive. Mouse-down inside the canvas
+  begins a rect annotation with the active color/stroke; drag updates
+  the opposite corner; release commits. An editor toolbar
+  (`egui::Panel::top`) appears at the top of the window with a Rect
+  tool selector (`selectable_value`) and an annotation-count label.
+  `Ctrl+Z` undoes the last commit and clears any in-flight pending
+  rect. Click-without-drag is filtered at the shell boundary (cancel
+  on degenerate rect rather than commit). `EguiCanvas::draw_rect_outline`
+  and `EguiCanvas::draw_rect_filled` now have real egui `Painter`
+  implementations using `StrokeKind::Inside` (so the stroke's outer
+  edge coincides with the dragged rect — "what you dragged is what
+  you get"). Other `Canvas` primitives (`draw_ellipse`, `draw_line`,
+  `draw_arrow`, `draw_text`) remain stubs until Tasks 11/12/13.
+- Save / Copy output paths (Phase 1 Task 9). Two new toolbar buttons
+  in the editor (`💾 Save`, `📋 Copy`) compose the final image
+  (background + all committed annotations) and either write a PNG
+  via `rfd::FileDialog` (blocking save dialog + `image::save_with_format`
+  with PNG forced) or place it on the system clipboard via
+  `arboard::Clipboard::set_image`. On success the editor publishes
+  the matching `EditorOutcome` variant (`Saved(path)` / `CopiedToClipboard`)
+  and closes; on failure it publishes `Err(FlintshotError)` and
+  closes (matching the existing render-error pattern). Dialog cancel
+  keeps the editor open with no outcome published. Two new workspace
+  deps: `rfd = "0.17"`, `arboard = "3"` (default features; X11 on
+  Linux, native elsewhere).
+- New `flintshot-core::render::compose_final(state: &EditorState)
+  -> RgbaImage` (Phase 1 Task 9). Clones `state.image` and renders
+  every committed annotation into the clone via the shared
+  `render_ann` dispatch — the same path the live editor uses, so
+  what the user sees is what gets saved / copied. No toolkit-specific
+  "screenshot the canvas" path is involved. Excludes `state.pending`
+  (in-flight annotations are not part of the saved output). The
+  function backs the Save / Copy buttons and is the source of truth
+  for Phase 4's Upload path.
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from
@@ -184,6 +219,15 @@ Categories used below:
   is the Task 4 content (unchanged); `app.rs` is the new private
   `EditorApp` `eframe::App` impl; `shell.rs` is the `EguiShell`
   `EditorShell` impl + `run_editor_blocking` helper.
+- `justfile` gained `bootstrap`, `nextest`, and `watch` recipes, and
+  `test` now prefers `cargo-nextest` (with fallback to `cargo test`)
+  for unit + integration runs. Doc tests still use `cargo test`
+  since nextest doesn't collect them. `just ci` is unchanged — it
+  still mirrors the GitHub Actions `test` job byte-for-byte
+  (`cargo test`, no nextest) so local pre-push results match CI.
+  `just bootstrap` installs the optional `cargo-watch` and
+  `cargo-nextest` subcommands idempotently. AGENTS.md and
+  CONTRIBUTING.md document the new recipes.
 
 ### Removed
 
@@ -231,13 +275,18 @@ Categories used below:
   blit + `EguiCanvas::upload_image` / `draw_image`), 5
   (`EguiShell::run_editor` opens an eframe window, displays the
   screenshot, returns `EditorOutcome::Cancelled` on `Esc` / close),
-   and 6 (`region` / `fullscreen` routed through `EguiShell` when
+  and 6 (`region` / `fullscreen` routed through `EguiShell` when
   `--out` is omitted; `--out PATH` preserved as the headless path;
   `cfg(not(feature = "egui"))` fallback errors clearly), and 7
   (editor state machine: `pending` field + `begin/update/commit/
   cancel_annotation`, snapshot `undo`/`redo`, `hit_test`; public
   `MockCanvas` + `DrawCall`; `render()` dispatches all 9 variants +
-  draws `pending` on top).
+  draws `pending` on top), and 8 (`Tool::Rect` interactive
+  end-to-end: egui pointer events → state machine → `render()`;
+  toolbar with Rect selector; `Ctrl+Z` undo; zero-area rect filter),
+  and 9 (Save / Copy buttons in the editor toolbar; PNG write via
+  `rfd`; clipboard via `arboard`; new `compose_final` in core for
+  headless render).
 
 ## Release cheat sheet (for maintainers)
 

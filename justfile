@@ -2,10 +2,33 @@
 #
 # Mirrors the CI gate (.github/workflows/ci.yml) so the same checks can
 # be run locally with one word. All commands run from the repo root.
+#
+# Optional cargo subcommands (install with `just bootstrap`):
+#   cargo-watch   - rebuild on save (used by `dev`, `watch`)
+#   cargo-nextest - faster test runner (used by `nextest`, preferred by `test`)
+# Recipes that need them fall back gracefully when absent.
 
 # Default: list available recipes.
 default:
     @just --list
+
+# Install recommended cargo subcommands for local dev. Idempotent —
+# re-runs are safe; already-installed binaries are skipped. Run once on
+# a fresh checkout so `dev`, `watch`, and `nextest` work at full power.
+bootstrap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    install_if_missing() {
+        local name="$1"
+        if cargo "$name" --version >/dev/null 2>&1; then
+            echo "ok: cargo-$name already installed ($(cargo "$name" --version))"
+        else
+            echo "installing: cargo-$name"
+            cargo install "$name" --locked
+        fi
+    }
+    install_if_missing watch
+    install_if_missing nextest
 
 # Auto-fix what CI checks: formatting and clippy.
 fix:
@@ -24,17 +47,43 @@ ci:
     echo "== test ==";        cargo test --workspace --all-targets
     echo "== test --doc ==";  cargo test --doc -p flintshot-core -p flintshot-editor-egui
 
-# Run all tests: unit + integration + doc.
+# Run all tests. Prefers cargo-nextest for unit + integration (faster,
+# nicer output); falls back to `cargo test` if nextest is absent.
+# Doc tests always use `cargo test` — nextest doesn't run them.
 test:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== test ==";      cargo test --workspace --all-targets
-    echo "== test --doc =="; cargo test --doc -p flintshot-core -p flintshot-editor-egui
+    if cargo nextest --version >/dev/null 2>&1; then
+        echo "== nextest (unit + integration) =="
+        cargo nextest run --workspace --all-targets
+    else
+        echo "== test (unit + integration) =="
+        cargo test --workspace --all-targets
+    fi
+    echo "== test --doc (lib crates) =="
+    cargo test --doc -p flintshot-core -p flintshot-editor-egui
 
 # Test only the core crate (the heavy-unit-coverage one).
 test-core:
     cargo test -p flintshot-core --all-targets
     cargo test -p flintshot-core --doc
+
+# Run tests with cargo-nextest explicitly. Requires cargo-nextest —
+# `just bootstrap` to install. Doc tests run via `cargo test` afterwards
+# since nextest doesn't collect them.
+nextest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo nextest run --workspace --all-targets
+    cargo test --doc -p flintshot-core -p flintshot-editor-egui
+
+# Rebuild on save. Defaults to `cargo check`; pass a cargo subcommand
+# (or several) to customize. Requires cargo-watch — `just bootstrap` to install.
+#   just watch                              # cargo check on every save
+#   just watch "test -p flintshot-core"     # run a single crate's tests
+#   watch "fmt -- --check && clippy -- -D warnings"
+watch args="check":
+    cargo watch -x "{{ args }}"
 
 # Verify the project builds on the pinned MSRV (1.95).
 # Toolchain is selected automatically by rust-toolchain.toml.
@@ -88,6 +137,6 @@ dev *args:
     if cargo watch --version >/dev/null 2>&1; then
         cargo watch -x "run -- {{ args }}"
     else
-        echo "note: cargo-watch not installed; backend won't auto-reload. 'cargo install cargo-watch' to enable." >&2
+        echo "note: cargo-watch not installed; backend won't auto-reload. Run 'just bootstrap' or 'cargo install cargo-watch' to enable." >&2
         cargo run -- {{ args }}
     fi
