@@ -1,25 +1,27 @@
-# Session handoff — Phase 1, Task 7 done; Checkpoint B + Task 8 next
+# Session handoff — Phase 1, Task 9 done; Checkpoint B + Task 10 next
 
-> **Last session:** Tue Jul 21 2026. Task 7 landed green. Phase 1.C
-> has its foundation: editor state machine, public `MockCanvas`, and
-> `render()` dispatch for every annotation variant. Task 8 (first
-> real annotation tool — Rectangle, end-to-end vertical slice) is
-> the natural next step.
+> **Last session:** Tue Jul 21 2026. Task 9 landed green (sitting
+> uncommitted in the working tree alongside Tasks 7 + 8). Phase 1.D
+> has its first half: Save / Copy buttons + the `compose_final`
+> headless-render path that backs them. Task 10 (keyboard shortcuts:
+> `Ctrl+S` / `Ctrl+C` / `Ctrl+Y` / `Ctrl+Shift+Z`) is the natural
+> next step.
 > **Next:** (optional) Checkpoint B human-eyes check for the editor
-> window on a real display, then Task 8. Replace this file at the
+> window on a real display, then Task 10. Replace this file at the
 > start of each session; the permanent record lives in
 > [`TODO.md`](TODO.md) under "Session notes".
 
 ## Where we are
 
 **Phase 1 — Capture + editor window.** Phase 1.A (capture path),
-Phase 1.B (editor skeleton), and the first half of Phase 1.C
-(editor state machine + MockCanvas infra) are code-complete. The
-standing gate is green. One carried-forward verification debt from
-Phase 1.B remains: the maintainer should confirm with human eyes
-that the editor window visibly shows the screenshot and that Esc
-returns `EditorOutcome::Cancelled`. This doesn't block Task 8 — it
-only blocks formal Checkpoint B sign-off.
+Phase 1.B (editor skeleton), Phase 1.C (editor state machine +
+Rect tool vertical slice), and Phase 1.D's first half (Save / Copy)
+are code-complete. The standing gate is green. One carried-forward
+verification debt from Phase 1.B remains: the maintainer should
+confirm with human eyes that the editor window visibly shows the
+screenshot and that Esc returns `EditorOutcome::Cancelled`. Task 9
+extends that debt to Save / Copy button clicks producing real PNG
+files / clipboard contents.
 
 ```
 Phase 1.A — Capture path             Phase 1.B — Editor skeleton
@@ -30,36 +32,41 @@ Phase 1.A — Capture path             Phase 1.B — Editor skeleton
 
 Phase 1.C — First annotation tool (vertical slice)
   Task 7  state machine + MockCanvas  [x]
-  Task 8  Rectangle end-to-end        [ ]    ← next
+  Task 8  Rectangle end-to-end        [x]
   ▓▓▓ Checkpoint C (0/1)
+
+Phase 1.D — Outputs
+  Task 9  Save + Copy                 [x]
+  Task 10 keyboard shortcuts          [ ]    ← next
+  ▓▓▓ Checkpoint D (0/1)
 
 `*` Checkpoint B's remaining work is the manual visibility check
     described below — no further code changes expected. Can run in
-    parallel with Task 8 if you'd rather not context-switch.
+    parallel with Task 10 if you'd rather not context-switch.
 ```
 
 ## What landed this session
 
-- **Task 7** — `EditorState` gained `pending: Option<Annotation>` and
-  the state-machine methods `begin_annotation` /
-  `update_annotation` / `commit_annotation` / `cancel_annotation` /
-  `undo` / `redo` / `hit_test`. `Annotation` gained
-  `bounding_box()` and `contains(point)` helpers. `render()` now
-  iterates `state.anns` and dispatches via the new public
-  `render_ann(canvas, ann)` helper, then draws `state.pending` on
-  top. The Task 4 inline `MockCanvas` is promoted to a public struct
-  with a full `DrawCall` enum (one variant per `Canvas` method). All
-  9 annotation variants have a dispatch path in `render_ann`; `Blur`
-  renders as a grey placeholder + `tracing::warn!` until Task 13's
-  `image_ops` lands, and `Number` renders as a square + text label
-  until Phase 2 adds a `draw_circle` primitive.
+- **Task 9** — `flintshot-core::render::compose_final(state) ->
+  RgbaImage` (re-exported from the crate root). Clones `state.image`,
+  walks `state.anns` through the existing `render_ann` dispatch into
+  a new private `ImageCanvas` struct that implements `Canvas`
+  directly on an `RgbaImage`. The function is the source of truth
+  for Save / Copy / Upload outputs — same per-variant dispatch as
+  the live editor, so what the user sees is what gets saved. Only
+  the rect primitives are real (the only tool shipping in Phase 1's
+  Task 8); other primitives warn + no-op until Tasks 11/12/13.
+  `EditorApp::ui` gained two toolbar buttons (`💾 Save`, `📋 Copy`)
+  and two `app.rs` helper functions: `save_to_disk` (rfd blocking
+  save dialog + `image::save_with_format` PNG-forced) and
+  `copy_to_clipboard` (arboard `Clipboard::set_image`).
 
-Detailed deviations + downstream-impact notes for Task 7 are in
-[`TODO.md`](TODO.md) under "### Task 7 close-out". **Read those
-before starting Task 8** — they document the drag-anchor convention
-(`rect.min` is the begin point during drag, normalized at commit),
-the `undo()`-clears-`pending` contract, the `Blur` placeholder
-behaviour, and the `mem::take`-vs-`clone` snapshot pattern.
+Detailed deviations + downstream-impact notes for Task 9 are in
+[`TODO.md`](TODO.md) under "### Task 9 close-out". **Read those
+before starting Task 10** — they document the sync-rfd decision,
+the ImageCanvas-as-private-implementation-detail choice, the
+pixel-assertion-vs-fixture-PNG tradeoff, and the
+failure-path-closes-editor UX wrinkle.
 
 ## Standing gate (last green run)
 
@@ -68,12 +75,15 @@ cargo fmt --all --check                                          # clean
 cargo clippy --workspace --all-targets -- -D warnings            # clean
 cargo clippy --no-default-features -p flintshot-app \
   --all-targets -- -D warnings                                   # clean
-cargo test --workspace --all-targets                             # 52 pass, 1 ignored, 0 fail
+cargo test --workspace --all-targets                             # 57 pass, 1 ignored, 0 fail
 cargo test --doc -p flintshot-core -p flintshot-editor-egui      # 0 doc tests
 ```
 
-Test count grew from 33 → 52 (19 new Task 7 tests: 16 in `editor.rs`,
-3 in `render.rs`).
+Test count grew from 53 → 57 (4 new Task 9 tests:
+`compose_final_renders_rect_outline_into_clone`,
+`compose_final_renders_rect_fill_and_outline`,
+`compose_final_excludes_pending`,
+`compose_final_empty_state_is_image_clone`).
 
 ## Open verification debt (resolve before Checkpoint B sign-off)
 
@@ -88,80 +98,92 @@ drive a close event). Smoke-verified end-to-end:
 - ❓ Screenshot is actually visible on screen.
 - ❓ Esc returns `EditorOutcome::Cancelled` and the process exits 0
   with no output file.
+- ❓ (Task 9) Save button opens a native dialog, picks a writable
+  path, writes a valid PNG with the rect baked in.
+- ❓ (Task 9) Copy button places the image on the clipboard and is
+  pasteable in GIMP / Preview / mspaint.
 
-**Resolution is one terminal command + two seconds of attention:**
+**Resolution is one terminal command + a minute of attention:**
 
 ```sh
 cargo run -- region
 ```
 
-If the window shows the screenshot and Esc closes it cleanly with
-terminal log `editor cancelled; no file written`, Checkpoint B is
-clear. If something looks wrong, capture the exact symptom and add a
-session note before opening a debugging pass. **This can run in
-parallel with Task 8** — Task 8 doesn't touch the editor window
-itself, only the input-handling logic inside `EditorApp`.
+Draw a rect with the Rect tool, click `💾 Save`, pick a path, verify
+the PNG opens in an image viewer. Then `📋 Copy`, switch to GIMP /
+an image viewer, paste (`Ctrl+V`), verify the rect is visible. If
+all three work (visible screenshot + Esc cancels + Save + Copy),
+Checkpoint B **and** Checkpoint D are clear. If something looks
+wrong, capture the exact symptom and add a session note before
+opening a debugging pass. **This can run in parallel with Task 10**
+— Task 10 doesn't touch the editor window itself, only the input
+dispatch logic inside `EditorApp`.
 
-## Next: Task 8 — Rectangle tool end-to-end
+## Next: Task 10 — Keyboard shortcuts
 
-**Task 8** ([`TODO.md`](TODO.md) §"Task 8"). Goal: vertical slice of
-a real annotation tool. With `Tool::Rect` active, the egui shell
-translates mouse-down / drag / up into
-`begin_annotation` / `update_annotation` / `commit_annotation` (the
-state machine landed in Task 7). The shared `render()` path already
-dispatches committed and pending Rects; no per-tool render code is
-needed. `Ctrl+Z` should undo the last commit (the state machine
-already supports it). Add a toolbar button for the Rect tool to
-prove the plumbing works (full picker UI is Task 15).
+**Task 10** ([`TODO.md`](TODO.md) §"Task 10"). Goal: wire the
+Phase 1 keyboard surface. The Task 5 close-out's forward-looking
+note said "Task 10 extracts a pure `dispatch_input` helper from
+`EditorApp::logic` so the input dispatch becomes unit-testable".
+The new shortcuts to wire:
 
-**Acceptance criteria** (from [`TODO.md`](TODO.md) §"Task 8"):
-- [ ] Mouse-down with `Tool::Rect` begins a rect annotation; drag
-      updates the opposite corner; mouse-up commits.
-- [ ] The in-progress rect is visible during drag (via `pending`).
-- [ ] Committed rect persists in `anns` across frames; visible after
-      next render.
-- [ ] `Ctrl+Z` undoes the last commit (visible immediately).
-- [ ] Toolbar shows at least one button (Rect); clicking sets
-      `state.tool`.
-- [ ] Clicking outside the canvas area doesn't begin an annotation.
-- [ ] No `egui::Painter` calls in the egui crate for the rect — only
-      `Canvas::draw_rect_*`.
+- `Esc` cancels (already wired in Task 5).
+- `Ctrl+S` triggers Save (calls Task 9's `save_to_disk`).
+- `Ctrl+C` triggers Copy (calls Task 9's `copy_to_clipboard`).
+- `Ctrl+Z` undoes (already wired in Task 8).
+- `Ctrl+Y` (and `Ctrl+Shift+Z`) redoes (calls `state.redo()`).
+- Shortcuts documented in `docs/TEST_MATRIX.md`.
+
+**Acceptance criteria** (from [`TODO.md`](TODO.md) §"Task 10"):
+- [ ] `Esc` cancels: drops pending, returns `EditorOutcome::Cancelled`.
+- [ ] `Ctrl+S` triggers Save (same path as Task 9's button).
+- [ ] `Ctrl+C` triggers Copy (same path as Task 9's button).
+- [ ] `Ctrl+Z` undoes last commit.
+- [ ] `Ctrl+Y` (and `Ctrl+Shift+Z`) redoes last undo.
+- [ ] Shortcuts are documented in `docs/TEST_MATRIX.md` Phase 1 table
+      for manual verification.
 
 **Verification:**
 - [ ] Standing gate passes.
-- [ ] `MockCanvas` test: render an `EditorState` with two committed
-      `Annotation::Rect`s; assert `draw_rect_outline` count and args.
-- [ ] Manual: `cargo run -- region`, draw a red rectangle, see it
-      persist, press `Ctrl+Z`, see it disappear.
+- [ ] Manual: each shortcut tested end-to-end on L1 or M1.
+- [ ] Unit test in egui crate: feed synthetic `Key` events through
+      the shell's dispatcher; assert state machine transitions.
 
 **Files likely touched:**
-- `crates/flintshot-core/src/render.rs` — Rect dispatch already lives
-  here (Task 7); Task 8 just exercises it.
-- `crates/flintshot-editor-egui/src/canvas.rs` — already has
-  `draw_rect_outline` / `draw_rect_filled` from Task 4; no change
-  expected unless the existing impl has bugs.
-- `crates/flintshot-editor-egui/src/shell.rs` (or `app.rs`) — add
-  pointer-event handling in `EditorApp::logic` (per Task 5's logic/ui
-  split), a one-button toolbar in `EditorApp::ui`, and `Ctrl+Z`
-  wiring.
+- `crates/flintshot-editor-egui/src/app.rs` — keyboard dispatch in
+  `EditorApp::logic` (already has Esc + Ctrl+Z; extend with Ctrl+S,
+  Ctrl+C, Ctrl+Y, Ctrl+Shift+Z). The pure `dispatch_input` extraction
+  is the new testable surface.
+- `docs/TEST_MATRIX.md` — Phase 1 keyboard-shortcut row.
 
 **Watch out for:**
-- Task 5's logic/ui split (egui 0.35) — pointer events go in
-  `logic()`, drawing stays in `ui()`. See Task 5 close-out
-  deviation 1 in [`TODO.md`](TODO.md).
-- The drag-anchor convention (Task 7 deviation 1): `rect.min` is the
-  begin anchor during drag; `rect.max` is the current pointer.
-  `Rect::normalized()` is applied at commit / render / hit-test time.
-- The outcome-slot `Rc<RefCell<…>>` (Task 5 deviation 4) doesn't
-  need touching — Task 8 doesn't change outcome semantics.
-- `EditorState::begin_annotation` already constructs a Rect ann from
-  `self.color` / `self.stroke_width` — Task 8 just feeds pointer
-  events into the state machine.
-- `egui::PointerButton::Primary` is the button to match for
-  left-click drag; `ctx.input(|i| i.pointer.button_down(...))` and
-  `ctx.input(|i| i.pointer.interact_pos())` are the API entry points.
-- Convert egui's logical pixels to physical (`pos * ctx.pixels_per_point()`)
-  at the event boundary — the state machine works in physical px.
+- Task 9's `save_to_disk` / `copy_to_clipboard` are free functions
+  taking `&EditorState` — they can be called from `logic()` directly
+  for the Ctrl+S / Ctrl+C shortcuts. The button-click path stays in
+  `ui()` (button clicks need a `Ui`), but the keyboard path doesn't.
+- The Task 5 close-out's plan was to extract a pure
+  `dispatch_input(&mut EditorState, &InputEvent)` function so input
+  dispatch is unit-testable without an eframe instance. Task 10 is
+  the right time to do that extraction — it cleans up the existing
+  pointer / Ctrl+Z match in `logic()` AND adds the new shortcuts in
+  one move.
+- Ctrl+S / Ctrl+C in `logic()` need to publish the outcome + close
+  the window, same as the button handler. The button handler lives
+  in `ui()` because it needs the toolbar's `&mut Ui`; the keyboard
+  handler lives in `logic()` because it doesn't.
+- `EditorState::redo()` already exists from Task 7; `Ctrl+Y` /
+  `Ctrl+Shift+Z` just call it.
+- The Task 9 close-out's "deviation 5" notes that failure-path
+  closes the editor. Ctrl+S / Ctrl+C should follow the same pattern
+  for consistency (failures publish `Err(_)` + close, not show a
+  toast).
+- `Key` enum lives in `flintshot-core::geom` (already used by the
+  Task 0 scaffolding). `egui::Key` → `Key` translation happens at
+  the event boundary in `logic()`.
+- A pure `dispatch_input` function may need an `InputEvent` enum
+  (also new). Define it in `flintshot-core::geom` or in
+  `flintshot-editor-egui`'s test module — pick whichever minimizes
+  the public surface.
 
 ## How to resume in a new session
 
@@ -171,21 +193,23 @@ prove the plumbing works (full picker UI is Task 15).
    opencode
    ```
 
-2. **If Checkpoint B is already signed off**, ask for Task 8 directly:
+2. **If Checkpoint B is already signed off**, ask for Task 10
+   directly:
    ```
-   do Task 8 — Rectangle tool end-to-end
+   do Task 10 — keyboard shortcuts
    ```
-   Otherwise run the visibility check first (one `cargo run -- region`
-   invocation) and tick the two remaining Checkpoint B boxes by hand,
-   in parallel with starting Task 8.
+   Otherwise run the visibility + Save / Copy check first (one
+   `cargo run -- region` invocation) and tick the remaining
+   Checkpoint B / D boxes by hand, in parallel with starting
+   Task 10.
 
 3. **Read order for context-loading** (opencode does most of this
    automatically, but for manual context-checking):
    - [`AGENTS.md`](../AGENTS.md) — operational guide + commands.
-   - [`docs/TODO.md`](TODO.md) §"Session notes" — Tasks 3–7 close-outs
+   - [`docs/TODO.md`](TODO.md) §"Session notes" — Tasks 3–9 close-outs
      (deviations + downstream impact).
    - [`docs/PLAN.md`](PLAN.md) — phase plan + risks; especially the
-     Phase 1.C task list.
+     Phase 1.D task list.
    - This file — for the resume checklist.
 
 4. **Run the standing gate first** as a sanity check that nothing
@@ -199,28 +223,38 @@ prove the plumbing works (full picker UI is Task 15).
    cargo test --doc -p flintshot-core -p flintshot-editor-egui
    ```
 
-5. **Pick up at Task 8.** Add a Task 8 close-out entry to
+5. **Pick up at Task 10.** Add a Task 10 close-out entry to
    [`TODO.md`](TODO.md) §"Session notes" (same Deviation / Change /
-   Downstream-impact format as Tasks 1–7). Then refresh this file for
+   Downstream-impact format as Tasks 1–9). Then refresh this file for
    whatever's next.
 
 ## Uncommitted state
 
-The Task 7 changes are **uncommitted** in the working tree. Previous
-sessions' Tasks 1–6 are already committed (Task 6 went in as
-`df58be7 update for task 5` — confusing message, correct contents).
-Suggested commit:
+The Task 7, Task 8, and Task 9 changes are **uncommitted** in the
+working tree. Task 7 went in as commit `1fcddf4` previously (correct
+contents, that commit landed); the unstaged Task 7-looking changes
+in `git status` are actually the Task 8 + Task 9 work layered on top
+(both tasks modify `render.rs`, `app.rs`, `canvas.rs`, etc.).
+
+Suggested commit (do this **before** starting Task 10 so the working
+tree is clean):
 
 ```sh
 git status                                                # survey
 
-git add crates/flintshot-core/src/editor.rs \
+git add Cargo.toml \
         crates/flintshot-core/src/render.rs \
         crates/flintshot-core/src/lib.rs \
-        CHANGELOG.md docs/TODO.md docs/PLAN.md docs/SESSION_HANDOFF.md
-git commit -m "Task 7: editor state machine + MockCanvas test infra"
+        crates/flintshot-editor-egui/Cargo.toml \
+        crates/flintshot-editor-egui/src/app.rs \
+        CHANGELOG.md docs/TODO.md docs/SESSION_HANDOFF.md
+git commit -m "Task 9: Save / Copy outputs via rfd + arboard"
 ```
 
-Adjust the pathspec against the actual `git status` output. The
-maintainer's preference is one commit per task; `git log --oneline -5`
-will show the existing pattern.
+Adjust the pathspec against the actual `git status` output. If the
+maintainer prefers Task 8 and Task 9 as separate commits, stage the
+Task 8 files first (`canvas.rs` draw_rect_* impls, the Task 8 close-
+out note + checkbox updates in TODO.md, the relevant CHANGELOG
+section, the Task 8 `render_two_committed_rects_emits_two_outlines`
+test), commit, then stage the Task 9 files and commit again. Either
+way works — the project history so far is one commit per task.

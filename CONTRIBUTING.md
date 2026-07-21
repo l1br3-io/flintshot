@@ -36,6 +36,16 @@ cargo test --workspace --all-targets
 cargo run -- --help
 ```
 
+Recommended: install the cargo subcommands the `justfile` recipes use
+(cargo-watch for rebuild-on-save, cargo-nextest for faster tests):
+
+```sh
+just bootstrap     # idempotent; installs cargo-watch + cargo-nextest
+```
+
+The recipes (`dev`, `watch`, `nextest`, `test`) fall back gracefully
+when these are missing, so this step is optional but recommended.
+
 If you intend to touch `flintshot-cosmic`, also install its system deps
 (see [`AGENTS.md`](AGENTS.md#cosmic-crate-system-deps-linux-only) or the
 `cosmic-build` job in `.github/workflows/ci.yml`).

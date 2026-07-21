@@ -391,26 +391,62 @@ pending rects. Toolbar gets a single button to confirm the tool
 switching plumbing works (full picker UI lands in Task 15).
 
 **Acceptance criteria:**
-- [ ] With `Tool::Rect` active, mouse-down begins a rect annotation
+- [x] With `Tool::Rect` active, mouse-down begins a rect annotation
       with the current color/stroke; mouse-drag updates the opposite
-      corner; mouse-up commits.
-- [ ] The in-progress rect is visible during drag (via `pending`).
-- [ ] Committed rect persists in `anns` across frames; visible after
+      corner; mouse-up commits. _(Pointer handling lives in
+      `EditorApp::logic`; down→`begin_annotation`, drag→
+      `update_annotation`, up→`commit_annotation`. `canvas_rect`
+      cached by the previous frame's `ui()` so `logic()` can translate
+      screen-logical → canvas-physical. Begins only fire when the
+      press lands inside the canvas rect; updates/commits proceed
+      regardless so drags that leave the canvas still produce a
+      sensible rect.)_
+- [x] The in-progress rect is visible during drag (via `pending`).
+      _(Already wired in Task 7's `render()` dispatch — Task 8
+      confirms it works end-to-end once `draw_rect_outline` has a real
+      egui impl.)_
+- [x] Committed rect persists in `anns` across frames; visible after
       next render.
-- [ ] `Ctrl+Z` undoes the last commit (visible immediately).
-- [ ] Toolbar shows at least one button (Rect) and clicking it sets
-      `state.tool`.
-- [ ] Clicking outside the canvas area doesn't begin an annotation.
-- [ ] No `egui::Painter` calls in the egui crate for the rect — only
-      `Canvas::draw_rect_*`.
+- [x] `Ctrl+Z` undoes the last commit (visible immediately). _(Wired
+      in `EditorApp::logic` via
+      `ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl)`.)_
+- [x] Toolbar shows at least one button (Rect) and clicking it sets
+      `state.tool`. _(Uses `egui::Panel::top("editor_toolbar").show`
+      with `ui.selectable_value(&mut self.state.tool, Tool::Rect,
+      "▭ Rectangle")`. egui 0.35 unified `TopBottomPanel::top` into
+      `Panel::top`.)_
+- [x] Clicking outside the canvas area doesn't begin an annotation.
+      _(Pointer hit-tested against cached `canvas_rect`; clicks on
+      the toolbar fall outside the rect and don't call
+      `begin_annotation`.)_
+- [x] No `egui::Painter` calls in the egui crate for the rect — only
+      `Canvas::draw_rect_*`. _(Rect drawing routes exclusively through
+      `EguiCanvas::draw_rect_outline` / `draw_rect_filled`, which
+      call `painter.rect_stroke` / `painter.rect_filled`. The
+      `render()` free function in core emits only `Canvas` calls;
+      egui-specific stroke kind, color conversion, and physical →
+      logical scaling all live in the canvas impl.)_
 
 **Verification:**
-- [ ] Standing gate passes.
-- [ ] `MockCanvas` test: render an `EditorState` with two committed
+- [x] Standing gate passes. _(`fmt --check`,
+      `clippy --workspace --all-targets -- -D warnings`,
+      `test --workspace --all-targets`, doc tests — all green. Plus
+      the Task 6 `--no-default-features` clippy gate still clean.)
+      Test count: 53 pass (was 52), 1 ignored (capture smoke), 0
+      fail._
+- [x] `MockCanvas` test: render an `EditorState` with two committed
       `Annotation::Rect`s; assert recorded `draw_rect_outline` count
-      and arguments.
+      and arguments. _(New test
+      `render_two_committed_rects_emits_two_outlines` in
+      `crates/flintshot-core/src/render.rs`. Covers rect 1 outline
+      only + rect 2 fill+outline, exact geometry/stroke/color
+      assertions, and the fill-before-outline dispatch order.)_
 - [ ] Manual: `cargo run -- region`, draw a red rectangle, see it
-      persist, press Ctrl+Z, see it disappear.
+      persist, press Ctrl+Z, see it disappear. _(Needs maintainer's
+      eyes on a real display. The egui 0.35 pointer API, the
+      stroke conversion, and the canvas-rect caching all compile
+      and exercise under the standing gate, but rectangle visibility
+      + Ctrl+Z feedback can only be confirmed interactively.)_
 
 **Dependencies:** Task 5, Task 7.
 
@@ -447,27 +483,65 @@ composition, handed to `arboard::Clipboard::set_image`. The editor
 returns `EditorOutcome::Saved(path)` or `EditorOutcome::CopiedToClipboard`.
 
 **Acceptance criteria:**
-- [ ] New core function `compose_final(state: &EditorState) ->
+- [x] New core function `compose_final(state: &EditorState) ->
       RgbaImage` renders `anns` into a clone of `state.image` (this is
       the source of truth for save/copy — not a screenshot of the
-      egui canvas).
-- [ ] `flintshot-editor-egui` exposes Save and Copy buttons (no
-      keyboard wiring yet — Task 10).
-- [ ] Save opens `rfd` async dialog; PNG written to chosen path.
+      egui canvas). _(Lives in `flintshot-core::render::compose_final`;
+      re-exported from the crate root. Uses a private `ImageCanvas`
+      that implements `Canvas` on top of an `RgbaImage`, so the
+      per-variant dispatch goes through the same `render_ann` path
+      the live editor uses. Excludes `state.pending` — in-flight
+      annotations are not part of the saved output.)_
+- [x] `flintshot-editor-egui` exposes Save and Copy buttons (no
+      keyboard wiring yet — Task 10). _(Two new buttons in the
+      `Panel::top("editor_toolbar")` row, after the annotation-count
+      label: `💾 Save` and `📋 Copy`. Clicks collect into a private
+      `ToolbarAction` enum returned from the panel closure so the
+      action handler can borrow `&self.outcome` cleanly outside.)_
+- [x] Save opens `rfd` async dialog; PNG written to chosen path.
+      _(Spec said async; shipped **sync** `rfd::FileDialog::save_file`
+      instead — see deviation 1 below. PNG encode/write via
+      `image::save_with_format` with `ImageFormat::Png` forced,
+      matching the `--out` path from Task 3.)_
 - [ ] Copy puts the image on the clipboard and is pasteable in another
-      app (verified manually).
-- [ ] `EguiShell::run_editor` returns the correct `EditorOutcome`
-      variant on each action and closes the window.
+      app (verified manually). _(Wired through `arboard::Clipboard::
+      set_image` with `ImageData` constructed from the `RgbaImage`'s
+      raw bytes; both are RGBA row-major so no swizzling needed.
+      Needs maintainer's eyes to confirm pasteability in GIMP /
+      Preview / mspaint.)_
+- [x] `EguiShell::run_editor` returns the correct `EditorOutcome`
+      variant on each action and closes the window. _(On Save:
+      publishes `Ok(Saved(path))` then `ViewportCommand::Close`.
+      On Copy: publishes `Ok(CopiedToClipboard)` then close. The
+      existing Task 6 CLI match in `run_editor_for_capture` already
+      logs each variant, so the Saved / CopiedToClipboard log lines
+      light up without further change. Render-error path unchanged
+      from Task 5.)_
 
 **Verification:**
-- [ ] Standing gate passes.
-- [ ] Unit test: `compose_final` on a known `EditorState` produces a
+- [x] Standing gate passes. _(`fmt --check`,
+      `clippy --workspace --all-targets -- -D warnings`,
+      `clippy --no-default-features -p flintshot-app --all-targets
+      -- -D warnings`, `test --workspace --all-targets`,
+      `test --doc -p flintshot-core -p flintshot-editor-egui` — all
+      green. Test count: 57 pass (was 53; +4 `compose_final` tests),
+      1 ignored (capture smoke), 0 fail.)_
+- [x] Unit test: `compose_final` on a known `EditorState` produces a
       deterministic image (compare to a fixture PNG checked into the
-      repo).
+      repo). _(Deviation 4: shipped pixel-level assertions on known
+      positions instead of a checked-in PNG fixture. Four tests:
+      `compose_final_renders_rect_outline_into_clone`,
+      `compose_final_renders_rect_fill_and_outline`,
+      `compose_final_excludes_pending`,
+      `compose_final_empty_state_is_image_clone`. Pixel assertions
+      give better failure messages than binary fixtures and avoid
+      cross-platform font-rendering fragility ahead of Task 12.)_
 - [ ] Manual: draw a rect, click Save, choose a path, verify file
       opens in an image viewer and shows the rect baked in.
+      _(Needs maintainer's eyes on a real display — same carry-forward
+      debt as Tasks 5/6/8.)_
 - [ ] Manual: draw a rect, click Copy, paste in GIMP / Preview /
-      mspaint; verify rect is visible.
+      mspaint; verify rect is visible. _(Same carry-forward.)_
 
 **Dependencies:** Task 8.
 
@@ -1613,12 +1687,351 @@ per-variant dispatch contract for Tasks 8 / 11 / 12 / 13.
   multi-selection (shift-click), the API will need extension. Single-
   selection as specified by Phase 1 is sufficient.
 
+### Task 8 close-out — `<pending first commit hash>`
+
+**Implementation.** Wired `Tool::Rect` end-to-end: egui pointer
+events flow through `EditorApp::logic` into the Task 7 state
+machine (`begin_annotation` / `update_annotation` /
+`commit_annotation`); the shared `render()` path draws both
+committed and pending rects via two newly-implemented
+`EguiCanvas` primitives. A `egui::Panel::top("editor_toolbar")`
+above the CentralPanel carries a single `selectable_value` Rect
+selector plus an annotation-count label and a hint line. `Ctrl+Z`
+in the same `logic()` body calls `state.undo()`. Real egui
+`Painter` impls for `draw_rect_outline` (using
+`StrokeKind::Inside`) and `draw_rect_filled` fill out the canvas
+trait surface for the Rect path; the remaining primitives
+(`draw_ellipse`, `draw_line`, `draw_arrow`, `draw_text`) stay as
+stubs until Tasks 11/12/13.
+
+**Deviation 1 — `TopBottomPanel` is gone in egui 0.35; unified
+into `Panel`.** The 0.30 source still in the registry's sibling
+directory has `TopBottomPanel::top` and `SidePanel::left`. The
+0.35 release collapsed both into a single `Panel` struct with
+`Panel::{top, bottom, left, right}` constructors. Initial draft
+used `TopBottomPanel::top` verbatim and failed with
+`cannot find type TopBottomPanel in egui`. Switched to
+`egui::Panel::top("editor_toolbar")`. Inline comment in `app.rs`
+documents the rename so future readers don't repeat the search.
+The unified API is functionally identical for our use — the
+default-resizable behaviour (top panels are non-resizable by
+default) matches.
+
+**Deviation 2 — pointer dispatch lives in `logic()` using a
+cached `canvas_rect`.** The Task 5 close-out's forward-looking
+note said "Task 7's state-machine methods will be called from
+inside `EditorApp::logic`", but egui's pointer position is in
+screen-logical coords and we need it in canvas-physical. The
+canvas rect (where `CentralPanel` ended up on screen, after the
+toolbar reserves its strip) is only known *after* `CentralPanel`
+shows — which happens inside `ui()`, not `logic()`. Resolved by
+caching: `EditorApp` gains a `canvas_rect: Option<egui::Rect>`
+field, `ui()` writes the freshly-computed panel rect into it
+each frame, and the next frame's `logic()` reads the cached value
+to translate pointer coords. One-frame latency on frame 1
+(`canvas_rect` is `None`; pointer events are skipped that frame).
+That's fine because the screenshot isn't visible until frame 1's
+`ui()` either, so no drags can start before the cache is
+populated. After Task 10 extracts a pure `dispatch_input`
+helper, the cache stays where it is — only the match logic moves
+into the pure function.
+
+**Deviation 3 — zero-area rect filter at the shell, not in core.**
+The Task 8 plan locked this in: a click without a drag would
+otherwise commit a degenerate (0×0) rect. The filter lives in
+`EditorApp::logic` (matches `Annotation::Rect | Ellipse | Blur`
+and cancels when either normalized dimension is `< 1.0` px),
+keeping `EditorState::commit_annotation` pure. The
+`Annotation::Ellipse` and `Annotation::Blur` arms are matched
+defensively — those are drag-rect tools arriving in Tasks 11/13
+and they share the same degenerate-rect trap; the filter serves
+all three without change.
+
+**Deviation 4 — drag extends beyond canvas rather than clamping.**
+If a drag starts inside the canvas and the pointer leaves the
+window (or enters the toolbar region), `update_annotation` keeps
+running with whatever negative / oversized coordinates result.
+The rect just extends; `render()` clips at the panel edge on
+the egui side. Task 14 (Select / crop) will need to revisit if
+precise crop bounds become load-bearing, but for an annotation
+tool "drag out and back in" producing an oversized rect is the
+expected Photoshop / GIMP / Snipping Tool behaviour.
+
+**Borrow-checker note.** Initial draft put the render-error
+handler inside the `CentralPanel::show` closure (publishing
+`Err(_)` from there). That captured `&self` wholesale and
+conflicted with the closure's existing disjoint captures of
+`&mut self.canvas`, `&mut self.bg`, `&self.state`. Restructured
+to return the render `Result` from the closure (`.inner`) and
+run error handling outside the closure body — same shape as
+Task 5's `EditorApp::ui`, just with the additional cache write
+between the panel `show` and the error match.
+
+**egui 0.35 `StrokeKind::Inside` for sharp rect edges.** The
+default `StrokeKind::Middle` puts half the stroke outside and
+half inside the dragged rect, so a 3-px stroke on a rect from
+(10,10)-(50,50) extends the visible outline to roughly
+(8.5,8.5)-(51.5,51.5). `Inside` puts the whole stroke inside
+the rect bounds, so the outer edge coincides with the dragged
+geometry — matches the Flameshot / Snipping Tool convention of
+"what you dragged is what you get". Future thick-stroke tools
+(Marker) may revisit if visual heft becomes more important than
+geometric precision.
+
+**Test count.** Added one new test (`render_two_committed_rects_
+emits_two_outlines` in `render.rs`). Standing gate: 53 pass
+(was 52), 1 ignored (capture smoke), 0 fail. The required Task 8
+MockCanvas test (two committed Rects; assert count + arguments)
+is the new test. Extras from Task 7 already cover committed +
+pending Rect dispatch (`render_draws_committed_and_pending_rects`)
+and per-variant dispatch (`render_ann_dispatches_each_variant`),
+so no additional snapshot tests were needed.
+
+**No new unit tests in `flintshot-editor-egui`.** `EditorApp::logic`
+isn't pure (depends on `egui::Context::input`) and eframe requires
+a real display, so the egui crate's test surface stays at zero
+through Phase 1. Task 10 extracts a pure
+`dispatch_input(&mut EditorState, &InputEvent)` function from
+the existing `logic()` body — at that point input dispatch
+becomes unit-testable without a window. The Task 5 close-out
+already flagged this as the plan; Task 8's pointer handling is
+structured to make that extraction a pure code motion (the
+match tree is already written without `egui` types at the
+decision points, only at the input-reading prologue).
+
+**Verification.** Standing gate green end-to-end:
+- `cargo fmt --all --check` — clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean
+  after two rounds of fixes (clippy::trivially_copy_pass_by_ref
+  on `to_egui_stroke` — switched `&Stroke` to `Stroke` since
+  `Stroke` is 8 bytes and `Copy`; clippy::unnested_or_patterns
+  on the zero-area filter — switched
+  `Some(Variant) | Some(Variant) | Some(Variant)` to
+  `Some(Variant | Variant | Variant)`, the Rust 2021 nested form).
+- `cargo clippy --no-default-features -p flintshot-app
+  --all-targets -- -D warnings` — clean (Task 6's no-default-
+  features gate preserved).
+- `cargo test --workspace --all-targets` — 53 pass, 1 ignored
+  (capture smoke), 0 fail.
+- `cargo test --doc -p flintshot-core -p flintshot-editor-egui` —
+  0 doc tests (unchanged).
+
+End-to-end smoke on the maintainer's display is the only
+remaining debt: rectangle visibility during drag, persistence
+after commit, and Ctrl+Z feedback all need human eyes on a real
+window. Scheduled for the Checkpoint C sign-off.
+
+**Downstream impact.**
+- Tasks 11 (Arrow) and 13 (Blur) follow the same input shape:
+  tool-specific `begin_annotation` already constructs the right
+  variant; `update_annotation` already updates the right field;
+  the zero-area filter (deviation 3) already covers Ellipse and
+  Blur. Tasks 11/13 add a toolbar button + a real `Canvas`
+  primitive impl each; no further plumbing in `EditorApp`.
+- Task 12 (Text) has a different input model (click to place
+  caret, type, Enter to commit). The `pending` field already
+  holds a Text ann; Task 12 adds a `begin_text(at)` method on
+  `EditorState` and routes keyboard chars through `logic()`'s
+  `ctx.input(|i| i.events)`.
+- Task 10 (keyboard shortcuts) extracts the existing `logic()`
+  pointer / Ctrl+Z match into a pure `dispatch_input` helper —
+  no behaviour change, just refactor + new shortcuts (Esc,
+  Ctrl+S, Ctrl+C, Ctrl+Y, Ctrl+Shift+Z).
+- Task 14 (Select / crop) reuses the drag-anchor convention
+  (Task 7 deviation 1) and the `hit_test` API. May revisit
+  deviation 4 (drag-outside-canvas) if precise crop bounds
+  become load-bearing.
+- Task 15 (pickers) will extend the toolbar's
+  `egui::Panel::top` with color/stroke widgets — the existing
+  `ui.horizontal` + `selectable_value` pattern is the template.
+
 <!-- Example entry format (commented out):
-### Task 8 — Rectangle tool end-to-end
-**Deviation.** Discovered egui 0.35's `Painter` API doesn't expose
-stroke-line-join the way the ARCHITECTURE doc assumed.
-**Change.** Added a `StrokeJoin` field to the core `Stroke` struct;
-updated MockCanvas assertions accordingly.
-**Downstream impact.** Task 11 (Arrow) inherits the new field
-automatically; Task 12 (Text) unaffected.
+### Task 9 — Save / Copy
+**Deviation.** Discovered `rfd::AsyncFileDialog` blocks the
+eframe render loop on Wayland.
+**Change.** Switched to `rfd::FileDialog` (synchronous); the
+eframe render loop is already blocking so no async benefit.
+**Downstream impact.** Task 10 (keyboard shortcuts) can call
+the same sync path from Ctrl+S; no scheduler change needed.
 -->
+
+### Task 9 close-out — `<pending first commit hash>`
+
+**Implementation.** Added `compose_final(state: &EditorState) ->
+RgbaImage` in `flintshot-core::render` (re-exported from the crate
+root). The function clones `state.image`, walks `state.anns` through
+the existing `render_ann` dispatch into a private `ImageCanvas`
+struct, and returns the resulting image. The `ImageCanvas` implements
+`Canvas` directly on top of an `RgbaImage` — `upload_image` and
+`draw_image` are no-ops (the canvas already *is* the image), and
+only `draw_rect_outline` / `draw_rect_filled` have real impls (the
+primitives the Rect tool exercises). Other primitives
+(`draw_ellipse` / `draw_line` / `draw_arrow` / `draw_text`) emit a
+`tracing::warn!` and are no-ops; Tasks 11/12/13 fill them in
+alongside their respective toolbar additions.
+
+On the shell side, `EditorApp::ui` gained two new toolbar buttons
+(`💾 Save`, `📋 Copy`) and two free helper functions in `app.rs`:
+`save_to_disk(state) -> Result<Option<PathBuf>>` (rfd blocking save
+dialog + `image::save_with_format` with PNG forced) and
+`copy_to_clipboard(state) -> Result<()>` (arboard `Clipboard::new` +
+`set_image`). Button clicks collect into a new private
+`ToolbarAction` enum returned from the toolbar panel's closure so
+the action handlers (`handle_save` / `handle_copy`) can borrow
+`&self.outcome` cleanly outside the closure — same pattern as the
+existing render-error handler.
+
+**Deviation 1 — sync `rfd::FileDialog`, not `AsyncFileDialog`.** The
+TODO spec called for `rfd::AsyncFileDialog`. The eframe native event
+loop is single-threaded and already blocking (`eframe::run_native`
+owns the calling thread until window close, per Task 5 deviation 4);
+there's no event loop to yield back to. `AsyncFileDialog` would
+require either spawning a thread (and then marshalling back to the
+UI thread for the actual outcome publish) or using `eframe::frame::
+set_repaint_callback` for a poll-based wait. Both are more code for
+no UX benefit — the native modal is what the user is interacting
+with anyway, so the editor window appearing frozen during the dialog
+is fine. Used `rfd::FileDialog::save_file() -> Option<PathBuf>`
+directly. Phase 2's daemon may need to revisit if a long-running
+editor blocks daemon IPC; that's a Phase 2 problem.
+
+**Deviation 2 — `compose_final` lives in `render.rs`, not a new
+`image_ops.rs`.** TODO spec left the location open ("render.rs or
+new image_ops.rs"). Task 13 will introduce `image_ops` for the blur
+computation (imageproc wrappers); landing `compose_final` there
+first would mean a mostly-empty module for one public function.
+Kept `compose_final` and the private `ImageCanvas` in `render.rs`
+next to the existing `render()` / `render_ann()` dispatch — they
+share the same per-variant mapping and belong together. When Task
+13 adds `image_ops::blur`, the natural extraction is for the blur
+computation only; `compose_final` stays in `render.rs`.
+
+**Deviation 3 — `ImageCanvas` is private, not part of the public
+Canvas surface.** Could have made it `pub` so external code could
+render annotations into arbitrary `RgbaImage`s. Chose privacy:
+`compose_final` is the only public entry point, and the `ImageCanvas`
+struct is an implementation detail. If a future caller needs direct
+access (e.g. Phase 4's upload path computing a thumbnail — different
+geometry than `compose_final`'s "clone then annotate"), the struct
+can be promoted without breaking changes (it'd just gain `pub`
+visibility).
+
+**Deviation 4 — pixel-level assertions, not a checked-in PNG
+fixture.** TODO spec said "compare to a fixture PNG checked into the
+repo". Took structural pixel assertions instead:
+- Better failure messages: a failing test reports `expected [255,
+  0, 0, 255] got [255, 255, 255, 255]` at a named pixel rather than
+  "fixture mismatch at byte 4271".
+- No binary content in git.
+- Forward-compatible: Task 12's `cosmic-text` integration will
+  introduce font rendering, which is platform-dependent (fontconfig
+  availability, hinting, subpixel layout). Pixel-level assertions on
+  non-text geometry stay deterministic across that change; a
+  whole-image fixture would break for everyone.
+- Matches the rest of the test suite (Task 7 / Task 8 render tests
+  already use structural `DrawCall` assertions rather than
+  fixtures).
+
+If the maintainer prefers a fixture for end-to-end coverage, that's
+a follow-up.
+
+**Deviation 5 — failure path closes the editor.** TODO spec is
+silent on Save/Copy error handling. Current behaviour: failure
+(e.g. permission denied on save path, clipboard occupied on copy)
+publishes `Err(...)` and closes the editor, matching the existing
+render-error pattern. The maintainer sees the error in the terminal
+via the CLI's `color_eyre` report. Phase 2 can add an in-editor
+error toast / retry button when failure modes pile up; for Phase 1's
+"draw a rect, click Save, get a PNG" happy path, the simpler
+fail-close is correct.
+
+**Deviation 6 — `arboard` with default features (no `wayland`
+feature).** `arboard` on Linux uses X11 by default; the `wayland`
+cargo feature adds `wl-clipboard-rs` for native Wayland clipboard
+access. The maintainer's dev machine is Wayland + XWayland, where
+the default X11 path should work (XWayland bridges the X clipboard).
+Speculative-enabling the `wayland` feature adds deps and compile
+time for a code path we haven't verified we need. Deferred until a
+maintainer can test on a Wayland-only session without XWayland.
+
+**No signature change to `EditorShell::run_editor`.** The shell
+contract is unchanged: callers get back an `EditorOutcome` (or
+`Err(FlintshotError)`). The two new outcome variants
+(`Saved(path)`, `CopiedToClipboard`) were already part of the enum
+from Phase 0; the CLI's match in `run_editor_for_capture` already
+logs them, so the Task 6 wiring is forward-compatible without code
+change. Verified by manual re-reading of `cli.rs:188-203`.
+
+**Borrow-checker pattern reused from Task 8.** The toolbar closure
+captures `&mut self.state.tool` (via `selectable_value`); Save/Copy
+handlers need `&self.state` (for `compose_final`) and `&self.outcome`
+(for `publish_outcome`). Resolved by collecting a `ToolbarAction`
+enum inside the closure and acting on it outside — same shape as
+the render-error handler from Task 5/8 (closure returns data,
+control flow outside).
+
+**Test count.** Added 4 new tests (`compose_final_*` in `render.rs`).
+Standing gate: 57 pass (was 53), 1 ignored (capture smoke), 0 fail.
+The required Task 9 unit test (deterministic `compose_final` output)
+is covered by the four tests collectively — each locks in one facet
+(rect-only outline, fill + outline combo, pending exclusion,
+empty-state clone).
+
+**No new unit tests in `flintshot-editor-egui`.** `EditorApp::ui`
+isn't pure (depends on `egui::Context` and `egui::Ui`) and eframe
+requires a real display, so the egui crate's test surface stays at
+zero through Phase 1. Task 10 extracts a pure `dispatch_input`
+function from the existing `logic()` body per the Task 7/8 close-out
+forward-looking notes — at that point keyboard-shortcut dispatch
+becomes unit-testable without a window. Save/Copy button clicks
+need an actual egui instance to test (no synthetic `Ui` harness
+exists), so they remain manual-verification-only until Phase 2 adds
+an editor test harness.
+
+**Verification.** Standing gate green end-to-end:
+- `cargo fmt --all --check` — clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean
+  after one round of fixes (clippy::doc_markdown on "XWayland" in
+  a doc comment; switched to backticks).
+- `cargo clippy --no-default-features -p flintshot-app --all-targets
+  -- -D warnings` — clean (Task 6's no-default-features gate
+  preserved).
+- `cargo test --workspace --all-targets` — 57 pass, 1 ignored
+  (capture smoke), 0 fail.
+- `cargo test --doc -p flintshot-core -p flintshot-editor-egui` —
+  0 doc tests (unchanged).
+
+End-to-end smoke on the maintainer's display is the remaining debt:
+save dialog opens, picks a writable path, writes a valid PNG with
+the rect baked in; copy places the image on the clipboard and is
+pasteable in GIMP / Preview / mspaint. Scheduled for the Checkpoint
+D sign-off alongside Tasks 10's keyboard-shortcut coverage.
+
+**Downstream impact.**
+- Task 10 (keyboard shortcuts) reuses the `save_to_disk` and
+  `copy_to_clipboard` helpers directly from the `Ctrl+S` / `Ctrl+C`
+  handlers. The handlers take `&EditorState`, so no signature
+  change needed. Task 10 also adds `Ctrl+Y` / `Ctrl+Shift+Z` for
+  redo — calls `state.redo()` (already implemented in Task 7).
+- Tasks 11/12/13 (Arrow / Text / Blur tools) need to extend
+  `ImageCanvas` with the corresponding primitives so
+  `compose_final` bakes those annotations into the saved output
+  too. Each primitive can be added independently when the tool
+  ships; until then, `compose_final` silently drops that variant
+  (with a `tracing::warn!` so a session trace shows what's
+  missing). This is the same placeholder-then-real pattern Task 7
+  established for `render_ann`'s Blur arm.
+- Phase 4 (Upload) calls `compose_final` to get the image bytes
+  for the upload `Backend::upload` trait method. The function
+  signature is already what Phase 4 will want.
+- Phase 3 (Pin) uses the *un*-annotated `state.image` rather than
+  `compose_final` output — pinning is "show this exact screenshot",
+  not "show the annotated version". `EditorState::image` remains
+  the source for the pin path.
+- The `rfd` + `arboard` workspace-dep additions
+  (`rfd = "0.17"`, `arboard = "3"`) propagate to any future crate
+  that wants them via `{ workspace = true }`. CI's `lint` / `test` /
+  `msrv` jobs don't need new system deps: `rfd`'s default Linux
+  backend is `xdg-portal` (pure Rust + DBus); `arboard`'s default
+  is `x11rb` (also pure Rust). Neither pulls in a `*-dev` apt
+  package.
