@@ -15,7 +15,9 @@ Read the existing spec (SPEC.md or equivalent) and the relevant codebase section
 5. Add checkpoints between phases
 6. Present the plan for human review
 
-Save the plan to docs/PLAN.md and task list to docs/TODO.md. Both are
-rolling — overwritten at the start of each phase, never appended across
-phases. Include a `## Session notes` section if any task deviates from
-the plan during execution (the `/status` command surfaces it).
+Save the plan to tasks/plan.md and task list to tasks/todo.md.
+
+If `tasks/plan.md` already exists and all its tasks are complete, archive it
+first — move `tasks/plan.md`, `tasks/todo.md`, and the phase's spec into
+`tasks/archive/YYYY-MM-DD-<slug>/` (see `planning-and-task-breakdown` § Plan
+File Lifecycle). Then generate the fresh plan.

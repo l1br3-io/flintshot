@@ -182,6 +182,26 @@ Categories used below:
   (in-flight annotations are not part of the saved output). The
   function backs the Save / Copy buttons and is the source of truth
   for Phase 4's Upload path.
+- New `flintshot-core::input` module (Phase 1 Task 10) with three
+  public types: `Modifiers`, `InputEvent`, `DispatchOutcome`. The
+  shell translates its native input events into `InputEvent`s at the
+  toolkit boundary; `EditorState::dispatch_input` walks them and
+  returns a `DispatchOutcome` naming the side-effect the shell
+  should perform (Save / Copy / Cancel). The dispatcher is pure and
+  unit-testable — no `egui::Context` or `eframe` types reach it —
+  so a future `iced` / `slint` shell reuses it verbatim. Includes
+  the cross-platform modifier mapping: egui's `Modifiers::command`
+  (Ctrl on Linux / Windows, ⌘ on macOS) maps onto `Modifiers::ctrl`
+  so the dispatcher's chord predicates work uniformly without
+  `cfg!(target_os = "macos")` in core.
+- Keyboard shortcuts now route through `EditorState::dispatch_input`
+  (Phase 1 Task 10): `Esc` (cancel), `Ctrl+Z` (undo), `Ctrl+Y` and
+  `Ctrl+Shift+Z` (redo), `Ctrl+S` (save), `Ctrl+C` (copy). The
+  pointer flow (down → drag → up) also routes through the
+  dispatcher; the zero-area rect filter from Task 8's "deviation 3"
+  moved into core so all shells inherit it without duplicating the
+  predicate. Existing `EditorApp::logic` is now a thin translator:
+  egui input → `InputEvent`, dispatch, `if matches!` on outcome.
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from
@@ -286,7 +306,11 @@ Categories used below:
   toolbar with Rect selector; `Ctrl+Z` undo; zero-area rect filter),
   and 9 (Save / Copy buttons in the editor toolbar; PNG write via
   `rfd`; clipboard via `arboard`; new `compose_final` in core for
-  headless render).
+  headless render), and 10 (keyboard shortcuts via a pure
+  `EditorState::dispatch_input`; new `flintshot-core::input` module
+  with `Modifiers` / `InputEvent` / `DispatchOutcome`; cross-
+  platform modifier mapping; pointer flow also routes through the
+  dispatcher; `EditorApp::logic` reduced to a thin translator).
 
 ## Release cheat sheet (for maintainers)
 
