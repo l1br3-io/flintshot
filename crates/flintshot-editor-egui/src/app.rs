@@ -20,8 +20,8 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    compose_final, render::render, Annotation, EditorOutcome, EditorState, FlintshotError, Point,
-    Tool,
+    compose_final, render::render, DispatchOutcome, EditorOutcome, EditorState, FlintshotError,
+    InputEvent, Key, Modifiers, Point, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -107,18 +107,80 @@ impl EditorApp {
 
 impl App for EditorApp {
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // Esc cancels. The window's X button also produces Cancelled
-        // by defaulting at the call site — see `shell::run_editor`.
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.publish_outcome(Ok(EditorOutcome::Cancelled));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
+        // Translate egui's input events to the toolkit-agnostic
+        // `InputEvent` and feed them through `state.dispatch_input`.
+        // Per the Task 10 close-out's plan, this is the pure-dispatcher
+        // extraction the Task 5 / 7 / 8 close-outs flagged forward:
+        // the dispatcher does all state mutation; the shell just
+        // performs the side-effect the returned `DispatchOutcome`
+        // names. Tested end-to-end by the dispatcher unit tests in
+        // `flintshot-core::editor`; the shell's only test surface is
+        // the translation itself (which is too thin to unit-test
+        // meaningfully without a synthetic `egui::Context`).
+        //
+        // Key order: keyboard first, then pointer. A `Ctrl+S` mid-drag
+        // should pre-empt the pointer-up that follows; the dispatcher's
+        // `Save` outcome short-circuits via `return` below before the
+        // pointer branch runs.
 
-        // Ctrl+Z undoes the last commit (and clears any in-flight
-        // pending annotation — see `EditorState::undo`).
-        if ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl) {
-            self.state.undo();
+        let modifiers = translate_modifiers(ctx.input(|i| i.modifiers));
+
+        // One key event per frame: egui's `key_pressed` reports the
+        // most recent press. If multiple keys fire on the same frame
+        // (unusual), only the last one dispatches — matches the
+        // existing Task 8 single-key behaviour.
+        let key_event = ctx.input(|i| {
+            // Order shortcuts by Phase 1 priority: Cancel > Save / Copy
+            // > Undo / Redo. egui reports each key independently so we
+            // can short-circuit on the first match.
+            if i.key_pressed(egui::Key::Escape) {
+                Some(InputEvent::Key {
+                    key: Key::Escape,
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::Z) {
+                Some(InputEvent::Key {
+                    key: Key::Char('z'),
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::Y) {
+                Some(InputEvent::Key {
+                    key: Key::Char('y'),
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::S) {
+                Some(InputEvent::Key {
+                    key: Key::Char('s'),
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::C) {
+                Some(InputEvent::Key {
+                    key: Key::Char('c'),
+                    modifiers,
+                })
+            } else {
+                None
+            }
+        });
+        if let Some(event) = key_event {
+            // `DispatchOutcome` is `#[non_exhaustive]`; future
+            // variants fall through to `matches!` returning `false`,
+            // which is the same behaviour as `Continue` for the shell
+            // (do nothing this frame).
+            let outcome = self.state.dispatch_input(&event);
+            if matches!(outcome, DispatchOutcome::Cancel) {
+                self.publish_outcome(Ok(EditorOutcome::Cancelled));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            if matches!(outcome, DispatchOutcome::Save) {
+                self.handle_save(ctx);
+                return;
+            }
+            if matches!(outcome, DispatchOutcome::Copy) {
+                self.handle_copy(ctx);
+                return;
+            }
         }
 
         // Pointer dispatch: translate egui's screen-logical coords to
@@ -155,33 +217,23 @@ impl App for EditorApp {
         // Once begun, updates and commit proceed even if the pointer
         // leaves the canvas: the rect just extends, and egui clips at
         // the panel edge on render.
-        if primary_pressed && canvas_rect.contains(pos) {
-            self.state.begin_annotation(at);
-        } else if primary_down && self.state.pending.is_some() {
-            self.state.update_annotation(at);
-        }
-
-        if primary_released && self.state.pending.is_some() {
-            // Zero-area filter: a click without a drag would otherwise
-            // commit a degenerate rect. Cancel so the user doesn't
-            // have to undo a stray mark. Only Rect / Ellipse / Blur
-            // (drag-rect tools) need this; Line / Arrow / Marker /
-            // Pencil accept zero-length strokes fine, so the filter
-            // matches only on the rect-shaped variants. Task 11's
-            // Arrow input model will reach the same path unchanged.
-            if let Some(
-                Annotation::Rect { rect, .. }
-                | Annotation::Ellipse { rect, .. }
-                | Annotation::Blur { rect, .. },
-            ) = &self.state.pending
-            {
-                let n = rect.normalized();
-                if n.width().abs() < 1.0 || n.height().abs() < 1.0 {
-                    self.state.cancel_annotation();
-                    return;
-                }
-            }
-            self.state.commit_annotation();
+        let pointer_event = if primary_pressed && canvas_rect.contains(pos) {
+            Some(InputEvent::PointerDown { pos: at })
+        } else if primary_released {
+            Some(InputEvent::PointerUp)
+        } else if primary_down {
+            Some(InputEvent::PointerDrag { pos: at })
+        } else {
+            None
+        };
+        if let Some(event) = pointer_event {
+            // Outcome is always `Continue` for pointer events today
+            // (no current tool produces a side-effecting outcome via
+            // pointer). Match exhaustively so future outcomes that
+            // *can* arise from pointer events (e.g. a Select-tool
+            // "crop-and-save" gesture) surface here as a compile error
+            // rather than silently dropping.
+            let _ = self.state.dispatch_input(&event);
         }
     }
 
@@ -374,5 +426,29 @@ fn copy_to_clipboard(state: &EditorState) -> flintshot_core::Result<()> {
 pub(crate) fn eframe_err_to_flintshot(err: &eframe::Error) -> FlintshotError {
     FlintshotError::Shell {
         detail: err.to_string(),
+    }
+}
+
+/// Translate egui's modifier state to the toolkit-agnostic
+/// [`Modifiers`] at the event boundary.
+///
+/// egui exposes both `ctrl` (the raw Ctrl key) and `command` (the
+/// cross-platform chord modifier — Ctrl on Linux / Windows, ⌘ on
+/// macOS). We map `command` onto our `Modifiers::ctrl` so the
+/// dispatcher's chord-matching (`ctrl_only`, `ctrl_shift`) works
+/// uniformly across platforms. The raw `ctrl` field is dropped: no
+/// current Phase 1 shortcut binds to "Linux Ctrl but not macOS Cmd",
+/// and adding one would require a separate `Modifiers::control_raw`
+/// field — deferred until needed.
+///
+/// `egui::Modifiers::alt` and `:shift` map 1:1. `egui::Modifiers::
+/// mac_cmd` is always `false` off macOS, so it maps cleanly onto
+/// `Modifiers::super_key` without a platform `cfg!`.
+fn translate_modifiers(egui_mods: egui::Modifiers) -> Modifiers {
+    Modifiers {
+        ctrl: egui_mods.command,
+        shift: egui_mods.shift,
+        alt: egui_mods.alt,
+        super_key: egui_mods.mac_cmd,
     }
 }

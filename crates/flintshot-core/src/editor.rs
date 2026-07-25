@@ -358,6 +358,111 @@ impl EditorState {
             .rev()
             .find_map(|(i, ann)| ann.contains(point).then_some(i))
     }
+
+    /// Dispatch a toolkit-agnostic [`InputEvent`] and return the
+    /// side-effect the shell should perform.
+    ///
+    /// This is the primary input boundary: shells translate their
+    /// native events into [`InputEvent`]s at the toolkit edge (egui →
+    /// `InputEvent`, future iced / slint shells likewise) and feed
+    /// them through this method. The dispatcher handles every
+    /// keyboard shortcut and every pointer-driven tool transition in
+    /// a single pure function — no `egui::Context` or window-system
+    /// types reach this code.
+    ///
+    /// The shell retains responsibility for:
+    /// - filtering repeat events (key held, pointer moved without a
+    ///   button change),
+    /// - translating screen-logical to canvas-physical coordinates,
+    /// - actually performing the side-effect when the outcome is
+    ///   `Cancel` / `Save` / `Copy` (those need a window / file
+    ///   dialog / clipboard, which core can't touch).
+    ///
+    /// # Pointer-up semantics
+    ///
+    /// [`InputEvent::PointerUp`] carries no position. The dispatcher
+    /// commits with the in-flight annotation's last-drag geometry,
+    /// matching the contract the user sees during the drag — what
+    /// was rendered is what gets committed. If the shell wants to
+    /// capture the release position precisely, it can emit a final
+    /// `PointerDrag { pos: release_pos }` before the `PointerUp`.
+    pub fn dispatch_input(
+        &mut self,
+        event: &crate::input::InputEvent,
+    ) -> crate::input::DispatchOutcome {
+        use crate::input::{DispatchOutcome, InputEvent};
+        match event {
+            InputEvent::Key { key, modifiers } => self.dispatch_key(*key, *modifiers),
+            InputEvent::PointerDown { pos } => {
+                self.begin_annotation(*pos);
+                DispatchOutcome::Continue
+            }
+            InputEvent::PointerDrag { pos } => {
+                self.update_annotation(*pos);
+                DispatchOutcome::Continue
+            }
+            InputEvent::PointerUp => {
+                self.finish_pointer_up();
+                DispatchOutcome::Continue
+            }
+        }
+    }
+
+    /// Keyboard dispatch helper. See [`dispatch_input`](Self::dispatch_input).
+    fn dispatch_key(
+        &mut self,
+        key: crate::geom::Key,
+        modifiers: crate::input::Modifiers,
+    ) -> crate::input::DispatchOutcome {
+        use crate::geom::Key;
+        use crate::input::DispatchOutcome;
+
+        // macOS users typically press Cmd where Linux / Windows users
+        // press Ctrl. The shell is responsible for mapping its native
+        // "primary chord modifier" onto `Modifiers::ctrl` so this
+        // dispatcher stays platform-agnostic.
+        match key {
+            Key::Escape => DispatchOutcome::Cancel,
+            Key::Char('z' | 'Z') if modifiers.ctrl_only() => {
+                self.undo();
+                DispatchOutcome::Continue
+            }
+            Key::Char('z' | 'Z') if modifiers.ctrl_shift() => {
+                self.redo();
+                DispatchOutcome::Continue
+            }
+            Key::Char('y' | 'Y') if modifiers.ctrl_only() => {
+                self.redo();
+                DispatchOutcome::Continue
+            }
+            Key::Char('s' | 'S') if modifiers.ctrl_only() => DispatchOutcome::Save,
+            Key::Char('c' | 'C') if modifiers.ctrl_only() => DispatchOutcome::Copy,
+            _ => DispatchOutcome::Continue,
+        }
+    }
+
+    /// Pointer-up dispatch helper: filter degenerate rects, then
+    /// commit. See [`dispatch_input`](Self::dispatch_input).
+    ///
+    /// Matches the Task 8 close-out's "deviation 3" zero-area filter
+    /// (a click without a drag cancels rather than committing a
+    /// 0×0 rect). Now in core so all shells inherit the same
+    /// behaviour without duplicating the predicate.
+    fn finish_pointer_up(&mut self) {
+        if let Some(
+            Annotation::Rect { rect, .. }
+            | Annotation::Ellipse { rect, .. }
+            | Annotation::Blur { rect, .. },
+        ) = &self.pending
+        {
+            let n = rect.normalized();
+            if n.width().abs() < 1.0 || n.height().abs() < 1.0 {
+                self.cancel_annotation();
+                return;
+            }
+        }
+        self.commit_annotation();
+    }
 }
 
 /// Default arrow-head barb length in physical pixels.
@@ -507,6 +612,8 @@ fn point_in_rect(point: Point, rect: Rect) -> bool {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    use crate::geom::Key;
+    use crate::input::{DispatchOutcome, InputEvent, Modifiers};
 
     fn blank_image() -> image::RgbaImage {
         image::RgbaImage::new(2, 2)
@@ -783,5 +890,232 @@ mod tests {
             s.begin_annotation(Point::new(1.0, 1.0));
             assert!(s.pending.is_none(), "{tool:?} should be a no-op");
         }
+    }
+
+    // --- Task 10: dispatch_input tests ---
+    //
+    // The shell's translation layer is too thin to unit-test
+    // meaningfully without a synthetic `egui::Context`; the
+    // dispatcher is where every keyboard + pointer contract lives.
+    // These tests are the "synthetic Key events through the shell's
+    // dispatcher" verification the TODO spec asks for, just running
+    // directly against `EditorState::dispatch_input` rather than a
+    // shell wrapper.
+
+    fn ctrl(ch: char) -> InputEvent {
+        InputEvent::Key {
+            key: Key::Char(ch),
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        }
+    }
+
+    fn ctrl_shift(ch: char) -> InputEvent {
+        InputEvent::Key {
+            key: Key::Char(ch),
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+        }
+    }
+
+    fn key(key: Key) -> InputEvent {
+        InputEvent::Key {
+            key,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn dispatch_esc_returns_cancel() {
+        let mut s = EditorState::new(blank_image());
+        assert_eq!(s.dispatch_input(&key(Key::Escape)), DispatchOutcome::Cancel);
+        // Cancel is purely a side-effect request — state itself is
+        // untouched. The shell is responsible for any state rollback
+        // it wants before closing the window.
+        assert_eq!(s.anns.len(), 0);
+        assert!(s.pending.is_none());
+    }
+
+    #[test]
+    fn dispatch_ctrl_z_undoes_last_commit() {
+        let mut s = EditorState::new(blank_image());
+        s.anns.push(rect_ann(0.0, 0.0, 10.0, 10.0));
+        s.anns.push(rect_ann(20.0, 20.0, 30.0, 30.0));
+        // Take a snapshot manually so undo has something to pop (the
+        // state machine's `commit_annotation` normally does this; we
+        // bypass it here to isolate dispatcher behaviour).
+        s.undo.push(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]);
+
+        assert_eq!(s.dispatch_input(&ctrl('z')), DispatchOutcome::Continue);
+        assert_eq!(s.anns.len(), 1);
+        assert_eq!(s.anns[0], rect_ann(0.0, 0.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn dispatch_ctrl_z_clears_pending() {
+        // Ctrl+Z mid-drag cancels the in-flight annotation — matches
+        // the `undo` doc comment (Task 7 deviation 2).
+        let mut s = EditorState::new(blank_image());
+        s.pending = Some(rect_ann(0.0, 0.0, 5.0, 5.0));
+        assert_eq!(s.dispatch_input(&ctrl('z')), DispatchOutcome::Continue);
+        assert!(s.pending.is_none());
+    }
+
+    #[test]
+    fn dispatch_ctrl_y_redoes() {
+        let mut s = EditorState::new(blank_image());
+        s.anns.push(rect_ann(0.0, 0.0, 10.0, 10.0));
+        s.undo.push(Vec::new());
+        s.redo.push(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]);
+        s.anns.clear();
+
+        assert_eq!(s.dispatch_input(&ctrl('y')), DispatchOutcome::Continue);
+        assert_eq!(s.anns.len(), 1);
+        assert_eq!(s.anns[0], rect_ann(0.0, 0.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn dispatch_ctrl_shift_z_redoes() {
+        let mut s = EditorState::new(blank_image());
+        s.anns.push(rect_ann(0.0, 0.0, 10.0, 10.0));
+        s.undo.push(Vec::new());
+        s.redo.push(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]);
+        s.anns.clear();
+
+        assert_eq!(
+            s.dispatch_input(&ctrl_shift('z')),
+            DispatchOutcome::Continue
+        );
+        assert_eq!(s.anns.len(), 1);
+    }
+
+    #[test]
+    fn dispatch_ctrl_s_returns_save() {
+        let mut s = EditorState::new(blank_image());
+        assert_eq!(s.dispatch_input(&ctrl('s')), DispatchOutcome::Save);
+        // The dispatcher does not touch state for Save — the shell
+        // performs the save pipeline after seeing the outcome.
+        assert_eq!(s.anns.len(), 0);
+    }
+
+    #[test]
+    fn dispatch_ctrl_c_returns_copy() {
+        let mut s = EditorState::new(blank_image());
+        assert_eq!(s.dispatch_input(&ctrl('c')), DispatchOutcome::Copy);
+    }
+
+    #[test]
+    fn dispatch_unknown_key_continues() {
+        let mut s = EditorState::new(blank_image());
+        assert_eq!(
+            s.dispatch_input(&key(Key::Char('q'))),
+            DispatchOutcome::Continue
+        );
+        assert_eq!(s.dispatch_input(&key(Key::Tab)), DispatchOutcome::Continue);
+        assert_eq!(
+            s.dispatch_input(&key(Key::Other)),
+            DispatchOutcome::Continue
+        );
+    }
+
+    #[test]
+    fn dispatch_ignores_shortcut_when_modifiers_dont_match() {
+        let mut s = EditorState::new(blank_image());
+        // Shift+S alone (no Ctrl) — not a shortcut.
+        assert_eq!(
+            s.dispatch_input(&InputEvent::Key {
+                key: Key::Char('s'),
+                modifiers: Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                }
+            }),
+            DispatchOutcome::Continue
+        );
+        // Ctrl+Alt+S — Alt spoils the chord.
+        assert_eq!(
+            s.dispatch_input(&InputEvent::Key {
+                key: Key::Char('s'),
+                modifiers: Modifiers {
+                    ctrl: true,
+                    alt: true,
+                    ..Modifiers::default()
+                }
+            }),
+            DispatchOutcome::Continue
+        );
+        // Plain S with no modifiers — not a shortcut.
+        assert_eq!(
+            s.dispatch_input(&key(Key::Char('s'))),
+            DispatchOutcome::Continue
+        );
+    }
+
+    #[test]
+    fn dispatch_pointer_down_begins_annotation() {
+        let mut s = EditorState::new(blank_image());
+        assert_eq!(
+            s.dispatch_input(&InputEvent::PointerDown {
+                pos: Point::new(5.0, 5.0)
+            }),
+            DispatchOutcome::Continue
+        );
+        assert!(s.pending.is_some());
+    }
+
+    #[test]
+    fn dispatch_pointer_down_drag_up_commits_rect() {
+        let mut s = EditorState::new(blank_image());
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(50.0, 60.0),
+        });
+        assert_eq!(
+            s.dispatch_input(&InputEvent::PointerUp),
+            DispatchOutcome::Continue
+        );
+        assert!(s.pending.is_none(), "pending cleared on commit");
+        assert_eq!(s.anns.len(), 1);
+        // The committed rect should be normalized to (10,10)-(50,60).
+        if let Annotation::Rect { rect, .. } = &s.anns[0] {
+            assert_eq!(rect.min, Point::new(10.0, 10.0));
+            assert_eq!(rect.max, Point::new(50.0, 60.0));
+        } else {
+            panic!("expected Rect, got {:?}", s.anns[0]);
+        }
+    }
+
+    #[test]
+    fn dispatch_pointer_down_immediate_up_cancels_zero_area() {
+        // Task 8 deviation 3 contract: a click without a drag does not
+        // commit a 0×0 rect. The zero-area filter moved into the
+        // dispatcher in Task 10 so all shells inherit it.
+        let mut s = EditorState::new(blank_image());
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.pending.is_none(), "pending cancelled, not committed");
+        assert_eq!(s.anns.len(), 0, "no annotation committed");
+    }
+
+    #[test]
+    fn dispatch_pointer_drag_without_down_is_noop() {
+        // Stray drag event (e.g. the shell forwards one before the
+        // first PointerDown due to a focus change) doesn't crash and
+        // doesn't conjure an annotation.
+        let mut s = EditorState::new(blank_image());
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(5.0, 5.0),
+        });
+        assert!(s.pending.is_none());
+        assert_eq!(s.anns.len(), 0);
     }
 }
