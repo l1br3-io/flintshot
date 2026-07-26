@@ -2,7 +2,7 @@
 
 > Rolling task list for the current phase. Overwritten at the start of
 > each phase; never appended across phases. Per-task detail for the
-> plan in [`PLAN.md`](PLAN.md). Check off items by completing the
+> plan in [`plan.md`](plan.md). Check off items by completing the
 > acceptance criteria and verification steps, not by writing code.
 
 Conventions:

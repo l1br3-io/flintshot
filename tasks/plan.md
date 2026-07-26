@@ -1,9 +1,52 @@
 # Implementation Plan: Phase 1 — Capture + Editor Window
 
 > Rolling plan for the current phase. Overwritten at the start of each
-> phase; never appended across phases. For product context see
-> [`VISION.md`](VISION.md); for sequence see [`ROADMAP.md`](ROADMAP.md);
-> for per-task detail see [`TODO.md`](TODO.md).
+> phase; never appended across phases. For requirements see
+> [`SPEC.md`](../SPEC.md); for product context see
+> [`docs/VISION.md`](../docs/VISION.md); for sequence see
+> [`docs/ROADMAP.md`](../docs/ROADMAP.md); for per-task detail see
+> [`todo.md`](todo.md).
+
+## Resuming
+
+> Live status for the current phase. Replaces the former
+> `docs/SESSION_HANDOFF.md`; updated whenever a task deviates from the
+> plan or a session hands off mid-task.
+
+**Where we are.** Phase 1.A through 1.D are code-complete. Tasks 9
+(Save / Copy) and 10 (keyboard shortcuts + pure `dispatch_input`
+helper in a new `flintshot-core::input` module) are done in the
+working tree but **uncommitted** — commit before starting the next
+task. Standing gate last green at **74 pass / 1 ignored / 0 fail**
+(2026-07-21).
+
+**Open verification debt.** Tasks 9 + 10 share one interactive check
+that also closes Checkpoint D:
+
+```sh
+cargo run -- region
+```
+
+Verify: draw a rect → `Ctrl+Z` (undo, rect gone) → `Ctrl+Y` /
+`Ctrl+Shift+Z` (redo, rect back) → `Ctrl+S` (native save dialog; PNG
+has the rect baked in) → `Ctrl+C` (clipboard image has the rect) →
+`Esc` (closes cleanly with `EditorOutcome::Cancelled`). If a shortcut
+fails, capture the symptom before debugging — the dispatcher's unit
+tests cover the logic, so an interactive failure points at the
+egui-side translation (`translate_modifiers`, key capture).
+
+**Next: Task 11 — Arrow tool end-to-end.** Same drag input model as
+Rect; the dispatcher already handles it. Three pieces: real
+`EguiCanvas::draw_arrow` (barbs at ±30° from the shaft, length =
+`head_size`), an Arrow toolbar button, and a `MockCanvas` snapshot
+test. `Annotation::Arrow` and its `render_ann` arm already exist, so
+read them first — Task 11 may be smaller than the spec suggests.
+
+```text
+1.A capture   ✓ closed   1.B skeleton   ✓ closed
+1.C Rect slice ✓ closed  1.D outputs    ← interactive pass closes Checkpoint D
+1.E Arrow/Text/Blur [ ]  1.F select & pickers [ ]
+```
 
 ## Overview
 
@@ -100,7 +143,7 @@ then the remaining tools, then region-crop + pickers.
 ## Task list (summary)
 
 Per-task acceptance criteria, verification, and dependencies live in
-[`TODO.md`](TODO.md). Checkpoints gate phases — do not start the next
+[`todo.md`](todo.md). Checkpoints gate phases — do not start the next
 phase until the previous checkpoint is signed off.
 
 ### Phase 1.A — Capture path (CLI writes a real PNG)

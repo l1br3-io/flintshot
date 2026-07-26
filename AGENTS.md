@@ -5,7 +5,10 @@ in this repo. Read this first; it tells you how to verify your work.
 
 For product intent, see [`docs/VISION.md`](docs/VISION.md). For layout
 and boundaries, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). For
-what's in flight, see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+sequencing, see [`docs/ROADMAP.md`](docs/ROADMAP.md). For the current
+phase's requirements, see [`SPEC.md`](SPEC.md); for the in-flight plan
+and checklist, see [`tasks/plan.md`](tasks/plan.md) and
+[`tasks/todo.md`](tasks/todo.md).
 
 ## Project shape
 
