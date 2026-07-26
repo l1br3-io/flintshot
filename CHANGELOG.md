@@ -213,13 +213,24 @@ Categories used below:
   -D warnings`, `cargo test`, MSRV (1.95) build, opt-in
   `flintshot-cosmic` build job.
 - Project documentation: `README.md`, `docs/VISION.md`,
-  `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/adr/`
+  `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/adrs/`
   (ADRs 0001–0012), `CONTRIBUTING.md`, `AGENTS.md`, `docs/TEST_MATRIX.md`.
 - Dual licensing: `MIT OR Apache-2.0`, with both license files in the
   repo root and the `license` field on every crate.
 
 ### Changed
 
+- Planning docs reorganized to the canonical OpenCode harness v0.5.0+
+  layout. Root `SPEC.md`, `tasks/plan.md`, `tasks/todo.md`, and
+  `tasks/archive/` are eliminated; in their place, each effort lives at
+  `docs/specs/<effort-slug>/` with `spec.md` (frontmatter
+  `status: draft|active|shipped`), thin `plan.md`, flat `todo.md`, and
+  per-task `tasks/00N-*.md` files. Shipped Phase 0 →
+  `docs/specs/phase-0-scaffolding/` (status: shipped); in-flight Phase 1
+  → `docs/specs/phase-1-capture-editor/` (status: active). `docs/adr/`
+  renamed to `docs/adrs/`. `docs/ROADMAP.md` "How we plan" now describes
+  the status-flip lifecycle (no archive step). Links in `README.md`,
+  `CONTRIBUTING.md`, and `AGENTS.md` updated to the new paths.
 - `Color` (de)serialization switched from struct-of-fields (the default
   `serde::Serialize` derive) to hex string (`#rrggbb` / `#rrggbbaa`).
   Affects every type that embeds `Color` (currently `Annotation` and

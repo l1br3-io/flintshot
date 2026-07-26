@@ -5,8 +5,9 @@ Inspired by [Flameshot](https://flameshot.org), designed to be fast, modular,
 and friendly to the [COSMIC desktop](https://system76.com/cosmic).
 
 > **Status:** Phase 1 (capture + editor window) in progress. Basic capture works;
-> annotation tools and save/copy coming soon. See [`SPEC.md`](SPEC.md) for the
-> current phase spec, or [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone index.
+> annotation tools and save/copy coming soon. See the
+> [Phase 1 spec](docs/specs/phase-1-capture-editor/spec.md), or
+> [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone index.
 
 ## At a glance
 
@@ -79,7 +80,7 @@ Dev shortcuts exist for capture subcommands too — e.g.
 - ⏳ Copy to clipboard
 - ⏳ Undo/redo
 
-See [`SPEC.md`](SPEC.md) for the current phase spec, or
+See the [Phase 1 spec](docs/specs/phase-1-capture-editor/spec.md), or
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone index.
 
 ## Documentation
@@ -88,10 +89,9 @@ Product & design:
 
 - [`docs/VISION.md`](docs/VISION.md) — product vision, scope, non-goals
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone index (thin)
-- [`SPEC.md`](SPEC.md) — current phase requirements (Phase 1)
-- [`tasks/plan.md`](tasks/plan.md) · [`tasks/todo.md`](tasks/todo.md) — current phase plan & checklist
+- [`docs/specs/phase-1-capture-editor/`](docs/specs/phase-1-capture-editor/) — current effort spec, plan, and task checklist (Phase 1)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — workspace, crates, dependencies, data model
-- [`docs/adr/`](docs/adr/) — technical decision records (ADRs)
+- [`docs/adrs/`](docs/adrs/) — technical decision records (ADRs)
 - [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md) — cross-platform manual QA grid
 
 Working in the repo:

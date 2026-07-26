@@ -1,24 +1,25 @@
 # Roadmap
 
-Directions and milestones for `flintshot`. Per-phase requirements live
-in `SPEC.md` (current phase) or `tasks/archive/` (history); this file is
-the thin index. For the narrative "why", see
+Thin index of directions and milestones for `flintshot`. Per-effort
+requirements live in [`specs/`](specs/) (one directory per effort,
+status-flipped in place when shipped). For the narrative "why", see
 [`VISION.md`](VISION.md); for decision rationale, see
-[`docs/adr/`](adr/).
+[`adrs/`](adrs/).
 
-**CURRENT MILESTONE: Phase 1 — Capture + Editor Window** (in flight).
+**CURRENT MILESTONE: Phase 1 — Capture + Editor Window** (in flight at
+[`specs/phase-1-capture-editor/`](specs/phase-1-capture-editor/)).
 
 ## Milestones
 
-| Milestone                                     | State        |                                                                             |
-| --------------------------------------------- | ------------ | --------------------------------------------------------------------------- |
-| Phase 0 — Scaffolding                         | Shipped      | [`archive`](../tasks/archive/2026-07-20-phase-0-scaffolding/)               |
-| Phase 1 — Capture + editor window             | **In flight**| [`SPEC.md`](../SPEC.md) · [`tasks/plan.md`](../tasks/plan.md)               |
-| Phase 2 — Tray, hotkeys, multi-monitor, polish| Planned      |                                                                             |
-| Phase 3 — Pin-to-desktop + COSMIC applet      | Planned      |                                                                             |
-| Phase 4 — Upload                              | Planned      |                                                                             |
-| Phase 5 — Live overlay (Flameshot-style)      | Planned      |                                                                             |
-| Phase 6 — Wayland global hotkeys via `ashpd`  | Planned      |                                                                             |
+| Milestone                                      | State         |
+| ---------------------------------------------- | ------------- |
+| Phase 0 — Scaffolding                          | Shipped       |
+| Phase 1 — Capture + editor window              | **In flight** |
+| Phase 2 — Tray, hotkeys, multi-monitor, polish | Planned       |
+| Phase 3 — Pin-to-desktop + COSMIC applet       | Planned       |
+| Phase 4 — Upload                               | Planned       |
+| Phase 5 — Live overlay (Flameshot-style)       | Planned       |
+| Phase 6 — Wayland global hotkeys via `ashpd`   | Planned       |
 
 ## Versioning
 
@@ -49,21 +50,22 @@ VISION   "What problem are we solving?"   docs/VISION.md
   │
 ROADMAP  "What directions / milestones?"  docs/ROADMAP.md  (this)
   │
-SPEC     "Current phase requirements"     SPEC.md  (root, one per phase)
+SPEC     "Current effort requirements"    docs/specs/<effort-slug>/spec.md
 ```
 
-### Each milestone ships through the harness lifecycle
+### Each effort ships through the harness lifecycle
 
 ```text
-DEFINE → /spec       spec-driven-development             → SPEC.md
-PLAN   → /planning   planning-and-task-breakdown          → tasks/plan.md + tasks/todo.md
-BUILD  → /build      incremental-implementation + TDD     → source + tests
-VERIFY → /test       debugging-and-error-recovery         → pnpm verify green
-REVIEW → /review     code-review-and-quality              → sign-off
-SHIP   → /ship       shipping-and-launch                  → tasks/archive/<date>-<slug>/{SPEC.md, plan.md, todo.md}
+DEFINE → /spec       spec-driven-development             → docs/specs/<slug>/spec.md (status: draft)
+PLAN   → /planning   planning-and-task-breakdown         → docs/specs/<slug>/{plan.md, todo.md, tasks/00N-*.md}
+BUILD  → /build      incremental-implementation + TDD    → source + tests (flips spec status: draft → active)
+VERIFY → /test       debugging-and-error-recovery        → pnpm verify green
+REVIEW → /review     code-review-and-quality             → sign-off
+SHIP   → /ship       shipping-and-launch                 → merge PR; spec status flips to shipped (dir stays in place)
 ```
 
-When a phase ships, its SPEC.md + plan.md + todo.md archive **together**
-under `tasks/archive/YYYY-MM-DD-<slug>/`, and the next phase starts fresh
-at `/spec`. A plan never outlives its phase; a spec never outlives its
-plan.
+When an effort ships, its spec.md frontmatter flips to `status: shipped`
+with the merge date. The directory stays at `docs/specs/<slug>/` forever
+— no archive step, no move. Git is the full history; the filesystem is
+the browsable index. The next effort starts on a fresh branch with a
+fresh `docs/specs/<new-slug>/` directory.

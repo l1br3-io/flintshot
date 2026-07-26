@@ -6,15 +6,13 @@ in this repo. Read this first; it tells you how to verify your work.
 For product intent, see [`docs/VISION.md`](docs/VISION.md). For layout
 and boundaries, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). For
 sequencing, see [`docs/ROADMAP.md`](docs/ROADMAP.md). For the current
-phase's requirements, see [`SPEC.md`](SPEC.md); for the in-flight plan
-and checklist, see [`tasks/plan.md`](tasks/plan.md) and
-[`tasks/todo.md`](tasks/todo.md).
+effort's spec, plan, and task checklist, see
+[`docs/specs/phase-1-capture-editor/`](docs/specs/phase-1-capture-editor/).
 
 ## Project shape
 
 Pure-Rust Cargo workspace. Four crates; only `flintshot-app` builds by
-default. Phase 0 scaffolding is in place; Phase 1 (capture + editor) is
-the active frontier.
+default.
 
 ```
 crates/
@@ -175,7 +173,7 @@ Authoritative style detail lives in
 | egui editor implementation      | `crates/flintshot-editor-egui/src/`                        |
 | Cross-crate types re-exports    | `crates/flintshot-core/src/lib.rs`                         |
 | CI pipeline                     | `.github/workflows/ci.yml`                                 |
-| Tech stack rationale            | `docs/adr/`                                        |
+| Tech stack rationale            | `docs/adrs/`                                               |
 
 ## When you finish a change
 
@@ -190,7 +188,7 @@ cargo test --doc -p flintshot-core -p flintshot-editor-egui
 
 If the change is user-visible or modifies the workspace shape, update
 `CHANGELOG.md` under `## [Unreleased]`. If it adds or revises a
-non-obvious technical choice, add an ADR entry in `docs/adr/`
+non-obvious technical choice, add an ADR entry in `docs/adrs/`
 (numbered `ADR-NNNN`, format: **Context · Decision · Consequences**).
 
 If a `cargo` command is missing from this file, ask the maintainer and
