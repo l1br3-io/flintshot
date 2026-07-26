@@ -4,7 +4,7 @@ Directions and milestones for `flintshot`. Per-phase requirements live
 in `SPEC.md` (current phase) or `tasks/archive/` (history); this file is
 the thin index. For the narrative "why", see
 [`VISION.md`](VISION.md); for decision rationale, see
-[`DECISIONS.md`](DECISIONS.md).
+[`docs/adr/`](adr/).
 
 **CURRENT MILESTONE: Phase 1 — Capture + Editor Window** (in flight).
 

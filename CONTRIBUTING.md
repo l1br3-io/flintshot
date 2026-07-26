@@ -73,7 +73,7 @@ round-trip.
 | New CLI subcommand or arg             | `crates/flintshot-app/src/cli.rs`                         |
 | New upload backend                    | impl `UploadBackend` — usually `crates/flintshot-core/src/upload.rs` or a new module |
 | Config fields                         | `flintshot-core` config schema, plus `docs/ARCHITECTURE.md` config sample |
-| A non-obvious technical decision      | new ADR in `docs/DECISIONS.md`                            |
+| A non-obvious technical decision      | new ADR in `docs/adr/`                            |
 
 ## Code style (short version)
 
@@ -113,7 +113,7 @@ manually.
    (`Add ellipse annotation tool`, not `added ellipse`).
 4. Update `CHANGELOG.md` under `## [Unreleased]` for user-visible
    changes (new subcommands, changed config schema, behavior shifts).
-5. Add an ADR in `docs/DECISIONS.md` if you introduced or revised a
+5. Add an ADR in `docs/adr/` if you introduced or revised a
    non-obvious technical choice. Format: **Context · Decision ·
    Consequences**.
 6. Make sure all four daily-workflow commands are green.

@@ -175,7 +175,7 @@ Authoritative style detail lives in
 | egui editor implementation      | `crates/flintshot-editor-egui/src/`                        |
 | Cross-crate types re-exports    | `crates/flintshot-core/src/lib.rs`                         |
 | CI pipeline                     | `.github/workflows/ci.yml`                                 |
-| Tech stack rationale            | `docs/DECISIONS.md`                                        |
+| Tech stack rationale            | `docs/adr/`                                        |
 
 ## When you finish a change
 
@@ -190,7 +190,7 @@ cargo test --doc -p flintshot-core -p flintshot-editor-egui
 
 If the change is user-visible or modifies the workspace shape, update
 `CHANGELOG.md` under `## [Unreleased]`. If it adds or revises a
-non-obvious technical choice, add an ADR entry in `docs/DECISIONS.md`
+non-obvious technical choice, add an ADR entry in `docs/adr/`
 (numbered `ADR-NNNN`, format: **Context · Decision · Consequences**).
 
 If a `cargo` command is missing from this file, ask the maintainer and

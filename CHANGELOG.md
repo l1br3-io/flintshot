@@ -213,7 +213,7 @@ Categories used below:
   -D warnings`, `cargo test`, MSRV (1.95) build, opt-in
   `flintshot-cosmic` build job.
 - Project documentation: `README.md`, `docs/VISION.md`,
-  `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/DECISIONS.md`
+  `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/adr/`
   (ADRs 0001–0012), `CONTRIBUTING.md`, `AGENTS.md`, `docs/TEST_MATRIX.md`.
 - Dual licensing: `MIT OR Apache-2.0`, with both license files in the
   repo root and the `license` field on every crate.
