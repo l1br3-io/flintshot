@@ -11,22 +11,23 @@ the head). The shared `render()` dispatches the new variant.
 
 ## Acceptance criteria
 
-- [ ] Drag with Arrow tool active commits an `Annotation::Arrow` with
+- [x] Drag with Arrow tool active commits an `Annotation::Arrow` with
       tail at the down point and head at the up point.
-- [ ] `head_size` defaults to 10 physical px; subsequent arrows inherit
+- [x] `head_size` defaults to 10 physical px; subsequent arrows inherit
       `state.stroke_width` for the shaft.
-- [ ] `EguiCanvas::draw_arrow` renders barbs at ±30° from the shaft
+- [x] `EguiCanvas::draw_arrow` renders barbs at ±30° from the shaft
       direction, length = `head_size`.
-- [ ] Toolbar adds an Arrow button; clicking switches `state.tool`.
-- [ ] Undo/redo works for arrows (no extra plumbing — Task 7 covers it).
+- [x] Toolbar adds an Arrow button; clicking switches `state.tool`.
+- [x] Undo/redo works for arrows (no extra plumbing — Task 7 covers it).
 
 ## Verification
 
-- [ ] Standing gate passes.
-- [ ] `MockCanvas` snapshot test for an `EditorState` with one Arrow
+- [x] Standing gate passes.
+- [x] `MockCanvas` snapshot test for an `EditorState` with one Arrow
       ann: assert exact `draw_arrow` call arguments.
 - [ ] Manual: draw an arrow over a screenshot, verify head/tail
-      orientation; save and reopen.
+      orientation; save and reopen. _(interactive verification owed —
+      see Checkpoint D / E close-out)_
 
 ## Dependencies
 

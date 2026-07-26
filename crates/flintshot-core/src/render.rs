@@ -196,6 +196,48 @@ fn image_rect(image: &image::RgbaImage) -> Rect {
     Rect::from_xywh(0.0, 0.0, image.width() as f32, image.height() as f32)
 }
 
+/// cos(30°) — barb half-angle from the reversed shaft direction.
+const ARROW_BARB_COS30: f32 = 0.866_025_4;
+/// sin(30°).
+const ARROW_BARB_SIN30: f32 = 0.5;
+
+/// Compute the two barb endpoints for an arrow whose shaft runs from
+/// `a` (tail) to `b` (head). Each barb is `head_size` long and angled
+/// 30° off the reversed shaft direction — the conventional "V" shape.
+///
+/// Shared between [`Canvas`] implementations so the live editor view
+/// (egui) and the saved / copied image ([`ImageCanvas`] /
+/// [`compose_final`]) agree pixel-for-pixel. Per ADR-0015 the two
+/// render paths must produce identical output; centralising the barb
+/// geometry here is what enforces that for arrows.
+///
+/// Returns `[Point { x: b.x, y: b.y }; 2]` (a degenerate "both barbs
+/// at the head" pair) when the shaft is shorter than 1 px — callers
+/// naturally skip drawing in that case because the shaft itself is
+/// invisible.
+#[must_use]
+pub fn arrow_barbs(a: Point, b: Point, head_size: f32) -> [Point; 2] {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1.0 {
+        return [b, b];
+    }
+    let len = len_sq.sqrt();
+    let ux = dx / len;
+    let uy = dy / len;
+    // Reverse direction (-ux, -uy) rotated by ±30° via the standard
+    // 2D rotation matrix R(θ) · (x, y) = (x·cosθ − y·sinθ, x·sinθ + y·cosθ).
+    let left_x = -ux * ARROW_BARB_COS30 + uy * ARROW_BARB_SIN30;
+    let left_y = -ux * ARROW_BARB_SIN30 - uy * ARROW_BARB_COS30;
+    let right_x = -ux * ARROW_BARB_COS30 - uy * ARROW_BARB_SIN30;
+    let right_y = ux * ARROW_BARB_SIN30 - uy * ARROW_BARB_COS30;
+    [
+        Point::new(b.x + head_size * left_x, b.y + head_size * left_y),
+        Point::new(b.x + head_size * right_x, b.y + head_size * right_y),
+    ]
+}
+
 /// Compose the final image: a clone of `state.image` with every
 /// committed annotation rendered into it. Excludes `state.pending`
 /// (in-flight annotations are not part of the saved output — the
@@ -211,12 +253,10 @@ fn image_rect(image: &image::RgbaImage) -> Rect {
 /// # Implementation note
 ///
 /// Drawing happens into a private [`ImageCanvas`] that implements
-/// [`Canvas`] on top of an [`image::RgbaImage`]. Phase 1 Task 9 fills
-/// in the rect primitives (the only ones the Rect tool exercises);
-/// ellipse / line / arrow / text emit a `tracing::warn!` and are
-/// no-ops for now, since the corresponding tools don't have toolbar
-/// buttons yet (Tasks 11/12/13 wire them up and fill in the missing
-/// primitives at that time).
+/// [`Canvas`] on top of an [`image::RgbaImage`]. Phase 1 Task 9 filled
+/// in the rect primitives; Task 11 adds line + arrow (line is needed
+/// by arrow's barbs). Ellipse / text remain `tracing::warn!` no-ops
+/// until Tasks 12 / 13 wire up the corresponding tools.
 #[must_use]
 pub fn compose_final(state: &EditorState) -> image::RgbaImage {
     let mut canvas = ImageCanvas::new(state.image.clone());
@@ -323,28 +363,85 @@ impl Canvas for ImageCanvas {
     fn draw_ellipse(&mut self, _rect: Rect, _stroke: &Stroke, _fill: Option<Color>) {
         tracing::warn!(
             target: "flintshot::render::image_canvas",
-            "draw_ellipse not yet implemented in ImageCanvas; annotation omitted from saved/copied output (Task 11 will fill this in)"
+            "draw_ellipse not yet implemented in ImageCanvas; annotation omitted from saved/copied output (Ellipse tool is Phase 2 scope)"
         );
     }
 
-    fn draw_line(&mut self, _a: Point, _b: Point, _stroke: &Stroke) {
-        tracing::warn!(
-            target: "flintshot::render::image_canvas",
-            "draw_line not yet implemented in ImageCanvas; annotation omitted from saved/copied output (Tasks 11/13 will fill this in)"
-        );
+    fn draw_line(&mut self, a: Point, b: Point, stroke: &Stroke) {
+        stroke_segment(&mut self.image, a, b, *stroke);
     }
 
-    fn draw_arrow(&mut self, _a: Point, _b: Point, _stroke: &Stroke, _head_size: f32) {
-        tracing::warn!(
-            target: "flintshot::render::image_canvas",
-            "draw_arrow not yet implemented in ImageCanvas; annotation omitted from saved/copied output (Task 11 will fill this in)"
-        );
+    fn draw_arrow(&mut self, a: Point, b: Point, stroke: &Stroke, head_size: f32) {
+        stroke_segment(&mut self.image, a, b, *stroke);
+        let [left, right] = arrow_barbs(a, b, head_size);
+        stroke_segment(&mut self.image, b, left, *stroke);
+        stroke_segment(&mut self.image, b, right, *stroke);
     }
 
     fn draw_text(&mut self, _pos: Point, _text: &str, _size: f32, _color: Color) {
         tracing::warn!(
             target: "flintshot::render::image_canvas",
             "draw_text not yet implemented in ImageCanvas; annotation omitted from saved/copied output (Task 12 will fill this in)"
+        );
+    }
+}
+
+/// Stroke a thick line segment from `a` to `b` by stamping a filled
+/// square of side `stroke.width` (centred on the line) at ~1-px
+/// intervals along the segment.
+///
+/// This is the [`ImageCanvas`] equivalent of egui's `Painter::line_segment`:
+/// a connected, opaque stroke band. Stamping a square per sample
+/// approximates a `StrokeKind::Inside`, round-cap stroke closely
+/// enough that saved output matches the on-screen arrow / line.
+/// Phase 1 has no anti-aliasing in the save path; that's acceptable
+/// for a screenshot annotation tool (the source pixels are opaque, and
+/// the editor view itself is AA'd by egui so the user sees a clean
+/// preview).
+///
+/// Sub-pixel segments (`len < 0.5`) draw nothing — the caller (e.g.
+/// [`ImageCanvas::draw_arrow`]) is responsible for deciding whether a
+/// single-pixel dot is appropriate, which it does via [`arrow_barbs`]'s
+/// degenerate-return contract.
+fn stroke_segment(img: &mut image::RgbaImage, a: Point, b: Point, stroke: Stroke) {
+    let w = stroke.width;
+    if w <= 0.0 {
+        return;
+    }
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 0.25 {
+        return;
+    }
+    let len = len_sq.sqrt();
+    // One stamp per pixel of length guarantees a connected band: the
+    // gap between consecutive centrerpoints is ≤ 1 px, and each stamp
+    // covers ±(width/2) around its centre, so adjacent stamps overlap
+    // for any width ≥ 1. ceil() ensures even a 0.6-px segment gets one
+    // step; the +1 includes the `b` endpoint.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "len ≥ 0.5 (filtered), ≤ image diagonal ≤ 2^24"
+    )]
+    let steps = len.ceil() as usize;
+    let half = w / 2.0;
+    for i in 0..=steps {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "loop index ≤ steps+1 ≤ 2^24, exact in f32"
+        )]
+        let t = i as f32 / steps as f32;
+        let cx = a.x + dx * t;
+        let cy = a.y + dy * t;
+        fill_rect(
+            img,
+            cx - half,
+            cy - half,
+            cx + half,
+            cy + half,
+            stroke.color,
         );
     }
 }
@@ -608,6 +705,39 @@ mod tests {
         assert!(bg.is_some());
     }
 
+    /// TODO Task 11 acceptance: `arrow_barbs` returns the two ±30°
+    /// barb endpoints for a given shaft. Locks the shared geometry
+    /// contract that both `ImageCanvas` and `EguiCanvas` render against
+    /// — a horizontal shaft from (10, 50) to (90, 50) with `head_size`
+    /// 10 produces barbs at (81.34, 45) and (81.34, 55), i.e. each
+    /// barb is 10 px long angled 30° off the reversed shaft.
+    #[test]
+    fn arrow_barbs_returns_30_degree_endpoints() {
+        let a = Point::new(10.0, 50.0);
+        let b = Point::new(90.0, 50.0);
+        let [left, right] = arrow_barbs(a, b, 10.0);
+
+        // Reverse shaft direction is (-1, 0); rotated ±30° gives
+        // (-cos30, ∓sin30) = (-0.866, ∓0.5). Each barb is 10 px.
+        // left (+30°) → (90 - 8.66, 50 - 5) = (81.34, 45).
+        assert!((left.x - 81.34).abs() < 0.01, "left.x = {}", left.x);
+        assert!((left.y - 45.0).abs() < 0.01, "left.y = {}", left.y);
+        // right (-30°) → (90 - 8.66, 50 + 5) = (81.34, 55).
+        assert!((right.x - 81.34).abs() < 0.01, "right.x = {}", right.x);
+        assert!((right.y - 55.0).abs() < 0.01, "right.y = {}", right.y);
+    }
+
+    /// `arrow_barbs` on a sub-pixel shaft returns both barbs at the
+    /// head point (degenerate — caller skips drawing barbs).
+    #[test]
+    fn arrow_barbs_degenerate_shaft_returns_head_twice() {
+        let a = Point::new(50.0, 50.0);
+        let b = Point::new(50.4, 50.0); // 0.4 px shaft
+        let [left, right] = arrow_barbs(a, b, 10.0);
+        assert_eq!(left, b);
+        assert_eq!(right, b);
+    }
+
     /// TODO Task 7 acceptance: render an `EditorState` with one
     /// committed Rect ann and one pending Rect; assert recorded
     /// `DrawCall` sequence.
@@ -859,6 +989,91 @@ mod tests {
         let out = compose_final(&state);
         assert_eq!(out.dimensions(), bg.dimensions());
         assert_eq!(out.as_raw(), bg.as_raw());
+    }
+
+    /// TODO Task 11 acceptance: render an `EditorState` with one
+    /// committed `Annotation::Arrow` and assert the exact `DrawArrow`
+    /// call arguments. Locks the dispatch contract: a single
+    /// `draw_arrow` call carrying the annotation's tail, head, stroke,
+    /// and `head_size` verbatim — no normalization, no recompute.
+    #[test]
+    fn render_arrow_emits_single_draw_arrow_call() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 100));
+        state.anns.push(Annotation::Arrow {
+            a: Point::new(10.0, 50.0),
+            b: Point::new(90.0, 50.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 10.0,
+        });
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg).expect("render");
+
+        // Upload + blit + one DrawArrow.
+        assert_eq!(canvas.calls.len(), 3);
+        assert!(matches!(canvas.calls[0], DrawCall::UploadImage));
+        assert!(matches!(canvas.calls[1], DrawCall::DrawImage { .. }));
+        match &canvas.calls[2] {
+            DrawCall::DrawArrow {
+                a,
+                b,
+                stroke,
+                head_size,
+            } => {
+                assert_eq!(*a, Point::new(10.0, 50.0), "tail = down point");
+                assert_eq!(*b, Point::new(90.0, 50.0), "head = up point");
+                assert_eq!(*stroke, Stroke::new(Color::RED, 3.0));
+                assert_eq!(*head_size, 10.0);
+            }
+            other => panic!("expected DrawArrow, got {other:?}"),
+        }
+    }
+
+    /// TODO Task 11 acceptance: `compose_final` bakes an arrow (shaft +
+    /// ±30° barbs) into the saved / copied image. Pixel-level
+    /// assertions on a horizontal arrow — shaft midpoint, tail, head,
+    /// and both barb endpoints are stroke-coloured; pixels past the
+    /// head and off the shaft stay background.
+    ///
+    /// Currently RED: `ImageCanvas::draw_arrow` is a warn-only no-op
+    /// stub until Task 11 fills it in.
+    #[test]
+    fn compose_final_renders_arrow_shaft_and_barbs() {
+        let bg = image::RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255]));
+        let mut state = EditorState::new(bg);
+        state.anns.push(Annotation::Arrow {
+            a: Point::new(10.0, 50.0),
+            b: Point::new(90.0, 50.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 10.0,
+        });
+
+        let out = compose_final(&state);
+        let red = image::Rgba([255, 0, 0, 255]);
+        let white = image::Rgba([255, 255, 255, 255]);
+
+        // Shaft midpoint.
+        assert_eq!(out.get_pixel(50, 50), &red, "shaft midpoint");
+        // Tail near `a`.
+        assert_eq!(out.get_pixel(11, 50), &red, "tail near down point");
+        // Head near `b`.
+        assert_eq!(out.get_pixel(89, 50), &red, "head near up point");
+        // Left barb endpoint ≈ (90 − 10·cos30°, 50 − 10·sin30°)
+        //                   ≈ (81.3, 45) → pixel (81, 45).
+        assert_eq!(out.get_pixel(81, 45), &red, "left barb endpoint");
+        // Right barb endpoint ≈ (81.3, 55) → pixel (81, 55).
+        assert_eq!(out.get_pixel(81, 55), &red, "right barb endpoint");
+        // Past the head — no shaft, no barb.
+        assert_eq!(out.get_pixel(95, 50), &white, "past head is background");
+        // Off the shaft, above the barbs.
+        assert_eq!(out.get_pixel(50, 30), &white, "off-shaft is background");
+        // Background image not mutated.
+        assert_eq!(
+            state.image.get_pixel(50, 50),
+            &white,
+            "state.image unchanged (compose_final clones)"
+        );
     }
 
     /// TODO Task 8 acceptance: render an `EditorState` with two

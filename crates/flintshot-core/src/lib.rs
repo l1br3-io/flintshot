@@ -31,6 +31,6 @@ pub use editor::{Annotation, BlurKind, EditorState, Tool};
 pub use error::{FlintshotError, Result};
 pub use geom::{Color, Key, Point, Rect, Stroke};
 pub use input::{DispatchOutcome, InputEvent, Modifiers};
-pub use render::{compose_final, render, render_ann, Canvas, DrawCall, MockCanvas};
+pub use render::{arrow_barbs, compose_final, render, render_ann, Canvas, DrawCall, MockCanvas};
 pub use shell::{EditorOutcome, EditorShell};
 pub use upload::{ImageMime, UploadBackend, UploadContext, UploadError, UploadOutcome};

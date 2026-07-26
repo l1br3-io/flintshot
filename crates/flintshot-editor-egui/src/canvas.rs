@@ -2,7 +2,7 @@
 //!
 //! [`Canvas`]: flintshot_core::render::Canvas
 
-use flintshot_core::{render::Canvas, Color, Point, Rect, Stroke};
+use flintshot_core::{arrow_barbs, render::Canvas, Color, Point, Rect, Stroke};
 
 /// egui-side texture handle, returned by [`EguiCanvas::upload_image`].
 #[derive(Clone)]
@@ -15,10 +15,9 @@ pub struct EguiTexture(pub egui::TextureHandle);
 /// that the shell binds before each `render()` call. Background
 /// blits and annotation primitives both go through the painter.
 ///
-/// Phase 1 Task 8 implements `draw_rect_outline` / `draw_rect_filled`
-/// (the only primitives the Rect tool exercises). Other primitives
-/// (`draw_ellipse`, `draw_line`, `draw_arrow`, `draw_text`) stay as
-/// stubs until the corresponding tools land in Tasks 11–13.
+/// Phase 1 Task 8 implemented `draw_rect_outline` / `draw_rect_filled`;
+/// Task 11 adds `draw_line` / `draw_arrow`. The remaining primitives
+/// (`draw_ellipse`, `draw_text`) stay as stubs until Tasks 12–13.
 pub struct EguiCanvas {
     /// Stable toolkit context, captured by reference at construction.
     ctx: egui::Context,
@@ -67,6 +66,11 @@ fn to_egui_rect(rect: Rect, ppp: f32) -> egui::Rect {
         egui::pos2(rect.min.x / ppp, rect.min.y / ppp),
         egui::vec2(rect.width() / ppp, rect.height() / ppp),
     )
+}
+
+/// Convert a physical-px [`Point`] to a logical-px [`egui::Pos2`].
+fn to_egui_pos(p: Point, ppp: f32) -> egui::Pos2 {
+    egui::pos2(p.x / ppp, p.y / ppp)
 }
 
 /// Convert a [`Stroke`] to an [`egui::Stroke`], scaling the width from
@@ -146,7 +150,36 @@ impl Canvas for EguiCanvas {
     }
 
     fn draw_ellipse(&mut self, _rect: Rect, _stroke: &Stroke, _fill: Option<Color>) {}
-    fn draw_line(&mut self, _a: Point, _b: Point, _stroke: &Stroke) {}
-    fn draw_arrow(&mut self, _a: Point, _b: Point, _stroke: &Stroke, _head_size: f32) {}
+
+    fn draw_line(&mut self, a: Point, b: Point, stroke: &Stroke) {
+        let Some(painter) = &self.painter else {
+            return;
+        };
+        let ppp = self.ppp();
+        painter.line_segment(
+            [to_egui_pos(a, ppp), to_egui_pos(b, ppp)],
+            to_egui_stroke(*stroke, ppp),
+        );
+    }
+
+    fn draw_arrow(&mut self, a: Point, b: Point, stroke: &Stroke, head_size: f32) {
+        let Some(painter) = &self.painter else {
+            return;
+        };
+        let ppp = self.ppp();
+        let a_l = to_egui_pos(a, ppp);
+        let b_l = to_egui_pos(b, ppp);
+        let egui_stroke = to_egui_stroke(*stroke, ppp);
+        painter.line_segment([a_l, b_l], egui_stroke);
+        // `arrow_barbs` returns physical-px endpoints (head_size is
+        // defined in physical px); converting them to logical via
+        // `to_egui_pos` yields the right on-screen length at any
+        // `pixels_per_point`, matching what `ImageCanvas` bakes into
+        // the saved PNG (ADR-0015 WYSIWYG).
+        let [left, right] = arrow_barbs(a, b, head_size);
+        painter.line_segment([b_l, to_egui_pos(left, ppp)], egui_stroke);
+        painter.line_segment([b_l, to_egui_pos(right, ppp)], egui_stroke);
+    }
+
     fn draw_text(&mut self, _pos: Point, _text: &str, _size: f32, _color: Color) {}
 }
