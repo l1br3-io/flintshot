@@ -3,7 +3,7 @@
 This document captures the technical architecture of `flintshot`. For
 product vision, see [VISION.md](VISION.md). For delivery sequencing, see
 [ROADMAP.md](ROADMAP.md). For decision rationale, see
-[DECISIONS.md](DECISIONS.md).
+[decision records](adr/).
 
 ## Workspace layout
 
@@ -158,7 +158,7 @@ pub enum Event {
 `flintshot` is UI-toolkit-agnostic by design. `flintshot-core` owns all
 shared types and pure logic; UI toolkits implement two traits. egui is
 the default; swapping or adding a toolkit (iced, slint) is purely
-additive. See [ADR-0012](DECISIONS.md#adr-0012-abstract-ui-toolkit-via-canvas--editorshell-traits)
+additive. See [ADR-0012](adr/ADR-0012-canvas-editorshell-traits.md)
 for rationale.
 
 ### Geometry types (`flintshot-core::geom`)
@@ -366,7 +366,7 @@ pub struct UploadOutcome {
 | Notifications        | `notify-rust`                                 | Cross-platform desktop notifications                                        |
 | COSMIC applet (P3)   | `libcosmic` (with `tokio`, `wayland` features)   | Official COSMIC toolkit                                                    |
 
-All choices are documented in [DECISIONS.md](DECISIONS.md).
+All choices are documented in [decision records](adr/).
 
 ## Cross-platform concerns
 

@@ -58,7 +58,7 @@ clipboard. The architecture-abstraction (`Canvas` / `EditorShell` traits,
 no GUI types in `flintshot-core`) established in Phase 0 stays intact
 and is exercised by real code on every task.
 
-Phase 1 **exit criteria** (from `ROADMAP.md`):
+Phase 1 **exit criteria** (from `../SPEC.md`):
 
 > A user can run `flintshot region`, drag-select a region, draw a red
 > rectangle with an arrow pointing at it, add a text label, save the
