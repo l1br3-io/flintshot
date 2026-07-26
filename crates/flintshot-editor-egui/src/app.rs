@@ -254,6 +254,7 @@ impl App for EditorApp {
                 let mut action = ToolbarAction::None;
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.state.tool, Tool::Rect, "▭ Rectangle");
+                    ui.selectable_value(&mut self.state.tool, Tool::Arrow, "→ Arrow");
                     ui.separator();
                     ui.label(format!("{} annotations", self.state.anns.len()));
                     ui.separator();

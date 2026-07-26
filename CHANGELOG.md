@@ -202,6 +202,17 @@ Categories used below:
   moved into core so all shells inherit it without duplicating the
   predicate. Existing `EditorApp::logic` is now a thin translator:
   egui input → `InputEvent`, dispatch, `if matches!` on outcome.
+- Arrow annotation tool end-to-end (Phase 1 Task 11). Toolbar gains an
+  "→ Arrow" button; drag from tail to head commits an
+  `Annotation::Arrow` (tail = down point, head = up point, endpoints
+  not normalized — direction matters). `head_size` defaults to 10
+  physical px; the shaft inherits `state.stroke_width`. New shared
+  `flintshot_core::arrow_barbs(a, b, head_size) -> [Point; 2]`
+  computes the ±30° barb endpoints so `EguiCanvas` (live view) and
+  `ImageCanvas` (`compose_final` → Save / Copy) render identical
+  arrows (ADR-0015 WYSIWYG). `ImageCanvas::draw_line` filled in
+  alongside; degenerate arrows (sub-px drag) cancel on pointer-up,
+  matching the Rect tool's click-without-drag contract.
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from

@@ -441,25 +441,39 @@ impl EditorState {
         }
     }
 
-    /// Pointer-up dispatch helper: filter degenerate rects, then
+    /// Pointer-up dispatch helper: filter degenerate annotations, then
     /// commit. See [`dispatch_input`](Self::dispatch_input).
     ///
-    /// Matches the Task 8 close-out's "deviation 3" zero-area filter
-    /// (a click without a drag cancels rather than committing a
-    /// 0×0 rect). Now in core so all shells inherit the same
-    /// behaviour without duplicating the predicate.
+    /// Two filters, matching the Task 8 close-out's "deviation 3"
+    /// zero-area contract (now in core so all shells inherit it):
+    /// - Rect-shaped annotations (`Rect` / `Ellipse` / `Blur`) cancel
+    ///   when either normalized dimension is < 1 px (a click without a
+    ///   drag would otherwise commit a 0×0 rect).
+    /// - `Arrow` cancels when the shaft is < 1 px long: a degenerate
+    ///   arrow has no defined head direction, so the barbs would
+    ///   render as nothing and the user would see a silent no-op
+    ///   instead of the cancel they expect from the Rect tool's
+    ///   click-without-drag behaviour (Task 11).
     fn finish_pointer_up(&mut self) {
-        if let Some(
-            Annotation::Rect { rect, .. }
-            | Annotation::Ellipse { rect, .. }
-            | Annotation::Blur { rect, .. },
-        ) = &self.pending
-        {
-            let n = rect.normalized();
-            if n.width().abs() < 1.0 || n.height().abs() < 1.0 {
-                self.cancel_annotation();
-                return;
+        let degenerate = match &self.pending {
+            Some(
+                Annotation::Rect { rect, .. }
+                | Annotation::Ellipse { rect, .. }
+                | Annotation::Blur { rect, .. },
+            ) => {
+                let n = rect.normalized();
+                n.width().abs() < 1.0 || n.height().abs() < 1.0
             }
+            Some(Annotation::Arrow { a, b, .. }) => {
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                (dx * dx + dy * dy).sqrt() < 1.0
+            }
+            _ => false,
+        };
+        if degenerate {
+            self.cancel_annotation();
+            return;
         }
         self.commit_annotation();
     }
@@ -1117,5 +1131,66 @@ mod tests {
         });
         assert!(s.pending.is_none());
         assert_eq!(s.anns.len(), 0);
+    }
+
+    /// TODO Task 11 acceptance: drag with Arrow tool active commits an
+    /// `Annotation::Arrow` with tail at the down point and head at the
+    /// up point. Unlike Rect, arrow endpoints are **not** normalized —
+    /// direction matters (tail = where the press went down, head = where
+    /// the release went up). `head_size` defaults to 10 physical px;
+    /// the shaft inherits `state.stroke_width`.
+    #[test]
+    fn dispatch_pointer_down_drag_up_commits_arrow() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Arrow;
+        s.stroke_width = 4.0;
+        s.color = Color::rgb(0, 0, 255);
+
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(50.0, 60.0),
+        });
+        assert_eq!(
+            s.dispatch_input(&InputEvent::PointerUp),
+            DispatchOutcome::Continue
+        );
+
+        assert!(s.pending.is_none(), "pending cleared on commit");
+        assert_eq!(s.anns.len(), 1);
+        match &s.anns[0] {
+            Annotation::Arrow {
+                a,
+                b,
+                stroke,
+                head_size,
+            } => {
+                assert_eq!(*a, Point::new(10.0, 10.0), "tail = down point");
+                assert_eq!(*b, Point::new(50.0, 60.0), "head = up point");
+                assert_eq!(stroke.color, Color::rgb(0, 0, 255));
+                assert_eq!(stroke.width, 4.0, "shaft inherits stroke_width");
+                assert_eq!(*head_size, 10.0, "head_size defaults to 10 px");
+            }
+            other => panic!("expected Arrow, got {other:?}"),
+        }
+    }
+
+    /// TODO Task 11 acceptance: arrow drag is not subject to the
+    /// zero-area rect filter — even a tiny drag commits a real arrow
+    /// (the head still has barbs, unlike a 0×0 rect which is
+    /// meaningless). A click-without-drag still cancels because the
+    /// shaft is degenerate, matching the Rect tool's "click cancels"
+    /// contract for consistency.
+    #[test]
+    fn dispatch_arrow_click_without_drag_cancels() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Arrow;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.pending.is_none(), "degenerate arrow cancelled");
+        assert_eq!(s.anns.len(), 0, "no annotation committed");
     }
 }
