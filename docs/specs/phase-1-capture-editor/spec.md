@@ -1,9 +1,15 @@
-# SPEC — Phase 1: Capture + Editor Window
+---
+status: active
+started: 2026-07-20
+---
 
-> Current phase spec. For strategy, see [`tasks/plan.md`](tasks/plan.md);
-> for the per-task checklist, see [`tasks/todo.md`](tasks/todo.md). For
-> product context, see [`docs/VISION.md`](docs/VISION.md); for sequencing,
-> see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+# Spec — Phase 1: Capture + Editor Window
+
+> Current effort spec (in flight). For the plan index, see
+> [`plan.md`](plan.md); for the flat status checklist, see
+> [`todo.md`](todo.md); per-task detail lives in [`tasks/`](tasks/).
+> For product context, see [`../../VISION.md`](../../VISION.md); for
+> sequencing, see [`../../ROADMAP.md`](../../ROADMAP.md).
 
 ## Goal
 

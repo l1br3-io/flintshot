@@ -3,7 +3,8 @@
 Conventions are loaded lazily — this file is the router, not the content.
 BEFORE writing or modifying code in a stack below, Read the matching files:
 
-- `rust` → `.opencode/harness/tech/rust/*.md` + `.opencode/harness/tech/common/*.md`
+- `python` → `.opencode/harness/tech/python/*.md` + `.opencode/harness/tech/common/*.md`
+- `react` → `.opencode/harness/tech/react/*.md` + `.opencode/harness/tech/common/*.md`
 
 Polyglot: when a task spans multiple stacks, load each stack's conventions and
 apply each to its own code. Do not mix conventions across boundaries.

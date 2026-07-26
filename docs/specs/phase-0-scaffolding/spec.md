@@ -1,10 +1,16 @@
-# SPEC — Phase 0: Scaffolding
+---
+status: shipped
+started: 2026-07-20
+shipped: 2026-07-20
+---
 
-> Archived 2026-07-20 (shipped). Phase 0 predates the plan/todo system;
-> this spec is extracted from the original roadmap and archived alone
-> (no `plan.md` / `todo.md` paired with it). For the project narrative,
-> see [`docs/VISION.md`](../../../docs/VISION.md); for the current phase,
-> see [`SPEC.md`](../../../SPEC.md).
+# Spec — Phase 0: Scaffolding
+
+> Shipped 2026-07-20. Phase 0 predates the plan/todo system; this spec
+> is extracted from the original roadmap and stands alone (no
+> `plan.md` / `todo.md` paired with it). For the project narrative, see
+> [`../../VISION.md`](../../VISION.md); for current direction, see
+> [`../../ROADMAP.md`](../../ROADMAP.md).
 
 ## Goal
 

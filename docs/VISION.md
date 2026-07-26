@@ -126,6 +126,6 @@ trademark-free.
 
 ## Where this fits
 
-This vision is the top of the planning hierarchy — the *why*. Direction,
+This vision is the top of the planning hierarchy — the why. Direction,
 milestones, and the delivery lifecycle (DEFINE → PLAN → BUILD → VERIFY →
 REVIEW → SHIP) live in [`ROADMAP.md`](./ROADMAP.md).
