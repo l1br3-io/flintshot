@@ -123,3 +123,9 @@ screenshot tools:
 `flintshot` — a flint strikes a spark, captures a moment. Fire theme
 continues from Flameshot; the name is short, available on crates.io, and
 trademark-free.
+
+## Where this fits
+
+This vision is the top of the planning hierarchy — the *why*. Direction,
+milestones, and the delivery lifecycle (DEFINE → PLAN → BUILD → VERIFY →
+REVIEW → SHIP) live in [`ROADMAP.md`](./ROADMAP.md).
