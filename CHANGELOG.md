@@ -361,6 +361,49 @@ Categories used below:
   `EguiShell::run_editor`; the `flintshot region` CLI path now covers
   that role end-to-end.
 
+### Fixed
+
+- Crop no longer leaves the cropped image partly hidden behind the
+  editor toolbar. The egui canvas now offsets every draw call by the
+  canvas panel's top-left, so the image's (0, 0) lands at the panel
+  origin instead of the window's — the toolbar used to cover the
+  topmost rows of every screenshot, which became visible as soon as
+  a small crop made the hidden strip a large fraction of the image.
+  The shell also keeps requesting `ViewportCommand::InnerSize` until
+  the panel reports the cropped dimensions, so the window resizes to
+  fit on toolkits / platforms that honour the command.
+- Text tool no longer traps the editor in modal mode. Clicking elsewhere
+  while editing commits the current draft and places a new caret (or
+  starts the newly-selected tool) — Flameshot-like behaviour. Switching
+  tools via the toolbar while a draft is active now flushes the draft
+  instead of blocking all subsequent input.
+- Copy-to-clipboard no longer loses the image on X11. The
+  `arboard::Clipboard` handle is kept alive in the `EditorApp` for the
+  window's lifetime (X11's clipboard is owner-based: dropping the handle
+  or exiting the process clears the selection). The editor window stays
+  open after copy with "Copied!" feedback; the user pastes and then
+  closes manually.
+- Copy now respects the active `Tool::Select` selection. When a
+  non-degenerate selection rect is present, Copy emits just the
+  selected region (annotations baked in, clipped at the region
+  boundary); without a selection it falls back to the full image.
+  Editor state is left untouched — the displayed image and selection
+  rect remain as-is, so the user can adjust and copy again. This
+  decouples "copy the selection" (read-only output) from the Crop
+  tool (which permanently narrows the editor). New
+  `flintshot_core::compose_final_region(state, rect)` is the
+  selection-aware source of truth alongside `compose_final`.
+- Clicking any toolbar button (Copy / Crop / Save / tool selectors /
+  pickers) with an active `Tool::Select` selection no longer corrupts
+  the selection rect. The shell's pointer dispatch previously emitted
+  `PointerDrag` for every frame the primary button was held,
+  regardless of where the press began — so a press that began on the
+  toolbar fed `update_selection` with the toolbar's (negative
+  canvas-y) coordinates, extending the rect up past the image origin
+  before Copy / Crop read it. The shell now tracks whether the
+  current press began inside the canvas, and only emits drag/up
+  events for canvas-originated presses.
+
 ### Notes
 
 - Phase 0 closed against the local standing gate (`fmt`, `clippy`,

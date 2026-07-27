@@ -20,8 +20,8 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    compose_final, render::render, Color, Config, DispatchOutcome, EditorOutcome, EditorState,
-    FlintshotError, InputEvent, Key, Modifiers, Point, Tool,
+    compose_final, compose_final_region, render::render, Color, Config, DispatchOutcome,
+    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, Point, Rect, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -64,10 +64,31 @@ pub(crate) struct EditorApp {
     /// dispatch skips that frame (the screenshot isn't visible yet
     /// either, so no drags can start).
     canvas_rect: Option<egui::Rect>,
+    /// Whether the current primary-button press began inside the
+    /// canvas. Set when `PointerDown` fires (which only happens on
+    /// canvas hits), cleared on `PointerUp`. Without this guard,
+    /// `primary_down` alone would emit `PointerDrag` for every frame
+    /// the button is held — including presses that began on the
+    /// toolbar. A toolbar press would then feed `PointerDrag`s
+    /// straight into the dispatcher, corrupting in-flight state:
+    /// e.g. an active `Tool::Select` selection would be extended to
+    /// the toolbar's (negative canvas-y) position while the user is
+    /// clicking Copy, and Copy would then read the mangled rect.
+    canvas_drag_active: bool,
     /// Outcome slot shared with the shell. Set on `Esc` or any future
     /// exit path (Save / Copy / …). Defaults to `Ok(Cancelled)` if
     /// the window closes without anything being set (the X button).
     outcome: OutcomeSlot,
+    /// Clipboard handle kept alive after a copy so the X11 selection
+    /// owner (our process) doesn't release the data before the user
+    /// pastes. On X11 the clipboard is owner-based: dropping the
+    /// `Clipboard` or exiting the process clears the selection.
+    /// `None` until the first successful copy.
+    clipboard: Option<arboard::Clipboard>,
+    /// Whether a copy has succeeded this session. Drives the
+    /// "Copied!" button feedback so the user knows the data is on the
+    /// clipboard and the editor is intentionally still open.
+    copied: bool,
 }
 
 /// Which toolbar button the user clicked this frame (if any).
@@ -99,7 +120,10 @@ impl EditorApp {
             bg: None,
             img_dims,
             canvas_rect: None,
+            canvas_drag_active: false,
             outcome,
+            clipboard: None,
+            copied: false,
         }
     }
 
@@ -114,6 +138,19 @@ impl EditorApp {
     fn publish_outcome(&self, outcome: flintshot_core::Result<EditorOutcome>) {
         self.persist_ui_config();
         *self.outcome.borrow_mut() = Some(outcome);
+    }
+
+    /// Like [`publish_outcome`](Self::publish_outcome) but does not
+    /// overwrite a previously-published outcome. Used by the Esc / X
+    /// close path so that a prior copy (which publishes
+    /// `CopiedToClipboard` and keeps the window open) is honoured
+    /// rather than being clobbered by `Cancelled`.
+    fn publish_outcome_if_unset(&self, outcome: flintshot_core::Result<EditorOutcome>) {
+        self.persist_ui_config();
+        let mut slot = self.outcome.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(outcome);
+        }
     }
 
     /// Persist the current `color` / `stroke_width` / `font_size` to
@@ -200,6 +237,44 @@ impl EditorApp {
             }
         }
     }
+
+    /// Detect image-dimension changes (crop) and respond by
+    /// invalidating the bg texture cache and resizing the window.
+    ///
+    /// Without the resize, a cropped image renders at its true pixel
+    /// size in the corner of the original (larger) window — the user
+    /// sees a tiny screenshot. Resizing to `image_dims + toolbar_h`
+    /// makes the canvas area exactly fit the new image.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "image dims ≤ 2^24 are exact in f32"
+    )]
+    fn handle_image_resize(&mut self, ctx: &Context) {
+        let current_dims = self.state.image.dimensions();
+        // Target panel size in logical px = image physical dims / ppp.
+        let ppp = ctx.pixels_per_point();
+        let target_w = current_dims.0 as f32 / ppp;
+        let target_h = current_dims.1 as f32 / ppp;
+        // Current canvas panel width/height (logical). When the resize
+        // has taken effect, these match the target.
+        let (cur_w, cur_h) = self
+            .canvas_rect
+            .map_or((0.0, 0.0), |r| (r.width(), r.height()));
+        if (cur_w - target_w).abs() < 1.0 && (cur_h - target_h).abs() < 1.0 {
+            return;
+        }
+        // Image dimensions changed OR the prior resize hasn't landed yet:
+        // invalidate the bg texture cache (image may have changed) and
+        // keep issuing InnerSize until the panel reports the right size.
+        if current_dims != self.img_dims {
+            self.bg = None;
+            self.img_dims = current_dims;
+        }
+        let toolbar_h = self.canvas_rect.map_or(0.0, |r| r.min.y);
+        let new_size = egui::vec2(target_w, target_h + toolbar_h);
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
+        ctx.request_repaint();
+    }
 }
 
 impl App for EditorApp {
@@ -221,6 +296,15 @@ impl App for EditorApp {
         // pointer branch runs.
 
         let modifiers = translate_modifiers(ctx.input(|i| i.modifiers));
+
+        // If the user switched tools via the toolbar while a text draft
+        // was active, commit the draft before anything else. The toolbar
+        // sets `state.tool` directly (bypassing the dispatcher), so the
+        // modal text-editing guard below would otherwise trap the user
+        // in text mode forever with a non-Text tool selected.
+        if self.state.is_editing_text() && self.state.tool != Tool::Text {
+            self.state.commit_text_draft();
+        }
 
         // Text-editing modal mode (Task 12): when the user has placed
         // a caret (Tool::Text click → pending Text annotation), route
@@ -278,7 +362,10 @@ impl App for EditorApp {
             // (do nothing this frame).
             let outcome = self.state.dispatch_input(&event);
             if matches!(outcome, DispatchOutcome::Cancel) {
-                self.publish_outcome(Ok(EditorOutcome::Cancelled));
+                // Use `if_unset` so a prior copy (which published
+                // `CopiedToClipboard` and kept the window open) is
+                // honoured when the user eventually closes via Esc.
+                self.publish_outcome_if_unset(Ok(EditorOutcome::Cancelled));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
             }
@@ -326,11 +413,23 @@ impl App for EditorApp {
         // Once begun, updates and commit proceed even if the pointer
         // leaves the canvas: the rect just extends, and egui clips at
         // the panel edge on render.
+        //
+        // `canvas_drag_active` gates drag/up events on whether the
+        // *press* began in the canvas. Without it, a toolbar click
+        // (Copy / Crop / tool selectors / pickers) would emit
+        // `PointerDrag`s for every held frame and a `PointerUp` on
+        // release, all routed into the dispatcher. For `Tool::Select`
+        // this updates `selection.max` to the toolbar's (negative
+        // canvas-y) position, so by the time the toolbar's click
+        // handler runs `handle_copy` / `confirm_selection`, the rect
+        // no longer matches what the user dragged.
         let pointer_event = if primary_pressed && canvas_rect.contains(pos) {
+            self.canvas_drag_active = true;
             Some(InputEvent::PointerDown { pos: at })
-        } else if primary_released {
+        } else if primary_released && self.canvas_drag_active {
+            self.canvas_drag_active = false;
             Some(InputEvent::PointerUp)
-        } else if primary_down {
+        } else if primary_down && self.canvas_drag_active {
             Some(InputEvent::PointerDrag { pos: at })
         } else {
             None
@@ -422,7 +521,12 @@ impl App for EditorApp {
                     if ui.button("💾 Save").clicked() {
                         action = ToolbarAction::Save;
                     }
-                    if ui.button("📋 Copy").clicked() {
+                    let copy_label = if self.copied {
+                        "✓ Copied!"
+                    } else {
+                        "📋 Copy"
+                    };
+                    if ui.button(copy_label).clicked() {
                         action = ToolbarAction::Copy;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -433,15 +537,10 @@ impl App for EditorApp {
             })
             .inner;
 
-        // Invalidate the bg texture cache when the image dimensions
-        // change (crop replaces state.image with a different-sized
-        // sub-image). The render path's `bg.is_none()` check then
-        // triggers a re-upload on the next frame.
-        let current_dims = self.state.image.dimensions();
-        if current_dims != self.img_dims {
-            self.bg = None;
-            self.img_dims = current_dims;
-        }
+        // Invalidate the bg texture cache and resize the window when
+        // the image dimensions change (crop replaces state.image with
+        // a different-sized sub-image).
+        self.handle_image_resize(ui.ctx());
 
         // Per-frame render: bind the painter, then walk the shared
         // render path. Render failure is terminal — publish `Err(_)`
@@ -514,16 +613,30 @@ impl EditorApp {
     }
 
     /// Copy button handler: compose the final image, hand it to
-    /// `arboard::Clipboard`, publish `CopiedToClipboard` on success.
-    fn handle_copy(&self, ctx: &Context) {
-        match copy_to_clipboard(&self.state) {
+    /// `arboard::Clipboard`, and publish `CopiedToClipboard`.
+    ///
+    /// On X11 the clipboard is **owner-based**: the process that sets
+    /// the selection must stay alive and keep its `Clipboard` handle
+    /// alive, or the data is lost the moment the process exits. Closing
+    /// the editor window would terminate the process and wipe the
+    /// clipboard before the user can paste.
+    ///
+    /// Therefore, on success we **do not close the window**. The
+    /// `arboard::Clipboard` is stored in `self.clipboard` to keep the
+    /// selection alive, and the Copy button shows "Copied!" feedback.
+    /// The user pastes into the target application and then closes the
+    /// editor (Esc / X button). The outcome was pre-published as
+    /// `CopiedToClipboard`, so the shell returns the correct result
+    /// even though the close was user-initiated.
+    fn handle_copy(&mut self, ctx: &Context) {
+        match copy_to_clipboard(&self.state, &mut self.clipboard) {
             Ok(()) => {
                 tracing::info!("editor copied to clipboard");
+                self.copied = true;
                 self.publish_outcome(Ok(EditorOutcome::CopiedToClipboard));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Err(err) => {
-                tracing::error!(error = %err, "copy failed; closing editor session");
+                tracing::error!(error = %err, "copy failed");
                 self.publish_outcome(Err(err));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -560,20 +673,48 @@ fn save_to_disk(state: &EditorState) -> flintshot_core::Result<Option<std::path:
 
 /// Compose the final image and place it on the system clipboard.
 ///
-/// Uses `arboard`'s default feature set (X11 on Linux, native
-/// elsewhere). Wayland-only sessions without `XWayland` may need
-/// arboard's `wayland` cargo feature — deferred until a maintainer
-/// can verify.
+/// When a non-degenerate `state.selection` is active, Copy emits just
+/// the selected region (Flameshot-style): the user expects the active
+/// selection to define what gets copied, separate from the Crop tool
+/// which permanently narrows the editor. The editor state is **not**
+/// mutated — `state.image`, `state.anns`, and `state.selection` are
+/// untouched, so the user can keep adjusting the selection and copy
+/// again. A degenerate selection (< 1 px) falls back to the full
+/// image, matching the no-selection behaviour.
+///
+/// The `arboard::Clipboard` handle is stored in `slot` rather than
+/// dropped at the end of this function. On X11 the clipboard is
+/// owner-based: dropping the handle (or exiting the process) clears
+/// the selection. The caller keeps the handle alive until the editor
+/// window closes, giving the user time to paste.
 ///
 /// # Errors
 /// Surfaces [`FlintshotError::Shell`] for clipboard-creation or
 /// clipboard-set failures (clipboard occupied by another process,
 /// clipboard daemon unavailable on Linux, etc.).
-fn copy_to_clipboard(state: &EditorState) -> flintshot_core::Result<()> {
-    let img = compose_final(state);
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| FlintshotError::Shell {
-        detail: e.to_string(),
-    })?;
+fn copy_to_clipboard(
+    state: &EditorState,
+    slot: &mut Option<arboard::Clipboard>,
+) -> flintshot_core::Result<()> {
+    // Selection-aware output: crop the composed image to the active
+    // selection rect when one is present and non-degenerate. The
+    // 1.0-px threshold matches the render path's selection-rect guard
+    // (`render::render`) and `EditorState::crop`'s degenerate no-op,
+    // so "what the user sees outlined" is exactly "what gets copied".
+    let img = match state.selection.map(Rect::normalized) {
+        Some(n) if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 => {
+            compose_final_region(state, n)
+        }
+        _ => compose_final(state),
+    };
+    // Reuse the existing Clipboard handle, or create one if this is
+    // the first copy this session.
+    let mut clipboard = match slot.take() {
+        Some(c) => c,
+        None => arboard::Clipboard::new().map_err(|e| FlintshotError::Shell {
+            detail: e.to_string(),
+        })?,
+    };
     let (w, h) = img.dimensions();
     // `arboard::ImageData::bytes` is RGBA in row-major order, which
     // matches `image::RgbaImage::into_raw` exactly — no swizzling.
@@ -588,6 +729,9 @@ fn copy_to_clipboard(state: &EditorState) -> flintshot_core::Result<()> {
         .map_err(|e| FlintshotError::Shell {
             detail: e.to_string(),
         })?;
+    // Store the handle back so the caller keeps the X11 selection
+    // alive until the editor window closes.
+    *slot = Some(clipboard);
     Ok(())
 }
 
