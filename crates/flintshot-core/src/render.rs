@@ -40,6 +40,15 @@ pub trait Canvas {
     /// Blit a previously-uploaded image into the given rectangle.
     fn draw_image(&mut self, img: &Self::Image, rect: Rect);
 
+    /// Blit a raw [`image::RgbaImage`] into `dest` (physical px).
+    ///
+    /// Unlike [`draw_image`](Self::draw_image), this takes raw pixels
+    /// rather than a pre-uploaded handle. Used by the blur render path
+    /// (Task 13) to emit a freshly-computed sub-image without a
+    /// separate upload / cache step: the toolkit uploads internally
+    /// (egui) or copies pixels directly (`ImageCanvas`).
+    fn draw_image_region(&mut self, img: &image::RgbaImage, dest: Rect);
+
     /// Outline a rectangle with `stroke`.
     fn draw_rect_outline(&mut self, rect: Rect, stroke: &Stroke);
 
@@ -95,21 +104,25 @@ pub fn render<C: Canvas>(
         canvas.draw_image(handle, rect);
     }
     for ann in &state.anns {
-        render_ann(canvas, ann);
+        render_ann(canvas, ann, &state.image);
     }
     if let Some(pending) = &state.pending {
-        render_ann(canvas, pending);
+        render_ann(canvas, pending, &state.image);
     }
     Ok(())
 }
 
 /// Dispatch a single annotation to the appropriate `Canvas` primitive(s).
 ///
-/// Public so future tool-specific render paths (e.g. Task 13's blur
-/// pre-computation) can reuse the per-variant mapping. Pending
-/// annotations call this same path; the only difference is whether
-/// they live in `EditorState::anns` or `EditorState::pending`.
-pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation) {
+/// `source` is the background screenshot (`state.image`); it's only
+/// consulted by [`Annotation::Blur`], which crops the region from it,
+/// runs [`crate::image_ops::blur`], and blits the result. Every other
+/// variant ignores `source` and renders from its own fields.
+///
+/// Public so future tool-specific render paths can reuse the per-variant
+/// mapping. Pending annotations call this same path; the only difference
+/// is whether they live in `EditorState::anns` or `EditorState::pending`.
+pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::RgbaImage) {
     match ann {
         Annotation::Rect { rect, stroke, fill } => {
             let n = rect.normalized();
@@ -149,16 +162,20 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation) {
             font_size,
             color,
         } => canvas.draw_text(*pos, text, *font_size, *color),
-        Annotation::Blur { rect, .. } => {
-            // Placeholder until Task 13 adds `image_ops::blur`. Visible
-            // grey overlay so annotations don't appear "missing" during
-            // the Task 7 → Task 13 gap; warn so a session trace shows
-            // that real blur is not yet being applied.
-            tracing::warn!(
-                ?rect,
-                "blur annotation rendered as placeholder; real blur lands in Task 13"
-            );
-            canvas.draw_rect_filled(rect.normalized(), Color::rgb(64, 64, 64));
+        Annotation::Blur {
+            rect,
+            kind,
+            strength,
+            ..
+        } => {
+            // Computed in core (ADR: blur/pixelate lives here, not in
+            // the shell). Crop → blur → blit; both the live egui view
+            // and compose_final's ImageCanvas hit this same path so
+            // WYSIWYG holds (ADR-0015).
+            let n = rect.normalized();
+            let region = crate::image_ops::crop_region(source, n);
+            let blurred = crate::image_ops::blur(&region, *kind, *strength);
+            canvas.draw_image_region(&blurred, n);
         }
         Annotation::Number {
             pos,
@@ -261,7 +278,7 @@ pub fn arrow_barbs(a: Point, b: Point, head_size: f32) -> [Point; 2] {
 pub fn compose_final(state: &EditorState) -> image::RgbaImage {
     let mut canvas = ImageCanvas::new(state.image.clone());
     for ann in &state.anns {
-        render_ann(&mut canvas, ann);
+        render_ann(&mut canvas, ann, &state.image);
     }
     canvas.into_inner()
 }
@@ -304,6 +321,33 @@ impl Canvas for ImageCanvas {
         // No-op: the background image is already in place as the
         // canvas's starting content (compose_final clones state.image
         // at construction). No separate blit step.
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "coords clamped and rounded before cast; dims ≤ 2^24"
+    )]
+    fn draw_image_region(&mut self, img: &image::RgbaImage, dest: Rect) {
+        // Copy the source sub-image into the canvas at `dest`,
+        // clamped to canvas bounds. Used by the blur render path to
+        // overwrite a region with its blurred version.
+        let n = dest.normalized();
+        let (cw, ch) = img.dimensions();
+        let (w_f, h_f) = (self.image.width() as f32, self.image.height() as f32);
+        let x0 = n.min.x.round().clamp(0.0, w_f) as u32;
+        let y0 = n.min.y.round().clamp(0.0, h_f) as u32;
+        let (canvas_w, canvas_h) = self.image.dimensions();
+        for dy in 0..ch {
+            for dx in 0..cw {
+                let px = x0.saturating_add(dx);
+                let py = y0.saturating_add(dy);
+                if px < canvas_w && py < canvas_h {
+                    self.image.put_pixel(px, py, *img.get_pixel(dx, dy));
+                }
+            }
+        }
     }
 
     fn draw_rect_outline(&mut self, rect: Rect, stroke: &Stroke) {
@@ -643,6 +687,15 @@ pub enum DrawCall {
         /// Blit destination.
         rect: Rect,
     },
+    /// `Canvas::draw_image_region` — raw sub-image blit (blur path).
+    DrawImageRegion {
+        /// Source image width in physical px.
+        width: u32,
+        /// Source image height in physical px.
+        height: u32,
+        /// Destination rect (normalized, physical px).
+        dest: Rect,
+    },
     /// `Canvas::draw_rect_outline`.
     DrawRectOutline {
         /// Geometry (normalized).
@@ -734,6 +787,15 @@ impl Canvas for MockCanvas {
 
     fn draw_image(&mut self, _img: &Self::Image, rect: Rect) {
         self.calls.push(DrawCall::DrawImage { rect });
+    }
+
+    fn draw_image_region(&mut self, img: &image::RgbaImage, dest: Rect) {
+        let (width, height) = img.dimensions();
+        self.calls.push(DrawCall::DrawImageRegion {
+            width,
+            height,
+            dest,
+        });
     }
 
     fn draw_rect_outline(&mut self, rect: Rect, stroke: &Stroke) {
@@ -938,11 +1000,16 @@ mod tests {
 
     /// `render_ann` is the per-variant dispatch helper. Verify it
     /// forwards each shape to the right Canvas primitive without
-    /// going through `render()`'s background-blit path.
+    /// going through `render()`'s background-blit path. (`Blur` is
+    /// exercised separately in `render_blur_emits_draw_image_region`
+    /// — it needs a real `source` image to crop from.)
     #[test]
     fn render_ann_dispatches_each_variant() {
         let mut canvas = MockCanvas::default();
         let stroke = Stroke::new(Color::RED, 2.0);
+        // `source` is only consulted by `Blur`; the other variants
+        // ignore it. A 1×1 placeholder keeps the test focused.
+        let source = image::RgbaImage::new(1, 1);
 
         render_ann(
             &mut canvas,
@@ -951,6 +1018,7 @@ mod tests {
                 b: Point::new(10.0, 10.0),
                 stroke,
             },
+            &source,
         );
         assert!(matches!(
             canvas.calls.last(),
@@ -965,6 +1033,7 @@ mod tests {
                 stroke,
                 head_size: 8.0,
             },
+            &source,
         );
         assert!(matches!(
             canvas.calls.last(),
@@ -978,6 +1047,7 @@ mod tests {
                 stroke,
                 fill: None,
             },
+            &source,
         );
         assert!(matches!(
             canvas.calls.last(),
@@ -992,6 +1062,7 @@ mod tests {
                 font_size: 12.0,
                 color: Color::RED,
             },
+            &source,
         );
         match canvas.calls.last() {
             Some(DrawCall::DrawText { text, .. }) => assert_eq!(text, "hi"),
@@ -999,11 +1070,90 @@ mod tests {
         }
     }
 
+    /// `Annotation::Blur` dispatches through `image_ops::blur` and
+    /// emits a single `draw_image_region` call carrying the blurred
+    /// sub-image. Locks the dispatch contract (Task 13): the recorded
+    /// call's dest matches the (normalized) blur rect, and the source
+    /// dimensions match the cropped region.
+    #[test]
+    fn render_blur_emits_draw_image_region() {
+        // Half-black / half-white 20×10 source so the blur produces a
+        // sub-image with deterministic dimensions.
+        let mut source = image::RgbaImage::new(20, 10);
+        for y in 0..10 {
+            for x in 0..10 {
+                source.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+            for x in 10..20 {
+                source.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+            }
+        }
+        let ann = Annotation::Blur {
+            rect: Rect::from_xywh(5.0, 2.0, 10.0, 6.0),
+            kind: crate::editor::BlurKind::Gaussian,
+            strength: 2,
+        };
+
+        let mut canvas = MockCanvas::default();
+        render_ann(&mut canvas, &ann, &source);
+
+        match &canvas.calls[..] {
+            [DrawCall::DrawImageRegion {
+                width,
+                height,
+                dest,
+            }] => {
+                assert_eq!(*width, 10, "cropped region width");
+                assert_eq!(*height, 6, "cropped region height");
+                assert_eq!(*dest, Rect::from_xywh(5.0, 2.0, 10.0, 6.0));
+            }
+            other => panic!("expected single DrawImageRegion, got {other:?}"),
+        }
+    }
+
+    /// `compose_final` bakes a blur into the saved image: the blurred
+    /// region's pixels differ from the original source. Half-black /
+    /// half-white → Gaussian blur at the boundary produces grey.
+    #[test]
+    fn compose_final_blurs_region() {
+        let mut source = image::RgbaImage::new(20, 10);
+        for y in 0..10 {
+            for x in 0..10 {
+                source.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+            for x in 10..20 {
+                source.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+            }
+        }
+        let mut state = EditorState::new(source);
+        state.anns.push(Annotation::Blur {
+            rect: Rect::from_xywh(0.0, 0.0, 20.0, 10.0),
+            kind: crate::editor::BlurKind::Gaussian,
+            strength: 3,
+        });
+
+        let out = compose_final(&state);
+        // Boundary pixel must be intermediate grey after Gaussian.
+        let mid = out.get_pixel(10, 5).0;
+        assert!(
+            mid[0] > 20 && mid[0] < 235,
+            "boundary blurred to {}",
+            mid[0]
+        );
+        // State image not mutated.
+        assert_eq!(
+            state.image.get_pixel(10, 5).0,
+            [255, 255, 255, 255],
+            "state.image unchanged"
+        );
+    }
+
     /// Pending marker renders as a polyline of consecutive `draw_line`
     /// calls — one per segment.
     #[test]
     fn render_pending_marker_emits_segment_lines() {
         let mut canvas = MockCanvas::default();
+        let source = image::RgbaImage::new(1, 1);
         render_ann(
             &mut canvas,
             &Annotation::Marker {
@@ -1015,6 +1165,7 @@ mod tests {
                 color: Color::RED,
                 width: 4.0,
             },
+            &source,
         );
         // 3 points → 2 segments → 2 draw_line calls.
         let line_count = canvas

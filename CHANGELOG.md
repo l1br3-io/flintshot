@@ -232,6 +232,19 @@ Categories used below:
   instead to keep the highest-risk Phase 1 task achievable — the plan
   pre-authorised this fallback). `EguiCanvas::draw_text` uses egui's
   native `Painter::text` (no new egui-side dep).
+- Blur / pixelate annotation tool end-to-end (Phase 1 Task 13).
+  Toolbar gains a "░ Blur" button with a Gaussian / Pixelate
+  `BlurKind` toggle (visible only while the Blur tool is active). Drag
+  selects a region; on commit, `flintshot-core::image_ops::blur` crops
+  the region from `state.image`, applies either
+  `imageproc::filter::gaussian_blur_f32` (Gaussian, sigma = strength)
+  or a block-average (Pixelate, block = strength), and blits the
+  result back over the region. New `Canvas::draw_image_region(img,
+  dest)` primitive carries the freshly-computed sub-image from core to
+  the shell (egui uploads a uniquely-named texture; `ImageCanvas` copies
+  pixels in-place). `render_ann` now takes a `source: &RgbaImage`
+  parameter so the blur dispatch can crop from the background. New
+  `flintshot-core::image_ops` module re-exports `blur` and `crop_region`.
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from

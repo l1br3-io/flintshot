@@ -174,6 +174,10 @@ pub struct EditorState {
     pub color: Color,
     /// Active stroke width.
     pub stroke_width: f32,
+    /// Active blur kind for `Tool::Blur` (Gaussian / Pixelate). Set by
+    /// the toolbar's `BlurKind` toggle; read at `begin_annotation` time
+    /// so the dragged annotation uses the currently-selected variant.
+    pub blur_kind: BlurKind,
     /// Active font size for `Tool::Text`.
     pub font_size: f32,
     /// Next number to assign for `Tool::Number`.
@@ -195,6 +199,7 @@ impl EditorState {
             tool: Tool::default(),
             color: Color::RED,
             stroke_width: 3.0,
+            blur_kind: BlurKind::default(),
             font_size: 16.0,
             next_number: 1,
             selection: None,
@@ -257,7 +262,7 @@ impl EditorState {
             },
             Tool::Blur => Annotation::Blur {
                 rect: Rect::new(at, at),
-                kind: BlurKind::default(),
+                kind: self.blur_kind,
                 strength: BLUR_DEFAULT_STRENGTH,
             },
             Tool::Text => Annotation::Text {
@@ -766,6 +771,7 @@ mod tests {
         assert_eq!(s.tool, Tool::Rect);
         assert_eq!(s.color, Color::RED);
         assert_eq!(s.stroke_width, 3.0);
+        assert_eq!(s.blur_kind, BlurKind::Gaussian);
         assert_eq!(s.font_size, 16.0);
         assert_eq!(s.next_number, 1);
         assert!(s.selection.is_none());
