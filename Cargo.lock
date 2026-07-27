@@ -2152,7 +2152,9 @@ dependencies = [
 name = "flintshot-core"
 version = "0.0.0"
 dependencies = [
+ "ab_glyph",
  "dirs",
+ "fontdb",
  "image",
  "imageproc",
  "serde",

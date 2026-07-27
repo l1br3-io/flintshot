@@ -181,5 +181,19 @@ impl Canvas for EguiCanvas {
         painter.line_segment([b_l, to_egui_pos(right, ppp)], egui_stroke);
     }
 
-    fn draw_text(&mut self, _pos: Point, _text: &str, _size: f32, _color: Color) {}
+    fn draw_text(&mut self, pos: Point, text: &str, size: f32, color: Color) {
+        let Some(painter) = &self.painter else {
+            return;
+        };
+        let ppp = self.ppp();
+        // `size` is physical px; egui wants logical px for FontId.
+        let font_id = egui::FontId::proportional(size / ppp);
+        painter.text(
+            to_egui_pos(pos, ppp),
+            egui::Align2::LEFT_TOP,
+            text,
+            font_id,
+            to_egui_color(color),
+        );
+    }
 }

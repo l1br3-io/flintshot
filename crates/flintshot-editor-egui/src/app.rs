@@ -103,6 +103,60 @@ impl EditorApp {
     fn publish_outcome(&self, outcome: flintshot_core::Result<EditorOutcome>) {
         *self.outcome.borrow_mut() = Some(outcome);
     }
+
+    /// Drain egui text-input events while in text-editing mode.
+    ///
+    /// egui reports typed characters via `Event::Text(String)` (which
+    /// may carry several chars for fast typing or IME composition);
+    /// `Backspace` / `Enter` arrive as `Event::Key`. We translate each
+    /// to the toolkit-agnostic [`InputEvent`] and feed it to the
+    /// dispatcher, which mutates the in-flight draft. The dispatcher's
+    /// outcomes for text events are always `Continue` (no save / copy
+    /// / cancel-editor mid-edit — Esc cancels the *draft* only), so we
+    /// don't need to branch on the outcome here.
+    fn dispatch_text_input(&mut self, ctx: &Context, modifiers: Modifiers) {
+        let events: Vec<egui::Event> = ctx.input(|i| i.raw.events.clone());
+        for event in events {
+            match event {
+                egui::Event::Text(text) => {
+                    for ch in text.chars() {
+                        self.state.dispatch_input(&InputEvent::TextInput(ch));
+                    }
+                }
+                egui::Event::Key {
+                    key: egui::Key::Backspace,
+                    pressed: true,
+                    ..
+                } => {
+                    self.state.dispatch_input(&InputEvent::Key {
+                        key: Key::Backspace,
+                        modifiers,
+                    });
+                }
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    ..
+                } => {
+                    self.state.dispatch_input(&InputEvent::Key {
+                        key: Key::Enter,
+                        modifiers,
+                    });
+                }
+                egui::Event::Key {
+                    key: egui::Key::Escape,
+                    pressed: true,
+                    ..
+                } => {
+                    self.state.dispatch_input(&InputEvent::Key {
+                        key: Key::Escape,
+                        modifiers,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 impl App for EditorApp {
@@ -124,6 +178,18 @@ impl App for EditorApp {
         // pointer branch runs.
 
         let modifiers = translate_modifiers(ctx.input(|i| i.modifiers));
+
+        // Text-editing modal mode (Task 12): when the user has placed
+        // a caret (Tool::Text click → pending Text annotation), route
+        // only text-affecting events and suppress the shortcut / pointer
+        // dispatch. The dispatcher does the same filtering on its side
+        // (`EditorState::is_editing_text`); we replicate the branch
+        // here so we don't steal an `s` keystroke for the Save shortcut
+        // while the user is typing.
+        if self.state.is_editing_text() {
+            self.dispatch_text_input(ctx, modifiers);
+            return;
+        }
 
         // One key event per frame: egui's `key_pressed` reports the
         // most recent press. If multiple keys fire on the same frame
@@ -255,6 +321,7 @@ impl App for EditorApp {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.state.tool, Tool::Rect, "▭ Rectangle");
                     ui.selectable_value(&mut self.state.tool, Tool::Arrow, "→ Arrow");
+                    ui.selectable_value(&mut self.state.tool, Tool::Text, "T Text");
                     ui.separator();
                     ui.label(format!("{} annotations", self.state.anns.len()));
                     ui.separator();
