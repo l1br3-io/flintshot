@@ -41,7 +41,7 @@ the task files.
 
 - [x] 011 — Arrow tool end-to-end → [`tasks/011-arrow-tool.md`](tasks/011-arrow-tool.md)
 - [x] 012 — Text tool (`cosmic-text`) → [`tasks/012-text-tool.md`](tasks/012-text-tool.md)
-- [ ] 013 — Blur tool (`imageproc`, computed in core) → [`tasks/013-blur-tool.md`](tasks/013-blur-tool.md)
+- [x] 013 — Blur tool (`imageproc`, computed in core) → [`tasks/013-blur-tool.md`](tasks/013-blur-tool.md)
 - [ ] **Checkpoint E** — all annotation tools work
 
 ## Phase 1.F — Region select & polish

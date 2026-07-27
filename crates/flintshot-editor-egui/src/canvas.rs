@@ -122,6 +122,35 @@ impl Canvas for EguiCanvas {
         painter.image(img.0.id(), dest, uv, egui::Color32::WHITE);
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "dest.min components are non-negative physical px within image bounds"
+    )]
+    fn draw_image_region(&mut self, img: &image::RgbaImage, dest: Rect) {
+        let Some(painter) = &self.painter else {
+            return;
+        };
+        let ppp = self.ppp();
+        // Upload the raw pixels to a uniquely-named texture so multiple
+        // blur annotations in the same frame don't clobber each other
+        // in egui's texture manager. The name incorporates the dest
+        // origin; Phase 1 doesn't cache across frames (re-uploads each
+        // frame), which is acceptable for the small number of blur
+        // annotations a typical screenshot accumulates.
+        let name = format!("flintshot-blur-{}-{}", dest.min.x as u32, dest.min.y as u32);
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [img.width() as usize, img.height() as usize],
+            img.as_raw(),
+        );
+        let texture = self
+            .ctx
+            .load_texture(name, color_image, egui::TextureOptions::NEAREST);
+        let dest_rect = to_egui_rect(dest, ppp);
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        painter.image(texture.id(), dest_rect, uv, egui::Color32::WHITE);
+    }
+
     fn draw_rect_outline(&mut self, rect: Rect, stroke: &Stroke) {
         let Some(painter) = &self.painter else {
             return;

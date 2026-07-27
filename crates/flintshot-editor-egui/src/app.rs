@@ -322,6 +322,21 @@ impl App for EditorApp {
                     ui.selectable_value(&mut self.state.tool, Tool::Rect, "▭ Rectangle");
                     ui.selectable_value(&mut self.state.tool, Tool::Arrow, "→ Arrow");
                     ui.selectable_value(&mut self.state.tool, Tool::Text, "T Text");
+                    ui.selectable_value(&mut self.state.tool, Tool::Blur, "░ Blur");
+                    if self.state.tool == Tool::Blur {
+                        ui.separator();
+                        ui.label("Kind:");
+                        ui.selectable_value(
+                            &mut self.state.blur_kind,
+                            flintshot_core::BlurKind::Gaussian,
+                            "Gaussian",
+                        );
+                        ui.selectable_value(
+                            &mut self.state.blur_kind,
+                            flintshot_core::BlurKind::Pixelate,
+                            "Pixelate",
+                        );
+                    }
                     ui.separator();
                     ui.label(format!("{} annotations", self.state.anns.len()));
                     ui.separator();
