@@ -6,16 +6,17 @@ status-flipped in place when shipped). For the narrative "why", see
 [`VISION.md`](VISION.md); for decision rationale, see
 [`adrs/`](adrs/).
 
-**CURRENT MILESTONE: Phase 1 — Capture + Editor Window** (in flight at
-[`specs/phase-1-capture-editor/`](specs/phase-1-capture-editor/)).
+**CURRENT MILESTONE: Phase 2 — Tray, hotkeys, multi-monitor, polish**
+(in flight; spec pending at
+[`specs/phase-2-*/`](specs/phase-2-*/)).
 
 ## Milestones
 
 | Milestone                                      | State         |
 | ---------------------------------------------- | ------------- |
 | Phase 0 — Scaffolding                          | Shipped       |
-| Phase 1 — Capture + editor window              | **In flight** |
-| Phase 2 — Tray, hotkeys, multi-monitor, polish | Planned       |
+| Phase 1 — Capture + editor window              | Shipped       |
+| Phase 2 — Tray, hotkeys, multi-monitor, polish | **In flight** |
 | Phase 3 — Pin-to-desktop + COSMIC applet       | Planned       |
 | Phase 4 — Upload                               | Planned       |
 | Phase 5 — Live overlay (Flameshot-style)       | Planned       |
