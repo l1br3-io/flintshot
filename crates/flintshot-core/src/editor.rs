@@ -612,9 +612,10 @@ impl EditorState {
     /// Dispatch an event while in text-editing mode. See
     /// [`dispatch_input`](Self::dispatch_input).
     ///
-    /// Phase 1 text editing is intentionally modal: a click elsewhere
-    /// does not move the caret or start a new annotation — the user
-    /// commits (`Enter`) or cancels (`Esc`) the current draft first.
+    /// A `PointerDown` commits the current draft and immediately starts
+    /// the next action at the clicked position — Flameshot-like
+    /// behaviour where clicking elsewhere places a new text caret (if
+    /// still on Text tool) or begins the newly-selected tool's drag.
     fn dispatch_text_event(
         &mut self,
         event: &crate::input::InputEvent,
@@ -645,9 +646,23 @@ impl EditorState {
                 self.type_char(*ch);
                 DispatchOutcome::Continue
             }
+            // Clicking elsewhere while editing commits the current
+            // draft and starts a fresh action at the new position
+            // (Flameshot behaviour). If the tool is still Text, a new
+            // caret is placed; if the user switched tools via the
+            // toolbar, the new tool's drag begins.
+            InputEvent::PointerDown { pos } => {
+                self.commit_text_draft();
+                if self.tool == Tool::Select {
+                    self.begin_selection(*pos);
+                } else {
+                    self.begin_annotation(*pos);
+                }
+                DispatchOutcome::Continue
+            }
             // Any other key / pointer event is ignored while editing
-            // text — the user must commit or cancel the draft first.
-            // This is what suppresses Ctrl+S / Ctrl+Z mid-edit.
+            // text. PointerDrag / PointerUp from the click that placed
+            // the caret are harmless no-ops here.
             _ => DispatchOutcome::Continue,
         }
     }
@@ -674,7 +689,11 @@ impl EditorState {
     /// An empty draft (no characters typed) never commits — committing
     /// a zero-content `Text` would litter `anns` with invisible
     /// annotations and skew the undo history.
-    fn commit_text_draft(&mut self) {
+    ///
+    /// Public so the shell can flush a pending draft when the user
+    /// switches tools via the toolbar (the tool change bypasses the
+    /// dispatcher, so the draft would otherwise stay modal forever).
+    pub fn commit_text_draft(&mut self) {
         let nonempty = matches!(
             &self.pending,
             Some(Annotation::Text { text, .. }) if !text.is_empty()
@@ -1723,24 +1742,82 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_text_pointer_ignored_while_editing() {
-        // A click elsewhere while editing does not start a new
-        // annotation or move the caret — Phase 1 keeps text editing
-        // modal (commit or cancel first).
+    fn dispatch_text_pointer_commits_and_repositions() {
+        // Flameshot-like behaviour: clicking elsewhere while a draft is
+        // active commits the current draft and places a new caret at
+        // the clicked position. An empty draft is cancelled (not
+        // committed), so the annotation list stays clean.
         let mut s = text_state();
         s.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(10.0, 10.0),
         });
+        s.dispatch_input(&InputEvent::TextInput('h'));
         // Click somewhere else while the draft is active.
         s.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(50.0, 50.0),
         });
+        // Previous draft committed (non-empty), new caret at (50,50).
+        assert_eq!(s.anns.len(), 1, "previous draft committed");
         match &s.pending {
             Some(Annotation::Text { pos, text, .. }) => {
-                assert_eq!(*pos, Point::new(10.0, 10.0), "original caret retained");
+                assert_eq!(*pos, Point::new(50.0, 50.0), "new caret at click position");
+                assert!(text.is_empty(), "new draft starts empty");
+            }
+            other => panic!("expected new pending Text, got {other:?}"),
+        }
+        match &s.anns[0] {
+            Annotation::Text { pos, text, .. } => {
+                assert_eq!(*pos, Point::new(10.0, 10.0));
+                assert_eq!(text, "h");
+            }
+            other => panic!("expected committed Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_text_pointer_empty_draft_cancels_then_repositions() {
+        // Clicking elsewhere with an empty draft cancels it (no empty
+        // annotation committed) and places a new caret.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        // No text typed — draft is empty.
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(50.0, 50.0),
+        });
+        assert_eq!(s.anns.len(), 0, "empty draft was cancelled, not committed");
+        match &s.pending {
+            Some(Annotation::Text { pos, text, .. }) => {
+                assert_eq!(*pos, Point::new(50.0, 50.0), "new caret at click position");
                 assert!(text.is_empty());
             }
-            other => panic!("expected original draft, got {other:?}"),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_text_pointer_switches_to_other_tool() {
+        // User was editing text, switched to Rectangle via toolbar,
+        // then clicks: the draft is committed and a Rect drag begins.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::TextInput('x'));
+        // Simulate toolbar tool change.
+        s.tool = Tool::Rect;
+        // Click to start drawing — this should commit the text and
+        // begin a rect annotation.
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 20.0),
+        });
+        assert_eq!(s.anns.len(), 1, "text draft committed");
+        match &s.pending {
+            Some(Annotation::Rect { rect, .. }) => {
+                assert_eq!(rect.min, Point::new(20.0, 20.0));
+            }
+            other => panic!("expected pending Rect, got {other:?}"),
         }
     }
 

@@ -67,6 +67,16 @@ pub trait Canvas {
     /// Draw left-to-right text starting at `pos`. (Shaping stays
     /// toolkit-specific; core only specifies the run.)
     fn draw_text(&mut self, pos: Point, text: &str, size: f32, color: Color);
+
+    /// Advance width of `text` at `size` px, in physical px. Used by
+    /// the shared render path to compute the caret position for an
+    /// in-flight text draft ([`EditorState::pending`]). Implementations
+    /// must use the same font metrics as their [`draw_text`](Self::draw_text)
+    /// so the caret lands at the visible end of the typed run.
+    ///
+    /// Returns 0.0 for an empty run (the caret sits at `pos.x`).
+    #[must_use]
+    fn measure_text(&self, text: &str, size: f32) -> f32;
 }
 
 /// Render `state` (background image + all annotations) via `canvas`.
@@ -108,6 +118,22 @@ pub fn render<C: Canvas>(
     }
     if let Some(pending) = &state.pending {
         render_ann(canvas, pending, &state.image);
+        // Caret indicator for an in-flight `Tool::Text` draft. Only
+        // drawn for `pending` (never for committed `anns`), so the
+        // saved/copied output via `compose_final` — which doesn't go
+        // through this path — never sees the caret. Without this the
+        // user has no visual feedback where the typed text will land,
+        // because `draw_text` with an empty string (or any string
+        // between keystrokes) draws nothing.
+        if let Annotation::Text {
+            pos,
+            text,
+            font_size,
+            color,
+        } = pending
+        {
+            draw_text_caret(canvas, *pos, text, *font_size, *color);
+        }
     }
     if let Some(sel) = state.selection {
         let n = sel.normalized();
@@ -123,6 +149,11 @@ pub fn render<C: Canvas>(
 /// apart from a committed `Annotation::Rect`. Blue is picked to match
 /// conventional selection-rectangle UX in screenshot tools.
 const SELECTION_STROKE: Stroke = Stroke::new(Color::rgb(0, 120, 215), 2.0);
+
+/// Caret stroke width (physical px) for the in-flight `Tool::Text`
+/// draft. Thin enough to read as a cursor rather than a tick, thick
+/// enough to survive `HiDPI` rounding at `pixels_per_point` ≥ 2.
+const CARET_STROKE_WIDTH: f32 = 1.5;
 
 /// Dispatch a single annotation to the appropriate `Canvas` primitive(s).
 ///
@@ -185,6 +216,18 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::R
             // and compose_final's ImageCanvas hit this same path so
             // WYSIWYG holds (ADR-0015).
             let n = rect.normalized();
+            // Skip degenerate rects. `crop_region` returns a 0×0
+            // `RgbaImage` for zero-area input, and uploading a
+            // zero-dimension texture panics wgpu ("Dimension X is
+            // zero"). The pending blur hits this on the first frame
+            // of every drag — `begin_annotation` seeds the rect as
+            // `Rect::new(at, at)` (zero area) before the user moves
+            // the pointer. The < 1 px threshold matches the
+            // degenerate-cancel contract in `EditorState::finish_pointer_up`
+            // and the selection-rect guard in `render()` below.
+            if n.width().abs() < 1.0 || n.height().abs() < 1.0 {
+                return;
+            }
             let region = crate::image_ops::crop_region(source, n);
             let blurred = crate::image_ops::blur(&region, *kind, *strength);
             canvas.draw_image_region(&blurred, n);
@@ -267,6 +310,33 @@ pub fn arrow_barbs(a: Point, b: Point, head_size: f32) -> [Point; 2] {
     ]
 }
 
+/// Draw a vertical caret bar at the end of an in-flight text draft.
+///
+/// Position: `pos.x + measure_text(text, font_size)` (so the bar
+/// appears immediately after the last typed glyph, or at the click
+/// position when the draft is empty). Height = `font_size`; width =
+/// [`CARET_STROKE_WIDTH`]. Colour matches the draft text colour.
+///
+/// Used only by the live editor view via [`render`]; the saved /
+/// copied image excludes `pending` annotations, so the caret never
+/// reaches disk or the clipboard.
+fn draw_text_caret<C: Canvas>(
+    canvas: &mut C,
+    pos: Point,
+    text: &str,
+    font_size: f32,
+    color: Color,
+) {
+    let advance = canvas.measure_text(text, font_size);
+    let x = pos.x + advance;
+    let stroke = Stroke::new(color, CARET_STROKE_WIDTH);
+    canvas.draw_line(
+        Point::new(x, pos.y),
+        Point::new(x, pos.y + font_size),
+        &stroke,
+    );
+}
+
 /// Compose the final image: a clone of `state.image` with every
 /// committed annotation rendered into it. Excludes `state.pending`
 /// (in-flight annotations are not part of the saved output — the
@@ -293,6 +363,33 @@ pub fn compose_final(state: &EditorState) -> image::RgbaImage {
         render_ann(&mut canvas, ann, &state.image);
     }
     canvas.into_inner()
+}
+
+/// Compose the final image (background + annotations), then crop to
+/// `rect`. The source of truth for selection-aware outputs: Copy with
+/// an active `Tool::Select` region emits just the selected pixels,
+/// with annotations baked in (clipped at the region boundary by the
+/// canvas's pixel-level bounds).
+///
+/// Pure / non-mutating: `state.image`, `state.anns`, and
+/// `state.selection` are untouched. This is the key difference from
+/// [`EditorState::crop`](crate::EditorState::crop), which *replaces*
+/// `state.image` with the cropped sub-image. Use `compose_final_region`
+/// when the caller wants a one-shot cropped buffer (e.g. placing bytes
+/// on the clipboard without disturbing the editor); use
+/// `EditorState::crop` when the user wants to permanently narrow the
+/// editor to the selection.
+///
+/// Returns a 0×0 image when `rect` is degenerate (< 1 px in either
+/// dimension) or falls entirely outside the image (see
+/// [`crop_region`](crate::image_ops::crop_region)). Callers that need
+/// a non-empty result should guard against degenerate rects before
+/// calling, typically with the same `width/height >= 1.0` check the
+/// render path uses for the in-flight selection outline.
+#[must_use]
+pub fn compose_final_region(state: &EditorState, rect: Rect) -> image::RgbaImage {
+    let full = compose_final(state);
+    crate::image_ops::crop_region(&full, rect)
 }
 
 /// Headless [`Canvas`] that draws into an [`image::RgbaImage`]. Used
@@ -444,6 +541,22 @@ impl Canvas for ImageCanvas {
             return;
         };
         rasterize_text(&mut self.image, pos, text, size, color, font);
+    }
+
+    /// Mirror `rasterize_text`'s horizontal advance using the same
+    /// system font + scale. Kept in lockstep so the live editor view
+    /// (egui) and the saved/copied image agree on caret placement for
+    /// the brief moment before commit; `compose_final` doesn't call
+    /// this since `pending` is excluded from saved output.
+    fn measure_text(&self, text: &str, size: f32) -> f32 {
+        use ab_glyph::{Font, ScaleFont};
+        let Some(font) = system_font() else {
+            return 0.0;
+        };
+        let scaled = font.as_scaled(ab_glyph::PxScale::from(size));
+        text.chars()
+            .map(|ch| scaled.h_advance(scaled.glyph_id(ch)))
+            .sum()
     }
 }
 
@@ -854,6 +967,19 @@ impl Canvas for MockCanvas {
             color,
         });
     }
+
+    /// Deterministic monospace-style estimate: `len * size * 0.6`.
+    /// Real shells use their shaping backend; the mock only needs a
+    /// predictable value so caret-position assertions in render tests
+    /// can compute the expected geometry without re-implementing
+    /// `ab_glyph` / egui's layouter.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "char count is bounded by the draft string length; realistic screenshots have ≤ 2^24 chars"
+    )]
+    fn measure_text(&self, text: &str, size: f32) -> f32 {
+        text.chars().count() as f32 * size * 0.6
+    }
 }
 
 #[cfg(test)]
@@ -1123,6 +1249,174 @@ mod tests {
         }
     }
 
+    /// Regression: a zero-area (or sub-pixel) `Annotation::Blur` must
+    /// not emit `draw_image_region`. The blur render path used to
+    /// unconditionally crop → blur → blit, which on the first frame
+    /// of every drag (`begin_annotation` seeds `Rect::new(at, at)`)
+    /// produced a 0×0 texture and crashed wgpu with
+    /// "Dimension X is zero". The guard in `render_ann` returns early
+    /// before touching the canvas, so this is the direct crash repro.
+    #[test]
+    fn render_blur_skips_degenerate_rect() {
+        let source = image::RgbaImage::new(20, 10);
+        // Zero-area rect — exactly what `begin_annotation` produces
+        // on PointerDown before the user drags.
+        let zero = Annotation::Blur {
+            rect: Rect::new(Point::new(5.0, 5.0), Point::new(5.0, 5.0)),
+            kind: crate::editor::BlurKind::Gaussian,
+            strength: 2,
+        };
+        // Sub-1px rect — must also be skipped per the threshold
+        // contract shared with `finish_pointer_up` and the selection
+        // rect guard.
+        let thin = Annotation::Blur {
+            rect: Rect::from_xywh(5.0, 5.0, 0.4, 8.0),
+            kind: crate::editor::BlurKind::Gaussian,
+            strength: 2,
+        };
+
+        for ann in [zero, thin] {
+            let mut canvas = MockCanvas::default();
+            render_ann(&mut canvas, &ann, &source);
+            assert!(
+                canvas.calls.is_empty(),
+                "degenerate blur should emit no draw calls, got {:?}",
+                canvas.calls
+            );
+        }
+    }
+
+    /// A pending `Annotation::Text` renders the text run followed by
+    /// a single `DrawLine` for the caret indicator. The caret's x
+    /// equals `pos.x + measure_text(text, font_size)`, so it sits at
+    /// the visible end of the typed run. Locks the caret contract:
+    /// without this `Tool::Text` shows no feedback where the typed
+    /// text will land (regression flagged against the Task 012
+    /// acceptance "Clicking with `Tool::Text` places a text input caret").
+    #[test]
+    fn render_pending_text_emits_caret_at_end_of_run() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 40));
+        let pos = Point::new(10.0, 5.0);
+        let font_size = 16.0;
+        let color = Color::rgb(0, 0, 0);
+        state.pending = Some(Annotation::Text {
+            pos,
+            text: "hi".to_owned(),
+            font_size,
+            color,
+        });
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg).expect("render");
+
+        // Upload + blit + DrawText (the run) + DrawLine (the caret).
+        let mut it = canvas.calls.iter();
+        assert!(matches!(it.next(), Some(DrawCall::UploadImage)));
+        assert!(matches!(it.next(), Some(DrawCall::DrawImage { .. })));
+        match it.next() {
+            Some(DrawCall::DrawText {
+                pos: p,
+                text,
+                size,
+                color: c,
+            }) => {
+                assert_eq!(*p, pos);
+                assert_eq!(text, "hi");
+                assert_eq!(*size, font_size);
+                assert_eq!(*c, color);
+            }
+            other => panic!("expected DrawText for pending run, got {other:?}"),
+        }
+        // MockCanvas::measure_text returns `len * size * 0.6`, so
+        // advance for "hi" at size 16.0 = 19.2 px.
+        let advance = 19.2_f32;
+        match it.next() {
+            Some(DrawCall::DrawLine { a, b, stroke }) => {
+                assert_eq!(*a, Point::new(pos.x + advance, pos.y), "caret top");
+                assert_eq!(
+                    *b,
+                    Point::new(pos.x + advance, pos.y + font_size),
+                    "caret bottom"
+                );
+                assert_eq!(stroke.color, color, "caret uses text colour");
+                assert_eq!(stroke.width, CARET_STROKE_WIDTH, "caret stroke width");
+            }
+            other => panic!("expected DrawLine caret, got {other:?}"),
+        }
+        assert!(it.next().is_none(), "no further draw calls");
+    }
+
+    /// An empty pending text draft still emits a caret — at `pos.x`
+    /// (advance is 0). This is the just-clicked-before-typing state,
+    /// and is precisely the case where the user needs the indicator
+    /// most, since there's no visible text yet to anchor against.
+    #[test]
+    fn render_pending_empty_text_emits_caret_at_pos() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 40));
+        let pos = Point::new(33.0, 12.0);
+        let font_size = 20.0;
+        state.pending = Some(Annotation::Text {
+            pos,
+            text: String::new(),
+            font_size,
+            color: Color::RED,
+        });
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg).expect("render");
+
+        // The empty run still emits a DrawText (the dispatcher doesn't
+        // special-case it), followed by the caret at pos.x (advance 0).
+        let has_caret_at_pos = canvas.calls.iter().any(|c| match c {
+            DrawCall::DrawLine { a, b, .. } => {
+                *a == Point::new(pos.x, pos.y) && *b == Point::new(pos.x, pos.y + font_size)
+            }
+            _ => false,
+        });
+        assert!(
+            has_caret_at_pos,
+            "empty draft must still draw caret at pos.x"
+        );
+    }
+
+    /// A *committed* `Annotation::Text` must NOT emit a caret — the
+    /// indicator is a live-editor affordance for `pending` only, and
+    /// must never reach `compose_final`'s output. Guards against a
+    /// regression that wires caret drawing into `render_ann` instead
+    /// of the `pending`-only branch in `render()`.
+    #[test]
+    fn render_committed_text_emits_no_caret() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 40));
+        state.anns.push(Annotation::Text {
+            pos: Point::new(10.0, 5.0),
+            text: "committed".to_owned(),
+            font_size: 16.0,
+            color: Color::rgb(0, 0, 0),
+        });
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg).expect("render");
+
+        // The committed text emits exactly one DrawText (no DrawLine).
+        assert!(
+            canvas
+                .calls
+                .iter()
+                .any(|c| matches!(c, DrawCall::DrawText { .. })),
+            "committed text should render"
+        );
+        assert!(
+            !canvas
+                .calls
+                .iter()
+                .any(|c| matches!(c, DrawCall::DrawLine { .. })),
+            "committed text must not emit a caret"
+        );
+    }
+
     /// `compose_final` bakes a blur into the saved image: the blurred
     /// region's pixels differ from the original source. Half-black /
     /// half-white → Gaussian blur at the boundary produces grey.
@@ -1299,6 +1593,104 @@ mod tests {
         let out = compose_final(&state);
         assert_eq!(out.dimensions(), bg.dimensions());
         assert_eq!(out.as_raw(), bg.as_raw());
+    }
+
+    /// `compose_final_region` returns the sub-image at `rect` with
+    /// annotations already baked in. Pixel-level check: a red rect
+    /// drawn over the boundary between cropped-in and cropped-out
+    /// regions appears only inside the crop.
+    #[test]
+    fn compose_final_region_crops_with_annotations() {
+        // Background: white 100x100.
+        let bg = image::RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255]));
+        let mut state = EditorState::new(bg);
+        // Solid red 100x100 rect covering the whole canvas — every
+        // output pixel is red after compose_final.
+        state.anns.push(Annotation::Rect {
+            rect: Rect::from_xywh(0.0, 0.0, 100.0, 100.0),
+            stroke: Stroke::new(Color::RED, 1.0),
+            fill: Some(Color::RED),
+        });
+
+        let out = compose_final_region(&state, Rect::from_xywh(20.0, 30.0, 40.0, 50.0));
+
+        assert_eq!(out.dimensions(), (40, 50), "cropped to rect size");
+        // Every pixel inside the crop is red (fill applied before crop).
+        for y in 0..50 {
+            for x in 0..40 {
+                assert_eq!(
+                    out.get_pixel(x, y),
+                    &image::Rgba([255, 0, 0, 255]),
+                    "pixel ({x},{y}) should be red after crop"
+                );
+            }
+        }
+    }
+
+    /// `compose_final_region` matches `crop_region(&compose_final(state), rect)`
+    /// byte-for-byte — the documented equivalence. Catches any future
+    /// refactor that tries to "optimise" by translating annotations
+    /// directly into a smaller canvas (which would diverge on
+    /// stroke-asymmetry / clipping edge cases).
+    #[test]
+    fn compose_final_region_matches_compose_then_crop() {
+        let bg = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
+        let mut state = EditorState::new(bg);
+        state.anns.push(Annotation::Rect {
+            rect: Rect::from_xywh(10.0, 10.0, 30.0, 30.0),
+            stroke: Stroke::new(Color::rgb(0, 200, 0), 2.0),
+            fill: None,
+        });
+        let rect = Rect::from_xywh(15.0, 15.0, 20.0, 20.0);
+
+        let direct = compose_final_region(&state, rect);
+        let two_step = crate::image_ops::crop_region(&compose_final(&state), rect);
+
+        assert_eq!(direct.dimensions(), two_step.dimensions());
+        assert_eq!(
+            direct.as_raw(),
+            two_step.as_raw(),
+            "pixel buffers must match"
+        );
+    }
+
+    /// `compose_final_region` does NOT mutate `state` — the editor's
+    /// image, annotations, and selection are all left intact. This is
+    /// the contract that distinguishes it from `EditorState::crop`
+    /// (which the Copy path must not invoke, since the user is not
+    /// asking to narrow the editor — only to copy the selection).
+    #[test]
+    fn compose_final_region_does_not_mutate_state() {
+        let bg = image::RgbaImage::from_pixel(50, 50, image::Rgba([255, 255, 255, 255]));
+        let mut state = EditorState::new(bg.clone());
+        state.anns.push(Annotation::Rect {
+            rect: Rect::from_xywh(5.0, 5.0, 10.0, 10.0),
+            stroke: Stroke::new(Color::RED, 1.0),
+            fill: None,
+        });
+        state.selection = Some(Rect::from_xywh(10.0, 10.0, 20.0, 20.0));
+
+        let img_before = state.image.clone();
+        let anns_before = state.anns.clone();
+        let sel_before = state.selection;
+
+        let _ = compose_final_region(&state, Rect::from_xywh(10.0, 10.0, 20.0, 20.0));
+
+        assert_eq!(state.image.as_raw(), img_before.as_raw(), "image unchanged");
+        assert_eq!(state.anns.len(), anns_before.len(), "anns unchanged");
+        assert_eq!(state.selection, sel_before, "selection unchanged");
+    }
+
+    /// A zero-area `rect` (matching `crop_region`'s degenerate-input
+    /// contract) yields a 0×0 image. The Copy path guards against
+    /// degenerate selections before calling, but the function itself
+    /// must still be safe to call with a degenerate rect.
+    #[test]
+    fn compose_final_region_degenerate_is_empty() {
+        let state = EditorState::new(image::RgbaImage::new(50, 50));
+        // Zero-width rect: min.x == max.x, so x1.saturating_sub(x0) == 0.
+        let out = compose_final_region(&state, Rect::from_xywh(10.0, 10.0, 0.0, 20.0));
+        assert_eq!(out.dimensions(), (0, 0));
     }
 
     /// TODO Task 14: a non-empty `state.selection` renders as a single
