@@ -213,6 +213,25 @@ Categories used below:
   arrows (ADR-0015 WYSIWYG). `ImageCanvas::draw_line` filled in
   alongside; degenerate arrows (sub-px drag) cancel on pointer-up,
   matching the Rect tool's click-without-drag contract.
+- Text annotation tool end-to-end (Phase 1 Task 12). Toolbar gains a
+  "T Text" button; click places a caret, typing appends to an
+  in-flight `Annotation::Text` draft, `Enter` commits, `Esc` cancels
+  the draft (stays in editor), `Backspace` deletes the last char. Empty
+  drafts never commit. While editing, keyboard shortcuts (`Ctrl+S`,
+  `Ctrl+Z`, etc.) are suppressed so the user can type freely; pointer
+  events are ignored until the draft is committed or cancelled (Phase 1
+  text editing is modal). New `InputEvent::TextInput(char)` carries
+  printable-char input from the shell (`egui::Event::Text`) into the
+  dispatcher. Multi-line text is deferred to Phase 2.
+- `ab_glyph` + `fontdb` added to `flintshot-core` (Phase 1 Task 12).
+  `ImageCanvas::draw_text` rasterises text annotations into the saved /
+  copied PNG via `ab_glyph` glyph outlines + source-over alpha
+  compositing; `fontdb` discovers a system sans-serif face via
+  fontconfig (cached in a process-wide `OnceLock`). See ADR-0017 for
+  the swap from the originally-specced `cosmic-text` (shipped `ab_glyph`
+  instead to keep the highest-risk Phase 1 task achievable — the plan
+  pre-authorised this fallback). `EguiCanvas::draw_text` uses egui's
+  native `Painter::text` (no new egui-side dep).
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from

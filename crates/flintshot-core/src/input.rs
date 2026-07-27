@@ -107,6 +107,16 @@ pub enum InputEvent {
     /// committed"). The release position itself is ignored — see
     /// `EditorState::dispatch_input` for details.
     PointerUp,
+    /// A printable character was typed (text input).
+    ///
+    /// Only meaningful while a text draft is active (see
+    /// [`EditorState::is_editing_text`]); the dispatcher drops it
+    /// outside text editing. Shells translate their toolkit's text
+    /// input events (egui `Event::Text`) into this variant at the
+    /// event boundary — `Key::Char(c)` is reserved for key-press
+    /// detection (shortcut matching), not text input, so the two
+    /// paths don't collide when the user types an `s` mid-edit.
+    TextInput(char),
 }
 
 /// Side-effect the shell should perform after dispatching an event.

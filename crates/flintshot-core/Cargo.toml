@@ -13,7 +13,9 @@ authors.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+ab_glyph = "0.2"
 dirs = { workspace = true }
+fontdb = "0.23"
 image = { workspace = true }
 imageproc = { workspace = true }
 serde = { workspace = true }

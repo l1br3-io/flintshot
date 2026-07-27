@@ -209,10 +209,14 @@ impl EditorState {
     /// [`update_annotation`](Self::update_annotation); release should
     /// call [`commit_annotation`](Self::commit_annotation).
     ///
-    /// Tools with a non-drag input model (`Text`, `Number`, `Select`)
-    /// are no-ops here; they have dedicated entry points (Text gets a
-    /// `begin_text` method in Task 12; Number gets its own placement
-    /// flow; Select is handled by the shell directly).
+    /// `Tool::Text` uses this same entry point: a click places a caret
+    /// (an empty `Annotation::Text` in `pending`), and subsequent
+    /// [`InputEvent::TextInput`] events append to the draft until
+    /// `Enter` / `Esc` (see [`dispatch_input`](Self::dispatch_input)'s
+    /// text-editing branch).
+    ///
+    /// Tools with a different input model (`Number`, `Select`) are
+    /// no-ops here; they have dedicated entry points.
     ///
     /// If a `pending` annotation already exists it is replaced — the
     /// shell should `commit_annotation()` or `cancel_annotation()`
@@ -256,9 +260,15 @@ impl EditorState {
                 kind: BlurKind::default(),
                 strength: BLUR_DEFAULT_STRENGTH,
             },
-            // Text / Number / Select have non-drag input models; their
-            // entry points are tool-specific (see method doc).
-            Tool::Text | Tool::Number | Tool::Select => return,
+            Tool::Text => Annotation::Text {
+                pos: at,
+                text: String::new(),
+                font_size: self.font_size,
+                color: self.color,
+            },
+            // Number / Select have non-drag input models; their entry
+            // points are tool-specific (see method doc).
+            Tool::Number | Tool::Select => return,
         };
         self.pending = Some(ann);
     }
@@ -391,6 +401,18 @@ impl EditorState {
         event: &crate::input::InputEvent,
     ) -> crate::input::DispatchOutcome {
         use crate::input::{DispatchOutcome, InputEvent};
+
+        // Text-editing modal mode: once a PointerDown with Tool::Text
+        // has placed a caret (`pending` is an empty/partial Text
+        // annotation), keyboard shortcuts are suppressed so the user
+        // can type freely without Ctrl+S / Ctrl+Z stealing focus.
+        // Only text-affecting events (TextInput, Backspace, Enter, Esc)
+        // and pointer events that would start a new annotation are
+        // routed differently — see `dispatch_text_event`.
+        if self.is_editing_text() {
+            return self.dispatch_text_event(event);
+        }
+
         match event {
             InputEvent::Key { key, modifiers } => self.dispatch_key(*key, *modifiers),
             InputEvent::PointerDown { pos } => {
@@ -405,6 +427,98 @@ impl EditorState {
                 self.finish_pointer_up();
                 DispatchOutcome::Continue
             }
+            // Stray text input outside text-editing mode: drop it.
+            // (The shell shouldn't send these, but the dispatcher must
+            // be robust against a TextInput arriving when no draft is
+            // active — e.g. a race between placement and the next frame.)
+            InputEvent::TextInput(_) => DispatchOutcome::Continue,
+        }
+    }
+
+    /// Whether a text draft is currently being edited.
+    ///
+    /// True when `pending` holds an in-progress `Annotation::Text`.
+    /// The dispatcher uses this to switch into text-editing modal
+    /// mode (see [`dispatch_input`](Self::dispatch_input)).
+    #[must_use]
+    pub fn is_editing_text(&self) -> bool {
+        matches!(self.pending, Some(Annotation::Text { .. }))
+    }
+
+    /// Dispatch an event while in text-editing mode. See
+    /// [`dispatch_input`](Self::dispatch_input).
+    ///
+    /// Phase 1 text editing is intentionally modal: a click elsewhere
+    /// does not move the caret or start a new annotation — the user
+    /// commits (`Enter`) or cancels (`Esc`) the current draft first.
+    fn dispatch_text_event(
+        &mut self,
+        event: &crate::input::InputEvent,
+    ) -> crate::input::DispatchOutcome {
+        use crate::geom::Key;
+        use crate::input::{DispatchOutcome, InputEvent};
+        match event {
+            InputEvent::Key {
+                key: Key::Escape, ..
+            } => {
+                self.cancel_annotation();
+                DispatchOutcome::Continue
+            }
+            InputEvent::Key {
+                key: Key::Enter, ..
+            } => {
+                self.commit_text_draft();
+                DispatchOutcome::Continue
+            }
+            InputEvent::Key {
+                key: Key::Backspace,
+                ..
+            } => {
+                self.backspace_text();
+                DispatchOutcome::Continue
+            }
+            InputEvent::TextInput(ch) => {
+                self.type_char(*ch);
+                DispatchOutcome::Continue
+            }
+            // Any other key / pointer event is ignored while editing
+            // text — the user must commit or cancel the draft first.
+            // This is what suppresses Ctrl+S / Ctrl+Z mid-edit.
+            _ => DispatchOutcome::Continue,
+        }
+    }
+
+    /// Append a typed character to the in-flight text draft.
+    ///
+    /// No-op when no text draft is active (`is_editing_text()` is
+    /// false). Called by the dispatcher's text-editing branch.
+    fn type_char(&mut self, ch: char) {
+        if let Some(Annotation::Text { text, .. }) = &mut self.pending {
+            text.push(ch);
+        }
+    }
+
+    /// Delete the last character from the in-flight text draft.
+    fn backspace_text(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &mut self.pending {
+            text.pop();
+        }
+    }
+
+    /// Commit the in-flight text draft to `anns`, or cancel it if empty.
+    ///
+    /// An empty draft (no characters typed) never commits — committing
+    /// a zero-content `Text` would litter `anns` with invisible
+    /// annotations and skew the undo history.
+    fn commit_text_draft(&mut self) {
+        let nonempty = matches!(
+            &self.pending,
+            Some(Annotation::Text { text, .. }) if !text.is_empty()
+        );
+        if nonempty {
+            self.commit_annotation();
+        } else {
+            self.cancel_annotation();
         }
     }
 
@@ -894,12 +1008,14 @@ mod tests {
         assert!(!ann.contains(Point::new(50.0, -50.0)));
     }
 
-    /// `begin_annotation` for `Tool::Text` / `Number` / `Select` is a no-op
+    /// `begin_annotation` for `Tool::Number` / `Select` is a no-op
     /// (different input model — those tools have dedicated entry points).
+    /// `Tool::Text` is NOT in this list as of Task 12: a click places
+    /// a caret (see `dispatch_text_click_places_caret`).
     #[test]
     fn begin_annotation_skips_non_drag_tools() {
         let mut s = EditorState::new(blank_image());
-        for tool in [Tool::Text, Tool::Number, Tool::Select] {
+        for tool in [Tool::Number, Tool::Select] {
             s.tool = tool;
             s.begin_annotation(Point::new(1.0, 1.0));
             assert!(s.pending.is_none(), "{tool:?} should be a no-op");
@@ -1192,5 +1308,248 @@ mod tests {
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.pending.is_none(), "degenerate arrow cancelled");
         assert_eq!(s.anns.len(), 0, "no annotation committed");
+    }
+
+    // --- Task 12: text tool state machine tests ---
+    //
+    // Text editing is a click-to-place-then-type model (not a drag).
+    // The dispatcher enters "text editing mode" once a PointerDown
+    // with `Tool::Text` creates a `pending: Annotation::Text`; while
+    // editing, keyboard shortcuts (Ctrl+S/Z/etc.) are suppressed and
+    // only text-affecting events (TextInput, Backspace, Enter, Esc)
+    // are honoured. Enter commits; Esc cancels; an empty draft never
+    // commits.
+
+    fn text_state() -> EditorState {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Text;
+        s
+    }
+
+    #[test]
+    fn dispatch_text_click_places_caret() {
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(30.0, 40.0),
+        });
+        match &s.pending {
+            Some(Annotation::Text { pos, text, .. }) => {
+                assert_eq!(*pos, Point::new(30.0, 40.0), "caret at click position");
+                assert!(text.is_empty(), "draft starts empty");
+            }
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_text_typing_appends_chars() {
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::TextInput('h'));
+        s.dispatch_input(&InputEvent::TextInput('i'));
+        match &s.pending {
+            Some(Annotation::Text { text, .. }) => assert_eq!(text, "hi"),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+        assert_eq!(s.anns.len(), 0, "typing does not commit");
+    }
+
+    #[test]
+    fn dispatch_text_backspace_deletes_last_char() {
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        for ch in "hi!".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Backspace,
+            modifiers: Modifiers::default(),
+        });
+        match &s.pending {
+            Some(Annotation::Text { text, .. }) => assert_eq!(text, "hi"),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_text_enter_commits_nonempty_draft() {
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        for ch in "hello".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        assert_eq!(
+            s.dispatch_input(&InputEvent::Key {
+                key: Key::Enter,
+                modifiers: Modifiers::default(),
+            }),
+            DispatchOutcome::Continue
+        );
+        assert!(s.pending.is_none(), "Enter clears pending");
+        assert_eq!(s.anns.len(), 1);
+        match &s.anns[0] {
+            Annotation::Text { text, pos, .. } => {
+                assert_eq!(text, "hello");
+                assert_eq!(*pos, Point::new(10.0, 10.0));
+            }
+            other => panic!("expected committed Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_text_enter_empty_cancels() {
+        // Placing the caret and immediately pressing Enter must NOT
+        // commit an empty Text annotation — that would litter the
+        // annotation list with invisible empties.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert!(s.pending.is_none(), "empty draft cancelled");
+        assert_eq!(s.anns.len(), 0, "nothing committed");
+    }
+
+    #[test]
+    fn dispatch_text_escape_cancels_draft() {
+        // Esc while editing cancels the DRAFT (stays in the editor),
+        // unlike Esc outside editing which cancels the EDITOR (closes
+        // the window). The dispatcher distinguishes via the outcome:
+        // Continue here vs Cancel for editor-close.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        for ch in "draft".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        assert_eq!(
+            s.dispatch_input(&InputEvent::Key {
+                key: Key::Escape,
+                modifiers: Modifiers::default(),
+            }),
+            DispatchOutcome::Continue,
+            "Esc while editing returns Continue (stays in editor)"
+        );
+        assert!(s.pending.is_none(), "draft cancelled");
+        assert_eq!(s.anns.len(), 0);
+    }
+
+    #[test]
+    fn dispatch_text_editing_bypasses_ctrl_s() {
+        // While editing text, Ctrl+S must not trigger Save (the user
+        // is mid-edit; committing the draft first is the user's job).
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::TextInput('a'));
+        assert_eq!(
+            s.dispatch_input(&InputEvent::Key {
+                key: Key::Char('s'),
+                modifiers: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+            }),
+            DispatchOutcome::Continue,
+            "Ctrl+S suppressed while editing text"
+        );
+    }
+
+    #[test]
+    fn dispatch_text_editing_bypasses_ctrl_z() {
+        // Ctrl+Z while editing text does NOT undo committed annotations
+        // (it would be jarring to lose prior work while typing). The
+        // user escapes or commits the draft first to regain undo.
+        let mut s = EditorState::new(blank_image());
+        s.anns.push(Annotation::Rect {
+            rect: Rect::from_xywh(0.0, 0.0, 5.0, 5.0),
+            stroke: Stroke::new(Color::RED, 1.0),
+            fill: None,
+        });
+        s.tool = Tool::Text;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        assert_eq!(
+            s.dispatch_input(&InputEvent::Key {
+                key: Key::Char('z'),
+                modifiers: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+            }),
+            DispatchOutcome::Continue
+        );
+        assert_eq!(s.anns.len(), 1, "prior annotation untouched");
+        assert!(s.pending.is_some(), "draft still active");
+    }
+
+    #[test]
+    fn dispatch_text_pointer_ignored_while_editing() {
+        // A click elsewhere while editing does not start a new
+        // annotation or move the caret — Phase 1 keeps text editing
+        // modal (commit or cancel first).
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        // Click somewhere else while the draft is active.
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(50.0, 50.0),
+        });
+        match &s.pending {
+            Some(Annotation::Text { pos, text, .. }) => {
+                assert_eq!(*pos, Point::new(10.0, 10.0), "original caret retained");
+                assert!(text.is_empty());
+            }
+            other => panic!("expected original draft, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_text_undo_after_commit_restores_empty() {
+        // Undo after committing a text annotation pops the snapshot
+        // (pre-commit anns) — works via the existing snapshot path
+        // (Task 7), no extra plumbing.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::TextInput('x'));
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.anns.len(), 1);
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Char('z'),
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        });
+        assert_eq!(s.anns.len(), 0, "undo removed committed text");
+    }
+
+    #[test]
+    fn dispatch_text_input_when_not_editing_is_noop() {
+        // A TextInput event with no active draft does nothing (the
+        // shell should not send these, but the dispatcher must be
+        // robust against stray events).
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::TextInput('h'));
+        assert!(s.pending.is_none());
+        assert_eq!(s.anns.len(), 0);
     }
 }
