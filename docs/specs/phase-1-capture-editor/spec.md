@@ -45,17 +45,22 @@ user annotate, save, or copy.
 - [x] `xcap` integration for single-monitor capture
 - [x] `flintshot-editor-egui`: eframe window implementing `EditorShell`;
       screenshot uploaded via `Canvas::upload_image`
-- [ ] All annotation drawing routed through the `Canvas` trait from day
-      one — no direct `egui::Painter` calls for annotations
-- [ ] Tools: **Select (region crop), Rectangle, Arrow, Text, Blur**
-- [ ] Color and stroke-width picker, persisted in config
-- [ ] Outputs: **Save** (`rfd` dialog), **Copy to clipboard** (`arboard`)
-- [ ] Undo/redo with snapshot history
-- [ ] Keyboard: `Esc` cancel, `Ctrl+S` save, `Ctrl+C` copy,
+- [x] All annotation drawing routed through the `Canvas` trait from day
+      one — no direct `egui::Painter` calls for annotations _(shared
+      `flintshot-core::render::render()` walks `EditorState`; egui only
+      implements primitives. Locked by ADR-0012.)_
+- [x] Tools: **Select (region crop), Rectangle, Arrow, Text, Blur**
+- [x] Color and stroke-width picker, persisted in config
+- [x] Outputs: **Save** (`rfd` dialog), **Copy to clipboard** (`arboard`)
+- [x] Undo/redo with snapshot history
+- [x] Keyboard: `Esc` cancel, `Ctrl+S` save, `Ctrl+C` copy,
       `Ctrl+Z`/`Ctrl+Y` undo/redo
 - [x] Initial config file at platform-appropriate location (`dirs` crate)
-- [ ] `cosmic-text` for text annotation rendering
-- [ ] HiDPI-aware coordinates
+- [x] Text annotation rendering _(via `ab_glyph` + `fontdb`, not
+      `cosmic-text`; see [ADR-0017](../../adrs/ADR-0017-ab-glyph-over-cosmic-text-phase-1.md).
+      `cosmic-text` is the planned Phase 2 upgrade.)_
+- [x] HiDPI-aware coordinates _(core in physical px; shell converts at
+      the event boundary via `pixels_per_point`.)_
 
 ## Exit criteria
 
