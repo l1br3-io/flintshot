@@ -85,6 +85,41 @@ impl Rect {
             max: Point::new(self.min.x.max(self.max.x), self.min.y.max(self.max.y)),
         }
     }
+
+    /// Intersection of two rects. Returns `None` if they don't overlap
+    /// or the overlap is degenerate (zero area).
+    ///
+    /// Both inputs are normalized first so flipped corners don't
+    /// produce wrong results. The result is always normalized.
+    #[must_use]
+    pub fn intersect(self, other: Self) -> Option<Self> {
+        let a = self.normalized();
+        let b = other.normalized();
+        let min_x = a.min.x.max(b.min.x);
+        let min_y = a.min.y.max(b.min.y);
+        let max_x = a.max.x.min(b.max.x);
+        let max_y = a.max.y.min(b.max.y);
+        if max_x > min_x && max_y > min_y {
+            Some(Self::new(
+                Point::new(min_x, min_y),
+                Point::new(max_x, max_y),
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Whether `point` lies inside this rect (boundaries inclusive).
+    ///
+    /// Assumes the rect is normalized; call [`normalized`](Self::normalized)
+    /// first if the corners may be flipped.
+    #[must_use]
+    pub fn contains(self, point: Point) -> bool {
+        point.x >= self.min.x
+            && point.x <= self.max.x
+            && point.y >= self.min.y
+            && point.y <= self.max.y
+    }
 }
 
 /// An 8-bit sRGB color with alpha.
@@ -211,5 +246,38 @@ mod tests {
     #[test]
     fn color_rgb_is_opaque() {
         assert_eq!(Color::rgb(1, 2, 3).a, 255);
+    }
+
+    #[test]
+    fn rect_intersect_overlapping() {
+        let a = Rect::from_xywh(0.0, 0.0, 10.0, 10.0);
+        let b = Rect::from_xywh(5.0, 5.0, 10.0, 10.0);
+        let i = a.intersect(b).expect("overlap");
+        assert_eq!(i.min, Point::new(5.0, 5.0));
+        assert_eq!(i.max, Point::new(10.0, 10.0));
+    }
+
+    #[test]
+    fn rect_intersect_disjoint_is_none() {
+        let a = Rect::from_xywh(0.0, 0.0, 5.0, 5.0);
+        let b = Rect::from_xywh(10.0, 10.0, 5.0, 5.0);
+        assert!(a.intersect(b).is_none());
+    }
+
+    #[test]
+    fn rect_intersect_edge_touch_is_none() {
+        // Sharing an edge is zero-area overlap → None.
+        let a = Rect::from_xywh(0.0, 0.0, 5.0, 5.0);
+        let b = Rect::from_xywh(5.0, 0.0, 5.0, 5.0);
+        assert!(a.intersect(b).is_none());
+    }
+
+    #[test]
+    fn rect_contains_inclusive_bounds() {
+        let r = Rect::from_xywh(0.0, 0.0, 10.0, 10.0);
+        assert!(r.contains(Point::new(0.0, 0.0)), "min corner inclusive");
+        assert!(r.contains(Point::new(10.0, 10.0)), "max corner inclusive");
+        assert!(r.contains(Point::new(5.0, 5.0)), "interior");
+        assert!(!r.contains(Point::new(10.1, 5.0)), "just outside");
     }
 }

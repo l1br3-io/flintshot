@@ -109,8 +109,20 @@ pub fn render<C: Canvas>(
     if let Some(pending) = &state.pending {
         render_ann(canvas, pending, &state.image);
     }
+    if let Some(sel) = state.selection {
+        let n = sel.normalized();
+        if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 {
+            canvas.draw_rect_outline(n, &SELECTION_STROKE);
+        }
+    }
     Ok(())
 }
+
+/// Stroke style for the in-flight `Tool::Select` region. Distinct from
+/// any annotation color so the user can tell the selection rectangle
+/// apart from a committed `Annotation::Rect`. Blue is picked to match
+/// conventional selection-rectangle UX in screenshot tools.
+const SELECTION_STROKE: Stroke = Stroke::new(Color::rgb(0, 120, 215), 2.0);
 
 /// Dispatch a single annotation to the appropriate `Canvas` primitive(s).
 ///
@@ -1287,6 +1299,52 @@ mod tests {
         let out = compose_final(&state);
         assert_eq!(out.dimensions(), bg.dimensions());
         assert_eq!(out.as_raw(), bg.as_raw());
+    }
+
+    /// TODO Task 14: a non-empty `state.selection` renders as a single
+    /// `DrawRectOutline` on top of annotations + pending, using the
+    /// distinct selection stroke.
+    #[test]
+    fn render_draws_selection_rect_on_top() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 100));
+        state.anns.push(Annotation::Rect {
+            rect: Rect::from_xywh(10.0, 10.0, 30.0, 30.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            fill: None,
+        });
+        state.selection = Some(Rect::from_xywh(5.0, 5.0, 80.0, 80.0));
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg).expect("render");
+
+        // Upload + blit + committed rect outline + selection outline.
+        assert_eq!(canvas.calls.len(), 4);
+        assert!(matches!(canvas.calls[0], DrawCall::UploadImage));
+        assert!(matches!(canvas.calls[1], DrawCall::DrawImage { .. }));
+        assert!(matches!(canvas.calls[2], DrawCall::DrawRectOutline { .. }));
+        match &canvas.calls[3] {
+            DrawCall::DrawRectOutline { rect, stroke } => {
+                assert_eq!(*rect, Rect::from_xywh(5.0, 5.0, 80.0, 80.0));
+                // Distinct from any annotation color (blue).
+                assert_eq!(stroke.color, Color::rgb(0, 120, 215));
+            }
+            other => panic!("expected selection outline, got {other:?}"),
+        }
+    }
+
+    /// A degenerate selection (< 1 px) is not rendered.
+    #[test]
+    fn render_skips_degenerate_selection() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 100));
+        state.selection = Some(Rect::new(Point::new(50.0, 50.0), Point::new(50.5, 50.0)));
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg).expect("render");
+
+        // Only upload + blit — no selection outline.
+        assert_eq!(canvas.calls.len(), 2);
     }
 
     /// TODO Task 12 acceptance: `compose_final` bakes a text annotation

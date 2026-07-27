@@ -144,6 +144,41 @@ pub enum Annotation {
     },
 }
 
+/// A captured editor state used for undo/redo history.
+///
+/// Captures the fields a mutating action can change: always `anns`
+/// (every mutation touches the annotation list), and `image` only when
+/// the mutation replaced the source screenshot (crop, Task 14).
+/// Annotation-only commits set `image` to `None` so the undo path
+/// leaves `state.image` untouched; crop sets it to `Some(pre_crop_image)`.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    /// Annotation list at capture time (pre-mutation).
+    pub anns: Vec<Annotation>,
+    /// Source image at capture time. `None` when the action did not
+    /// touch the image (annotation commit); `Some` when it did (crop).
+    pub image: Option<image::RgbaImage>,
+}
+
+impl Snapshot {
+    /// Construct an annotation-only snapshot (no image change).
+    /// Used by [`EditorState::commit_annotation`].
+    #[must_use]
+    pub fn anns_only(anns: Vec<Annotation>) -> Self {
+        Self { anns, image: None }
+    }
+
+    /// Construct a full snapshot capturing both image and anns.
+    /// Used by [`EditorState::crop`].
+    #[must_use]
+    pub fn full(anns: Vec<Annotation>, image: image::RgbaImage) -> Self {
+        Self {
+            anns,
+            image: Some(image),
+        }
+    }
+}
+
 /// Full editor state: source image + committed annotations + history +
 /// active tool settings.
 ///
@@ -161,13 +196,20 @@ pub struct EditorState {
     pub image: image::RgbaImage,
     /// Committed annotations, in draw order.
     pub anns: Vec<Annotation>,
-    /// Undo history (snapshots of `anns` taken at each commit).
-    pub undo: Vec<Vec<Annotation>>,
-    /// Redo history (snapshots of `anns` taken at each undo).
-    pub redo: Vec<Vec<Annotation>>,
+    /// Undo history (snapshots of pre-mutation state).
+    pub undo: Vec<Snapshot>,
+    /// Redo history (snapshots of post-mutation state).
+    pub redo: Vec<Snapshot>,
     /// In-flight annotation being drawn (live feedback during drag).
     /// `None` when no tool interaction is in progress.
     pub pending: Option<Annotation>,
+    /// In-flight region selection for `Tool::Select` (Task 14).
+    /// `None` when no selection drag is active. Set by the dispatcher
+    /// on PointerDown/PointerDrag with `Tool::Select`; consumed by
+    /// [`confirm_selection`](Self::confirm_selection) on Enter or the
+    /// shell's Crop button. Rendered on top of annotations so the user
+    /// sees live feedback during the drag.
+    pub selection: Option<Rect>,
     /// Currently-active tool.
     pub tool: Tool,
     /// Active annotation color.
@@ -182,8 +224,10 @@ pub struct EditorState {
     pub font_size: f32,
     /// Next number to assign for `Tool::Number`.
     pub next_number: u32,
-    /// Selected annotation index, if any.
-    pub selection: Option<usize>,
+    /// Selected annotation index, if any (hit-testing result). Set by
+    /// the shell when the user clicks an existing annotation; not yet
+    /// wired into the dispatcher (Phase 2 select-and-move tool).
+    pub selected_index: Option<usize>,
 }
 
 impl EditorState {
@@ -196,13 +240,14 @@ impl EditorState {
             undo: Vec::new(),
             redo: Vec::new(),
             pending: None,
+            selection: None,
             tool: Tool::default(),
             color: Color::RED,
             stroke_width: 3.0,
             blur_kind: BlurKind::default(),
             font_size: 16.0,
             next_number: 1,
-            selection: None,
+            selected_index: None,
         }
     }
 
@@ -318,7 +363,7 @@ impl EditorState {
         // Clone-then-push: snapshot must capture pre-commit `anns`
         // (without the new annotation). `mem::take` here would wipe
         // `self.anns` and lose prior annotations.
-        self.undo.push(self.anns.clone());
+        self.undo.push(Snapshot::anns_only(self.anns.clone()));
         self.redo.clear();
         self.anns.push(ann);
     }
@@ -328,32 +373,122 @@ impl EditorState {
         self.pending = None;
     }
 
+    // --- Region selection (Tool::Select, Task 14) ---
+
+    /// Begin a selection drag at `anchor`. Replaces any prior selection.
+    fn begin_selection(&mut self, anchor: Point) {
+        self.selection = Some(Rect::new(anchor, anchor));
+    }
+
+    /// Extend the in-flight selection's far corner to `at`. No-op when
+    /// no selection is active (e.g. a stray drag before `PointerDown`).
+    fn update_selection(&mut self, at: Point) {
+        if let Some(sel) = &mut self.selection {
+            sel.max = at;
+        }
+    }
+
+    /// Normalize the selection rect on pointer release so `min` is
+    /// top-left. Matches [`commit_annotation`]'s normalization contract.
+    fn finish_selection(&mut self) {
+        if let Some(sel) = &mut self.selection {
+            *sel = sel.normalized();
+        }
+    }
+
+    /// Confirm the current selection: crop the editor to the selected
+    /// region, then clear the selection. No-op when no selection is
+    /// active or the selection is degenerate (see [`crop`]).
+    ///
+    /// This is the entry point the dispatcher's Enter handler and the
+    /// shell's "Crop" button both call.
+    pub fn confirm_selection(&mut self) {
+        let Some(sel) = self.selection.take() else {
+            return;
+        };
+        self.crop(sel);
+    }
+
+    /// Crop the editor to `rect`, replacing `image` with the cropped
+    /// sub-image and translating every annotation by subtracting the
+    /// crop origin.
+    ///
+    /// Annotations fully outside `rect` are dropped. Rect-shaped
+    /// annotations (`Rect` / `Ellipse` / `Blur`) that partially
+    /// overlap `rect` are geometrically clipped to the overlap;
+    /// other annotation types keep their geometry (the rendered edge
+    /// is clipped at the new image boundary by the canvas).
+    ///
+    /// Pushes a [`Snapshot::full`] (pre-crop image + anns) onto `undo`
+    /// and clears `redo`. Clears `pending` (an in-flight annotation
+    /// in the old coordinate space would be misleading after crop).
+    /// No-op when `rect` is degenerate (either normalized dimension
+    /// < 1 px) or the crop falls entirely outside the image.
+    pub fn crop(&mut self, rect: Rect) {
+        let n = rect.normalized();
+        if n.width().abs() < 1.0 || n.height().abs() < 1.0 {
+            return;
+        }
+        let new_image = crate::image_ops::crop_region(&self.image, n);
+        let (cw, ch) = new_image.dimensions();
+        if cw == 0 || ch == 0 {
+            return;
+        }
+        let snapshot = Snapshot::full(self.anns.clone(), self.image.clone());
+        self.image = new_image;
+        self.anns.retain_mut(|ann| ann.crop_and_translate(n));
+        self.pending = None;
+        self.undo.push(snapshot);
+        self.redo.clear();
+    }
+
     /// Pop the last committed state from `undo` and swap it into `anns`.
     ///
     /// Also clears `pending` (Ctrl+Z mid-drag cancels the in-flight
-    /// annotation, matching typical editor behaviour). The current
-    /// `anns` is pushed onto `redo` before the swap. No-op when
-    /// `undo` is empty.
+    /// annotation, matching typical editor behaviour). If the snapshot
+    /// carries an image (crop), the pre-crop image is restored too.
+    /// The current state is pushed onto `redo` before the swap. No-op
+    /// when `undo` is empty.
     pub fn undo(&mut self) {
         self.pending = None;
         let Some(prev) = self.undo.pop() else {
             return;
         };
-        self.redo.push(std::mem::take(&mut self.anns));
-        self.anns = prev;
+        // Build the "current state" snapshot for redo. If the undo
+        // entry captured an image (crop), capture the current image
+        // too so redo can restore it; otherwise image is None and
+        // redo leaves image untouched (matching commit's snapshot).
+        let current = Snapshot {
+            anns: std::mem::take(&mut self.anns),
+            image: prev.image.as_ref().map(|_| self.image.clone()),
+        };
+        self.redo.push(current);
+        self.anns = prev.anns;
+        if let Some(img) = prev.image {
+            self.image = img;
+        }
     }
 
     /// Pop the last undone state from `redo` and swap it into `anns`.
     ///
-    /// The current `anns` is pushed onto `undo` before the swap. No-op
-    /// when `redo` is empty (which is always the case immediately
-    /// after a commit, since `commit_annotation` clears `redo`).
+    /// Mirrors [`undo`](Self::undo): if the redo snapshot carries an
+    /// image, it is restored. The current state is pushed onto `undo`
+    /// before the swap. No-op when `redo` is empty (which is always
+    /// the case immediately after a commit or crop, since both clear
+    /// `redo`).
     pub fn redo(&mut self) {
         let Some(next) = self.redo.pop() else {
             return;
         };
-        self.undo.push(std::mem::take(&mut self.anns));
-        self.anns = next;
+        let current = Snapshot {
+            anns: std::mem::take(&mut self.anns),
+            image: next.image.as_ref().map(|_| self.image.clone()),
+        };
+        self.undo.push(current);
+        self.anns = next.anns;
+        if let Some(img) = next.image {
+            self.image = img;
+        }
     }
 
     /// Return the index of the topmost annotation containing `point`,
@@ -419,17 +554,41 @@ impl EditorState {
         }
 
         match event {
-            InputEvent::Key { key, modifiers } => self.dispatch_key(*key, *modifiers),
+            InputEvent::Key { key, modifiers } => {
+                // Enter confirms a Select-tool selection (Task 14)
+                // before falling through to the normal shortcut path.
+                if *key == crate::geom::Key::Enter
+                    && self.tool == Tool::Select
+                    && self.selection.is_some()
+                {
+                    self.confirm_selection();
+                    DispatchOutcome::Continue
+                } else {
+                    self.dispatch_key(*key, *modifiers)
+                }
+            }
             InputEvent::PointerDown { pos } => {
-                self.begin_annotation(*pos);
+                if self.tool == Tool::Select {
+                    self.begin_selection(*pos);
+                } else {
+                    self.begin_annotation(*pos);
+                }
                 DispatchOutcome::Continue
             }
             InputEvent::PointerDrag { pos } => {
-                self.update_annotation(*pos);
+                if self.tool == Tool::Select {
+                    self.update_selection(*pos);
+                } else {
+                    self.update_annotation(*pos);
+                }
                 DispatchOutcome::Continue
             }
             InputEvent::PointerUp => {
-                self.finish_pointer_up();
+                if self.tool == Tool::Select {
+                    self.finish_selection();
+                } else {
+                    self.finish_pointer_up();
+                }
                 DispatchOutcome::Continue
             }
             // Stray text input outside text-editing mode: drop it.
@@ -623,6 +782,63 @@ fn normalize_rects(ann: &mut Annotation) {
 }
 
 impl Annotation {
+    /// Clip this annotation to `bounds`, translate all coordinates by
+    /// `-bounds.min`, and return whether the annotation should be kept.
+    ///
+    /// Returns `false` when the annotation is entirely outside
+    /// `bounds` (drop it); `true` when any part survives. For
+    /// rect-shaped variants the geometry is clipped to the overlap;
+    /// for point-based variants (Line / Arrow / Marker / Pencil) the
+    /// endpoints are translated verbatim and render-time clipping
+    /// handles the visible edge.
+    fn crop_and_translate(&mut self, bounds: Rect) -> bool {
+        let n = bounds.normalized();
+        let (dx, dy) = (n.min.x, n.min.y);
+        match self {
+            Annotation::Rect { rect, .. }
+            | Annotation::Ellipse { rect, .. }
+            | Annotation::Blur { rect, .. } => match rect.normalized().intersect(n) {
+                Some(clip) => {
+                    *rect = Rect::new(
+                        Point::new(clip.min.x - dx, clip.min.y - dy),
+                        Point::new(clip.max.x - dx, clip.max.y - dy),
+                    );
+                    true
+                }
+                None => false,
+            },
+            Annotation::Line { a, b, .. } | Annotation::Arrow { a, b, .. } => {
+                let bbox = Rect::new(*a, *b).normalized();
+                if bbox.intersect(n).is_none() {
+                    return false;
+                }
+                a.x -= dx;
+                a.y -= dy;
+                b.x -= dx;
+                b.y -= dy;
+                true
+            }
+            Annotation::Marker { points, .. } | Annotation::Pencil { points, .. } => {
+                if !points.iter().any(|&p| n.contains(p)) {
+                    return false;
+                }
+                for p in points {
+                    p.x -= dx;
+                    p.y -= dy;
+                }
+                true
+            }
+            Annotation::Text { pos, .. } | Annotation::Number { pos, .. } => {
+                if !n.contains(*pos) {
+                    return false;
+                }
+                pos.x -= dx;
+                pos.y -= dy;
+                true
+            }
+        }
+    }
+
     /// Axis-aligned bounding box of the annotation, normalized so
     /// `min` is top-left. Returns `None` for annotations with no
     /// extent (empty polyline, zero-size rect).
@@ -774,7 +990,8 @@ mod tests {
         assert_eq!(s.blur_kind, BlurKind::Gaussian);
         assert_eq!(s.font_size, 16.0);
         assert_eq!(s.next_number, 1);
-        assert!(s.selection.is_none());
+        assert!(s.selected_index.is_none());
+        assert!(s.selection.is_none(), "selection rect starts None");
     }
 
     #[test]
@@ -884,13 +1101,14 @@ mod tests {
         s.undo();
         assert_eq!(s.anns, vec![a1.clone(), a2.clone()]);
         assert_eq!(s.redo.len(), 1);
-        assert_eq!(s.redo[0], vec![a1.clone(), a2.clone(), a3.clone()]);
+        assert_eq!(s.redo[0].anns, vec![a1.clone(), a2.clone(), a3.clone()]);
+        assert!(s.redo[0].image.is_none(), "commit snapshots carry no image");
 
         // Undo twice: anns = [a1], redo = [[a1,a2,a3], [a1,a2]]
         s.undo();
         assert_eq!(s.anns, vec![a1.clone()]);
         assert_eq!(s.redo.len(), 2);
-        assert_eq!(s.redo[1], vec![a1.clone(), a2.clone()]);
+        assert_eq!(s.redo[1].anns, vec![a1.clone(), a2.clone()]);
 
         // Redo once: anns = [a1, a2], redo back to length 1
         s.redo();
@@ -1085,7 +1303,8 @@ mod tests {
         // Take a snapshot manually so undo has something to pop (the
         // state machine's `commit_annotation` normally does this; we
         // bypass it here to isolate dispatcher behaviour).
-        s.undo.push(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]);
+        s.undo
+            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]));
 
         assert_eq!(s.dispatch_input(&ctrl('z')), DispatchOutcome::Continue);
         assert_eq!(s.anns.len(), 1);
@@ -1106,8 +1325,9 @@ mod tests {
     fn dispatch_ctrl_y_redoes() {
         let mut s = EditorState::new(blank_image());
         s.anns.push(rect_ann(0.0, 0.0, 10.0, 10.0));
-        s.undo.push(Vec::new());
-        s.redo.push(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]);
+        s.undo.push(Snapshot::anns_only(Vec::new()));
+        s.redo
+            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]));
         s.anns.clear();
 
         assert_eq!(s.dispatch_input(&ctrl('y')), DispatchOutcome::Continue);
@@ -1119,8 +1339,9 @@ mod tests {
     fn dispatch_ctrl_shift_z_redoes() {
         let mut s = EditorState::new(blank_image());
         s.anns.push(rect_ann(0.0, 0.0, 10.0, 10.0));
-        s.undo.push(Vec::new());
-        s.redo.push(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]);
+        s.undo.push(Snapshot::anns_only(Vec::new()));
+        s.redo
+            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]));
         s.anns.clear();
 
         assert_eq!(
@@ -1557,5 +1778,274 @@ mod tests {
         s.dispatch_input(&InputEvent::TextInput('h'));
         assert!(s.pending.is_none());
         assert_eq!(s.anns.len(), 0);
+    }
+
+    // --- Task 14: Select / crop region tool tests ---
+
+    /// Helper: a state with a 100×100 image so crops have room.
+    fn hundred_state() -> EditorState {
+        EditorState::new(image::RgbaImage::new(100, 100))
+    }
+
+    /// `crop(rect)` replaces `image` with the cropped sub-image.
+    #[test]
+    fn crop_replaces_image_with_cropped_subimage() {
+        let mut img = image::RgbaImage::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                #[allow(clippy::cast_possible_truncation, reason = "x, y ≤ 99")]
+                let (x8, y8) = (x as u8, y as u8);
+                img.put_pixel(x, y, image::Rgba([x8, y8, 0, 255]));
+            }
+        }
+        let mut s = EditorState::new(img);
+        s.crop(Rect::from_xywh(10.0, 20.0, 30.0, 40.0));
+        assert_eq!(s.image.dimensions(), (30, 40));
+        assert_eq!(
+            s.image.get_pixel(0, 0).0,
+            [10, 20, 0, 255],
+            "origin = crop min"
+        );
+        assert_eq!(s.image.get_pixel(29, 39).0, [39, 59, 0, 255]);
+    }
+
+    /// `crop` translates rect annotations by subtracting crop origin.
+    #[test]
+    fn crop_translates_rect_annotations() {
+        let mut s = hundred_state();
+        s.anns.push(rect_ann(20.0, 20.0, 50.0, 50.0));
+        s.crop(Rect::from_xywh(10.0, 10.0, 80.0, 80.0));
+        assert_eq!(s.anns.len(), 1);
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(
+                    rect.min,
+                    Point::new(10.0, 10.0),
+                    "translated by -crop_origin"
+                );
+                assert_eq!(rect.max, Point::new(40.0, 40.0));
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// Annotations fully outside the crop are dropped.
+    #[test]
+    fn crop_drops_annotations_outside_bounds() {
+        let mut s = hundred_state();
+        s.anns.push(rect_ann(0.0, 0.0, 5.0, 5.0)); // top-left, outside crop
+        s.anns.push(rect_ann(50.0, 50.0, 80.0, 80.0)); // inside crop
+        s.crop(Rect::from_xywh(40.0, 40.0, 50.0, 50.0));
+        assert_eq!(s.anns.len(), 1, "outside annotation dropped");
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(rect.min, Point::new(10.0, 10.0));
+                assert_eq!(rect.max, Point::new(40.0, 40.0));
+            }
+            other => panic!("expected surviving Rect, got {other:?}"),
+        }
+    }
+
+    /// Rect annotations partially overlapping the crop are geometrically
+    /// clipped to the overlap (not just translated).
+    #[test]
+    fn crop_clips_partial_rect_overlap() {
+        let mut s = hundred_state();
+        // Rect straddles the crop's left edge: x from 5 to 30, crop
+        // starts at x=10. Clipped to x 10..30, then translated to 0..20.
+        s.anns.push(rect_ann(5.0, 0.0, 30.0, 40.0));
+        s.crop(Rect::from_xywh(10.0, 0.0, 80.0, 100.0));
+        assert_eq!(s.anns.len(), 1);
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(rect.min, Point::new(0.0, 0.0), "clipped min.x = crop.min.x");
+                assert_eq!(rect.max, Point::new(20.0, 40.0));
+            }
+            other => panic!("expected clipped Rect, got {other:?}"),
+        }
+    }
+
+    /// Arrow annotations translate endpoints verbatim; render-time
+    /// clipping handles the visible edge.
+    #[test]
+    fn crop_translates_arrow_endpoints() {
+        let mut s = hundred_state();
+        s.anns.push(Annotation::Arrow {
+            a: Point::new(20.0, 30.0),
+            b: Point::new(60.0, 70.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 10.0,
+        });
+        s.crop(Rect::from_xywh(10.0, 10.0, 80.0, 80.0));
+        assert_eq!(s.anns.len(), 1);
+        match &s.anns[0] {
+            Annotation::Arrow { a, b, .. } => {
+                assert_eq!(*a, Point::new(10.0, 20.0));
+                assert_eq!(*b, Point::new(50.0, 60.0));
+            }
+            other => panic!("expected Arrow, got {other:?}"),
+        }
+    }
+
+    /// Crop pushes a full snapshot (image + anns) to undo; undo
+    /// restores both.
+    #[test]
+    fn crop_is_undoable() {
+        let mut s = hundred_state();
+        let original_dims = s.image.dimensions();
+        s.anns.push(rect_ann(20.0, 20.0, 50.0, 50.0));
+        s.crop(Rect::from_xywh(10.0, 10.0, 80.0, 80.0));
+        assert_eq!(s.image.dimensions(), (80, 80), "image cropped");
+        assert_eq!(s.anns.len(), 1, "annotation survived crop");
+        assert_eq!(s.undo.len(), 1);
+        assert!(s.undo[0].image.is_some(), "crop snapshot has image");
+
+        s.undo();
+        assert_eq!(s.image.dimensions(), original_dims, "image restored");
+        assert_eq!(s.anns.len(), 1, "anns restored");
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(rect.min, Point::new(20.0, 20.0), "pre-crop geometry");
+                assert_eq!(rect.max, Point::new(50.0, 50.0));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Redo after undoing a crop restores the cropped state.
+    #[test]
+    fn crop_redo_after_undo() {
+        let mut s = hundred_state();
+        s.crop(Rect::from_xywh(10.0, 10.0, 80.0, 80.0));
+        let cropped_dims = s.image.dimensions();
+        s.undo();
+        assert_eq!(s.image.dimensions(), (100, 100), "undo restores full image");
+        s.redo();
+        assert_eq!(s.image.dimensions(), cropped_dims, "redo restores crop");
+    }
+
+    /// Crop clears redo (new mutation invalidates the redo stack).
+    #[test]
+    fn crop_clears_redo() {
+        let mut s = hundred_state();
+        // Populate redo via an undo of a commit.
+        s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
+        s.commit_annotation();
+        s.undo();
+        assert!(!s.redo.is_empty(), "undo populated redo");
+        s.crop(Rect::from_xywh(10.0, 10.0, 50.0, 50.0));
+        assert!(s.redo.is_empty(), "crop cleared redo");
+    }
+
+    /// A degenerate crop rect (< 1 px in either dimension) is a no-op.
+    #[test]
+    fn crop_degenerate_is_noop() {
+        let mut s = hundred_state();
+        s.anns.push(rect_ann(10.0, 10.0, 50.0, 50.0));
+        let dims_before = s.image.dimensions();
+        s.crop(Rect::from_xywh(50.0, 50.0, 0.5, 50.0));
+        assert_eq!(s.image.dimensions(), dims_before, "image untouched");
+        assert_eq!(s.anns.len(), 1, "anns untouched");
+        assert!(s.undo.is_empty(), "no snapshot pushed");
+    }
+
+    /// Select tool: `PointerDown` starts a selection; `PointerDrag` extends it.
+    #[test]
+    fn dispatch_select_drag_creates_selection() {
+        let mut s = hundred_state();
+        s.tool = Tool::Select;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        assert!(s.selection.is_some(), "PointerDown starts selection");
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(50.0, 60.0),
+        });
+        match s.selection {
+            Some(r) => {
+                assert_eq!(r.min, Point::new(10.0, 10.0));
+                assert_eq!(r.max, Point::new(50.0, 60.0));
+            }
+            None => panic!("selection should be active"),
+        }
+    }
+
+    /// Select tool: `PointerUp` normalizes the selection rect.
+    #[test]
+    fn dispatch_select_up_normalizes_selection() {
+        let mut s = hundred_state();
+        s.tool = Tool::Select;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(50.0, 60.0),
+        });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        match s.selection {
+            Some(r) => {
+                assert_eq!(r.min, Point::new(10.0, 10.0), "normalized: min is top-left");
+                assert_eq!(r.max, Point::new(50.0, 60.0));
+            }
+            None => panic!("selection retained after PointerUp"),
+        }
+    }
+
+    /// Select tool: Enter confirms the selection (crops) and clears it.
+    #[test]
+    fn dispatch_enter_confirms_selection() {
+        let mut s = hundred_state();
+        s.tool = Tool::Select;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(50.0, 50.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert!(s.selection.is_none(), "selection cleared on confirm");
+        assert_eq!(s.image.dimensions(), (40, 40), "cropped to selection");
+        assert_eq!(s.undo.len(), 1, "crop pushed undo");
+    }
+
+    /// Select tool: Enter without an active selection is a no-op
+    /// (falls through to the normal key path).
+    #[test]
+    fn dispatch_enter_without_selection_is_noop() {
+        let mut s = hundred_state();
+        s.tool = Tool::Select;
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.image.dimensions(), (100, 100), "image unchanged");
+        assert!(s.undo.is_empty());
+    }
+
+    /// `confirm_selection` is a no-op when no selection is active.
+    #[test]
+    fn confirm_selection_noop_without_selection() {
+        let mut s = hundred_state();
+        s.confirm_selection();
+        assert_eq!(s.image.dimensions(), (100, 100));
+        assert!(s.undo.is_empty());
+    }
+
+    /// Select tool does not interfere with keyboard shortcuts (Ctrl+Z
+    /// still undoes while Select is active).
+    #[test]
+    fn dispatch_select_does_not_suppress_undo() {
+        let mut s = hundred_state();
+        s.tool = Tool::Select;
+        s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
+        s.anns.push(rect_ann(20.0, 20.0, 30.0, 30.0));
+        s.commit_annotation();
+        assert_eq!(s.anns.len(), 2);
+        assert_eq!(s.dispatch_input(&ctrl('z')), DispatchOutcome::Continue);
+        assert_eq!(s.anns.len(), 1, "Ctrl+Z undid last commit");
     }
 }

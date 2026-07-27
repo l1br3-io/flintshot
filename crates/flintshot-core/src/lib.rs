@@ -28,7 +28,7 @@ pub mod upload;
 
 pub use capture::{capture_fullscreen, capture_region};
 pub use config::{CaptureConfig, Config, UiConfig};
-pub use editor::{Annotation, BlurKind, EditorState, Tool};
+pub use editor::{Annotation, BlurKind, EditorState, Snapshot, Tool};
 pub use error::{FlintshotError, Result};
 pub use geom::{Color, Key, Point, Rect, Stroke};
 pub use image_ops::{blur, crop_region};
