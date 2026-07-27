@@ -258,6 +258,17 @@ Categories used below:
   carries one. New `Rect::intersect` / `Rect::contains` geometry
   helpers, `Annotation::crop_and_translate` per-variant dispatch, and
   `EditorState::selection: Option<Rect>` field for the in-flight drag.
+- Color / stroke-width pickers + config persistence (Phase 1 Task 15).
+  Toolbar gains a color swatch (`egui::color_edit_button_srgb`) and a
+  stroke-width slider (1–20 px); a font-size slider (8–72) appears
+  while the Text tool is active. Changes update `state.color` /
+  `state.stroke_width` / `state.font_size` live. On editor close,
+  `persist_ui_config` writes the current values back to
+  `~/.config/flintshot/config.toml` via `Config::load` + `Config::save`
+  (preserves unrelated sections). Config write failures surface as
+  `tracing::warn!` — non-blocking, annotation continues. CLI now loads
+  `Config::load()` before opening the editor and seeds `EditorState`
+  with the persisted defaults.
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from
@@ -396,7 +407,9 @@ Categories used below:
   crop_and_translate` per-variant; `Snapshot` type for image-aware
   undo/redo; `Rect::intersect` / `Rect::contains`; shell toolbar
   gains Select + Crop buttons; bg cache invalidated on image-dims
-  change).
+  change), and 15 (color / stroke-width / font-size pickers in the
+  toolbar; config persistence on editor close via `Config::load` +
+  `Config::save`; CLI seeds `EditorState` from `Config::load()`).
 
 ## Release cheat sheet (for maintainers)
 

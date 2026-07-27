@@ -47,5 +47,5 @@ the task files.
 ## Phase 1.F — Region select & polish
 
 - [x] 014 — Select / crop region tool → [`tasks/014-select-crop-tool.md`](tasks/014-select-crop-tool.md)
-- [ ] 015 — Color & stroke-width pickers + config persistence → [`tasks/015-color-stroke-pickers.md`](tasks/015-color-stroke-pickers.md)
+- [x] 015 — Color & stroke-width pickers + config persistence → [`tasks/015-color-stroke-pickers.md`](tasks/015-color-stroke-pickers.md)
 - [ ] **Checkpoint F** — Phase 1 exit criteria met; ready for Phase 2

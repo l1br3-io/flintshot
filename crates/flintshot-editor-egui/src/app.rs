@@ -20,8 +20,8 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    compose_final, render::render, DispatchOutcome, EditorOutcome, EditorState, FlintshotError,
-    InputEvent, Key, Modifiers, Point, Tool,
+    compose_final, render::render, Color, Config, DispatchOutcome, EditorOutcome, EditorState,
+    FlintshotError, InputEvent, Key, Modifiers, Point, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -106,8 +106,45 @@ impl EditorApp {
     /// Publish an outcome to the shared slot. First writer wins in
     /// practice — every trigger path immediately follows up with
     /// `ViewportCommand::Close`, so a second writer can't race in.
+    ///
+    /// Also persists the current UI defaults (color / stroke / font)
+    /// to config before publishing, so the user's last-used values
+    /// survive across sessions (Task 15). Persistence failures are
+    /// logged as warnings and never block the primary outcome.
     fn publish_outcome(&self, outcome: flintshot_core::Result<EditorOutcome>) {
+        self.persist_ui_config();
         *self.outcome.borrow_mut() = Some(outcome);
+    }
+
+    /// Persist the current `color` / `stroke_width` / `font_size` to
+    /// the user's config file (Task 15).
+    ///
+    /// Loads the existing config first so unrelated sections
+    /// (`[capture]`, future tables) are preserved, then overwrites
+    /// just the `[ui]` defaults. Failures are surfaced as
+    /// `tracing::warn!` — non-blocking, matching the acceptance
+    /// criterion that annotation continues to work even when the
+    /// config file is unwritable.
+    fn persist_ui_config(&self) {
+        let mut cfg = match Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not load config for persistence; skipping save"
+                );
+                return;
+            }
+        };
+        cfg.ui.default_color = self.state.color;
+        cfg.ui.default_stroke_width = self.state.stroke_width;
+        cfg.ui.default_font_size = self.state.font_size;
+        if let Err(e) = cfg.save() {
+            tracing::warn!(
+                error = %e,
+                "could not save config; UI defaults not persisted this session"
+            );
+        }
     }
 
     /// Drain egui text-input events while in text-editing mode.
@@ -342,6 +379,26 @@ impl App for EditorApp {
                             &mut self.state.blur_kind,
                             flintshot_core::BlurKind::Pixelate,
                             "Pixelate",
+                        );
+                    }
+                    // Color + stroke-width pickers (Task 15). Apply to
+                    // all drawing tools (Rect / Arrow / Marker / Pencil
+                    // / Text). Color uses egui's sRGB editor; the three
+                    // u8 channels map directly to flintshot_core::Color.
+                    ui.separator();
+                    let mut rgb = [self.state.color.r, self.state.color.g, self.state.color.b];
+                    ui.color_edit_button_srgb(&mut rgb);
+                    if rgb != [self.state.color.r, self.state.color.g, self.state.color.b] {
+                        self.state.color = Color::rgb(rgb[0], rgb[1], rgb[2]);
+                    }
+                    ui.add(
+                        egui::Slider::new(&mut self.state.stroke_width, 1.0..=20.0).text("Width"),
+                    );
+                    // Font-size control shows only for Text (matches
+                    // the blur-kind-gated pattern).
+                    if self.state.tool == Tool::Text {
+                        ui.add(
+                            egui::Slider::new(&mut self.state.font_size, 8.0..=72.0).text("Font"),
                         );
                     }
                     // Select-tool: offer crop when a non-degenerate
