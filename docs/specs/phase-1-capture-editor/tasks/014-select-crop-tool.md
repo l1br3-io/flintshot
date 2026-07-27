@@ -12,23 +12,24 @@ promise in Phase 1's exit criteria.
 
 ## Acceptance criteria
 
-- [ ] Dragging with `Tool::Select` shows a selection rectangle.
-- [ ] Confirming the selection (button, double-click, or Enter) crops
+- [x] Dragging with `Tool::Select` shows a selection rectangle.
+- [x] Confirming the selection (button, double-click, or Enter) crops
       `state.image` to the selected rect.
-- [ ] Existing annotations translate correctly (subtract the crop
+- [x] Existing annotations translate correctly (subtract the crop
       origin); annotations fully outside the crop are dropped; partial
       overlap is clipped.
-- [ ] Crop is undoable (snapshot of pre-crop image + anns pushed to
+- [x] Crop is undoable (snapshot of pre-crop image + anns pushed to
       `undo`).
-- [ ] `EditorOutcome` is unaffected — crop is an in-editor action.
+- [x] `EditorOutcome` is unaffected — crop is an in-editor action.
 
 ## Verification
 
-- [ ] Standing gate passes.
-- [ ] Unit test: `EditorState::crop(rect)` on a known state produces
+- [x] Standing gate passes.
+- [x] Unit test: `EditorState::crop(rect)` on a known state produces
       the expected translated `anns` and cropped `image`.
 - [ ] Manual: select a small region, crop, draw a new rect, save, verify
-      the saved PNG matches the cropped dimensions.
+      the saved PNG matches the cropped dimensions. _(interactive; owed
+      for Checkpoint F close-out)_
 
 ## Dependencies
 

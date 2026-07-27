@@ -245,6 +245,19 @@ Categories used below:
   pixels in-place). `render_ann` now takes a `source: &RgbaImage`
   parameter so the blur dispatch can crop from the background. New
   `flintshot-core::image_ops` module re-exports `blur` and `crop_region`.
+- Select / crop region tool end-to-end (Phase 1 Task 14). Toolbar gains
+  a "⬚ Select" button; drag selects a region (rendered with a distinct
+  blue outline so it's distinguishable from a committed `Rect`), and
+  `Enter` or a "✂ Crop to selection" toolbar button crops `state.image`
+  to the selection. Existing annotations translate by subtracting the
+  crop origin; annotations fully outside the crop are dropped;
+  rect-shaped annotations (`Rect` / `Ellipse` / `Blur`) that partially
+  overlap are geometrically clipped to the overlap. Crop is undoable:
+  the pre-crop image + anns are captured in a `Snapshot::full` on
+  `undo`, and `undo()` / `redo()` restore the image when the snapshot
+  carries one. New `Rect::intersect` / `Rect::contains` geometry
+  helpers, `Annotation::crop_and_translate` per-variant dispatch, and
+  `EditorState::selection: Option<Rect>` field for the in-flight drag.
 - Shared error types: `FlintshotError`, `Result` (libs); `color_eyre`
   reporting init in the binary.
 - `tracing` + `tracing-subscriber` initialized from
@@ -274,6 +287,19 @@ Categories used below:
   renamed to `docs/adrs/`. `docs/ROADMAP.md` "How we plan" now describes
   the status-flip lifecycle (no archive step). Links in `README.md`,
   `CONTRIBUTING.md`, and `AGENTS.md` updated to the new paths.
+- `EditorState::undo` / `redo` fields changed from
+  `Vec<Vec<Annotation>>` to `Vec<Snapshot>` (Phase 1 Task 14). The new
+  `Snapshot` type captures both `anns` and an optional `image`, so
+  crop (which mutates the source image) is undoable. Annotation-only
+  commits carry `image: None` (no extra clone); crop carries
+  `image: Some(pre_crop)`. Callers that pushed raw `Vec<Annotation>`
+  onto `undo` / `redo` must switch to `Snapshot::anns_only(vec)` or
+  `Snapshot::full(vec, img)`.
+- `EditorState::selection` field renamed to `selected_index` (Phase 1
+  Task 14). The old `selection: Option<usize>` held the hit-tested
+  annotation index; it collided with the new `selection: Option<Rect>`
+  drag-rectangle field. `selected_index` is still `None` (not yet wired
+  into any tool — reserved for Phase 2's select-and-move feature).
 - `Color` (de)serialization switched from struct-of-fields (the default
   `serde::Serialize` derive) to hex string (`#rrggbb` / `#rrggbbaa`).
   Affects every type that embeds `Color` (currently `Annotation` and
@@ -364,7 +390,13 @@ Categories used below:
   `EditorState::dispatch_input`; new `flintshot-core::input` module
   with `Modifiers` / `InputEvent` / `DispatchOutcome`; cross-
   platform modifier mapping; pointer flow also routes through the
-  dispatcher; `EditorApp::logic` reduced to a thin translator).
+  dispatcher; `EditorApp::logic` reduced to a thin translator), and
+  14 (`Tool::Select` drag-select + crop: new `EditorState::crop` /
+  `confirm_selection` / `selection` field; `Annotation::
+  crop_and_translate` per-variant; `Snapshot` type for image-aware
+  undo/redo; `Rect::intersect` / `Rect::contains`; shell toolbar
+  gains Select + Crop buttons; bg cache invalidated on image-dims
+  change).
 
 ## Release cheat sheet (for maintainers)
 

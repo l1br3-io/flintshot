@@ -53,6 +53,10 @@ pub(crate) struct EditorApp {
     /// whenever the shell invalidates the cache (e.g. crop, Phase
     /// 1.F's Task 14).
     bg: Option<EguiTexture>,
+    /// Last-seen image dimensions. Detects when crop (Task 14)
+    /// replaces `state.image` so the bg texture cache is dropped
+    /// and the new image is re-uploaded on the next `render()` call.
+    img_dims: (u32, u32),
     /// Screen-logical rect of the most recent `CentralPanel`. Cached
     /// by `ui()` so the next frame's `logic()` can translate pointer
     /// coords into canvas-physical px and reject clicks that land on
@@ -88,10 +92,12 @@ impl EditorApp {
     /// Construct the app. The canvas captures a clone of the
     /// [`Context`] for texture loading outside the per-frame `ui` call.
     pub(crate) fn new(state: EditorState, ctx: &Context, outcome: OutcomeSlot) -> Self {
+        let img_dims = state.image.dimensions();
         Self {
             state,
             canvas: EguiCanvas::new(ctx.clone()),
             bg: None,
+            img_dims,
             canvas_rect: None,
             outcome,
         }
@@ -319,6 +325,7 @@ impl App for EditorApp {
             .show(ui, |ui| {
                 let mut action = ToolbarAction::None;
                 ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.state.tool, Tool::Select, "⬚ Select");
                     ui.selectable_value(&mut self.state.tool, Tool::Rect, "▭ Rectangle");
                     ui.selectable_value(&mut self.state.tool, Tool::Arrow, "→ Arrow");
                     ui.selectable_value(&mut self.state.tool, Tool::Text, "T Text");
@@ -337,6 +344,21 @@ impl App for EditorApp {
                             "Pixelate",
                         );
                     }
+                    // Select-tool: offer crop when a non-degenerate
+                    // selection is active. Enter also confirms (the
+                    // dispatcher handles that); the button is for
+                    // pointer-driven users.
+                    if self.state.tool == Tool::Select {
+                        if let Some(sel) = self.state.selection {
+                            let n = sel.normalized();
+                            if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 {
+                                ui.separator();
+                                if ui.button("✂ Crop to selection (↵)").clicked() {
+                                    self.state.confirm_selection();
+                                }
+                            }
+                        }
+                    }
                     ui.separator();
                     ui.label(format!("{} annotations", self.state.anns.len()));
                     ui.separator();
@@ -353,6 +375,16 @@ impl App for EditorApp {
                 action
             })
             .inner;
+
+        // Invalidate the bg texture cache when the image dimensions
+        // change (crop replaces state.image with a different-sized
+        // sub-image). The render path's `bg.is_none()` check then
+        // triggers a re-upload on the next frame.
+        let current_dims = self.state.image.dimensions();
+        if current_dims != self.img_dims {
+            self.bg = None;
+            self.img_dims = current_dims;
+        }
 
         // Per-frame render: bind the painter, then walk the shared
         // render path. Render failure is terminal — publish `Err(_)`
