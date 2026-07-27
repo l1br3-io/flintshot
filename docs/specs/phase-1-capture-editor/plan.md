@@ -107,26 +107,22 @@ verification, dependencies, and files live in `tasks/00N-*.md`.
 - [`tasks/009-save-copy-outputs.md`](tasks/009-save-copy-outputs.md) — Save (rfd + PNG) and Copy (arboard)
 - [`tasks/010-keyboard-shortcuts.md`](tasks/010-keyboard-shortcuts.md) — Keyboard shortcuts
 
-**Checkpoint D** — user can save PNG and copy to clipboard. ⬜ _(interactive
-close-out owed: `cargo run -- region`, then draw a rect → `Ctrl+Z` →
-`Ctrl+Y` / `Ctrl+Shift+Z` → `Ctrl+S` (save dialog; PNG has rect baked
-in) → `Ctrl+C` (clipboard has rect) → `Esc` (clean cancel). If a
-shortcut fails, capture the symptom before debugging — the dispatcher's
-unit tests cover the logic, so an interactive failure points at the
-egui-side translation.)_
+**Checkpoint D** — user can save PNG and copy to clipboard. ✅ _(closed
+via interactive testing; see commit `46bb05f` "Phase 1 hardening: editor
+bug fixes from interactive testing".)_
 
 ### Phase 1.E — Remaining annotation tools
 - [`tasks/011-arrow-tool.md`](tasks/011-arrow-tool.md) — Arrow tool
 - [`tasks/012-text-tool.md`](tasks/012-text-tool.md) — Text tool (cosmic-text)
 - [`tasks/013-blur-tool.md`](tasks/013-blur-tool.md) — Blur tool (imageproc, computed in core)
 
-**Checkpoint E** — all annotation tools work. ⬜
+**Checkpoint E** — all annotation tools work. ✅
 
 ### Phase 1.F — Region select & polish
 - [`tasks/014-select-crop-tool.md`](tasks/014-select-crop-tool.md) — Select / crop region tool
 - [`tasks/015-color-stroke-pickers.md`](tasks/015-color-stroke-pickers.md) — Color & stroke-width pickers + config
 
-**Checkpoint F** — Phase 1 exit criteria met; ready for Phase 2. ⬜
+**Checkpoint F** — Phase 1 exit criteria met; ready for Phase 2. ✅
 
 ## Risks and mitigations
 

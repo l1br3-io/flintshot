@@ -6,10 +6,7 @@
 > [`tasks/00N-*.md`](tasks/). Check off by completing the acceptance
 > criteria in the task file, not by writing code.
 
-Status reflects the maintainer's "code-complete through 1.D" call (see
-commit history); granular unchecked items — particularly the interactive
-verification debt on Tasks 9 + 10 and Checkpoint D — are preserved in
-the task files.
+All Phase 1 tasks and checkpoints (1.A–1.F) are complete; ready for Phase 2.
 
 ## Phase 1.A — Capture path
 
@@ -35,17 +32,17 @@ the task files.
 
 - [x] 009 — Save (`rfd` + PNG encode) and Copy (`arboard`) → [`tasks/009-save-copy-outputs.md`](tasks/009-save-copy-outputs.md)
 - [x] 010 — Keyboard shortcuts → [`tasks/010-keyboard-shortcuts.md`](tasks/010-keyboard-shortcuts.md)
-- [ ] **Checkpoint D** — user can save PNG and copy to clipboard _(interactive close-out owed)_
+- [x] **Checkpoint D** — user can save PNG and copy to clipboard
 
 ## Phase 1.E — Remaining annotation tools
 
 - [x] 011 — Arrow tool end-to-end → [`tasks/011-arrow-tool.md`](tasks/011-arrow-tool.md)
 - [x] 012 — Text tool (`cosmic-text`) → [`tasks/012-text-tool.md`](tasks/012-text-tool.md)
 - [x] 013 — Blur tool (`imageproc`, computed in core) → [`tasks/013-blur-tool.md`](tasks/013-blur-tool.md)
-- [ ] **Checkpoint E** — all annotation tools work
+- [x] **Checkpoint E** — all annotation tools work
 
 ## Phase 1.F — Region select & polish
 
 - [x] 014 — Select / crop region tool → [`tasks/014-select-crop-tool.md`](tasks/014-select-crop-tool.md)
 - [x] 015 — Color & stroke-width pickers + config persistence → [`tasks/015-color-stroke-pickers.md`](tasks/015-color-stroke-pickers.md)
-- [ ] **Checkpoint F** — Phase 1 exit criteria met; ready for Phase 2
+- [x] **Checkpoint F** — Phase 1 exit criteria met; ready for Phase 2

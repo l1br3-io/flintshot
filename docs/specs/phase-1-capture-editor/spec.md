@@ -1,11 +1,12 @@
 ---
-status: active
+status: shipped
 started: 2026-07-20
+shipped: 2026-07-28
 ---
 
 # Spec — Phase 1: Capture + Editor Window
 
-> Current effort spec (in flight). For the plan index, see
+> Shipped effort spec. For the plan index, see
 > [`plan.md`](plan.md); for the flat status checklist, see
 > [`todo.md`](todo.md); per-task detail lives in [`tasks/`](tasks/).
 > For product context, see [`../../VISION.md`](../../VISION.md); for

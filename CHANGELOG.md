@@ -406,6 +406,13 @@ Categories used below:
 
 ### Notes
 
+- **Phase 1 (Capture + Editor Window) shipped 2026-07-28.** All
+  checkpoints A–F complete; exit criteria in
+  `docs/specs/phase-1-capture-editor/spec.md` met. Spec status flipped
+  to `shipped`; `docs/ROADMAP.md` moves Phase 2 to **In flight**. No
+  version tag cut — `0.x.y` remains in effect until Phase 4 (upload)
+  per the versioning policy.
+
 - Phase 0 closed against the local standing gate (`fmt`, `clippy`,
   `test`, MSRV build, cosmic build) — no git remote is configured yet,
   so the GitHub Actions pipeline has not executed against a push.
