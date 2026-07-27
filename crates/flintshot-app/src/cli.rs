@@ -171,10 +171,30 @@ fn capture_and_dispatch(monitor: Option<u32>, mode: &str, output: &OutputArgs) -
 /// up as `Err`.
 #[cfg(feature = "egui")]
 fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
-    use flintshot_core::{EditorOutcome, EditorShell, EditorState};
+    use flintshot_core::{Config, EditorOutcome, EditorShell, EditorState};
+
+    // Apply persisted UI defaults (color / stroke / font) before opening
+    // the editor (Task 15). A load failure is non-fatal — fall back to
+    // EditorState::new's hardcoded defaults and let the editor proceed.
+    let state = match Config::load() {
+        Ok(cfg) => {
+            let mut s = EditorState::new(img);
+            s.color = cfg.ui.default_color;
+            s.stroke_width = cfg.ui.default_stroke_width;
+            s.font_size = cfg.ui.default_font_size;
+            s
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not load config; opening editor with built-in defaults"
+            );
+            EditorState::new(img)
+        }
+    };
 
     let outcome = flintshot_editor_egui::EguiShell::new()
-        .run_editor(EditorState::new(img))
+        .run_editor(state)
         .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
         .with_context(|| format!("running editor for {mode} capture"))?;
 
