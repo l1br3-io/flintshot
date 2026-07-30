@@ -14,30 +14,30 @@ applet, scripts) will depend on. Add `postcard` + `serde` to
 
 ## Acceptance criteria
 
-- [ ] `flintshot-core::ipc` module exists and is re-exported from
+- [x] `flintshot-core::ipc` module exists and is re-exported from
       `lib.rs`; module doc states transport lives in `flintshot-app`.
-- [ ] `Request` has variants: `CaptureRegion { monitor, delay_ms }`,
+- [x] `Request` has variants: `CaptureRegion { monitor, delay_ms }`,
       `CaptureFullscreen { monitor }`, `Quit`, `Subscribe`, `OpenLast`,
       `PinLast`, `UploadLast { backend }` — all `#[non_exhaustive]`.
-- [ ] `Event` has variants: `CaptureStarted`, `EditorOpened`,
+- [x] `Event` has variants: `CaptureStarted`, `EditorOpened`,
       `Saved { path }`, `Error { code, message }`, `Pinned { id }`,
       `Uploaded { url, delete_handle }` — all `#[non_exhaustive]`.
-- [ ] Every public type has a doc comment (`#![warn(missing_docs)]`).
-- [ ] `socket_path()` returns `$XDG_RUNTIME_DIR/flintshot.sock` on
+- [x] Every public type has a doc comment (`#![warn(missing_docs)]`).
+- [x] `socket_path()` returns `$XDG_RUNTIME_DIR/flintshot.sock` on
       Linux, a platform-appropriate path on macOS, `\\.\pipe\flintshot`
       on Windows; honours an explicit override when passed.
-- [ ] `FlintshotError` gains `Ipc { detail: String }` (follows the
+- [x] `FlintshotError` gains `Ipc { detail: String }` (follows the
       `detail`-field rule of ADR-0013).
 
 ## Verification
 
-- [ ] Standing gate passes.
-- [ ] `cargo test -p flintshot-core ipc::` — postcard roundtrip: encode
+- [x] Standing gate passes.
+- [x] `cargo test -p flintshot-core ipc::` — postcard roundtrip: encode
       every `Request` / `Event` variant, decode, assert equality
       (catches serde-tag / `#[non_exhaustive]` regressions).
-- [ ] `cargo test -p flintshot-core ipc::socket_path` — resolver
+- [x] `cargo test -p flintshot-core ipc::socket_path` — resolver
       returns the expected platform default; override wins.
-- [ ] `no_gui_types_in_core.rs` still green (Task 012 will extend it,
+- [x] `no_gui_types_in_core.rs` still green (Task 012 will extend it,
       but `ipc.rs` must already avoid `use interprocess` / `use tokio`).
 
 ## Dependencies

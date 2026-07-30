@@ -21,6 +21,7 @@ pub mod error;
 pub mod geom;
 pub mod image_ops;
 pub mod input;
+pub mod ipc;
 pub mod render;
 pub mod serde_util;
 pub mod shell;
@@ -33,6 +34,7 @@ pub use error::{FlintshotError, Result};
 pub use geom::{Color, Key, Point, Rect, Stroke};
 pub use image_ops::{blur, crop_region};
 pub use input::{DispatchOutcome, InputEvent, Modifiers};
+pub use ipc::{socket_path, Event as IpcEvent, Request as IpcRequest};
 pub use render::{
     arrow_barbs, compose_final, compose_final_region, render, render_ann, Canvas, DrawCall,
     MockCanvas,

@@ -8,7 +8,7 @@
 
 ## Phase 2.A — Foundation
 
-- [ ] 001 — IPC protocol types in `flintshot-core::ipc` → [`tasks/001-ipc-protocol-types.md`](tasks/001-ipc-protocol-types.md)
+- [x] 001 — IPC protocol types in `flintshot-core::ipc` → [`tasks/001-ipc-protocol-types.md`](tasks/001-ipc-protocol-types.md)
 - [ ] 002 — Workspace deps + MSRV gate → [`tasks/002-workspace-deps.md`](tasks/002-workspace-deps.md)
 - [ ] **Checkpoint A** — foundation types + deps in place; workspace builds clean
 
