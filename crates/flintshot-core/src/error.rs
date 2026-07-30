@@ -76,6 +76,19 @@ pub enum FlintshotError {
         detail: String,
     },
 
+    /// An IPC-layer failure: socket connect/bind failure, malformed
+    /// postcard frame, or an unsupported request variant. `detail`
+    /// carries the lower-level message verbatim. Named `detail` rather
+    /// than `source` for the same reason as [`FlintshotError::Capture`]:
+    /// `thiserror` reserves the `source` field name for the error-chain
+    /// source and requires it to be `dyn Error`, but we want a plain
+    /// `String` for cheap display. (ADR-0013 detail-field rule.)
+    #[error("ipc error: {detail}")]
+    Ipc {
+        /// Lower-level error message from the transport or codec.
+        detail: String,
+    },
+
     /// A catch-all for operations not yet wired up. Phase 0 uses this in
     /// stubs; later phases replace it with specific variants.
     #[error("not implemented yet: {0}")]
