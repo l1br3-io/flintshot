@@ -73,23 +73,33 @@ Subcommand: `flintshot region`, `flintshot fullscreen`
   window opens to a black image; verify the detection-and-guide path
   fires.
 
-## Phase 2 — daemon, tray, hotkeys, multi-monitor
+## Phase 2 — daemon, tray, hotkeys, IPC
 
-Subcommand: `flintshot daemon`
+Subcommand: `flintshot daemon` (and `flintshot daemon --replace`).
+Annotation tools (Ellipse/Line/Marker/Pencil/Number/Magnifier) are
+deferred to `phase-2b` and tested there.
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| `flintshot daemon` starts, tray icon appears                |    |    |    |    |    |    |    |    |    |
-| Second `flintshot daemon` exits and signals the first       |    |    |    |    |    |    |    |    |    |
-| Tray menu: Region / Fullscreen / Open last / Settings / Quit |    |    |    |    |    |    |    |    |    |
+| `cargo build --features tray` succeeds                      |    |    |    |    |    |    |    |    |    |
+| `flintshot daemon` starts, tray icon appears (`--features tray`) | |  |    |    |    |    |    |    |    |    |
+| `flintshot daemon` (no tray feature) still binds IPC + hotkeys |   |    |    |    |    |    |    |    |    |
+| Second `flintshot daemon` fails "already running"           |    |    |    |    |    |    |    |    |    |
+| `flintshot daemon --replace` swaps daemons cleanly          |    |    |    |    |    |    |    |    |    |
+| Tray *Capture region* / *Capture fullscreen* spawn editor   |    |    |    |    |    |    |    |    |    |
+| Tray *Fullscreen on monitor →* lists each monitor; each captures the right one | | | | | | | | | |
+| Tray *Open config* opens `$EDITOR` on `config.toml`         |    |    |    |    |    |    |    |    |    |
+| Tray *Quit* exits the daemon cleanly                        |    |    |    |    |    |    |    |    |    |
+| Tray visible with no SNI host → daemon stays alive (warning)|    |    |    |    |    |    |    |    |    |
 | Global hotkey fires capture on X11 / macOS / Windows        |    | N/A | N/A | N/A | N/A |    |    |    |    |
-| Compositor keybind → `flintshot region` (Wayland fallback)  | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
-| Multi-monitor capture, combined image, correct geometry     |    |    |    |    |    |    |    |    |    |
-| `--monitor N` selects the right monitor                    |    |    |    |    |    |    |    |    |    |
-| Ellipse / Line / Marker / Pencil tools                     |    |    |    |    |    |    |    |    |    |
-| Move / select existing annotation                          |    |    |    |    |    |    |    |    |    |
-| Magnifier on region selection                              |    |    |    |    |    |    |    |    |    |
-| Auto-incrementing number bubbles                           |    |    |    |    |    |    |    |    |    |
+| Wayland: hotkey does NOT fire; compositor-keybind workaround logged | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| Edit `[hotkeys]`, save → new chord works without restart    |    |    |    |    |    |    |    |    |    |
+| IPC client `Subscribe` then `broadcast` → receives `Event`  |    |    |    |    |    |    |    |    |    |
+| `flintshot region` with daemon running delegates (events centralised) | | | | | | | | | |
+| `flintshot region` with no daemon → standalone editor       |    |    |    |    |    |    |    |    |    |
+| `flintshot region --standalone` forces in-process capture   |    |    |    |    |    |    |    |    |    |
+| Ctrl-C → clean daemon shutdown (socket reclaimed)           |    |    |    |    |    |    |    |    |    |
+
 
 ## Phase 3 — pin-to-desktop + COSMIC applet
 

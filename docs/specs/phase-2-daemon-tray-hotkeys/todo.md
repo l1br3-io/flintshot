@@ -39,5 +39,5 @@
 
 ## Phase 2.F — Hardening
 
-- [ ] 012 — Boundary test + ADRs + CHANGELOG + cross-platform docs → [`tasks/012-hardening.md`](tasks/012-hardening.md)
-- [ ] **Checkpoint F** — Phase 2 exit criteria met; ready for review
+- [x] 012 — Boundary test + ADRs + CHANGELOG + cross-platform docs → [`tasks/012-hardening.md`](tasks/012-hardening.md)
+- [x] **Checkpoint F** — Phase 2 exit criteria met; ready for review

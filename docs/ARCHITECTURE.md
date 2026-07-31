@@ -374,14 +374,21 @@ All choices are documented in [decision records](adr/).
 - **X11**: full feature set; `global-hotkey` and live overlay both work
 - **Wayland**: capture via `xcap` (which uses `xdg-desktop-portal`
   under the hood); first capture per session may show a portal dialog;
-  global hotkeys require Phase 6 portal integration; live overlay
-  falls back to editor-window
+  global hotkeys require Phase 6 portal integration — the daemon
+  detects this and logs a "bind a compositor keybinding to `flintshot
+  region`/`flintshot fullscreen`" notice instead of failing (tray +
+  IPC still work); live overlay falls back to editor-window
+- **System tray**: `tray-icon` (libappindicator) needs an SNI host; on
+  compositors without one the daemon logs a warning and continues
+  (best-effort — IPC + hotkeys are unaffected)
 
 ### macOS
 - **Screen Recording permission** must be granted in System Settings →
   Privacy & Security. `flintshot` detects this on first capture and
   guides the user.
-- **Global hotkeys** work via `global-hotkey` (CGEventTap).
+- **Global hotkeys** work via `global-hotkey` (CGEventTap); first use
+  may prompt for Accessibility / Input Monitoring permission — grant it
+  in System Settings → Privacy & Security.
 - **Live overlay** works (borderless fullscreen window).
 
 ### Windows

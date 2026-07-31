@@ -12,31 +12,41 @@ proves the abstraction held and the phase is review-ready.
 
 ## Acceptance criteria
 
-- [ ] `no_gui_types_in_core.rs` `FORBIDDEN_PREFIXES` extended with
+- [x] `no_gui_types_in_core.rs` `FORBIDDEN_PREFIXES` extended with
       `use interprocess`, `use global_hotkey`, `use tray_icon`, `use
-      notify` (note: `tray-icon` → `tray_icon`, `global-hotkey` →
-      `global_hotkey` in Rust ident form). Test green.
-- [ ] ADRs finalized: ADR-0018 (event-loop bridge), ADR-0019
+      notify`. Test green.
+      _All four added; `no_gui_toolkit_imports_in_core_src` green._
+- [x] ADRs finalized: ADR-0018 (event-loop bridge), ADR-0019
       (daemon-spawns-worker), ADR-0020 (single-instance on daemon
       only); ADR-0021 (framing) if split in Task 004.
-- [ ] `CHANGELOG.md` `[Unreleased]` has Added/Changed/Fixed/Notes
+      _0018/0019/0020 written + indexed. ADR-0021 not split — the
+      u32-LE framing extends ADR-0011 (decided in Task 004)._
+- [x] `CHANGELOG.md` `[Unreleased]` has Added/Changed/Fixed/Notes
       entries for every user-visible Phase 2 change (daemon, tray,
       hotkeys, IPC, config hot-reload, CLI delegation, new deps).
-- [ ] Cross-platform docs updated: `docs/ARCHITECTURE.md` §Cross-
+      _Phase 2 subsection covers all of it + a Notes block (postcard
+      tag, PrintScreen, Wayland gap, submenu-refresh limitation)._
+- [x] Cross-platform docs updated: `docs/ARCHITECTURE.md` §Cross-
       platform concerns (Wayland hotkey gap → Phase 6, macOS
       hotkey permission); `docs/TEST_MATRIX.md` gains Phase 2 rows
       (tray, hotkey, single-instance, config reload, per platform);
       `README.md` / `AGENTS.md` get a one-line index pointer to the
       Wayland-keybind workaround if warranted.
-- [ ] `docs/ROADMAP.md` Phase 2 line updated to reflect the real scope
+      _ARCHITECTURE §Cross-platform + §Linux/macOS updated; TEST_MATRIX
+      Phase 2 section rewritten to the real scope; README daemon/
+      Wayland snippet added._
+- [x] `docs/ROADMAP.md` Phase 2 line updated to reflect the real scope
       (system integration; annotation tools moved to phase-2b).
+      _Phase 2 → "Daemon, tray, hotkeys, IPC" (Review-ready); phase-2b
+      added for annotation tools/magnifier/polish._
 
 ## Verification
 
-- [ ] Standing gate passes.
-- [ ] `cargo test -p flintshot-core --test no_gui_types_in_core` green
+- [x] Standing gate passes. _(fmt, default + tray clippy, workspace +
+      tray tests, doc tests.)_
+- [x] `cargo test -p flintshot-core --test no_gui_types_in_core` green
       (the extended ban list catches any leak).
-- [ ] Reviewer can read CHANGELOG + ADRs + TEST_MATRIX and understand
+- [x] Reviewer can read CHANGELOG + ADRs + TEST_MATRIX and understand
       what Phase 2 delivered and what it deliberately deferred.
 
 ## Dependencies
