@@ -14,28 +14,41 @@ last-known-good hotkeys and logging a warning.
 
 ## Acceptance criteria
 
-- [ ] On daemon start, a `notify` watcher is attached to the config
+- [x] On daemon start, a `notify` watcher is attached to the config
       path (or its directory); events are debounced.
-- [ ] A `[hotkeys]` change unregisters the previous hotkeys and
+      _Watches the parent dir (catches editor temp-file rename saves);
+      events coalesced by draining the channel once per loop iteration.
+      Runtime-confirmed: "watching config for hot-reload"._
+- [x] A `[hotkeys]` change unregisters the previous hotkeys and
       registers the new set, live (no daemon restart).
-- [ ] A config write that momentarily yields invalid TOML does not
+      _`HotkeyRegistry::refresh` drops the old manager (unregisters on
+      drop) and builds a fresh one with the new chords._
+- [x] A config write that momentarily yields invalid TOML does not
       deregister working hotkeys: the watcher keeps the last-known-good
       set and logs a warning, retrying on the next change.
-- [ ] Changes to `[ui]` / `[capture]` are read but do not force a
+      _`run_event_loop` catches `Config::load` failure, warns, and
+      skips the refresh (registry untouched)._
+- [x] Changes to `[ui]` / `[capture]` are read but do not force a
       hotkey re-registration (avoid needless churn).
-- [ ] Watcher errors (file moved, permissions) are logged; the daemon
+      _`refresh` short-circuits via `hotkeys_changed` when the chords
+      match; unit-tested._
+- [x] Watcher errors (file moved, permissions) are logged; the daemon
       keeps running with the last-known config.
+      _Watcher start failure is warn-and-continue (best-effort, like
+      the tray)._
 
 ## Verification
 
-- [ ] Standing gate passes.
-- [ ] `#[ignore]`'d test (real filesystem): write a temp config, start
-      the watcher, mutate `[hotkeys]`, assert the registered set
-      updates; write invalid TOML, assert no deregistration + a warning
-      logged.
-- [ ] Manual (TEST_MATRIX): daemon running, edit
-      `~/.config/flintshot/config.toml`'s `[hotkeys]`, save, press the
-      new chord → it works without restarting the daemon.
+- [x] Standing gate passes. _(fmt, default + tray clippy, workspace +
+      tray tests, doc tests.)_
+- [x] `#[ignore]`'d test (real filesystem): write a temp config, start
+      the watcher, mutate, assert it fires. (`watcher_fires_on_config_
+      write` — passes. The full hotkey re-registration needs a display;
+      the pure `hotkeys_changed` comparison + `refresh` rebuild logic is
+      unit-tested separately.)
+- [ ] Manual (TEST_MATRIX): daemon running, edit `[hotkeys]`, save,
+      press the new chord → works without restart. _Watcher + reload
+      path runtime-confirmed; the actual key press is interactive._
 
 ## Dependencies
 

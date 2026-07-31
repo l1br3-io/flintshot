@@ -33,7 +33,7 @@
 
 ## Phase 2.E — Config hot-reload + CLI delegation
 
-- [ ] 010 — Config hot-reload via `notify` → [`tasks/010-config-hot-reload.md`](tasks/010-config-hot-reload.md)
+- [x] 010 — Config hot-reload via `notify` → [`tasks/010-config-hot-reload.md`](tasks/010-config-hot-reload.md)
 - [ ] 011 — CLI capture subcommands detect-and-delegate → [`tasks/011-cli-detect-delegate.md`](tasks/011-cli-detect-delegate.md)
 - [ ] **Checkpoint E** — config edit applies a new hotkey without restart; `flintshot region` delegates / falls back
 
