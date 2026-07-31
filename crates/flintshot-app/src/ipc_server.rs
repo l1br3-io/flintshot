@@ -63,7 +63,7 @@ where
 
 /// Write one length-prefixed frame. Rejects payloads over
 /// [`MAX_FRAME_LEN`] before touching the socket.
-async fn write_frame<W>(w: &mut W, payload: &[u8]) -> eyre::Result<()>
+pub(crate) async fn write_frame<W>(w: &mut W, payload: &[u8]) -> eyre::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -88,7 +88,7 @@ where
 }
 
 /// Postcard-encode `msg` to owned bytes.
-fn encode_msg<T>(msg: &T) -> eyre::Result<Vec<u8>>
+pub(crate) fn encode_msg<T>(msg: &T) -> eyre::Result<Vec<u8>>
 where
     T: serde::Serialize + ?Sized,
 {
@@ -149,7 +149,7 @@ impl Default for SubscriberBus {
 /// out of the struct body.
 type Listener = interprocess::local_socket::tokio::Listener;
 /// The tokio local-socket stream type.
-type Stream = interprocess::local_socket::tokio::Stream;
+pub(crate) type Stream = interprocess::local_socket::tokio::Stream;
 
 /// The IPC server: owns the listener, the subscriber bus, and a
 /// shutdown signal.
@@ -324,7 +324,7 @@ async fn handle_connection(
 
 /// Resolve the OS socket/pipe name for `path`. Unix → a filesystem
 /// socket name; Windows → a namespaced pipe name.
-fn socket_name(path: &Path) -> eyre::Result<interprocess::local_socket::Name<'_>> {
+pub(crate) fn socket_name(path: &Path) -> eyre::Result<interprocess::local_socket::Name<'_>> {
     // The prelude pulls the ToFsName / ToNsName traits into scope (as `_`)
     // so `.to_fs_name()` / `.to_ns_name()` resolve.
     use interprocess::local_socket::tokio::prelude::*;

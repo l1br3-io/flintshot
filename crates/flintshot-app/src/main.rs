@@ -9,6 +9,7 @@ mod cli;
 mod config_watcher;
 mod daemon;
 mod hotkeys;
+mod ipc_client;
 mod ipc_server;
 mod single;
 #[cfg(feature = "tray")]

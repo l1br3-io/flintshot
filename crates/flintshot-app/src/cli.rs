@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
+use flintshot_core::ipc::Request;
 use flintshot_core::{capture_fullscreen, Config};
 use image::ImageFormat;
 
@@ -76,6 +77,12 @@ pub struct OutputArgs {
     /// path still yields valid PNG bytes.
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
+    /// Skip daemon detect-and-delegate: always run the capture + editor
+    /// in this process, even if a daemon is running. Escape hatch for
+    /// debugging (delegated captures centralise their `Event` stream;
+    /// `--standalone` does not).
+    #[arg(long)]
+    pub standalone: bool,
 }
 
 /// Arguments for `flintshot region`.
@@ -129,14 +136,24 @@ pub fn run_daemon(args: &DaemonArgs) -> Result<()> {
     crate::daemon::run(args.replace)
 }
 
-/// `flintshot region` — Phase 1 Task 3 (capture) + Task 6 (editor wiring).
+/// `flintshot region` — Phase 1 capture+editor, with Phase 2
+/// detect-and-delegate.
 ///
-/// Captures the primary monitor and either opens the editor (no `--out`)
-/// or writes a PNG (`--out PATH`). The interactive region-select tool
-/// lands in Task 14; for now `region` and `fullscreen` capture
-/// equivalent pixels (full primary monitor) — `region` only differs in
-/// accepting `--delay-ms`.
+/// If a daemon is running (and `--standalone`/`--out` aren't set), the
+/// request is handed to it so the capture's `Event`s reach subscribers
+/// and the daemon's worker opens the editor. Otherwise the in-process
+/// Phase 1 capture+editor path runs (or a PNG is written with `--out`).
 pub fn run_region(args: &RegionArgs) -> Result<()> {
+    if delegate_to_daemon(
+        &Request::CaptureRegion {
+            monitor: args.monitor,
+            delay_ms: args.delay_ms,
+        },
+        &args.output,
+        "region",
+    ) {
+        return Ok(());
+    }
     if args.delay_ms > 0 {
         tracing::debug!(delay_ms = args.delay_ms, "sleeping before capture");
         std::thread::sleep(Duration::from_millis(u64::from(args.delay_ms)));
@@ -144,9 +161,45 @@ pub fn run_region(args: &RegionArgs) -> Result<()> {
     capture_and_dispatch(args.monitor, "region", &args.output)
 }
 
-/// `flintshot fullscreen` — Phase 1 Task 3 (capture) + Task 6 (editor wiring).
+/// `flintshot fullscreen` — Phase 1 capture+editor, with Phase 2
+/// detect-and-delegate. See [`run_region`].
 pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
+    if delegate_to_daemon(
+        &Request::CaptureFullscreen {
+            monitor: args.monitor,
+        },
+        &args.output,
+        "fullscreen",
+    ) {
+        return Ok(());
+    }
     capture_and_dispatch(args.monitor, "fullscreen", &args.output)
+}
+
+/// Try to hand a capture `request` to a running daemon. Returns `true`
+/// if delegated (the caller should exit). Skipped when `--standalone` is
+/// set or when `--out` is given (the PNG-write path is headless and must
+/// run in-process; the daemon's worker would open an editor instead).
+/// A delegation failure falls back to standalone with a warning rather
+/// than failing the whole capture.
+fn delegate_to_daemon(request: &Request, output: &OutputArgs, mode: &str) -> bool {
+    if output.standalone || output.out.is_some() {
+        return false;
+    }
+    match crate::ipc_client::try_delegate(request) {
+        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {
+            tracing::info!("delegated `{mode}` to the running daemon");
+            true
+        }
+        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => false,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not delegate `{mode}` to the daemon; falling back to standalone"
+            );
+            false
+        }
+    }
 }
 
 /// Capture a monitor and either write a PNG (`--out`) or open the
