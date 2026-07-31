@@ -161,13 +161,27 @@ pub struct IpcServer {
 
 impl IpcServer {
     /// Bind a listener on [`socket_path`] (`override_path` honoured),
-    /// reclaiming any stale socket file on Unix via `try_overwrite`.
+    /// reclaiming any stale socket file on Unix via `try_overwrite`,
+    /// with a fresh subscriber bus.
     ///
     /// # Errors
     /// - If the socket name can't be resolved.
     /// - If binding the listener fails (e.g. a live socket already
     ///   holds the path and can't be replaced).
+    //
+    // The daemon uses `bind_with_bus` (it shares a bus with the tray
+    // path); this convenience is used by the integration tests.
+    #[allow(dead_code)]
     pub fn bind(override_path: Option<&Path>) -> eyre::Result<Self> {
+        Self::bind_with_bus(override_path, SubscriberBus::new())
+    }
+
+    /// Like [`bind`](Self::bind) but uses an externally-provided
+    /// `bus`. The daemon shares one bus between the IPC server (which
+    /// fans `Event`s to IPC subscribers) and its own tray/hotkey
+    /// dispatch path, so a capture started from the tray reaches IPC
+    /// subscribers and vice versa.
+    pub fn bind_with_bus(override_path: Option<&Path>, bus: SubscriberBus) -> eyre::Result<Self> {
         let path = socket_path(override_path);
         let name = socket_name(&path)?;
         let listener = interprocess::local_socket::ListenerOptions::new()
@@ -178,7 +192,7 @@ impl IpcServer {
         tracing::info!(path = %path.display(), "IPC server bound");
         Ok(Self {
             listener,
-            bus: SubscriberBus::new(),
+            bus,
             shutdown: Arc::new(Notify::new()),
         })
     }

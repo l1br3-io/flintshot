@@ -28,6 +28,7 @@ dirs = "6"
 eframe = "0.35"
 egui = "0.35"
 global-hotkey = "0.8"
+gtk = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 imageproc = { version = "0.25", default-features = false }
 interprocess = { version = "2", features = ["tokio"] }
