@@ -10,7 +10,7 @@
 
 use color_eyre::eyre;
 use flintshot_core::ipc::Request;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 // Stable string ids — `MenuEvent::id` is matched against these. Kept
@@ -19,6 +19,9 @@ const ID_CAPTURE_REGION: &str = "flintshot.region";
 const ID_CAPTURE_FULLSCREEN: &str = "flintshot.fullscreen";
 const ID_OPEN_CONFIG: &str = "flintshot.open-config";
 const ID_QUIT: &str = "flintshot.quit";
+/// Per-monitor submenu items use this prefix + the monitor index, e.g.
+/// `flintshot.fullscreen-monitor.2`.
+const ID_FULLSCREEN_MONITOR_PREFIX: &str = "flintshot.fullscreen-monitor.";
 
 /// What a tray menu click resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +37,16 @@ pub(crate) enum TrayAction {
 /// unknown id (e.g. events not from our menu).
 #[must_use]
 pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
-    match event.id.as_ref() {
+    let id = event.id.as_ref();
+    // Per-monitor submenu: "flintshot.fullscreen-monitor.<N>".
+    if let Some(num) = id.strip_prefix(ID_FULLSCREEN_MONITOR_PREFIX) {
+        if let Ok(index) = num.parse::<u32>() {
+            return Some(TrayAction::Request(Request::CaptureFullscreen {
+                monitor: Some(index),
+            }));
+        }
+    }
+    match id {
         ID_CAPTURE_REGION => Some(TrayAction::Request(Request::CaptureRegion {
             monitor: None,
             delay_ms: 0,
@@ -67,9 +79,17 @@ pub(crate) fn build() -> eyre::Result<TrayIcon> {
     let open_config = MenuItem::with_id(ID_OPEN_CONFIG, "Open config", true, None);
     let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
 
+    // Per-monitor submenu (Phase 2's multi-monitor UX). The list is
+    // enumerated at build time — muda doesn't portably expose a
+    // submenu-open event, so hot-plugging a monitor mid-session needs a
+    // tray rebuild (future work); restarting the daemon refreshes it.
+    let monitor_submenu = Submenu::with_id("flintshot.monitors", "Fullscreen on monitor", true);
+    append_monitor_entries(&monitor_submenu)?;
+
     if let Err(e) = menu
         .append(&region)
         .and_then(|()| menu.append(&fullscreen))
+        .and_then(|()| menu.append(&monitor_submenu))
         .and_then(|()| menu.append(&PredefinedMenuItem::separator()))
         .and_then(|()| menu.append(&open_config))
         .and_then(|()| menu.append(&PredefinedMenuItem::separator()))
@@ -85,6 +105,39 @@ pub(crate) fn build() -> eyre::Result<TrayIcon> {
         .with_menu(Box::new(menu))
         .build()
         .map_err(|e| eyre::eyre!("building tray icon: {e}"))
+}
+
+/// Populate the per-monitor submenu: one entry per monitor
+/// (`"<N> · <name> (primary)"`), or a disabled "no monitors" entry if
+/// `xcap` reports none or errors. A failure here is non-fatal — the
+/// submenu just shows "no monitors".
+fn append_monitor_entries(submenu: &Submenu) -> eyre::Result<()> {
+    match flintshot_core::monitors() {
+        Ok(list) if !list.is_empty() => {
+            for m in list {
+                let label = if m.is_primary {
+                    format!("{} · {} (primary)", m.index, m.name)
+                } else {
+                    format!("{} · {}", m.index, m.name)
+                };
+                let id = format!("{ID_FULLSCREEN_MONITOR_PREFIX}{}", m.index);
+                let item = MenuItem::with_id(id, label, true, None);
+                submenu
+                    .append(&item)
+                    .map_err(|e| eyre::eyre!("appending monitor entry: {e}"))?;
+            }
+        }
+        _ => {
+            // Zero monitors or enumeration error: a disabled placeholder
+            // so the submenu isn't a confusing empty void.
+            let none = MenuItem::with_id("flintshot.no-monitors", "no monitors", false, None);
+            let _ = submenu.append(&none);
+            if let Err(e) = flintshot_core::monitors() {
+                tracing::warn!(error = %e, "could not enumerate monitors for the tray submenu");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A simple two-tone 32×32 mark — a bright lens on a dark rounded
@@ -177,5 +230,22 @@ mod tests {
     #[test]
     fn unknown_id_is_ignored() {
         assert!(action_for(&event("something-else")).is_none());
+    }
+
+    #[test]
+    fn monitor_submenu_item_maps_to_fullscreen_with_index() {
+        let Some(TrayAction::Request(Request::CaptureFullscreen { monitor })) =
+            action_for(&event("flintshot.fullscreen-monitor.3"))
+        else {
+            panic!("expected CaptureFullscreen for a monitor submenu click");
+        };
+        assert_eq!(monitor, Some(3));
+    }
+
+    #[test]
+    fn malformed_monitor_id_is_ignored() {
+        // Prefix but not a number — must not panic, must not match.
+        assert!(action_for(&event("flintshot.fullscreen-monitor.abc")).is_none());
+        assert!(action_for(&event("flintshot.fullscreen-monitor.")).is_none());
     }
 }

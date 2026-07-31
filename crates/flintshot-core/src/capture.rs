@@ -34,6 +34,46 @@ use xcap::Monitor;
 use crate::error::{FlintshotError, Result};
 use crate::geom::Rect;
 
+/// A discoverable monitor, for UI surfaces (e.g. the tray's per-monitor
+/// submenu). `index` is the value to pass to [`capture_fullscreen`]'s
+/// `Some(index)` argument; `name`/`is_primary` are for labelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MonitorInfo {
+    /// Index into [`Monitor::all()`]'s order — the `Some(n)` argument
+    /// for [`capture_fullscreen`].
+    pub index: u32,
+    /// Human-readable name (`xcap`'s `Monitor::name`), empty if none.
+    pub name: String,
+    /// Whether `xcap` flags this as the primary monitor.
+    pub is_primary: bool,
+}
+
+/// Enumerate monitors in the order [`capture_fullscreen`] expects
+/// (primary first, then by display index — whatever `xcap` returns).
+///
+/// # Errors
+/// - [`FlintshotError::Capture`] if `xcap`'s enumeration fails, or if
+///   there are somehow more monitors than `u32` can index (impossible
+///   in practice — the index round-trips through [`capture_fullscreen`]'s
+///   `Some(n)` argument).
+pub fn monitors() -> Result<Vec<MonitorInfo>> {
+    let all = Monitor::all().map_err(|e| FlintshotError::Capture {
+        detail: e.to_string(),
+    })?;
+    let mut out = Vec::with_capacity(all.len());
+    for (i, m) in all.into_iter().enumerate() {
+        out.push(MonitorInfo {
+            index: u32::try_from(i).map_err(|_| FlintshotError::Capture {
+                detail: format!("too many monitors to index ({i})"),
+            })?,
+            name: m.name().unwrap_or_default(),
+            is_primary: m.is_primary().unwrap_or(false),
+        });
+    }
+    Ok(out)
+}
+
 /// Capture a full monitor's framebuffer in physical pixels.
 ///
 /// `monitor = None` selects the primary monitor (the one `xcap` flags
