@@ -6,9 +6,10 @@ status-flipped in place when shipped). For the narrative "why", see
 [`VISION.md`](VISION.md); for decision rationale, see
 [`adrs/`](adrs/).
 
-**CURRENT MILESTONE: Phase 2 — Tray, hotkeys, multi-monitor, polish**
-(in flight; spec pending at
-[`specs/phase-2-*/`](specs/phase-2-*/)).
+**CURRENT MILESTONE: Phase 2 — Daemon, tray, hotkeys, IPC** (review-
+ready; spec at [`specs/phase-2-daemon-tray-hotkeys/`](specs/phase-2-daemon-tray-hotkeys/)).
+Annotation tools, magnifier, and UX polish split off to
+`phase-2b-annotation-tools`.
 
 ## Milestones
 
@@ -16,7 +17,8 @@ status-flipped in place when shipped). For the narrative "why", see
 | ---------------------------------------------- | ------------- |
 | Phase 0 — Scaffolding                          | Shipped       |
 | Phase 1 — Capture + editor window              | Shipped       |
-| Phase 2 — Tray, hotkeys, multi-monitor, polish | **In flight** |
+| Phase 2 — Daemon, tray, hotkeys, IPC           | **Review-ready** |
+| Phase 2b — Annotation tools, magnifier, polish | Planned       |
 | Phase 3 — Pin-to-desktop + COSMIC applet       | Planned       |
 | Phase 4 — Upload                               | Planned       |
 | Phase 5 — Live overlay (Flameshot-style)       | Planned       |

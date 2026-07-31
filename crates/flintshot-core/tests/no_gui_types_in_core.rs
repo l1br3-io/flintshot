@@ -1,10 +1,13 @@
 //! Guard test: no GUI toolkit types may leak into `flintshot-core`'s
 //! public API or its source. See `docs/ARCHITECTURE.md` §Coding conventions.
 //!
-//! This test greps its own crate's `src/` for forbidden `use egui::`,
-//! `use eframe::`, `use iced::`, `use libcosmic::`, or `use slint::`
-//! imports and fails if any are found. It runs without compiling the
-//! toolkit crates — pure source scan.
+//! This test greps its own crate's `src/` for forbidden imports — GUI
+//! toolkits (egui/eframe/iced/libcosmic/slint/gdk/gtk) **and** the
+//! Phase 2 transport/system crates (`interprocess`, `global_hotkey`,
+//! `tray_icon`, `notify`) — and fails if any are found. The IPC schema
+//! (`flintshot-core::ipc`) may use only `postcard`/`serde`/std types;
+//! the transport/server implementations live in `flintshot-app`. It
+//! runs without compiling the toolkit crates — pure source scan.
 
 use std::path::PathBuf;
 
@@ -16,6 +19,11 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
     "use slint",
     "use gdk",
     "use gtk",
+    // Phase 2 transport / system crates — keep core schema-only.
+    "use interprocess",
+    "use global_hotkey",
+    "use tray_icon",
+    "use notify",
 ];
 
 #[test]

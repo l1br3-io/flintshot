@@ -285,7 +285,7 @@ Categories used below:
 - Dual licensing: `MIT OR Apache-2.0`, with both license files in the
   repo root and the `license` field on every crate.
 
-#### Phase 2 — Daemon, tray, hotkeys, IPC (in progress)
+#### Phase 2 — Daemon, tray, hotkeys, IPC
 
 - `flintshot-core::ipc`: transport-agnostic IPC schema
   (`Request`/`Event` enums, `#[non_exhaustive]`, postcard-serde) and the
@@ -293,6 +293,11 @@ Categories used below:
   (`#[serde(tag = "kind")]` is `WontImplement` under postcard); see
   ADR-0011.
 - `flintshot-core::error::FlintshotError::Ipc { detail }` variant.
+- `flintshot-core::config::HotkeyConfig` (`[hotkeys]` section:
+  `region`/`fullscreen` chord strings, serde-defaulted) with
+  comment-preserving merge, and a public `config_path()`.
+- `flintshot-core::capture::monitors()` + `MonitorInfo` (xcap monitor
+  enumeration for the tray's per-monitor submenu).
 - Workspace dependencies for the resident daemon: `interprocess`
   (local-socket transport, `tokio` feature), `postcard` (binary
   encoding), `global-hotkey` (X11/macOS/Windows hotkeys), `notify`
@@ -300,12 +305,51 @@ Categories used below:
   the `single` vs `single-instance` open question: `single` is an
   unrelated Itertools helper; `single-instance` is the Tauri-affiliated
   single-instance lock.
+- `flintshot daemon`: long-running process — tokio side thread + main-
+  thread platform loop bridged by mpsc (ADR-0018), single-instance lock
+  (daemon role only), `interprocess` IPC server with length-prefixed
+  postcard framing, `Request::Quit` graceful shutdown, and `Ctrl-C`
+  exit. Proven at runtime.
+- `flintshot daemon --replace`: sends `Request::Quit` to the running
+  daemon, waits for it to exit, then takes over (ADR-0020). Runtime-
+  confirmed it swaps daemons cleanly.
+- Worker-spawn model (ADR-0019): the daemon never captures in-process —
+  tray/hotkey/IPC capture actions spawn a `flintshot` child (resolved
+  via `current_exe`, reusing the Phase 1 CLI) and broadcast
+  `CaptureStarted`/`EditorOpened` to IPC subscribers.
+- System tray (`tray` feature): *Capture region*, *Capture fullscreen*,
+  *Fullscreen on monitor →* (per-monitor submenu), *Open config*,
+  *Quit*. Tray failure is non-fatal (compositor without an SNI host).
+- Global hotkeys from `[hotkeys]` (X11/macOS/Windows); on Wayland the
+  daemon logs the compositor-keybind workaround and continues. Hot-
+  reload: editing `[hotkeys]` re-registers without restarting the
+  daemon.
+- CLI detect-and-delegate: `flintshot region`/`fullscreen` hand the
+  capture to a running daemon when one is present (centralising the
+  event stream), and fall back to the Phase 1 in-process path
+  otherwise. `--standalone` forces the in-process path.
 - `flintshot-app` `tray` feature (default OFF): gates the `tray-icon`
   crate, whose Linux backend (`libappindicator`) pulls the full GTK3
   stack that the default CI build doesn't install. The daemon runs
   without it (IPC + hotkeys + single-instance); build with
-  `--features tray` to enable the system tray. A dedicated daemon-build
-  CI job lands in Task 012.
+  `--features tray` to enable the system tray.
+- Boundary test extended: `flintshot-core` also rejects `use
+  interprocess` / `use global_hotkey` / `use tray_icon` / `use notify`.
+
+##### Notes (Phase 2)
+
+- `Event` uses postcard-native external tagging; the spec/ARCHITECTURE
+  `#[serde(tag = "kind")]` internally-tagged form is `WontImplement`
+  under postcard (Task 1 found this; kept the schema, dropped the tag).
+- Default hotkey chords are `Ctrl+Shift+PrintScreen` /
+  `Ctrl+Alt+PrintScreen` — `global-hotkey` names the key `PrintScreen`,
+  not `Print` (ARCHITECTURE.md's example updated).
+- Wayland global hotkeys are deferred to Phase 6 (`ashpd`
+  GlobalShortcuts portal); bind a compositor keybinding to `flintshot
+  region` / `flintshot fullscreen` in the meantime.
+- The tray's per-monitor submenu is built at tray creation; muda/tray-
+  icon don't portably expose a submenu-open event, so hot-plugging a
+  monitor mid-session needs a daemon restart (documented limitation).
 
 ### Changed
 

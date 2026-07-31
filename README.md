@@ -51,6 +51,27 @@ cargo run -- --help
 cargo run -- region --help
 ```
 
+### Daemon, tray & hotkeys (Phase 2)
+
+Run the resident daemon for the system tray, global hotkeys, and IPC
+(the tray needs `--features tray`, which pulls GTK on Linux):
+
+```sh
+cargo run -- daemon                 # tray* + hotkeys + IPC server
+cargo run -- daemon --replace       # take over from a running daemon
+cargo run --features tray -- daemon # with the system tray enabled
+```
+
+`flintshot region` / `fullscreen` delegate to a running daemon when one
+is present (centralising the event stream) and fall back to standalone
+otherwise; `--standalone` forces the in-process path.
+
+> **Wayland:** `global-hotkey` has no Wayland backend yet (Phase 6,
+> via the `ashpd` `GlobalShortcuts` portal). On Wayland the daemon logs
+> a notice and you bind a compositor keybinding to `flintshot region` /
+> `flintshot fullscreen`. See
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §Cross-platform concerns.
+
 ### Development
 
 For contributors. The `justfile` wraps the common loop; see
