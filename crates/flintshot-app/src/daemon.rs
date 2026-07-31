@@ -96,10 +96,24 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     };
     let hotkey_registry = crate::hotkeys::HotkeyRegistry::from_config(&config.hotkeys);
 
+    // Start the config hot-reload watcher (best-effort — a missing
+    // config dir or notify failure just means no hot-reload).
+    let config_watcher =
+        flintshot_core::config_path().and_then(
+            |p| match crate::config_watcher::ConfigWatcher::start(&p) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    tracing::warn!(error = %e, "config hot-reload unavailable; continuing");
+                    None
+                }
+            },
+        );
+
     // 4. Block on the event loop. Ctrl-C (caught in the tokio side)
     //    drops the channel sender → the loop exits cleanly.
     tracing::info!("daemon event loop running; press Ctrl-C to exit");
-    run_event_loop(&rx, &bus, &hotkey_registry);
+    let mut hotkey_registry = hotkey_registry;
+    run_event_loop(&rx, &bus, &mut hotkey_registry, config_watcher.as_ref());
 
     // Wait for the tokio side to finish so we don't leak the runtime.
     let _ = tokio_join.join();
@@ -142,7 +156,8 @@ fn run_event_loop(
     rx: &mpsc::Receiver<()>,
     #[cfg_attr(not(feature = "tray"), allow(unused_variables))]
     bus: &crate::ipc_server::SubscriberBus,
-    hotkeys: &crate::hotkeys::HotkeyRegistry,
+    hotkeys: &mut crate::hotkeys::HotkeyRegistry,
+    config_watcher: Option<&crate::config_watcher::ConfigWatcher>,
 ) {
     loop {
         #[cfg(feature = "tray")]
@@ -153,6 +168,27 @@ fn run_event_loop(
             break;
         }
         drain_hotkeys(hotkeys, bus);
+
+        // Config hot-reload: re-read on change; re-register hotkeys only
+        // when [hotkeys] actually changed. A mid-write parse failure is
+        // tolerated (keep last-known-good, log, retry next change).
+        if let Some(watcher) = config_watcher {
+            if watcher.poll_changed() {
+                match flintshot_core::Config::load() {
+                    Ok(new_config) => {
+                        if hotkeys.refresh(&new_config.hotkeys) {
+                            tracing::info!("applied hotkey change from config");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "config reload failed (likely mid-write); keeping last-known-good hotkeys"
+                        );
+                    }
+                }
+            }
+        }
 
         match rx.recv_timeout(POLL_TIMEOUT) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}

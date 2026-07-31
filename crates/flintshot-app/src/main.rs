@@ -6,6 +6,7 @@
 #![warn(clippy::pedantic)]
 
 mod cli;
+mod config_watcher;
 mod daemon;
 mod hotkeys;
 mod ipc_server;

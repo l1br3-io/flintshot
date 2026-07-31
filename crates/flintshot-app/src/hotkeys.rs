@@ -19,12 +19,24 @@ use global_hotkey::GlobalHotKeyManager;
 
 /// Registered global hotkeys + the id → request map. Holds the manager
 /// alive for the daemon's lifetime (dropping the manager unregisters
-/// everything).
+/// everything). Remembers the chords it registered so config hot-reload
+/// (Task 010) can skip a costly re-registration when `[hotkeys]` is
+/// unchanged.
 pub(crate) struct HotkeyRegistry {
-    // Underscore-prefixed: the field is unused by name, but keeping the
-    // manager alive is the whole point — it must not be dropped early.
-    _manager: Option<GlobalHotKeyManager>,
+    // Held for its `Drop` side effect (unregistering the hotkeys on
+    // drop); never read by name. `refresh` swaps it to re-register.
+    #[allow(dead_code)]
+    manager: Option<GlobalHotKeyManager>,
     by_id: HashMap<u32, Request>,
+    region: String,
+    fullscreen: String,
+}
+
+/// Pure check: has the `[hotkeys]` section changed relative to the
+/// currently-registered chords? (Separate from [`HotkeyRegistry`] so it
+/// is unit-testable without a display / `global-hotkey`.)
+fn hotkeys_changed(config: &HotkeyConfig, region: &str, fullscreen: &str) -> bool {
+    config.region != region || config.fullscreen != fullscreen
 }
 
 impl HotkeyRegistry {
@@ -63,16 +75,70 @@ impl HotkeyRegistry {
             Request::CaptureFullscreen { monitor: None },
         );
         Self {
-            _manager: Some(manager),
+            manager: Some(manager),
             by_id,
+            region: config.region.clone(),
+            fullscreen: config.fullscreen.clone(),
         }
     }
 
     fn empty() -> Self {
         Self {
-            _manager: None,
+            manager: None,
             by_id: HashMap::new(),
+            region: String::new(),
+            fullscreen: String::new(),
         }
+    }
+
+    /// Hot-reload: if `[hotkeys]` changed, drop the old manager (which
+    /// unregisters its hotkeys) and register the new set. Returns `true`
+    /// if a re-registration happened. A manager-creation failure during
+    /// reload clears the chords so the next change retries; the daemon
+    /// keeps running.
+    pub(crate) fn refresh(&mut self, config: &HotkeyConfig) -> bool {
+        if !hotkeys_changed(config, &self.region, &self.fullscreen) {
+            return false;
+        }
+        // Drop the old manager — global-hotkey unregisters its hotkeys
+        // on drop.
+        self.manager = None;
+        self.by_id.clear();
+
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "global-hotkey manager unavailable after config change; \
+                     hotkeys disabled until the next config change"
+                );
+                // Force a rebuild attempt next time.
+                self.region.clear();
+                self.fullscreen.clear();
+                return true;
+            }
+        };
+        Self::register(
+            &manager,
+            &mut self.by_id,
+            &config.region,
+            Request::CaptureRegion {
+                monitor: None,
+                delay_ms: 0,
+            },
+        );
+        Self::register(
+            &manager,
+            &mut self.by_id,
+            &config.fullscreen,
+            Request::CaptureFullscreen { monitor: None },
+        );
+        self.manager = Some(manager);
+        self.region.clone_from(&config.region);
+        self.fullscreen.clone_from(&config.fullscreen);
+        tracing::info!("re-registered global hotkeys after a config change");
+        true
     }
 
     /// Parse + register one chord, recording its id → `request`.
@@ -131,14 +197,38 @@ mod tests {
         let mut by_id = HashMap::new();
         by_id.insert(42, Request::CaptureFullscreen { monitor: None });
         let reg = HotkeyRegistry {
-            _manager: None,
+            manager: None,
             by_id,
+            region: String::new(),
+            fullscreen: String::new(),
         };
         assert!(matches!(
             reg.lookup(42),
             Some(Request::CaptureFullscreen { monitor: None })
         ));
         assert!(reg.lookup(7).is_none());
+    }
+
+    #[test]
+    fn hotkeys_changed_detects_a_real_change() {
+        let mut cfg = flintshot_core::HotkeyConfig::default();
+        cfg.region = "Ctrl+Shift+A".into();
+        cfg.fullscreen = "Ctrl+Alt+B".into();
+        assert!(hotkeys_changed(&cfg, "Ctrl+Shift+Old", "Ctrl+Alt+B"));
+        assert!(hotkeys_changed(&cfg, "Ctrl+Shift+A", "Ctrl+Alt+Old"));
+        assert!(hotkeys_changed(&cfg, "", ""));
+    }
+
+    #[test]
+    fn hotkeys_unchanged_is_detected() {
+        let mut cfg = flintshot_core::HotkeyConfig::default();
+        cfg.region = "Ctrl+Shift+PrintScreen".into();
+        cfg.fullscreen = "Ctrl+Alt+PrintScreen".into();
+        assert!(!hotkeys_changed(
+            &cfg,
+            "Ctrl+Shift+PrintScreen",
+            "Ctrl+Alt+PrintScreen"
+        ));
     }
 
     #[test]
