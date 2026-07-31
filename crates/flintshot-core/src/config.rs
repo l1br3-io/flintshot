@@ -33,6 +33,9 @@ pub struct Config {
     /// Capture behaviour defaults.
     #[serde(default)]
     pub capture: CaptureConfig,
+    /// Global hotkey chords (read by the daemon; see [`HotkeyConfig`]).
+    #[serde(default)]
+    pub hotkeys: HotkeyConfig,
 }
 
 /// Editor defaults: persist the user's last-used color, stroke width,
@@ -83,6 +86,44 @@ impl Default for CaptureConfig {
             default_delay_ms: default_delay_ms(),
         }
     }
+}
+
+/// Global-hotkey chords (X11/macOS/Windows). Wayland's portal-based
+/// global hotkeys are Phase 6 — on Wayland the daemon logs the
+/// compositor-keybind workaround and the `[hotkeys]` section is simply
+/// unused. Chord strings use `global-hotkey`'s accelerator format
+/// (`"Ctrl+Shift+Print"`, case-insensitive modifier names, `+`-joined).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub struct HotkeyConfig {
+    /// Chord that captures a region (interactive selection), e.g.
+    /// `"Ctrl+Shift+Print"`.
+    #[serde(default = "default_region_hotkey")]
+    pub region: String,
+    /// Chord that captures the primary monitor fullscreen, e.g.
+    /// `"Ctrl+Alt+Print"`.
+    #[serde(default = "default_fullscreen_hotkey")]
+    pub fullscreen: String,
+}
+
+impl Default for HotkeyConfig {
+    fn default() -> Self {
+        Self {
+            region: default_region_hotkey(),
+            fullscreen: default_fullscreen_hotkey(),
+        }
+    }
+}
+
+fn default_region_hotkey() -> String {
+    // global-hotkey's parser names the key `PrintScreen` (not `Print`);
+    // ARCHITECTURE.md's example used the shorter form.
+    "Ctrl+Shift+PrintScreen".into()
+}
+
+fn default_fullscreen_hotkey() -> String {
+    "Ctrl+Alt+PrintScreen".into()
 }
 
 fn default_color() -> Color {
@@ -209,6 +250,7 @@ impl Config {
 
         ensure_table(&mut doc, "ui");
         ensure_table(&mut doc, "capture");
+        ensure_table(&mut doc, "hotkeys");
 
         if let Some(ui) = doc.get_mut("ui").and_then(|i| i.as_table_mut()) {
             set_value(
@@ -237,6 +279,18 @@ impl Config {
                 cap,
                 "default-delay-ms",
                 toml_edit::Value::from(i64::from(self.capture.default_delay_ms)),
+            );
+        }
+        if let Some(hk) = doc.get_mut("hotkeys").and_then(|i| i.as_table_mut()) {
+            set_value(
+                hk,
+                "region",
+                toml_edit::Value::from(self.hotkeys.region.as_str()),
+            );
+            set_value(
+                hk,
+                "fullscreen",
+                toml_edit::Value::from(self.hotkeys.fullscreen.as_str()),
             );
         }
 
@@ -405,6 +459,36 @@ include-cursor = true  # hide cursor when capturing presentations
         assert_eq!(cfg.ui.default_font_size, 16.0);
         assert!(cfg.capture.include_cursor);
         assert_eq!(cfg.capture.default_delay_ms, 0);
+    }
+
+    #[test]
+    fn missing_hotkeys_section_uses_defaults() {
+        // No [hotkeys] in the file → the default chords.
+        let cfg = Config::load_from(&{
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            fs::write(&path, "[ui]\ndefault-color = \"#000000\"\n").unwrap();
+            path
+        })
+        .unwrap();
+        assert_eq!(cfg.hotkeys.region, "Ctrl+Shift+PrintScreen");
+        assert_eq!(cfg.hotkeys.fullscreen, "Ctrl+Alt+PrintScreen");
+        let d = Config::default();
+        assert_eq!(d.hotkeys.region, "Ctrl+Shift+PrintScreen");
+    }
+
+    #[test]
+    fn custom_hotkeys_load_from_toml() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[hotkeys]\nregion = \"Ctrl+Shift+KeyA\"\nfullscreen = \"Super+F\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.hotkeys.region, "Ctrl+Shift+KeyA");
+        assert_eq!(cfg.hotkeys.fullscreen, "Super+F");
     }
 
     #[test]

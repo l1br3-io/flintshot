@@ -28,7 +28,7 @@ pub mod shell;
 pub mod upload;
 
 pub use capture::{capture_fullscreen, capture_region, monitors, MonitorInfo};
-pub use config::{config_path, CaptureConfig, Config, UiConfig};
+pub use config::{config_path, CaptureConfig, Config, HotkeyConfig, UiConfig};
 pub use editor::{Annotation, BlurKind, EditorState, Snapshot, Tool};
 pub use error::{FlintshotError, Result};
 pub use geom::{Color, Key, Point, Rect, Stroke};

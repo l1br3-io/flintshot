@@ -7,6 +7,7 @@
 
 mod cli;
 mod daemon;
+mod hotkeys;
 mod ipc_server;
 mod single;
 #[cfg(feature = "tray")]

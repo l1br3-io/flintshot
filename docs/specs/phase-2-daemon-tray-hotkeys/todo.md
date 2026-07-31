@@ -28,8 +28,8 @@
 
 - [x] 007 — System tray menu → [`tasks/007-system-tray-menu.md`](tasks/007-system-tray-menu.md)
 - [x] 008 — Multi-monitor tray submenu → [`tasks/008-monitor-submenu.md`](tasks/008-monitor-submenu.md)
-- [ ] 009 — Global hotkeys from `[hotkeys]` config → [`tasks/009-global-hotkeys.md`](tasks/009-global-hotkeys.md)
-- [ ] **Checkpoint D** — full daemon works on X11: tray + hotkeys + IPC + single-instance
+- [x] 009 — Global hotkeys from `[hotkeys]` config → [`tasks/009-global-hotkeys.md`](tasks/009-global-hotkeys.md)
+- [x] **Checkpoint D** — full daemon works on X11: tray + hotkeys + IPC + single-instance
 
 ## Phase 2.E — Config hot-reload + CLI delegation
 

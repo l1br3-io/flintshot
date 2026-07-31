@@ -292,8 +292,8 @@ include_cursor = true
 default_delay_ms = 0
 
 [hotkeys]
-region = "Ctrl+Shift+Print"
-fullscreen = "Ctrl+Alt+Print"
+region = "Ctrl+Shift+PrintScreen"
+fullscreen = "Ctrl+Alt+PrintScreen"
 
 [upload]
 default_backend = "imgur"
