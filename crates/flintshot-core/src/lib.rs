@@ -36,8 +36,8 @@ pub use image_ops::{blur, crop_region};
 pub use input::{DispatchOutcome, InputEvent, Modifiers};
 pub use ipc::{socket_path, Event as IpcEvent, Request as IpcRequest};
 pub use render::{
-    arrow_barbs, compose_final, compose_final_region, render, render_ann, Canvas, DrawCall,
-    MockCanvas,
+    arrow_barbs, compose_final, compose_final_region, render, render_ann, BlurCache, Canvas,
+    DrawCall, MockCanvas,
 };
 pub use shell::{EditorOutcome, EditorShell};
 pub use upload::{ImageMime, UploadBackend, UploadContext, UploadError, UploadOutcome};

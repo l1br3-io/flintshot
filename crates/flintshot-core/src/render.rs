@@ -14,8 +14,10 @@
 //! for the render path: tests construct an `EditorState`, run `render`
 //! against a `MockCanvas`, and assert the recorded `Vec<DrawCall>`.
 
+use std::collections::HashMap;
+
 use crate::{
-    editor::{Annotation, EditorState},
+    editor::{Annotation, BlurKind, EditorState},
     geom::{Color, Point, Rect, Stroke},
 };
 
@@ -92,6 +94,11 @@ pub trait Canvas {
 /// cropped sub-image). For Phase 1 Task 4 there is no such mutation
 /// path, so the cache lives for the editor's lifetime.
 ///
+/// Committed `Annotation::Blur` entries are cached in `blur_cache` so
+/// the expensive Gaussian / pixelate pass runs once per annotation,
+/// not once per frame. Without this, a few blur regions saturate the
+/// CPU at 60 fps and the editor freezes.
+///
 /// After the background blit, this walks `state.anns` in draw order
 /// and dispatches each annotation via [`render_ann`]. If `state.pending`
 /// is set it is drawn on top (last) so the user sees live feedback
@@ -104,6 +111,7 @@ pub fn render<C: Canvas>(
     state: &EditorState,
     canvas: &mut C,
     bg: &mut Option<C::Image>,
+    blur_cache: &mut BlurCache,
 ) -> crate::Result<()> {
     if bg.is_none() {
         let handle = canvas.upload_image(&state.image)?;
@@ -113,9 +121,30 @@ pub fn render<C: Canvas>(
     if let Some(handle) = bg.as_ref() {
         canvas.draw_image(handle, rect);
     }
-    for ann in &state.anns {
-        render_ann(canvas, ann, &state.image);
+
+    // Committed annotations. Blur annotations are special-cased to use
+    // the blur cache — without it, every committed blur recomputes its
+    // Gaussian / pixelate pass every frame, which saturates the CPU
+    // after a few regions and freezes the editor.
+    blur_cache.prune(state.anns.len());
+    for (i, ann) in state.anns.iter().enumerate() {
+        match ann {
+            Annotation::Blur {
+                rect,
+                kind,
+                strength,
+            } => {
+                let n = rect.normalized();
+                if n.width().abs() < 1.0 || n.height().abs() < 1.0 {
+                    continue;
+                }
+                let img = blur_cache.get_or_compute(i, *rect, *kind, *strength, &state.image);
+                canvas.draw_image_region(img, n);
+            }
+            _ => render_ann(canvas, ann, &state.image),
+        }
     }
+
     if let Some(pending) = &state.pending {
         render_ann(canvas, pending, &state.image);
         // Caret indicator for an in-flight `Tool::Text` draft. Only
@@ -135,6 +164,19 @@ pub fn render<C: Canvas>(
             draw_text_caret(canvas, *pos, text, *font_size, *color);
         }
     }
+
+    // Blur outlines: live-view-only affordance so the user can locate
+    // blur regions even when the underlying pixels are uniform. Not
+    // drawn by `render_ann`, so `compose_final` output excludes them.
+    for ann in &state.anns {
+        if let Annotation::Blur { rect, .. } = ann {
+            draw_blur_outline(canvas, *rect);
+        }
+    }
+    if let Some(Annotation::Blur { rect, .. }) = &state.pending {
+        draw_blur_outline(canvas, *rect);
+    }
+
     if let Some(sel) = state.selection {
         let n = sel.normalized();
         if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 {
@@ -142,6 +184,15 @@ pub fn render<C: Canvas>(
         }
     }
     Ok(())
+}
+
+/// Draw a thin outline around a blur region. No-op on degenerate rects
+/// (< 1 px). See [`BLUR_OUTLINE_STROKE`] for styling rationale.
+fn draw_blur_outline<C: Canvas>(canvas: &mut C, rect: Rect) {
+    let n = rect.normalized();
+    if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 {
+        canvas.draw_rect_outline(n, &BLUR_OUTLINE_STROKE);
+    }
 }
 
 /// Stroke style for the in-flight `Tool::Select` region. Distinct from
@@ -154,6 +205,15 @@ const SELECTION_STROKE: Stroke = Stroke::new(Color::rgb(0, 120, 215), 2.0);
 /// draft. Thin enough to read as a cursor rather than a tick, thick
 /// enough to survive `HiDPI` rounding at `pixels_per_point` ≥ 2.
 const CARET_STROKE_WIDTH: f32 = 1.5;
+
+/// Outline drawn around blur regions in the live editor view so the
+/// user can locate them even when the underlying pixels are uniform
+/// (Gaussian blur of a flat colour is indistinguishable from the
+/// original). Semi-transparent white is visible on both dark and light
+/// backgrounds. This is a live-view-only affordance — `render_ann`
+/// does not draw it, so saved / copied output via `compose_final`
+/// excludes it.
+const BLUR_OUTLINE_STROKE: Stroke = Stroke::new(Color::rgba(255, 255, 255, 180), 1.5);
 
 /// Dispatch a single annotation to the appropriate `Canvas` primitive(s).
 ///
@@ -335,6 +395,99 @@ fn draw_text_caret<C: Canvas>(
         Point::new(x, pos.y + font_size),
         &stroke,
     );
+}
+
+/// Cache of precomputed blurred images for committed `Annotation::Blur`
+/// entries, keyed by annotation index.
+///
+/// Without this cache, [`render`] recomputes the Gaussian / pixelate
+/// pass for every committed blur on every frame (60 fps). A few large
+/// blur regions saturate the CPU and the editor freezes. The cache
+/// computes each blur once and reuses the result across frames.
+///
+/// The shell owns the cache and passes it to [`render`] each frame.
+/// It must call [`BlurCache::clear`] when the source image changes
+/// (crop replaces `state.image`) so stale entries don't survive.
+///
+/// Cache invalidation is parameter-based: each entry stores the
+/// `(rect, kind, strength)` it was computed with. On lookup, if the
+/// annotation's params differ (e.g. after undo / redo / crop changed
+/// the rect), the entry is recomputed. Annotation index is the primary
+/// key, so adding new annotations doesn't invalidate existing entries.
+pub struct BlurCache {
+    entries: HashMap<usize, BlurCacheEntry>,
+}
+
+struct BlurCacheEntry {
+    rect: Rect,
+    kind: BlurKind,
+    strength: u8,
+    image: image::RgbaImage,
+}
+
+impl BlurCache {
+    /// Construct an empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Drop all cached entries. Call when the source image changes
+    /// (crop) so stale precomputed blurs don't survive.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Remove entries whose annotation index is ≥ `len`. Called each
+    /// frame so undo (which shrinks `anns`) doesn't leak memory.
+    fn prune(&mut self, len: usize) {
+        self.entries.retain(|&k, _| k < len);
+    }
+
+    /// Return the cached blurred image for annotation `index`, or
+    /// compute and cache it on miss. Parameter check on every hit means
+    /// undo / redo / crop (which change annotation rects or the source
+    /// image) naturally invalidate stale entries.
+    fn get_or_compute(
+        &mut self,
+        index: usize,
+        rect: Rect,
+        kind: BlurKind,
+        strength: u8,
+        source: &image::RgbaImage,
+    ) -> &image::RgbaImage {
+        let needs_compute = self
+            .entries
+            .get(&index)
+            .is_none_or(|e| e.rect != rect || e.kind != kind || e.strength != strength);
+        if needs_compute {
+            let n = rect.normalized();
+            let region = crate::image_ops::crop_region(source, n);
+            let blurred = crate::image_ops::blur(&region, kind, strength);
+            self.entries.insert(
+                index,
+                BlurCacheEntry {
+                    rect,
+                    kind,
+                    strength,
+                    image: blurred,
+                },
+            );
+        }
+        &self
+            .entries
+            .get(&index)
+            .expect("entry was just inserted")
+            .image
+    }
+}
+
+impl Default for BlurCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Compose the final image: a clone of `state.image` with every
@@ -997,7 +1150,8 @@ mod tests {
         let state = EditorState::new(image::RgbaImage::new(10, 20));
         let mut canvas = MockCanvas::default();
         let mut bg = None;
-        render(&state, &mut canvas, &mut bg).expect("render should succeed");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default())
+            .expect("render should succeed");
 
         assert_eq!(canvas.calls.len(), 2, "upload + blit");
         assert!(matches!(canvas.calls[0], DrawCall::UploadImage));
@@ -1016,11 +1170,11 @@ mod tests {
         let mut canvas = MockCanvas::default();
         let mut bg = None;
 
-        render(&state, &mut canvas, &mut bg).expect("first render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("first render");
         assert!(bg.is_some(), "first render populates the cache");
         let calls_after_first = canvas.calls.len();
 
-        render(&state, &mut canvas, &mut bg).expect("second render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("second render");
         assert_eq!(
             canvas.calls.len(),
             calls_after_first + 1,
@@ -1043,9 +1197,10 @@ mod tests {
         let mut canvas = MockCanvas::default();
         let mut bg = None;
 
-        render(&state, &mut canvas, &mut bg).expect("first render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("first render");
         bg = None; // simulate cache invalidation
-        render(&state, &mut canvas, &mut bg).expect("second render after drop");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default())
+            .expect("second render after drop");
 
         // Two uploads + two blits across the two frames.
         assert_eq!(canvas.calls.len(), 4);
@@ -1109,7 +1264,7 @@ mod tests {
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
-        render(&state, &mut canvas, &mut bg).expect("render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // Expected sequence: UploadImage, DrawImage (bg), DrawRectOutline
         // (committed), DrawRectOutline (pending, normalized).
@@ -1308,7 +1463,7 @@ mod tests {
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
-        render(&state, &mut canvas, &mut bg).expect("render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // Upload + blit + DrawText (the run) + DrawLine (the caret).
         let mut it = canvas.calls.iter();
@@ -1365,7 +1520,7 @@ mod tests {
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
-        render(&state, &mut canvas, &mut bg).expect("render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // The empty run still emits a DrawText (the dispatcher doesn't
         // special-case it), followed by the caret at pos.x (advance 0).
@@ -1398,7 +1553,7 @@ mod tests {
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
-        render(&state, &mut canvas, &mut bg).expect("render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // The committed text emits exactly one DrawText (no DrawLine).
         assert!(
@@ -1708,7 +1863,7 @@ mod tests {
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
-        render(&state, &mut canvas, &mut bg).expect("render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // Upload + blit + committed rect outline + selection outline.
         assert_eq!(canvas.calls.len(), 4);
@@ -1733,7 +1888,7 @@ mod tests {
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
-        render(&state, &mut canvas, &mut bg).expect("render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // Only upload + blit — no selection outline.
         assert_eq!(canvas.calls.len(), 2);
@@ -1798,7 +1953,7 @@ mod tests {
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
-        render(&state, &mut canvas, &mut bg).expect("render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // Upload + blit + one DrawArrow.
         assert_eq!(canvas.calls.len(), 3);
@@ -1888,7 +2043,7 @@ mod tests {
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
-        render(&state, &mut canvas, &mut bg).expect("render");
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // Expected sequence: UploadImage, DrawImage (bg),
         // DrawRectOutline (rect 1, outline only),
@@ -1935,5 +2090,182 @@ mod tests {
             }
             other => panic!("expected outline for rect 2, got {other:?}"),
         }
+    }
+
+    /// The live `render()` path draws a thin outline around each blur
+    /// region so the user can locate it even on uniform backgrounds
+    /// (Gaussian blur of a flat colour is invisible). Without this the
+    /// user sees no box indicator at all — Bug 1 in the original report.
+    #[test]
+    fn render_draws_outline_for_committed_blur() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 100));
+        state.anns.push(Annotation::Blur {
+            rect: Rect::from_xywh(20.0, 20.0, 40.0, 30.0),
+            kind: crate::editor::BlurKind::Gaussian,
+            strength: 3,
+        });
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        let mut cache = BlurCache::default();
+        render(&state, &mut canvas, &mut bg, &mut cache).expect("render");
+
+        // Expect: UploadImage, DrawImage (bg),
+        //         DrawImageRegion (blurred pixels),
+        //         DrawRectOutline (blur boundary indicator).
+        let has_blur_outline = canvas.calls.iter().any(|c| match c {
+            DrawCall::DrawRectOutline { rect, stroke } => {
+                *rect == Rect::from_xywh(20.0, 20.0, 40.0, 30.0)
+                    && stroke.color == Color::rgba(255, 255, 255, 180)
+            }
+            _ => false,
+        });
+        assert!(
+            has_blur_outline,
+            "committed blur should have a visible outline, got {:?}",
+            canvas.calls
+        );
+    }
+
+    /// The live `render()` path also draws an outline for a *pending*
+    /// blur annotation (during drag), so the user sees a box indicator
+    /// while creating the blur region.
+    #[test]
+    fn render_draws_outline_for_pending_blur() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 100));
+        state.pending = Some(Annotation::Blur {
+            rect: Rect::from_xywh(10.0, 10.0, 50.0, 50.0),
+            kind: crate::editor::BlurKind::Gaussian,
+            strength: 3,
+        });
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        let mut cache = BlurCache::default();
+        render(&state, &mut canvas, &mut bg, &mut cache).expect("render");
+
+        let has_blur_outline = canvas.calls.iter().any(|c| match c {
+            DrawCall::DrawRectOutline { rect, .. } => {
+                *rect == Rect::from_xywh(10.0, 10.0, 50.0, 50.0)
+            }
+            _ => false,
+        });
+        assert!(
+            has_blur_outline,
+            "pending blur should have a visible outline during drag"
+        );
+    }
+
+    /// Blur outlines are a live-view-only affordance. `compose_final`
+    /// (which drives `render_ann` directly, not `render`) must NOT
+    /// include them in saved / copied output.
+    #[test]
+    fn compose_final_excludes_blur_outline() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 100));
+        state.anns.push(Annotation::Blur {
+            rect: Rect::from_xywh(20.0, 20.0, 40.0, 30.0),
+            kind: crate::editor::BlurKind::Gaussian,
+            strength: 3,
+        });
+
+        let out = compose_final(&state);
+        // The blur region's top-left corner should be blurred source
+        // pixels, not the white outline colour. If the outline leaked
+        // into compose_final, (20, 20) would be white-ish.
+        let corner = out.get_pixel(20, 20).0;
+        assert!(
+            !(corner[0] > 240 && corner[1] > 240 && corner[2] > 240),
+            "blur outline leaked into compose_final: corner = {corner:?}"
+        );
+    }
+
+    /// The blur cache computes each committed blur once and reuses it
+    /// across frames. Render the same state twice with the same cache
+    /// and verify both frames produce the same draw calls — the cache
+    /// is transparent (the blit still happens), just the expensive
+    /// computation is skipped.
+    #[test]
+    fn blur_cache_reuses_across_frames() {
+        let mut state = EditorState::new(image::RgbaImage::new(50, 50));
+        state.anns.push(Annotation::Blur {
+            rect: Rect::from_xywh(5.0, 5.0, 30.0, 30.0),
+            kind: crate::editor::BlurKind::Gaussian,
+            strength: 4,
+        });
+
+        let mut cache = BlurCache::default();
+
+        // Frame 1 — cache miss, computes + stores.
+        let mut canvas1 = MockCanvas::default();
+        let mut bg1 = None;
+        render(&state, &mut canvas1, &mut bg1, &mut cache).expect("frame 1");
+        let frame1_region: Vec<_> = canvas1
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                DrawCall::DrawImageRegion {
+                    width,
+                    height,
+                    dest,
+                    ..
+                } => Some((*width, *height, *dest)),
+                _ => None,
+            })
+            .collect();
+
+        // Frame 2 — cache hit, blits same image.
+        let mut canvas2 = MockCanvas::default();
+        let mut bg2 = None;
+        render(&state, &mut canvas2, &mut bg2, &mut cache).expect("frame 2");
+        let frame2_region: Vec<_> = canvas2
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                DrawCall::DrawImageRegion {
+                    width,
+                    height,
+                    dest,
+                    ..
+                } => Some((*width, *height, *dest)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            frame1_region, frame2_region,
+            "cached blur should produce identical blit geometry across frames"
+        );
+    }
+
+    /// `BlurCache::clear` drops all entries. After clearing, the next
+    /// render recomputes from scratch.
+    #[test]
+    fn blur_cache_clear_works() {
+        let mut state = EditorState::new(image::RgbaImage::new(50, 50));
+        state.anns.push(Annotation::Blur {
+            rect: Rect::from_xywh(5.0, 5.0, 30.0, 30.0),
+            kind: crate::editor::BlurKind::Gaussian,
+            strength: 4,
+        });
+
+        let mut cache = BlurCache::default();
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+
+        // Populate cache.
+        render(&state, &mut canvas, &mut bg, &mut cache).expect("first render");
+        assert_eq!(canvas.calls.len(), 4, "upload + blit + region + outline");
+
+        // Clear + re-render — should still produce the same calls.
+        cache.clear();
+        canvas.calls.clear();
+        render(&state, &mut canvas, &mut bg, &mut cache).expect("re-render after clear");
+        assert!(
+            canvas
+                .calls
+                .iter()
+                .any(|c| matches!(c, DrawCall::DrawImageRegion { .. })),
+            "blur should re-render after cache clear"
+        );
     }
 }

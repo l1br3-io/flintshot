@@ -20,7 +20,7 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    compose_final, compose_final_region, render::render, Color, Config, DispatchOutcome,
+    compose_final, compose_final_region, render::render, BlurCache, Color, Config, DispatchOutcome,
     EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, Point, Rect, Tool,
 };
 
@@ -89,6 +89,11 @@ pub(crate) struct EditorApp {
     /// "Copied!" button feedback so the user knows the data is on the
     /// clipboard and the editor is intentionally still open.
     copied: bool,
+    /// Precomputed blur images for committed `Annotation::Blur` entries.
+    /// Avoids recomputing the expensive Gaussian / pixelate pass every
+    /// frame — without it, a few blur regions saturate the CPU at 60 fps
+    /// and the editor freezes. Cleared when crop replaces `state.image`.
+    blur_cache: BlurCache,
 }
 
 /// Which toolbar button the user clicked this frame (if any).
@@ -124,6 +129,7 @@ impl EditorApp {
             outcome,
             clipboard: None,
             copied: false,
+            blur_cache: BlurCache::new(),
         }
     }
 
@@ -268,6 +274,7 @@ impl EditorApp {
         // keep issuing InnerSize until the panel reports the right size.
         if current_dims != self.img_dims {
             self.bg = None;
+            self.blur_cache.clear();
             self.img_dims = current_dims;
         }
         let toolbar_h = self.canvas_rect.map_or(0.0, |r| r.min.y);
@@ -557,7 +564,12 @@ impl App for EditorApp {
         // publication happens against the unborrowed `self`).
         let panel = egui::CentralPanel::default().show(ui, |ui| {
             self.canvas.bind_painter(ui.painter());
-            render(&self.state, &mut self.canvas, &mut self.bg)
+            render(
+                &self.state,
+                &mut self.canvas,
+                &mut self.bg,
+                &mut self.blur_cache,
+            )
         });
 
         // Cache the canvas's screen-logical rect so the next frame's
