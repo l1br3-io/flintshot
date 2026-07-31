@@ -20,7 +20,7 @@
 ## Phase 2.C — IPC server + worker model
 
 - [x] 004 — IPC server transport + postcard framing → [`tasks/004-ipc-server-transport.md`](tasks/004-ipc-server-transport.md)
-- [ ] 005 — Worker spawn module + dispatch table → [`tasks/005-worker-spawn-module.md`](tasks/005-worker-spawn-module.md)
+- [x] 005 — Worker spawn module + dispatch table → [`tasks/005-worker-spawn-module.md`](tasks/005-worker-spawn-module.md)
 - [ ] 006 — Wire capture requests + `--replace` → [`tasks/006-wire-capture-requests.md`](tasks/006-wire-capture-requests.md)
 - [ ] **Checkpoint C** — IPC end-to-end; external client observes the Event stream; `--replace` swaps daemons
 

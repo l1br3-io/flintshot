@@ -9,6 +9,7 @@ mod cli;
 mod daemon;
 mod ipc_server;
 mod single;
+mod worker;
 
 use clap::Parser;
 use color_eyre::Result;
