@@ -126,10 +126,6 @@ impl SubscriberBus {
     /// Broadcast `event` to every current subscriber. No subscribers →
     /// silent no-op. A subscriber that has gone away is reaped
     /// automatically by the broadcast channel.
-    ///
-    // In Task 004 only the unit tests broadcast; Task 006 wires the
-    // daemon to broadcast capture outcomes, which makes this live.
-    #[allow(dead_code)]
     pub fn broadcast(&self, event: IpcEvent) {
         let _ = self.tx.send(event);
     }
@@ -249,52 +245,54 @@ async fn handle_connection(
     loop {
         let payload = read_frame(&mut stream).await?;
         let request = decode_request(&payload)?;
-        match request {
-            IpcRequest::Subscribe => {
-                tracing::debug!("IPC subscriber registered");
-                // Subscribe synchronously — the receiver is registered
-                // the moment Subscribe is read, before the forwarder
-                // task is scheduled, so a client that sends Subscribe
-                // then waits for events doesn't race the task spawn.
-                let rx = bus.subscribe();
-                tokio::spawn(async move {
-                    let mut rx = rx;
-                    let mut stream = stream;
-                    loop {
-                        match rx.recv().await {
-                            Ok(event) => {
-                                let bytes = match encode_msg(&event) {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "encode event failed");
-                                        continue;
-                                    }
-                                };
-                                if write_frame(&mut stream, &bytes).await.is_err() {
-                                    break; // subscriber gone
+        if matches!(request, IpcRequest::Subscribe) {
+            tracing::debug!("IPC subscriber registered");
+            // Subscribe synchronously — the receiver is registered
+            // the moment Subscribe is read, before the forwarder
+            // task is scheduled, so a client that sends Subscribe
+            // then waits for events doesn't race the task spawn.
+            let rx = bus.subscribe();
+            tokio::spawn(async move {
+                let mut rx = rx;
+                let mut stream = stream;
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => {
+                            let bytes = match encode_msg(&event) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "encode event failed");
+                                    continue;
                                 }
+                            };
+                            if write_frame(&mut stream, &bytes).await.is_err() {
+                                break; // subscriber gone
                             }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                tracing::warn!(
-                                    skipped = n,
-                                    "IPC subscriber lagged; skipping events"
-                                );
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
                         }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "IPC subscriber lagged; skipping events");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                });
-                return Ok(());
-            }
-            IpcRequest::Quit => {
-                tracing::info!("IPC Request::Quit received; signalling daemon shutdown");
-                shutdown.notify_one();
-                return Ok(());
-            }
-            other => {
-                // Capture/replace wiring lands in Task 006.
-                tracing::debug!(?other, "IPC request not yet handled (Task 006)");
-            }
+                }
+            });
+            return Ok(());
+        }
+
+        // Everything else routes through the worker dispatch table:
+        // capture requests spawn a `flintshot` child + broadcast
+        // CaptureStarted; Quit signals shutdown; unbuilt phases
+        // broadcast an `unsupported` Error.
+        let outcome =
+            crate::worker::dispatch(&request, &crate::worker::CommandSpawner, &mut |event| {
+                bus.broadcast(event);
+            })?;
+        if matches!(outcome, crate::worker::DispatchOutcome::Shutdown) {
+            tracing::info!("IPC Request::Quit received; signalling shutdown");
+            // Task 006's `--replace` extends this to a full daemon
+            // takeover; for now it stops the IPC accept loop.
+            shutdown.notify_one();
+            return Ok(());
         }
     }
 }
