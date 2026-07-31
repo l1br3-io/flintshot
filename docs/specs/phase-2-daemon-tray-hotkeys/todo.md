@@ -15,11 +15,11 @@
 ## Phase 2.B — Daemon event-loop de-risk (high risk)
 
 - [x] 003 — Daemon event-loop bridge spike + single-instance lock → [`tasks/003-daemon-loop-bridge.md`](tasks/003-daemon-loop-bridge.md)
-- [ ] **Checkpoint B** — bridge approach proven; ADR-0018 reviewed before building on it
+- [x] **Checkpoint B** — bridge approach proven; ADR-0018 reviewed before building on it
 
 ## Phase 2.C — IPC server + worker model
 
-- [ ] 004 — IPC server transport + postcard framing → [`tasks/004-ipc-server-transport.md`](tasks/004-ipc-server-transport.md)
+- [x] 004 — IPC server transport + postcard framing → [`tasks/004-ipc-server-transport.md`](tasks/004-ipc-server-transport.md)
 - [ ] 005 — Worker spawn module + dispatch table → [`tasks/005-worker-spawn-module.md`](tasks/005-worker-spawn-module.md)
 - [ ] 006 — Wire capture requests + `--replace` → [`tasks/006-wire-capture-requests.md`](tasks/006-wire-capture-requests.md)
 - [ ] **Checkpoint C** — IPC end-to-end; external client observes the Event stream; `--replace` swaps daemons

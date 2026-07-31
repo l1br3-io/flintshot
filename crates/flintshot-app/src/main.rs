@@ -7,6 +7,7 @@
 
 mod cli;
 mod daemon;
+mod ipc_server;
 mod single;
 
 use clap::Parser;
