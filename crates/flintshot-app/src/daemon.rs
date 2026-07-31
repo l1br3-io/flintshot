@@ -35,8 +35,6 @@ const POLL_TIMEOUT: Duration = Duration::from_millis(100);
 pub enum ActionSource {
     /// Periodic heartbeat from the tokio side thread.
     Tick,
-    /// A system-tray interaction.
-    Tray,
     /// A registered global hotkey fired.
     Hotkey,
 }
@@ -45,7 +43,6 @@ impl ActionSource {
     fn as_str(self) -> &'static str {
         match self {
             ActionSource::Tick => "tick",
-            ActionSource::Tray => "tray",
             ActionSource::Hotkey => "hotkey",
         }
     }
@@ -55,14 +52,12 @@ impl ActionSource {
 ///
 /// Deliberately platform-agnostic — no `tray_icon`/`global_hotkey`
 /// types leak here, so the handler (and its tests) need neither a
-/// display nor those crates.
+/// display nor those crates. Tray clicks don't appear here: they route
+/// straight through the worker dispatch table in [`drain_tray_menu`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonAction {
     /// Heartbeat from the tokio side (proves the bridge is alive).
     Tick,
-    /// A tray click (full menu wiring lands in Task 007).
-    #[cfg_attr(not(feature = "tray"), allow(dead_code))]
-    Tray,
     /// A global hotkey fired; `id` is the accelerator id assigned at
     /// registration.
     Hotkey {
@@ -78,7 +73,6 @@ impl DaemonAction {
     pub fn source(&self) -> ActionSource {
         match self {
             DaemonAction::Tick => ActionSource::Tick,
-            DaemonAction::Tray => ActionSource::Tray,
             DaemonAction::Hotkey { .. } => ActionSource::Hotkey,
         }
     }
@@ -141,19 +135,23 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     }?;
     tracing::info!("single-instance lock acquired");
 
-    // 2. Spawn the tokio side thread + the main→tokio channel.
+    // 2. Spawn the tokio side thread + the main→tokio channel. The
+    //    subscriber bus is shared between the IPC server (tokio side)
+    //    and the tray/hotkey dispatch (main loop), so a capture started
+    //    from any source reaches every subscriber.
+    let bus = crate::ipc_server::SubscriberBus::new();
     let (tx, rx) = mpsc::channel::<DaemonAction>();
-    //    The IPC server is bound inside the runtime (interprocess's
-    //    tokio listener registers its fd with the reactor on creation,
-    //    so binding must happen on the tokio side, not the main thread).
     let builder = thread::Builder::new().name("flintshot-tokio".into());
     let tokio_join = builder
-        .spawn(move || run_tokio_side(tx))
+        .spawn({
+            let bus = bus.clone();
+            move || run_tokio_side(tx, bus)
+        })
         .map_err(|e| eyre::eyre!("spawning tokio side thread: {e}"))?;
 
     // 3. Platform sources on the main thread.
     #[cfg(feature = "tray")]
-    let _tray = match setup_tray() {
+    let _tray = match crate::tray::build() {
         Ok(t) => Some(t),
         Err(e) => {
             tracing::warn!(
@@ -177,7 +175,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     // 4. Block on the event loop. Ctrl-C (caught in the tokio side)
     //    drops the channel sender → the loop exits cleanly.
     tracing::info!("daemon event loop running; press Ctrl-C to exit");
-    run_event_loop(LoggingHandler, &rx);
+    run_event_loop(LoggingHandler, &rx, &bus);
 
     // Wait for the tokio side to finish so we don't leak the runtime.
     let _ = tokio_join.join();
@@ -209,12 +207,27 @@ fn replace_running_daemon() -> eyre::Result<()> {
     Ok(())
 }
 
-/// The main event loop: drain tray + hotkey receivers, then block
-/// (briefly) on the tokio channel. Forwards everything to `handler`.
-fn run_event_loop(mut handler: impl ActionHandler, rx: &mpsc::Receiver<DaemonAction>) {
+/// The main event loop: drain tray menu + hotkey receivers, then block
+/// (briefly) on the tokio channel. Tray capture/quit clicks route
+/// through the worker dispatch table (same path as IPC); the handler
+/// logs heartbeats/hotkeys.
+///
+/// Returns when the tokio side drops its sender (Ctrl-C / IPC `Quit`)
+/// or a tray *Quit* is clicked.
+fn run_event_loop(
+    mut handler: impl ActionHandler,
+    rx: &mpsc::Receiver<DaemonAction>,
+    #[cfg_attr(not(feature = "tray"), allow(unused_variables))]
+    bus: &crate::ipc_server::SubscriberBus,
+) {
     loop {
         #[cfg(feature = "tray")]
-        drain_tray(&mut handler);
+        if drain_tray_menu(bus) {
+            // Tray *Quit*: dropping `rx` is the caller's job; just stop
+            // polling. (`run` then returns, releasing the lock etc.)
+            tracing::info!("tray Quit clicked; exiting event loop");
+            break;
+        }
         drain_hotkeys(&mut handler);
 
         match rx.recv_timeout(POLL_TIMEOUT) {
@@ -228,15 +241,56 @@ fn run_event_loop(mut handler: impl ActionHandler, rx: &mpsc::Receiver<DaemonAct
     }
 }
 
-/// Forward all pending tray clicks to `handler` (best-effort; no-op if
-/// no tray was built — the global receiver simply stays empty).
+/// Drain pending tray menu clicks, routing each through the worker
+/// dispatch table (capture → spawn + `CaptureStarted`/`EditorOpened`;
+/// quit → shutdown) or opening the config. Returns `true` if *Quit* was
+/// clicked. Best-effort: a no-op if no tray was built.
 #[cfg(feature = "tray")]
-fn drain_tray(handler: &mut impl ActionHandler) {
-    use tray_icon::TrayIconEvent;
-    let rx = TrayIconEvent::receiver();
-    while rx.try_recv().is_ok() {
-        handler.handle(DaemonAction::Tray);
+fn drain_tray_menu(bus: &crate::ipc_server::SubscriberBus) -> bool {
+    use tray_icon::menu::MenuEvent;
+
+    let rx = MenuEvent::receiver();
+    while let Ok(event) = rx.try_recv() {
+        match crate::tray::action_for(&event) {
+            Some(crate::tray::TrayAction::Request(request)) => {
+                match crate::worker::dispatch(&request, &crate::worker::CommandSpawner, &mut |ev| {
+                    bus.broadcast(ev);
+                }) {
+                    Ok(crate::worker::DispatchOutcome::Shutdown) => return true,
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "tray dispatch failed"),
+                }
+            }
+            Some(crate::tray::TrayAction::OpenConfig) => {
+                if let Err(e) = open_config_file() {
+                    tracing::warn!(error = %e, "opening config from tray");
+                }
+            }
+            None => {}
+        }
     }
+    false
+}
+
+/// Open `config.toml` in `$EDITOR` (fallback `$VISUAL`); print the path
+/// if neither is set.
+#[cfg(feature = "tray")]
+fn open_config_file() -> eyre::Result<()> {
+    use std::process::Command;
+
+    let path = flintshot_core::config_path()
+        .ok_or_else(|| eyre::eyre!("no platform config_dir available"))?;
+    if let Some(editor) = std::env::var_os("EDITOR").or_else(|| std::env::var_os("VISUAL")) {
+        Command::new(&editor)
+            .arg(&path)
+            .spawn()
+            .map_err(|e| eyre::eyre!("launching {editor:?} on {}: {e}", path.display()))?;
+        tracing::info!(editor = ?editor, path = %path.display(), "opened config");
+    } else {
+        println!("{}", path.display());
+        tracing::info!(path = %path.display(), "no $EDITOR/$VISUAL; printed config path");
+    }
+    Ok(())
 }
 
 /// Forward all pending *pressed* hotkey events to `handler`. `Released`
@@ -259,7 +313,7 @@ fn drain_hotkeys(handler: &mut impl ActionHandler) {
 /// `recv_timeout` returns `Disconnected`, and the daemon exits. Capture
 /// requests arriving over IPC are stubbed here (logged); Task 006 wires
 /// worker spawns.
-fn run_tokio_side(tx: mpsc::Sender<DaemonAction>) {
+fn run_tokio_side(tx: mpsc::Sender<DaemonAction>, bus: crate::ipc_server::SubscriberBus) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -272,15 +326,11 @@ fn run_tokio_side(tx: mpsc::Sender<DaemonAction>) {
     };
 
     runtime.block_on(async move {
-        // Bind the IPC server inside the reactor. A bind failure (e.g.
-        // a live socket the daemon can't replace) is non-fatal: we log
-        // and keep the daemon alive for tray/hotkey/ticks, mirroring
-        // the tray's best-effort stance.
-        let (serve_handle, shutdown) = match crate::ipc_server::IpcServer::bind(None) {
+        // Bind the IPC server inside the reactor, sharing the daemon's
+        // bus so tray/hotkey-initiated captures reach IPC subscribers.
+        let (serve_handle, shutdown) = match crate::ipc_server::IpcServer::bind_with_bus(None, bus)
+        {
             Ok(ipc) => {
-                // Grab the shutdown signal before moving `ipc` into the
-                // serve task — Quit from a client must stop the ticker
-                // (and thus the whole daemon), not just the accept loop.
                 let shutdown = ipc.shutdown_signal();
                 let handle = tokio::spawn(async move {
                     if let Err(e) = ipc.serve().await {
@@ -331,29 +381,6 @@ fn run_tokio_side(tx: mpsc::Sender<DaemonAction>) {
     });
 }
 
-/// Build a minimal system tray icon (Phase 2 spike — full menu in Task
-/// 007). Returns the owned [`TrayIcon`], which the caller keeps alive.
-#[cfg(feature = "tray")]
-fn setup_tray() -> eyre::Result<tray_icon::TrayIcon> {
-    let icon = spike_icon()?;
-    tray_icon::TrayIconBuilder::new()
-        .with_tooltip("flintshot daemon (Phase 2 spike)")
-        .with_icon(icon)
-        .build()
-        .map_err(|e| eyre::eyre!("building tray icon: {e}"))
-}
-
-/// A flat 16×16 red square — enough for `libappindicator` to render
-/// *something*. Replaced with a real logo in the polish sweep.
-#[cfg(feature = "tray")]
-fn spike_icon() -> eyre::Result<tray_icon::Icon> {
-    const W: u32 = 16;
-    const H: u32 = 16;
-    let pixel = [220_u8, 60, 60, 255];
-    let rgba: Vec<u8> = (0..(W * H)).flat_map(|_| pixel).collect();
-    tray_icon::Icon::from_rgba(rgba, W, H).map_err(|e| eyre::eyre!("encoding spike icon: {e}"))
-}
-
 /// Register one dummy global hotkey (`Ctrl+Shift+P`) so the spike can
 /// prove hotkey events reach the handler. Task 009 registers the real
 /// chords from `[hotkeys]` config.
@@ -387,7 +414,6 @@ mod tests {
     #[test]
     fn action_source_round_trips() {
         assert_eq!(DaemonAction::Tick.source(), ActionSource::Tick);
-        assert_eq!(DaemonAction::Tray.source(), ActionSource::Tray);
         assert_eq!(
             DaemonAction::Hotkey { id: 7 }.source(),
             ActionSource::Hotkey
@@ -396,9 +422,9 @@ mod tests {
 
     #[test]
     fn source_strings_are_stable() {
-        // The acceptance criterion logs "<source: tick|tray|hotkey>".
+        // The bridge logs "<source: tick|hotkey>" (tray clicks dispatch
+        // directly, never surfacing as a DaemonAction).
         assert_eq!(ActionSource::Tick.as_str(), "tick");
-        assert_eq!(ActionSource::Tray.as_str(), "tray");
         assert_eq!(ActionSource::Hotkey.as_str(), "hotkey");
     }
 
@@ -407,7 +433,6 @@ mod tests {
         // The spike handler just logs; assert it accepts every variant.
         let mut h = LoggingHandler;
         h.handle(DaemonAction::Tick);
-        h.handle(DaemonAction::Tray);
         h.handle(DaemonAction::Hotkey { id: 1 });
     }
 

@@ -2267,6 +2267,7 @@ dependencies = [
  "flintshot-core",
  "flintshot-editor-egui",
  "global-hotkey",
+ "gtk",
  "image",
  "interprocess",
  "notify",

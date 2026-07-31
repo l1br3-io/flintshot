@@ -9,6 +9,8 @@ mod cli;
 mod daemon;
 mod ipc_server;
 mod single;
+#[cfg(feature = "tray")]
+mod tray;
 mod worker;
 
 use clap::Parser;

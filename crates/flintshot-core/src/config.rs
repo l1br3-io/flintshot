@@ -279,7 +279,8 @@ fn set_value(table: &mut toml_edit::Table, key: &str, new_value: toml_edit::Valu
 /// Resolve `<config_dir>/flintshot/config.toml`, or `None` if
 /// `dirs::config_dir()` returns `None` (happens on platforms without
 /// a clear convention).
-fn config_path() -> Option<PathBuf> {
+#[must_use]
+pub fn config_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("flintshot").join("config.toml"))
 }
 
