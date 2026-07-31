@@ -17,6 +17,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use color_eyre::eyre::{self, WrapErr};
 use flintshot_core::ipc::{socket_path, Event as IpcEvent, Request as IpcRequest};
@@ -185,11 +186,20 @@ impl IpcServer {
     /// A cloneable handle to broadcast [`Event`]s to subscribers. The
     /// daemon keeps one and calls [`SubscriberBus::broadcast`] as
     /// capture outcomes arrive (Task 006).
-    // In Task 004 only the integration test uses this; Task 006 holds a
-    // bus in the daemon and broadcasts capture outcomes, making it live.
+    //
+    // Only the integration test uses this externally; the daemon's
+    // `handle_connection` broadcasts via its own bus clone.
     #[allow(dead_code)]
     pub fn bus(&self) -> SubscriberBus {
         self.bus.clone()
+    }
+
+    /// The daemon-wide shutdown signal. `Request::Quit` (via
+    /// `--replace`) fires it so the IPC accept loop, the heartbeat
+    /// ticker, and thus the daemon's main loop all stop together.
+    #[must_use]
+    pub fn shutdown_signal(&self) -> Arc<Notify> {
+        Arc::clone(&self.shutdown)
     }
 
     /// Run the accept loop until shutdown is signalled (`Request::Quit`
@@ -288,10 +298,11 @@ async fn handle_connection(
                 bus.broadcast(event);
             })?;
         if matches!(outcome, crate::worker::DispatchOutcome::Shutdown) {
-            tracing::info!("IPC Request::Quit received; signalling shutdown");
-            // Task 006's `--replace` extends this to a full daemon
-            // takeover; for now it stops the IPC accept loop.
-            shutdown.notify_one();
+            tracing::info!("IPC Request::Quit received; signalling daemon shutdown");
+            // Wake every waiter (the IPC accept loop AND the daemon's
+            // heartbeat ticker) so the whole daemon shuts down — this
+            // is the `--replace` takeover path.
+            shutdown.notify_waiters();
             return Ok(());
         }
     }
@@ -317,6 +328,61 @@ fn socket_name(path: &Path) -> eyre::Result<interprocess::local_socket::Name<'_>
             .to_ns_name::<GenericNamespaced>()
             .map_err(|e| eyre::eyre!("resolving pipe name: {e}"))
     }
+}
+
+// ── client helpers (used by `--replace` now, detect-and-delegate in 011) ──
+
+/// Connect to the daemon at [`socket_path`](`override_path`) and send
+/// one framed `request`. No response is read (fire-and-forget); the
+/// daemon's reaction arrives via its side effects (shutdown for `Quit`,
+/// a spawned worker + event stream for captures).
+pub(crate) async fn send_request(
+    override_path: Option<&Path>,
+    request: &IpcRequest,
+) -> eyre::Result<()> {
+    let path = socket_path(override_path);
+    let name = socket_name(&path)?;
+    let mut conn = <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name)
+        .await
+        .map_err(|e| eyre::eyre!("connecting to IPC socket {}: {e}", path.display()))?;
+    let bytes = encode_msg(request)?;
+    write_frame(&mut conn, &bytes).await?;
+    Ok(())
+}
+
+/// Sync wrapper around [`send_request`] for callers not already in a
+/// tokio runtime (the `--replace` handshake runs on the daemon's main
+/// thread, before the tokio side starts).
+pub(crate) fn send_request_blocking(
+    override_path: Option<&Path>,
+    request: &IpcRequest,
+) -> eyre::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| eyre::eyre!("building IPC client runtime: {e}"))?;
+    runtime.block_on(send_request(override_path, request))
+}
+
+/// Poll until the IPC socket file is gone (the old daemon released it),
+/// up to `timeout`. Used by `--replace` to wait for the previous daemon
+/// to exit before taking the single-instance lock.
+pub(crate) fn wait_for_socket_to_free(
+    override_path: Option<&Path>,
+    timeout: Duration,
+) -> eyre::Result<()> {
+    let path = socket_path(override_path);
+    let deadline = std::time::Instant::now() + timeout;
+    while path.exists() {
+        if std::time::Instant::now() >= deadline {
+            return Err(eyre::eyre!(
+                "timed out after {timeout:?} waiting for {} to be released by the old daemon",
+                path.display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -476,6 +542,64 @@ mod tests {
         assert_eq!(decoded, event);
 
         drop(client);
+        server_task.abort();
+    }
+
+    #[test]
+    fn wait_for_socket_to_free_returns_immediately_when_absent() {
+        // A path that doesn't exist is already "free" — no waiting.
+        let bogus = std::path::Path::new("/this/does/not/exist/flintshot-test.sock");
+        wait_for_socket_to_free(Some(bogus), std::time::Duration::from_secs(1))
+            .expect("absent path is immediately free");
+    }
+
+    /// The `--replace` core mechanism on a real socket: a client sends
+    /// `Request::Quit`, the server's shutdown signal fires, and the
+    /// socket file is reclaimed. `#[ignore]` (needs a real local
+    /// socket). Run with:
+    /// `cargo test -p flintshot-app -- --ignored ipc_server`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a real local socket (no display); run explicitly"]
+    async fn integration_quit_triggers_shutdown_and_frees_socket() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let n = UNIQUE.fetch_add(1, Ordering::Relaxed);
+        let sock = dir.path().join(format!("flintshot-quit-{n}.sock"));
+
+        let server = IpcServer::bind(Some(&sock)).unwrap();
+        let shutdown = server.shutdown_signal();
+        let server_task = tokio::spawn(async move { server.serve().await });
+
+        // Send Quit. A failure to connect (e.g. the listener not yet
+        // ready) is retried briefly.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match send_request(Some(&sock), &Request::Quit).await {
+                    Ok(()) => return,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("timed out sending Quit");
+
+        // The shutdown signal must fire.
+        tokio::time::timeout(std::time::Duration::from_secs(2), shutdown.notified())
+            .await
+            .expect("shutdown signal did not fire after Quit");
+
+        // Wait for the serve loop to end and reclaim the socket file.
+        let freed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while sock.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(freed, "socket file was not reclaimed after Quit");
+
         server_task.abort();
     }
 }

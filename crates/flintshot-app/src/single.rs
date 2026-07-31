@@ -12,6 +12,7 @@
 
 use color_eyre::eyre;
 use single_instance::SingleInstance;
+use std::time::Duration;
 
 /// Lock name for the daemon role. Hashed by `single-instance` into the
 /// OS's lock namespace (abstract-socket name on Linux).
@@ -29,6 +30,34 @@ const DAEMON_LOCK_NAME: &str = "flintshot-daemon";
 ///   lock.
 pub fn acquire_daemon_lock() -> eyre::Result<SingleInstance> {
     acquire_named(DAEMON_LOCK_NAME)
+}
+
+/// Acquire the daemon lock, retrying until `timeout` elapses. Used by
+/// `--replace`: after the old daemon releases its IPC socket there's a
+/// short window before its single-instance (abstract-socket) lock is
+/// freed, so a single immediate acquire can race. Retry absorbs it.
+///
+/// # Errors
+/// Propagates the last acquire error if `timeout` expires.
+pub fn acquire_daemon_lock_with_retry(timeout: Duration) -> eyre::Result<SingleInstance> {
+    acquire_named_with_retry(DAEMON_LOCK_NAME, timeout)
+}
+
+/// Testable seam: [`acquire_daemon_lock_with_retry`] with an explicit
+/// lock name (tests pass a unique name per case).
+fn acquire_named_with_retry(name: &str, timeout: Duration) -> eyre::Result<SingleInstance> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match acquire_named(name) {
+            Ok(lock) => return Ok(lock),
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(e);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 /// Testable seam: same as [`acquire_daemon_lock`] but with an explicit
@@ -103,6 +132,33 @@ mod tests {
         assert!(
             a.is_single() && b.is_single(),
             "distinct names don't conflict"
+        );
+    }
+
+    #[test]
+    fn retry_succeeds_once_holder_releases() {
+        let name = unique_name("retry-release");
+        let name_clone = name.clone();
+        // Holder taken in a background thread that drops it after 150ms.
+        let t = std::thread::spawn(move || {
+            let _holder = acquire_named(&name_clone).expect("holder");
+            std::thread::sleep(Duration::from_millis(150));
+        });
+        // Give the holder a moment to grab the lock first.
+        std::thread::sleep(Duration::from_millis(50));
+        let lock = acquire_named_with_retry(&name, Duration::from_secs(2)).expect("retry succeeds");
+        assert!(lock.is_single());
+        t.join().expect("holder thread");
+    }
+
+    #[test]
+    fn retry_times_out_when_held() {
+        let name = unique_name("retry-timeout");
+        let _holder = acquire_named(&name).expect("holder");
+        let result = acquire_named_with_retry(&name, Duration::from_millis(120));
+        assert!(
+            result.is_err(),
+            "retry must time out while the lock is held"
         );
     }
 }

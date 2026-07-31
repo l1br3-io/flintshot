@@ -94,14 +94,20 @@ pub fn dispatch(
     match request {
         Request::CaptureRegion { monitor, delay_ms } => {
             let argv = region_argv(*monitor, *delay_ms);
-            spawn_argv(spawner, &argv)?;
             sink(Event::CaptureStarted);
+            spawn_argv(spawner, &argv)?;
+            // The worker process is confirmed launched (spawn returned
+            // Ok). True "editor window opened" detection needs the
+            // worker to report back over IPC; until then we emit
+            // `EditorOpened` as a process-started proxy.
+            sink(Event::EditorOpened);
             Ok(DispatchOutcome::Continue)
         }
         Request::CaptureFullscreen { monitor } => {
             let argv = fullscreen_argv(*monitor);
-            spawn_argv(spawner, &argv)?;
             sink(Event::CaptureStarted);
+            spawn_argv(spawner, &argv)?;
+            sink(Event::EditorOpened);
             Ok(DispatchOutcome::Continue)
         }
         Request::Quit => Ok(DispatchOutcome::Shutdown),
@@ -236,7 +242,11 @@ mod tests {
                 "200".into(),
             ]]
         );
-        assert_eq!(events, vec![Event::CaptureStarted]);
+        assert_eq!(
+            events,
+            vec![Event::CaptureStarted, Event::EditorOpened],
+            "CaptureStarted on receipt, EditorOpened once the worker is confirmed running"
+        );
     }
 
     #[test]
@@ -269,7 +279,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(spawner.snapshot(), vec![vec!["fullscreen".to_string()]]);
-        assert_eq!(events, vec![Event::CaptureStarted]);
+        assert_eq!(events, vec![Event::CaptureStarted, Event::EditorOpened]);
     }
 
     #[test]
@@ -339,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failure_propagates_without_emitting() {
+    fn spawn_failure_propagates_after_capture_started() {
         let mut events = Vec::new();
         let result = dispatch(
             &Request::CaptureRegion {
@@ -350,9 +360,12 @@ mod tests {
             &mut |ev| events.push(ev),
         );
         assert!(result.is_err(), "spawn failure must propagate");
-        assert!(
-            events.is_empty(),
-            "no event emitted when the worker never launched"
+        // CaptureStarted was emitted "on receipt" (before spawn); the
+        // EditorOpened event is suppressed since the worker never ran.
+        assert_eq!(
+            events,
+            vec![Event::CaptureStarted],
+            "CaptureStarted on receipt; EditorOpened suppressed on spawn failure"
         );
     }
 }
