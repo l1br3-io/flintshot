@@ -29,80 +29,6 @@ const TICK_INTERVAL: Duration = Duration::from_millis(500);
 /// tray/hotkey again. Caps click/hotkey latency at this value.
 const POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// Where a [`DaemonAction`] originated. Used for logging and (later)
-/// for routing in the worker-spawning handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActionSource {
-    /// Periodic heartbeat from the tokio side thread.
-    Tick,
-    /// A registered global hotkey fired.
-    Hotkey,
-}
-
-impl ActionSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            ActionSource::Tick => "tick",
-            ActionSource::Hotkey => "hotkey",
-        }
-    }
-}
-
-/// A discrete event the daemon main loop forwards to its handler.
-///
-/// Deliberately platform-agnostic — no `tray_icon`/`global_hotkey`
-/// types leak here, so the handler (and its tests) need neither a
-/// display nor those crates. Tray clicks don't appear here: they route
-/// straight through the worker dispatch table in [`drain_tray_menu`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DaemonAction {
-    /// Heartbeat from the tokio side (proves the bridge is alive).
-    Tick,
-    /// A global hotkey fired; `id` is the accelerator id assigned at
-    /// registration.
-    Hotkey {
-        /// Accelerator id from `global-hotkey` (mapped to an action in
-        /// Task 009).
-        id: u32,
-    },
-}
-
-impl DaemonAction {
-    /// Which source produced this action.
-    #[must_use]
-    pub fn source(&self) -> ActionSource {
-        match self {
-            DaemonAction::Tick => ActionSource::Tick,
-            DaemonAction::Hotkey { .. } => ActionSource::Hotkey,
-        }
-    }
-}
-
-/// Handles daemon actions.
-///
-/// The spike uses [`LoggingHandler`] (just logs each action + source).
-/// Task 005 swaps in a worker-spawning implementation that turns
-/// capture/hotkey actions into child-process spawns without touching
-/// the loop.
-pub trait ActionHandler {
-    /// Dispatch `action`. Called on the daemon's main thread.
-    fn handle(&mut self, action: DaemonAction);
-}
-
-/// Spike handler: logs every action with its source, proving all three
-/// event sources reach a single handler (Task 003 acceptance).
-pub struct LoggingHandler;
-
-impl ActionHandler for LoggingHandler {
-    fn handle(&mut self, action: DaemonAction) {
-        tracing::info!(
-            source = action.source().as_str(),
-            ?action,
-            "action received"
-        );
-    }
-}
-
 /// Run the daemon: acquire the single-instance lock, start the tokio
 /// side thread, set up the tray (if built with `--features tray`) and a
 /// dummy global hotkey, then block on the event loop until Ctrl-C.
@@ -135,12 +61,19 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     }?;
     tracing::info!("single-instance lock acquired");
 
+    // Load config once at start (hot-reload is Task 010). A load failure
+    // is non-fatal — fall back to defaults so the daemon still runs.
+    let config = flintshot_core::Config::load().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not load config; using built-in defaults");
+        flintshot_core::Config::default()
+    });
+
     // 2. Spawn the tokio side thread + the main→tokio channel. The
     //    subscriber bus is shared between the IPC server (tokio side)
     //    and the tray/hotkey dispatch (main loop), so a capture started
     //    from any source reaches every subscriber.
     let bus = crate::ipc_server::SubscriberBus::new();
-    let (tx, rx) = mpsc::channel::<DaemonAction>();
+    let (tx, rx) = mpsc::channel::<()>();
     let builder = thread::Builder::new().name("flintshot-tokio".into());
     let tokio_join = builder
         .spawn({
@@ -161,21 +94,12 @@ pub fn run(replace: bool) -> eyre::Result<()> {
             None
         }
     };
-    let _hotkey_manager = match setup_spike_hotkey() {
-        Ok(m) => Some(m),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "global hotkey unavailable; continuing without it (tray + IPC still work)"
-            );
-            None
-        }
-    };
+    let hotkey_registry = crate::hotkeys::HotkeyRegistry::from_config(&config.hotkeys);
 
     // 4. Block on the event loop. Ctrl-C (caught in the tokio side)
     //    drops the channel sender → the loop exits cleanly.
     tracing::info!("daemon event loop running; press Ctrl-C to exit");
-    run_event_loop(LoggingHandler, &rx, &bus);
+    run_event_loop(&rx, &bus, &hotkey_registry);
 
     // Wait for the tokio side to finish so we don't leak the runtime.
     let _ = tokio_join.join();
@@ -208,31 +132,30 @@ fn replace_running_daemon() -> eyre::Result<()> {
 }
 
 /// The main event loop: drain tray menu + hotkey receivers, then block
-/// (briefly) on the tokio channel. Tray capture/quit clicks route
-/// through the worker dispatch table (same path as IPC); the handler
-/// logs heartbeats/hotkeys.
+/// (briefly) on the tokio heartbeat channel. Tray capture/quit clicks
+/// and hotkey fires route through the worker dispatch table (same path
+/// as IPC); the heartbeat just keeps the loop polling.
 ///
 /// Returns when the tokio side drops its sender (Ctrl-C / IPC `Quit`)
 /// or a tray *Quit* is clicked.
 fn run_event_loop(
-    mut handler: impl ActionHandler,
-    rx: &mpsc::Receiver<DaemonAction>,
+    rx: &mpsc::Receiver<()>,
     #[cfg_attr(not(feature = "tray"), allow(unused_variables))]
     bus: &crate::ipc_server::SubscriberBus,
+    hotkeys: &crate::hotkeys::HotkeyRegistry,
 ) {
     loop {
         #[cfg(feature = "tray")]
         if drain_tray_menu(bus) {
-            // Tray *Quit*: dropping `rx` is the caller's job; just stop
-            // polling. (`run` then returns, releasing the lock etc.)
+            // Tray *Quit*: stop polling. `run` then returns, the lock
+            // is released, and the daemon exits.
             tracing::info!("tray Quit clicked; exiting event loop");
             break;
         }
-        drain_hotkeys(&mut handler);
+        drain_hotkeys(hotkeys, bus);
 
         match rx.recv_timeout(POLL_TIMEOUT) {
-            Ok(action) => handler.handle(action),
-            Err(RecvTimeoutError::Timeout) => {}
+            Ok(()) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 tracing::info!("daemon channel closed; exiting event loop");
                 break;
@@ -293,27 +216,41 @@ fn open_config_file() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Forward all pending *pressed* hotkey events to `handler`. `Released`
-/// is ignored to avoid double-firing on a single key press.
-fn drain_hotkeys(handler: &mut impl ActionHandler) {
+/// Drain pending *pressed* hotkey events, dispatching each through the
+/// worker table (same path as tray/IPC). `Released` is ignored to avoid
+/// double-firing. A no-op when hotkeys are unavailable (the registry is
+/// empty).
+fn drain_hotkeys(
+    registry: &crate::hotkeys::HotkeyRegistry,
+    bus: &crate::ipc_server::SubscriberBus,
+) {
     use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
+
     let rx = GlobalHotKeyEvent::receiver();
     while let Ok(event) = rx.try_recv() {
-        if event.state == HotKeyState::Pressed {
-            handler.handle(DaemonAction::Hotkey { id: event.id });
+        if event.state != HotKeyState::Pressed {
+            continue;
+        }
+        if let Some(request) = registry.lookup(event.id) {
+            if let Err(e) =
+                crate::worker::dispatch(request, &crate::worker::CommandSpawner, &mut |ev| {
+                    bus.broadcast(ev);
+                })
+            {
+                tracing::warn!(error = %e, "hotkey dispatch failed");
+            }
         }
     }
 }
 
 /// Run a multi-thread tokio runtime that binds the IPC server (the
 /// `interprocess` tokio listener must be created inside a reactor),
-/// drives its accept loop, emits [`DaemonAction::Tick`] heartbeats, and
-/// catches Ctrl-C for a clean shutdown. When Ctrl-C fires (or the main
-/// loop drops the receiver), the sender drops, the main loop's
-/// `recv_timeout` returns `Disconnected`, and the daemon exits. Capture
-/// requests arriving over IPC are stubbed here (logged); Task 006 wires
-/// worker spawns.
-fn run_tokio_side(tx: mpsc::Sender<DaemonAction>, bus: crate::ipc_server::SubscriberBus) {
+/// drives its accept loop, emits heartbeat ticks on `tx`, and catches
+/// Ctrl-C / IPC `Quit` for a clean shutdown. When the tokio side stops
+/// (Ctrl-C or `Request::Quit` via `--replace`), the sender drops, the
+/// main loop's `recv_timeout` returns `Disconnected`, and the daemon
+/// exits.
+fn run_tokio_side(tx: mpsc::Sender<()>, bus: crate::ipc_server::SubscriberBus) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -354,7 +291,7 @@ fn run_tokio_side(tx: mpsc::Sender<DaemonAction>, bus: crate::ipc_server::Subscr
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if tx.send(DaemonAction::Tick).is_err() {
+                    if tx.send(()).is_err() {
                         // Main loop gone — shut down.
                         break;
                     }
@@ -381,96 +318,35 @@ fn run_tokio_side(tx: mpsc::Sender<DaemonAction>, bus: crate::ipc_server::Subscr
     });
 }
 
-/// Register one dummy global hotkey (`Ctrl+Shift+P`) so the spike can
-/// prove hotkey events reach the handler. Task 009 registers the real
-/// chords from `[hotkeys]` config.
-fn setup_spike_hotkey() -> eyre::Result<global_hotkey::GlobalHotKeyManager> {
-    use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-    let manager = global_hotkey::GlobalHotKeyManager::new()
-        .map_err(|e| eyre::eyre!("creating global-hotkey manager: {e}"))?;
-    let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyP);
-    manager
-        .register(hotkey)
-        .map_err(|e| eyre::eyre!("registering spike hotkey Ctrl+Shift+P: {e}"))?;
-    tracing::info!("registered spike hotkey: Ctrl+Shift+P");
-    Ok(manager)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Test handler that records every action it sees.
-    struct Collector {
-        seen: Vec<DaemonAction>,
-    }
-
-    impl ActionHandler for Collector {
-        fn handle(&mut self, action: DaemonAction) {
-            self.seen.push(action);
-        }
-    }
-
+    /// The main loop drains tray/hotkey then blocks on the heartbeat
+    /// channel. We can't exercise the real OS receivers headless, but we
+    /// can drive the channel half: feed a tick, then drop the sender to
+    /// prove the loop terminates on disconnect (the Ctrl-C / `--replace`
+    /// shutdown path).
     #[test]
-    fn action_source_round_trips() {
-        assert_eq!(DaemonAction::Tick.source(), ActionSource::Tick);
-        assert_eq!(
-            DaemonAction::Hotkey { id: 7 }.source(),
-            ActionSource::Hotkey
-        );
-    }
-
-    #[test]
-    fn source_strings_are_stable() {
-        // The bridge logs "<source: tick|hotkey>" (tray clicks dispatch
-        // directly, never surfacing as a DaemonAction).
-        assert_eq!(ActionSource::Tick.as_str(), "tick");
-        assert_eq!(ActionSource::Hotkey.as_str(), "hotkey");
-    }
-
-    #[test]
-    fn logging_handler_does_not_panic() {
-        // The spike handler just logs; assert it accepts every variant.
-        let mut h = LoggingHandler;
-        h.handle(DaemonAction::Tick);
-        h.handle(DaemonAction::Hotkey { id: 1 });
-    }
-
-    #[test]
-    fn collector_records_in_order() {
-        let mut c = Collector { seen: vec![] };
-        c.handle(DaemonAction::Tick);
-        c.handle(DaemonAction::Hotkey { id: 42 });
-        assert_eq!(
-            c.seen,
-            vec![DaemonAction::Tick, DaemonAction::Hotkey { id: 42 }]
-        );
-    }
-
-    /// The main loop drains tray/hotkey then blocks on the channel. We
-    /// can't exercise the real OS receivers headless, but we *can*
-    /// drive the channel half of the loop: feed an action, then drop
-    /// the sender to prove the loop terminates on disconnect (the
-    /// Ctrl-C shutdown path).
-    #[test]
-    fn event_loop_exits_when_channel_disconnects() {
-        let (tx, rx) = mpsc::channel::<DaemonAction>();
-        let mut handler = Collector { seen: vec![] };
-
-        tx.send(DaemonAction::Tick).expect("send tick");
+    fn loop_terminates_when_channel_disconnects() {
+        let (tx, rx) = mpsc::channel::<()>();
+        let mut saw_tick = false;
+        tx.send(()).expect("send heartbeat");
         drop(tx);
 
-        // Drain exactly like the real loop, but without tray/hotkey
-        // (no display in CI). This reproduces run_event_loop's channel
-        // handling.
+        // Drain exactly like run_event_loop's channel handling (no
+        // tray/hotkey — no display in CI).
         loop {
             match rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(a) => handler.handle(a),
+                Ok(()) => saw_tick = true,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
 
-        assert_eq!(handler.seen, vec![DaemonAction::Tick]);
+        assert!(
+            saw_tick,
+            "the heartbeat should have arrived before disconnect"
+        );
     }
 }
