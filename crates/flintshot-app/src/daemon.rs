@@ -125,15 +125,20 @@ impl ActionHandler for LoggingHandler {
 ///   display on Linux; without one this surfaces as a clear error
 ///   rather than a silent no-op).
 pub fn run(replace: bool) -> eyre::Result<()> {
+    // `--replace`: ask any running daemon to quit, then wait for it to
+    // release its socket before taking over. (Task 006 / ADR-0020.)
     if replace {
-        tracing::warn!(
-            "--replace requested but not yet implemented (Task 006); \
-             a running daemon will still hold its lock"
-        );
+        replace_running_daemon()?;
     }
 
     // 1. Single-instance lock (daemon role only). Hold for the lifetime.
-    let _lock = single::acquire_daemon_lock()?;
+    //    After `--replace`, retry briefly to absorb the window between
+    //    the old daemon's socket-file removal and its lock release.
+    let _lock = if replace {
+        single::acquire_daemon_lock_with_retry(Duration::from_secs(3))
+    } else {
+        single::acquire_daemon_lock()
+    }?;
     tracing::info!("single-instance lock acquired");
 
     // 2. Spawn the tokio side thread + the main→tokio channel.
@@ -177,6 +182,30 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     // Wait for the tokio side to finish so we don't leak the runtime.
     let _ = tokio_join.join();
     tracing::info!("daemon exited cleanly");
+    Ok(())
+}
+
+/// `--replace` handshake: send `Request::Quit` to any running daemon,
+/// then wait (bounded) for it to release its IPC socket. A missing
+/// daemon (no socket / connection refused) is not an error — there's
+/// simply nothing to replace.
+fn replace_running_daemon() -> eyre::Result<()> {
+    use flintshot_core::ipc::Request;
+
+    match crate::ipc_server::send_request_blocking(None, &Request::Quit) {
+        Ok(()) => {
+            tracing::info!("--replace: asked the running daemon to quit; waiting for it to exit");
+        }
+        Err(e) => {
+            // No daemon reachable — start fresh.
+            tracing::debug!(
+                error = %e,
+                "--replace: no running daemon to replace; starting fresh"
+            );
+            return Ok(());
+        }
+    }
+    crate::ipc_server::wait_for_socket_to_free(None, Duration::from_secs(3))?;
     Ok(())
 }
 
@@ -247,19 +276,25 @@ fn run_tokio_side(tx: mpsc::Sender<DaemonAction>) {
         // a live socket the daemon can't replace) is non-fatal: we log
         // and keep the daemon alive for tray/hotkey/ticks, mirroring
         // the tray's best-effort stance.
-        let serve_handle = match crate::ipc_server::IpcServer::bind(None) {
-            Ok(ipc) => tokio::spawn(async move {
-                if let Err(e) = ipc.serve().await {
-                    tracing::error!(error = %e, "IPC server accept loop ended with error");
-                }
-            }),
+        let (serve_handle, shutdown) = match crate::ipc_server::IpcServer::bind(None) {
+            Ok(ipc) => {
+                // Grab the shutdown signal before moving `ipc` into the
+                // serve task — Quit from a client must stop the ticker
+                // (and thus the whole daemon), not just the accept loop.
+                let shutdown = ipc.shutdown_signal();
+                let handle = tokio::spawn(async move {
+                    if let Err(e) = ipc.serve().await {
+                        tracing::error!(error = %e, "IPC server accept loop ended with error");
+                    }
+                });
+                (handle, Some(shutdown))
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "IPC server unavailable; continuing without it (tray + hotkeys still work)"
                 );
-                // Sentinel handle so the `abort` below is harmless.
-                tokio::spawn(async {})
+                (tokio::spawn(async {}), None)
             }
         };
 
@@ -276,6 +311,18 @@ fn run_tokio_side(tx: mpsc::Sender<DaemonAction>) {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Ctrl-C received; shutting down daemon");
+                    break;
+                }
+                // `Request::Quit` over IPC (the `--replace` path): stop
+                // the ticker so `tx` drops and the main loop exits too.
+                () = async {
+                    if let Some(s) = shutdown.as_ref() {
+                        s.notified().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    tracing::info!("IPC shutdown requested; stopping daemon");
                     break;
                 }
             }
