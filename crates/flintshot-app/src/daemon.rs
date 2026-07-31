@@ -138,6 +138,9 @@ pub fn run(replace: bool) -> eyre::Result<()> {
 
     // 2. Spawn the tokio side thread + the main→tokio channel.
     let (tx, rx) = mpsc::channel::<DaemonAction>();
+    //    The IPC server is bound inside the runtime (interprocess's
+    //    tokio listener registers its fd with the reactor on creation,
+    //    so binding must happen on the tokio side, not the main thread).
     let builder = thread::Builder::new().name("flintshot-tokio".into());
     let tokio_join = builder
         .spawn(move || run_tokio_side(tx))
@@ -219,11 +222,14 @@ fn drain_hotkeys(handler: &mut impl ActionHandler) {
     }
 }
 
-/// Run a multi-thread tokio runtime that emits [`DaemonAction::Tick`]
-/// heartbeats and catches Ctrl-C for a clean shutdown. When Ctrl-C
-/// fires (or the main loop drops the receiver), the sender drops, the
-/// main loop's `recv_timeout` returns `Disconnected`, and the daemon
-/// exits. Task 004 will add the IPC server alongside the ticker here.
+/// Run a multi-thread tokio runtime that binds the IPC server (the
+/// `interprocess` tokio listener must be created inside a reactor),
+/// drives its accept loop, emits [`DaemonAction::Tick`] heartbeats, and
+/// catches Ctrl-C for a clean shutdown. When Ctrl-C fires (or the main
+/// loop drops the receiver), the sender drops, the main loop's
+/// `recv_timeout` returns `Disconnected`, and the daemon exits. Capture
+/// requests arriving over IPC are stubbed here (logged); Task 006 wires
+/// worker spawns.
 fn run_tokio_side(tx: mpsc::Sender<DaemonAction>) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -237,6 +243,26 @@ fn run_tokio_side(tx: mpsc::Sender<DaemonAction>) {
     };
 
     runtime.block_on(async move {
+        // Bind the IPC server inside the reactor. A bind failure (e.g.
+        // a live socket the daemon can't replace) is non-fatal: we log
+        // and keep the daemon alive for tray/hotkey/ticks, mirroring
+        // the tray's best-effort stance.
+        let serve_handle = match crate::ipc_server::IpcServer::bind(None) {
+            Ok(ipc) => tokio::spawn(async move {
+                if let Err(e) = ipc.serve().await {
+                    tracing::error!(error = %e, "IPC server accept loop ended with error");
+                }
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "IPC server unavailable; continuing without it (tray + hotkeys still work)"
+                );
+                // Sentinel handle so the `abort` below is harmless.
+                tokio::spawn(async {})
+            }
+        };
+
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         // Discard the immediate first tick so heartbeats are paced.
         interval.tick().await;
@@ -254,6 +280,7 @@ fn run_tokio_side(tx: mpsc::Sender<DaemonAction>) {
                 }
             }
         }
+        serve_handle.abort();
     });
 }
 
