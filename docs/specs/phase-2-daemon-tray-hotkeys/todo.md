@@ -14,7 +14,7 @@
 
 ## Phase 2.B — Daemon event-loop de-risk (high risk)
 
-- [ ] 003 — Daemon event-loop bridge spike + single-instance lock → [`tasks/003-daemon-loop-bridge.md`](tasks/003-daemon-loop-bridge.md)
+- [x] 003 — Daemon event-loop bridge spike + single-instance lock → [`tasks/003-daemon-loop-bridge.md`](tasks/003-daemon-loop-bridge.md)
 - [ ] **Checkpoint B** — bridge approach proven; ADR-0018 reviewed before building on it
 
 ## Phase 2.C — IPC server + worker model

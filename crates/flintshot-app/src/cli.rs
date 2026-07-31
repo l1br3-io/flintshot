@@ -119,12 +119,14 @@ pub struct UploadArgs {
 }
 
 /// `flintshot daemon` — Phase 2.
-// Signature returns `Result<()>` so future phases can add real failures
-// without rewriting call sites in `main`.
-#[allow(clippy::unnecessary_wraps)]
-pub fn run_daemon(_args: &DaemonArgs) -> Result<()> {
-    tracing::info!("daemon subcommand: not implemented yet (Phase 2)");
-    Ok(())
+///
+/// Starts the long-running daemon: single-instance lock, tokio side
+/// thread, system tray (if built with `--features tray`), a spike
+/// global hotkey, and the event loop. Blocks until Ctrl-C. The IPC
+/// server, real hotkeys, and `--replace` takeover land in Tasks
+/// 004–011; see [`crate::daemon`].
+pub fn run_daemon(args: &DaemonArgs) -> Result<()> {
+    crate::daemon::run(args.replace)
 }
 
 /// `flintshot region` — Phase 1 Task 3 (capture) + Task 6 (editor wiring).

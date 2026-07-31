@@ -27,3 +27,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0015 | [`compose_final` is a separate render path from live `render()`](ADR-0015-compose-final-separate-render-path.md) |
 | ADR-0016 | [Standing gate uses `--workspace` and scoped `--doc`](ADR-0016-workspace-scoped-standing-gate.md) |
 | ADR-0017 | [`ab_glyph` over `cosmic-text` for Phase 1 text tool](ADR-0017-ab-glyph-over-cosmic-text-phase-1.md) |
+| ADR-0018 | [Tokio side thread + main-thread platform loop, bridged by mpsc](ADR-0018-tokio-side-thread-main-event-loop-bridge.md) |
