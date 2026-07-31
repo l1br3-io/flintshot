@@ -285,6 +285,28 @@ Categories used below:
 - Dual licensing: `MIT OR Apache-2.0`, with both license files in the
   repo root and the `license` field on every crate.
 
+#### Phase 2 — Daemon, tray, hotkeys, IPC (in progress)
+
+- `flintshot-core::ipc`: transport-agnostic IPC schema
+  (`Request`/`Event` enums, `#[non_exhaustive]`, postcard-serde) and the
+  `socket_path()` resolver. `Event` uses postcard-native external tagging
+  (`#[serde(tag = "kind")]` is `WontImplement` under postcard); see
+  ADR-0011.
+- `flintshot-core::error::FlintshotError::Ipc { detail }` variant.
+- Workspace dependencies for the resident daemon: `interprocess`
+  (local-socket transport, `tokio` feature), `postcard` (binary
+  encoding), `global-hotkey` (X11/macOS/Windows hotkeys), `notify`
+  (config hot-reload), `single-instance` (daemon-role lock). Resolves
+  the `single` vs `single-instance` open question: `single` is an
+  unrelated Itertools helper; `single-instance` is the Tauri-affiliated
+  single-instance lock.
+- `flintshot-app` `tray` feature (default OFF): gates the `tray-icon`
+  crate, whose Linux backend (`libappindicator`) pulls the full GTK3
+  stack that the default CI build doesn't install. The daemon runs
+  without it (IPC + hotkeys + single-instance); build with
+  `--features tray` to enable the system tray. A dedicated daemon-build
+  CI job lands in Task 012.
+
 ### Changed
 
 - Planning docs reorganized to the canonical OpenCode harness v0.5.0+
