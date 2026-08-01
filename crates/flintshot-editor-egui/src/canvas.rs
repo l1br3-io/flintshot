@@ -2,7 +2,12 @@
 //!
 //! [`Canvas`]: flintshot_core::render::Canvas
 
-use flintshot_core::{arrow_barbs, render::Canvas, Color, Point, Rect, Stroke};
+use flintshot_core::{
+    arrow_barbs,
+    render::Canvas,
+    text::{FontFamily, FontStyle, FontWeight, TextAlign, TextStyle},
+    Color, Point, Rect, Stroke,
+};
 
 /// egui-side texture handle, returned by [`EguiCanvas::upload_image`].
 #[derive(Clone)]
@@ -235,33 +240,89 @@ impl Canvas for EguiCanvas {
         painter.line_segment([b_l, to_egui_pos(right, ppp, self.origin)], egui_stroke);
     }
 
-    fn draw_text(&mut self, pos: Point, text: &str, size: f32, color: Color) {
+    fn draw_text(&mut self, pos: Point, text: &str, style: &TextStyle) {
         let Some(painter) = &self.painter else {
             return;
         };
         let ppp = self.ppp();
-        // `size` is physical px; egui wants logical px for FontId.
-        let font_id = egui::FontId::proportional(size / ppp);
-        painter.text(
-            to_egui_pos(pos, ppp, self.origin),
-            egui::Align2::LEFT_TOP,
-            text,
-            font_id,
-            to_egui_color(color),
-        );
+        // `style.size` is physical px; egui wants logical px for FontId.
+        let size = style.size / ppp;
+        // egui ships two built-in families; Serif falls back to
+        // Proportional (Sans) until a serif face is bundled — see ADR.
+        let family = match style.family {
+            FontFamily::Monospace => egui::FontFamily::Monospace,
+            _ => egui::FontFamily::Proportional,
+        };
+        let format = egui::text::TextFormat {
+            font_id: egui::FontId { size, family },
+            color: to_egui_color(style.color),
+            // Background is drawn explicitly below (solid rect) so the
+            // save path — which can only fill a rect — matches WYSIWYG.
+            background: egui::Color32::TRANSPARENT,
+            italics: matches!(style.style, FontStyle::Italic),
+            ..egui::text::TextFormat::default()
+        };
+        let mut job = egui::text::LayoutJob {
+            // No word-wrap (only `\n` breaks lines), matching the save path.
+            wrap: egui::text::TextWrapping {
+                max_width: f32::INFINITY,
+                ..egui::text::TextWrapping::default()
+            },
+            halign: match style.align {
+                TextAlign::Center => egui::Align::Center,
+                TextAlign::Right => egui::Align::RIGHT,
+                _ => egui::Align::LEFT,
+            },
+            ..egui::text::LayoutJob::default()
+        };
+        job.append(text, 0.0, format);
+        let galley = self.ctx.fonts_mut(|f| f.layout_job(job));
+        let anchor = to_egui_pos(pos, ppp, self.origin);
+        let galley_size = galley.size();
+        // Solid background rect behind the laid-out block.
+        if let Some(bg) = style.background {
+            let r = egui::Rect::from_min_size(anchor, galley_size);
+            painter.rect_filled(r, egui::CornerRadius::ZERO, to_egui_color(bg));
+        }
+        let color = to_egui_color(style.color);
+        // Faux outline: redraw the galley at the four cardinal offsets in
+        // the outline colour, then the fill pass centres the glyphs.
+        // `galley_with_override_text_color` repaints the cached galley
+        // in any colour without re-laying-out.
+        if let Some(outline) = style.outline {
+            let oc = to_egui_color(outline.color);
+            let w = outline.width / ppp;
+            for (dx, dy) in [(w, 0.0), (-w, 0.0), (0.0, w), (0.0, -w)] {
+                painter.galley_with_override_text_color(
+                    anchor + egui::vec2(dx, dy),
+                    galley.clone(),
+                    oc,
+                );
+            }
+        }
+        painter.galley_with_override_text_color(anchor, galley.clone(), color);
+        // Faux bold: egui has no weight API (its `strong()` only changes
+        // colour), so thicken by overdrawing at a sub-pixel x offset.
+        // The save path uses a real bold face via fontdb — minor
+        // WYSIWYG difference, documented in the ADR.
+        if matches!(style.weight, FontWeight::Bold) {
+            painter.galley_with_override_text_color(
+                anchor + egui::vec2(0.5 / ppp, 0.0),
+                galley,
+                color,
+            );
+        }
     }
 
-    fn measure_text(&self, text: &str, size: f32) -> f32 {
+    fn measure_text(&self, text: &str, style: &TextStyle) -> flintshot_core::text::TextMetrics {
         let ppp = self.ppp();
-        // `size` is physical px; egui wants logical px for FontId.
-        let font_id = egui::FontId::proportional(size / ppp);
+        // `style.size` is physical px; egui wants logical px for FontId.
+        let font_id = egui::FontId::proportional(style.size / ppp);
         // Laying out the text is the authoritative measurement path —
-        // it consults the same font + shaping that `draw_text` uses,
-        // so the caret lands exactly at the visible end of the run.
-        // `fonts_mut` caches the resulting galley, so repeated calls
-        // for the same draft text are cheap. `INFINITY` wrap width
-        // matches the single-line Phase 1 contract (no Shift+Enter
-        // until Phase 2 — ADR-0017).
+        // it consults the same font + shaping that `draw_text` uses, so
+        // the caret lands exactly at the visible end of the run. egui's
+        // galley already splits on `\n`, so multi-line runs get a row
+        // per line for free. `fonts_mut` caches the galley.
         let galley = self.ctx.fonts_mut(|f| {
             f.layout(
                 text.to_owned(),
@@ -272,6 +333,19 @@ impl Canvas for EguiCanvas {
         });
         // Galley size is logical px; convert back to physical to match
         // the canvas-physical coordinate space the render path uses.
-        galley.size().x * ppp
+        let size = galley.size();
+        let width = size.x * ppp;
+        // The caret sits at the end of the last line; `galley.rows`'s
+        // final entry holds that line's width (empty after a trailing
+        // `\n`, which is correct — the caret drops to a fresh line).
+        let last_line_width = galley
+            .rows
+            .last()
+            .map_or(0.0, |row| row.rect().width() * ppp);
+        flintshot_core::text::TextMetrics {
+            width,
+            height: size.y * ppp,
+            last_line_width,
+        }
     }
 }

@@ -115,12 +115,33 @@ pub enum Annotation {
     Text {
         /// Anchor (top-left of text).
         pos: Point,
-        /// Text content.
+        /// Text content. May contain `\n` (multiline, via Shift+Enter).
         text: String,
         /// Font size in physical px.
         font_size: f32,
         /// Text color.
         color: Color,
+        /// Font family.
+        #[serde(default)]
+        family: crate::text::FontFamily,
+        /// Font weight.
+        #[serde(default)]
+        weight: crate::text::FontWeight,
+        /// Font style.
+        #[serde(default)]
+        style: crate::text::FontStyle,
+        /// Horizontal alignment.
+        #[serde(default)]
+        align: crate::text::TextAlign,
+        /// Line-spacing multiplier (line height = `font_size * line_spacing`).
+        #[serde(default = "crate::text::default_line_spacing")]
+        line_spacing: f32,
+        /// Optional glyph outline for readability.
+        #[serde(default)]
+        outline: Option<crate::text::TextOutline>,
+        /// Optional filled background behind the text block.
+        #[serde(default)]
+        background: Option<Color>,
     },
     /// Blur / pixelate region.
     Blur {
@@ -222,6 +243,24 @@ pub struct EditorState {
     pub blur_kind: BlurKind,
     /// Active font size for `Tool::Text`.
     pub font_size: f32,
+    /// Active font family for `Tool::Text`.
+    pub font_family: crate::text::FontFamily,
+    /// Active font weight for `Tool::Text`.
+    pub font_weight: crate::text::FontWeight,
+    /// Active font style for `Tool::Text`.
+    pub font_style: crate::text::FontStyle,
+    /// Active text alignment for `Tool::Text`.
+    pub text_align: crate::text::TextAlign,
+    /// Dedicated text colour for `Tool::Text`, decoupled from the
+    /// drawing-tools [`color`](Self::color). Snapshot into
+    /// [`Annotation::Text`] at `begin_annotation` time.
+    pub text_color: Color,
+    /// Line-spacing multiplier for `Tool::Text`.
+    pub line_spacing: f32,
+    /// Optional outline for `Tool::Text`.
+    pub text_outline: Option<crate::text::TextOutline>,
+    /// Optional background fill for `Tool::Text`.
+    pub text_background: Option<Color>,
     /// Next number to assign for `Tool::Number`.
     pub next_number: u32,
     /// Selected annotation index, if any (hit-testing result). Set by
@@ -246,6 +285,14 @@ impl EditorState {
             stroke_width: 3.0,
             blur_kind: BlurKind::default(),
             font_size: 16.0,
+            font_family: crate::text::FontFamily::default(),
+            font_weight: crate::text::FontWeight::default(),
+            font_style: crate::text::FontStyle::default(),
+            text_align: crate::text::TextAlign::default(),
+            text_color: Color::RED,
+            line_spacing: crate::text::DEFAULT_LINE_SPACING,
+            text_outline: None,
+            text_background: None,
             next_number: 1,
             selected_index: None,
         }
@@ -310,12 +357,20 @@ impl EditorState {
                 kind: self.blur_kind,
                 strength: BLUR_DEFAULT_STRENGTH,
             },
-            Tool::Text => Annotation::Text {
-                pos: at,
-                text: String::new(),
-                font_size: self.font_size,
-                color: self.color,
-            },
+            Tool::Text => {
+                let style = crate::text::TextStyle {
+                    size: self.font_size,
+                    color: self.text_color,
+                    family: self.font_family,
+                    weight: self.font_weight,
+                    style: self.font_style,
+                    align: self.text_align,
+                    line_spacing: self.line_spacing,
+                    outline: self.text_outline,
+                    background: self.text_background,
+                };
+                Annotation::text(at, "", style)
+            }
             // Number / Select have non-drag input models; their entry
             // points are tool-specific (see method doc).
             Tool::Number | Tool::Select => return,
@@ -630,9 +685,18 @@ impl EditorState {
                 DispatchOutcome::Continue
             }
             InputEvent::Key {
-                key: Key::Enter, ..
+                key: Key::Enter,
+                modifiers,
             } => {
-                self.commit_text_draft();
+                // Shift+Enter inserts a line break (multiline text);
+                // plain Enter commits the draft. Multi-line support was
+                // pulled forward from Phase 2 (ADR-0017) once the save
+                // path learned to rasterise multiple baselines.
+                if modifiers.shift {
+                    self.insert_newline();
+                } else {
+                    self.commit_text_draft();
+                }
                 DispatchOutcome::Continue
             }
             InputEvent::Key {
@@ -674,6 +738,15 @@ impl EditorState {
     fn type_char(&mut self, ch: char) {
         if let Some(Annotation::Text { text, .. }) = &mut self.pending {
             text.push(ch);
+        }
+    }
+
+    /// Insert a line break into the in-flight text draft (Shift+Enter).
+    /// The `\n` is stored verbatim; both renderers split on it to lay
+    /// out subsequent lines. No-op when no text draft is active.
+    fn insert_newline(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &mut self.pending {
+            text.push('\n');
         }
     }
 
@@ -801,6 +874,65 @@ fn normalize_rects(ann: &mut Annotation) {
 }
 
 impl Annotation {
+    /// Build the [`crate::text::TextStyle`] describing how a `Text`
+    /// variant should be rendered.
+    ///
+    /// Panics for non-`Text` variants (callers gate on the variant).
+    /// Bundling every text property into one [`crate::text::TextStyle`]
+    /// keeps the [`crate::render::Canvas`] signature stable as new
+    /// text properties are added.
+    #[must_use]
+    pub fn text_style(&self) -> crate::text::TextStyle {
+        let Annotation::Text {
+            font_size,
+            color,
+            family,
+            weight,
+            style,
+            align,
+            line_spacing,
+            outline,
+            background,
+            ..
+        } = self
+        else {
+            unreachable!("text_style only valid for Annotation::Text");
+        };
+        crate::text::TextStyle {
+            size: *font_size,
+            color: *color,
+            family: *family,
+            weight: *weight,
+            style: *style,
+            align: *align,
+            line_spacing: *line_spacing,
+            outline: *outline,
+            background: *background,
+        }
+    }
+
+    /// Construct a [`Annotation::Text`] from a [`crate::text::TextStyle`]
+    /// bundle, expanding the style into the variant's individual fields.
+    /// The inverse of [`text_style`](Self::text_style). Used by
+    /// `begin_annotation` and by tests so neither has to enumerate
+    /// every text field by hand.
+    #[must_use]
+    pub fn text(pos: Point, text: impl Into<String>, style: crate::text::TextStyle) -> Self {
+        Annotation::Text {
+            pos,
+            text: text.into(),
+            font_size: style.size,
+            color: style.color,
+            family: style.family,
+            weight: style.weight,
+            style: style.style,
+            align: style.align,
+            line_spacing: style.line_spacing,
+            outline: style.outline,
+            background: style.background,
+        }
+    }
+
     /// Clip this annotation to `bounds`, translate all coordinates by
     /// `-bounds.min`, and return whether the annotation should be kept.
     ///
@@ -895,20 +1027,32 @@ impl Annotation {
                 pos,
                 text,
                 font_size,
+                line_spacing,
                 ..
             } => {
-                // Coarse approximation: ~half the font size per glyph
-                // of advance, line height ≈ 1.2 × font_size. Real
-                // metrics come with cosmic-text in Task 12.
-                // char_count fits in u32 losslessly for any realistic
-                // text label (< 2^24 chars); the cast is exact.
+                // Coarse approximation: ~half the font size per glyph of
+                // advance. Width uses the longest line; height spans
+                // every line at `font_size * line_spacing` leading.
+                // Real glyph metrics live in the render backends; this
+                // estimate is for hit-testing / select-tool bounds only.
+                let (max_chars, line_count) =
+                    text.split('\n')
+                        .fold((0_usize, 0_usize), |(mut mx, mut n), line| {
+                            mx = mx.max(line.chars().count());
+                            n += 1;
+                            (mx, n)
+                        });
                 #[allow(
                     clippy::cast_precision_loss,
-                    reason = "text length fits in f32's 24-bit mantissa"
+                    reason = "per-line char counts fit in f32's 24-bit mantissa"
                 )]
-                let char_count = text.chars().count() as f32;
-                let approx_w = font_size * 0.5 * char_count;
-                Rect::from_xywh(pos.x, pos.y, approx_w, font_size * 1.2)
+                let approx_w = font_size * 0.5 * max_chars as f32;
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "line count fits in f32's 24-bit mantissa"
+                )]
+                let h = line_count as f32 * font_size * line_spacing;
+                Rect::from_xywh(pos.x, pos.y, approx_w, h)
             }
             Annotation::Number { pos, diameter, .. } => {
                 let half = diameter / 2.0;
@@ -1588,6 +1732,49 @@ mod tests {
     }
 
     #[test]
+    fn text_style_round_trips_through_annotation_text() {
+        // `Annotation::text` expands a TextStyle into the variant's
+        // fields; `text_style` folds them back. The pair must be a
+        // round-trip so the two render backends always see the same
+        // style bundle the editor captured.
+        let style = crate::text::TextStyle {
+            size: 24.0,
+            color: Color::rgb(1, 2, 3),
+            family: crate::text::FontFamily::Monospace,
+            weight: crate::text::FontWeight::Bold,
+            style: crate::text::FontStyle::Italic,
+            align: crate::text::TextAlign::Center,
+            line_spacing: 1.5,
+            outline: Some(crate::text::TextOutline {
+                color: Color::rgb(0, 0, 0),
+                width: 3.0,
+            }),
+            background: Some(Color::rgb(255, 235, 0)),
+        };
+        let ann = Annotation::text(Point::new(1.0, 2.0), "body", style);
+        assert_eq!(ann.text_style(), style, "text_style() must invert text()");
+    }
+
+    #[test]
+    fn begin_text_annotation_snapshots_text_color_not_tool_color() {
+        // The Text tool's colour is decoupled from the drawing-tools
+        // `color`; `begin_annotation` must snapshot `text_color` so a
+        // red arrow and a white label can coexist.
+        let mut s = text_state();
+        s.color = Color::rgb(255, 0, 0);
+        s.text_color = Color::rgb(255, 255, 255);
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(5.0, 5.0),
+        });
+        match &s.pending {
+            Some(Annotation::Text { color, .. }) => {
+                assert_eq!(*color, Color::rgb(255, 255, 255), "uses text_color");
+            }
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn dispatch_text_typing_appends_chars() {
         let mut s = text_state();
         s.dispatch_input(&InputEvent::PointerDown {
@@ -1645,6 +1832,45 @@ mod tests {
                 assert_eq!(*pos, Point::new(10.0, 10.0));
             }
             other => panic!("expected committed Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_text_shift_enter_inserts_newline() {
+        // Shift+Enter breaks the line instead of committing; a
+        // subsequent plain Enter commits the multi-line draft whole.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        for ch in "ab".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        });
+        for ch in "cd".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        // Still editing — Shift+Enter must not commit.
+        assert!(s.is_editing_text(), "Shift+Enter keeps the draft open");
+        match &s.pending {
+            Some(Annotation::Text { text, .. }) => assert_eq!(text, "ab\ncd"),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+        // Plain Enter commits the two-line draft.
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.anns.len(), 1);
+        match &s.anns[0] {
+            Annotation::Text { text, .. } => assert_eq!(text, "ab\ncd"),
+            other => panic!("expected committed multi-line Text, got {other:?}"),
         }
     }
 

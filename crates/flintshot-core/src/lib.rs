@@ -25,6 +25,7 @@ pub mod ipc;
 pub mod render;
 pub mod serde_util;
 pub mod shell;
+pub mod text;
 pub mod upload;
 
 pub use capture::{capture_fullscreen, capture_region, monitors, MonitorInfo};
@@ -40,4 +41,8 @@ pub use render::{
     DrawCall, MockCanvas,
 };
 pub use shell::{EditorOutcome, EditorShell};
+pub use text::{
+    FontFamily, FontStyle, FontWeight, TextAlign, TextMetrics, TextOutline, TextStyle,
+    DEFAULT_LINE_SPACING,
+};
 pub use upload::{ImageMime, UploadBackend, UploadContext, UploadError, UploadOutcome};

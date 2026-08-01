@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use crate::{
     editor::{Annotation, BlurKind, EditorState},
     geom::{Color, Point, Rect, Stroke},
+    text::{TextMetrics, TextStyle},
 };
 
 /// Immediate-mode drawing primitives for annotations.
@@ -66,19 +67,24 @@ pub trait Canvas {
     /// Stroke an arrow from `a` (tail) to `b` (head), with barbs of `head_size`.
     fn draw_arrow(&mut self, a: Point, b: Point, stroke: &Stroke, head_size: f32);
 
-    /// Draw left-to-right text starting at `pos`. (Shaping stays
-    /// toolkit-specific; core only specifies the run.)
-    fn draw_text(&mut self, pos: Point, text: &str, size: f32, color: Color);
+    /// Draw a text run starting at `pos` (top-left anchor), styled by
+    /// `style`. Shaping, multiline layout, and any outline / background
+    /// are the implementer's concern; core only specifies the run.
+    /// `style` is a bundle (not a growing positional list) so new text
+    /// properties don't widen this signature.
+    fn draw_text(&mut self, pos: Point, text: &str, style: &TextStyle);
 
-    /// Advance width of `text` at `size` px, in physical px. Used by
-    /// the shared render path to compute the caret position for an
-    /// in-flight text draft ([`EditorState::pending`]). Implementations
-    /// must use the same font metrics as their [`draw_text`](Self::draw_text)
-    /// so the caret lands at the visible end of the typed run.
+    /// Layout measurements of `text` under `style`, in physical px. Used
+    /// by the shared render path to place the caret / bounding box for
+    /// an in-flight text draft ([`EditorState::pending`]).
+    /// Implementations must use the same font metrics as their
+    /// [`draw_text`](Self::draw_text) so the caret lands at the visible
+    /// end of the typed run.
     ///
-    /// Returns 0.0 for an empty run (the caret sits at `pos.x`).
+    /// For an empty run the widths are `0.0` (caret sits at `pos.x`)
+    /// and `height` is one line height (`size * line_spacing`).
     #[must_use]
-    fn measure_text(&self, text: &str, size: f32) -> f32;
+    fn measure_text(&self, text: &str, style: &TextStyle) -> TextMetrics;
 }
 
 /// Render `state` (background image + all annotations) via `canvas`.
@@ -147,21 +153,15 @@ pub fn render<C: Canvas>(
 
     if let Some(pending) = &state.pending {
         render_ann(canvas, pending, &state.image);
-        // Caret indicator for an in-flight `Tool::Text` draft. Only
-        // drawn for `pending` (never for committed `anns`), so the
-        // saved/copied output via `compose_final` — which doesn't go
-        // through this path — never sees the caret. Without this the
-        // user has no visual feedback where the typed text will land,
-        // because `draw_text` with an empty string (or any string
-        // between keystrokes) draws nothing.
-        if let Annotation::Text {
-            pos,
-            text,
-            font_size,
-            color,
-        } = pending
-        {
-            draw_text_caret(canvas, *pos, text, *font_size, *color);
+        // Text indicators (bounding box + block caret) for an in-flight
+        // `Tool::Text` draft. Only drawn for `pending` (never for
+        // committed `anns`), so the saved/copied output via
+        // `compose_final` — which doesn't go through this path — never
+        // sees them. Without these the user has no feedback where the
+        // typed text will land, because `draw_text` with an empty string
+        // (or any string between keystrokes) draws nothing.
+        if let Annotation::Text { pos, text, .. } = pending {
+            draw_text_indicators(canvas, *pos, text, &pending.text_style());
         }
     }
 
@@ -201,10 +201,24 @@ fn draw_blur_outline<C: Canvas>(canvas: &mut C, rect: Rect) {
 /// conventional selection-rectangle UX in screenshot tools.
 const SELECTION_STROKE: Stroke = Stroke::new(Color::rgb(0, 120, 215), 2.0);
 
-/// Caret stroke width (physical px) for the in-flight `Tool::Text`
-/// draft. Thin enough to read as a cursor rather than a tick, thick
-/// enough to survive `HiDPI` rounding at `pixels_per_point` ≥ 2.
-const CARET_STROKE_WIDTH: f32 = 1.5;
+/// Outline drawn around the in-flight `Tool::Text` block so the user
+/// can see the text's extent. Semi-transparent mid-grey reads on both
+/// bright and dark screenshots without competing with the text colour.
+/// Live-view-only — `render_ann` doesn't draw it, so saved / copied
+/// output via `compose_final` excludes it.
+const TEXT_BBOX_STROKE: Stroke = Stroke::new(Color::rgba(60, 60, 60, 170), 1.0);
+
+/// Padding around the laid-out text block for the bounding-box
+/// indicator, in physical px. Keeps the box from hugging glyph edges
+/// (ascenders / descenders would otherwise touch the outline).
+const TEXT_BBOX_PAD: f32 = 2.0;
+
+/// Width of the solid block caret, as a fraction of font size and
+/// clamped so it stays visible at small sizes. Terminal-style: a filled
+/// rectangle the user reads as the insertion point.
+fn block_caret_width(size: f32) -> f32 {
+    (size * 0.12).max(2.0)
+}
 
 /// Outline drawn around blur regions in the live editor view so the
 /// user can locate them even when the underlying pixels are uniform
@@ -259,12 +273,9 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::R
                 canvas.draw_line(w[0], w[1], &stroke);
             }
         }
-        Annotation::Text {
-            pos,
-            text,
-            font_size,
-            color,
-        } => canvas.draw_text(*pos, text, *font_size, *color),
+        Annotation::Text { pos, text, .. } => {
+            canvas.draw_text(*pos, text, &ann.text_style());
+        }
         Annotation::Blur {
             rect,
             kind,
@@ -308,7 +319,11 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::R
             // Contrast text: white on dark fills, black on light. We
             // don't compute luminance here; pick white as a default —
             // refined in Task 15 when pickers land.
-            canvas.draw_text(*pos, &label, *diameter * 0.6, Color::rgb(255, 255, 255));
+            canvas.draw_text(
+                *pos,
+                &label,
+                &TextStyle::simple(*diameter * 0.6, Color::rgb(255, 255, 255)),
+            );
         }
     }
 }
@@ -370,31 +385,33 @@ pub fn arrow_barbs(a: Point, b: Point, head_size: f32) -> [Point; 2] {
     ]
 }
 
-/// Draw a vertical caret bar at the end of an in-flight text draft.
+/// Draw the in-flight text indicators: a hollow bounding box around
+/// the laid-out text block and a solid block caret at the insertion
+/// point (end of the last line).
 ///
-/// Position: `pos.x + measure_text(text, font_size)` (so the bar
-/// appears immediately after the last typed glyph, or at the click
-/// position when the draft is empty). Height = `font_size`; width =
-/// [`CARET_STROKE_WIDTH`]. Colour matches the draft text colour.
-///
-/// Used only by the live editor view via [`render`]; the saved /
-/// copied image excludes `pending` annotations, so the caret never
-/// reaches disk or the clipboard.
-fn draw_text_caret<C: Canvas>(
-    canvas: &mut C,
-    pos: Point,
-    text: &str,
-    font_size: f32,
-    color: Color,
-) {
-    let advance = canvas.measure_text(text, font_size);
-    let x = pos.x + advance;
-    let stroke = Stroke::new(color, CARET_STROKE_WIDTH);
-    canvas.draw_line(
-        Point::new(x, pos.y),
-        Point::new(x, pos.y + font_size),
-        &stroke,
+/// Both are live-view-only — drawn solely for `pending`
+/// `Annotation::Text` via [`render`]; the saved / copied image excludes
+/// `pending`, so neither reaches disk or the clipboard. Without these
+/// the user has no feedback where typed text will land, because
+/// `draw_text` with an empty string (or between keystrokes) draws
+/// nothing.
+fn draw_text_indicators<C: Canvas>(canvas: &mut C, pos: Point, text: &str, style: &TextStyle) {
+    let metrics = canvas.measure_text(text, style);
+    let pad = TEXT_BBOX_PAD;
+    let block_w = block_caret_width(style.size);
+    // Bounding box: spans the widest line, extended to cover the caret
+    // (which sits just past the last line's end).
+    let bbox_w = metrics.width.max(metrics.last_line_width + block_w);
+    let bbox = Rect::from_xywh(
+        pos.x - pad,
+        pos.y - pad,
+        bbox_w + pad * 2.0,
+        metrics.height + pad * 2.0,
     );
+    canvas.draw_rect_outline(bbox, &TEXT_BBOX_STROKE);
+    // Solid block caret at the insertion point.
+    let caret = Rect::from_xywh(pos.x + metrics.last_line_width, pos.y, block_w, style.size);
+    canvas.draw_rect_filled(caret, style.color);
 }
 
 /// Cache of precomputed blurred images for committed `Annotation::Blur`
@@ -684,8 +701,22 @@ impl Canvas for ImageCanvas {
         stroke_segment(&mut self.image, b, right, *stroke);
     }
 
-    fn draw_text(&mut self, pos: Point, text: &str, size: f32, color: Color) {
-        let Some(font) = system_font() else {
+    fn draw_text(&mut self, pos: Point, text: &str, style: &TextStyle) {
+        // Background highlight: a solid filled rect behind the whole
+        // laid-out block (matches the egui view, which draws the same
+        // rect via `painter.rect_filled`).
+        if let Some(bg) = style.background {
+            let m = self.measure_text(text, style);
+            fill_rect(
+                &mut self.image,
+                pos.x,
+                pos.y,
+                pos.x + m.width,
+                pos.y + m.height,
+                bg,
+            );
+        }
+        let Some(font) = font_for(style.family, style.weight, style.style) else {
             tracing::warn!(
                 target: "flintshot::render::image_canvas",
                 pos = ?pos, text,
@@ -693,23 +724,66 @@ impl Canvas for ImageCanvas {
             );
             return;
         };
-        rasterize_text(&mut self.image, pos, text, size, color, font);
+        // Outline: redraw the run at the four cardinal offsets in the
+        // outline colour, then the fill pass on top centres the
+        // glyphs. Mirrors the egui view's faux-outline approach so the
+        // two paths stay WYSIWYG without a separate stroke rasteriser.
+        if let Some(outline) = style.outline {
+            let w = outline.width;
+            let outlined = crate::text::TextStyle {
+                color: outline.color,
+                ..*style
+            };
+            for (dx, dy) in [(w, 0.0), (-w, 0.0), (0.0, w), (0.0, -w)] {
+                rasterize_text(
+                    &mut self.image,
+                    Point::new(pos.x + dx, pos.y + dy),
+                    text,
+                    &outlined,
+                    &font,
+                );
+            }
+        }
+        rasterize_text(&mut self.image, pos, text, style, &font);
     }
 
     /// Mirror `rasterize_text`'s horizontal advance using the same
-    /// system font + scale. Kept in lockstep so the live editor view
+    /// resolved font + scale. Kept in lockstep so the live editor view
     /// (egui) and the saved/copied image agree on caret placement for
     /// the brief moment before commit; `compose_final` doesn't call
     /// this since `pending` is excluded from saved output.
-    fn measure_text(&self, text: &str, size: f32) -> f32 {
+    fn measure_text(&self, text: &str, style: &TextStyle) -> TextMetrics {
         use ab_glyph::{Font, ScaleFont};
-        let Some(font) = system_font() else {
-            return 0.0;
+        let Some(font) = font_for(style.family, style.weight, style.style) else {
+            return TextMetrics::default();
         };
-        let scaled = font.as_scaled(ab_glyph::PxScale::from(size));
-        text.chars()
-            .map(|ch| scaled.h_advance(scaled.glyph_id(ch)))
-            .sum()
+        let scaled = font.as_scaled(ab_glyph::PxScale::from(style.size));
+        let line_width = |line: &str| -> f32 {
+            line.chars()
+                .map(|ch| scaled.h_advance(scaled.glyph_id(ch)))
+                .sum()
+        };
+        // `split('\n')` yields one entry for a single-line run, so the
+        // common case keeps `width == last_line_width`.
+        let mut width = 0.0_f32;
+        let mut last_line_width = 0.0_f32;
+        let mut line_count = 0_usize;
+        for line in text.split('\n') {
+            let w = line_width(line);
+            width = width.max(w);
+            last_line_width = w;
+            line_count += 1;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "line count is bounded by the draft length; ≤ 2^24, exact in f32"
+        )]
+        let height = line_count as f32 * style.size * style.line_spacing;
+        TextMetrics {
+            width,
+            height,
+            last_line_width,
+        }
     }
 }
 
@@ -773,58 +847,106 @@ fn stroke_segment(img: &mut image::RgbaImage, a: Point, b: Point, stroke: Stroke
     }
 }
 
-/// Cached system font for [`ImageCanvas`]'s text rendering.
+/// Cache of resolved system fonts keyed by family + weight + style.
 ///
-/// `OnceLock` so the fontdb scan + font read happen once per process,
-/// not once per `draw_text` call (`compose_final` may render many text
-/// annotations). `Option` because the host may have no discoverable
-/// fonts (e.g. a minimal container); callers handle `None` by
-/// warning + skipping the annotation rather than panicking.
-static SYSTEM_FONT: std::sync::OnceLock<Option<ab_glyph::FontArc>> = std::sync::OnceLock::new();
+/// `OnceLock<Mutex<HashMap<…>>>` so the fontdb scan + font read happen
+/// at most once per distinct `(family, weight, style)` triple per
+/// process — `compose_final` may render many text annotations, and
+/// re-scanning fontconfig each time would dominate save time. Each
+/// value is `Option<FontArc>` (`None` cached when fontconfig found
+/// nothing for that triple, so we don't retry). Cloning a `FontArc` is
+/// a cheap `Arc` bump, so callers take an owned copy per call.
+static SYSTEM_FONTS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<FontKey, Option<ab_glyph::FontArc>>>,
+> = std::sync::OnceLock::new();
 
-/// Return a shared reference to the lazily-discovered system font, or
-/// `None` if fontconfig found nothing.
-///
-/// Uses `fontdb` to query the default sans-serif face (plan Q2:
-/// system fontconfig default). The first call scans the system font
-/// directories; subsequent calls return the cached result.
-fn system_font() -> Option<&'static ab_glyph::FontArc> {
-    SYSTEM_FONT
-        .get_or_init(|| {
-            let mut db = fontdb::Database::new();
-            db.load_system_fonts();
-            let id = db.query(&fontdb::Query {
-                families: &[fontdb::Family::SansSerif],
-                weight: fontdb::Weight::NORMAL,
-                stretch: fontdb::Stretch::Normal,
-                style: fontdb::Style::Normal,
-            })?;
-            let face = db.face(id)?;
-            match &face.source {
-                fontdb::Source::Binary(data) => {
-                    let bytes: &[u8] = (**data).as_ref();
-                    ab_glyph::FontArc::try_from_vec(bytes.to_vec()).ok()
-                }
-                fontdb::Source::File(path) => std::fs::read(path)
-                    .ok()
-                    .and_then(|bytes| ab_glyph::FontArc::try_from_vec(bytes).ok()),
-                fontdb::Source::SharedFile(_path, data) => {
-                    let bytes: &[u8] = (**data).as_ref();
-                    ab_glyph::FontArc::try_from_vec(bytes.to_vec()).ok()
-                }
-            }
-        })
-        .as_ref()
+/// Cache key for [`SYSTEM_FONTS`]. The four text enums are `Copy` and
+/// cheap; `Hash`/`Eq` derive from the underlying field.
+#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+struct FontKey {
+    family: crate::text::FontFamily,
+    weight: crate::text::FontWeight,
+    style: crate::text::FontStyle,
 }
 
-/// Rasterize a single-line `text` label into `img` at `pos` (the
-/// top-left baseline anchor) using `font` at `size` px, coloured
-/// `color`. Glyphs are source-over alpha-composited so the text
-/// renders correctly over any background (annotation over screenshot).
+/// Resolve (and cache) a system [`ab_glyph::FontArc`] for the given
+/// family / weight / style, or `None` if fontconfig found nothing.
+///
+/// Falls back gracefully: an unknown `FontFamily`/`FontWeight`/
+/// `FontStyle` variant (the enums are `#[non_exhaustive]`) maps to the
+/// sans / normal / normal default, so future variants never panic.
+fn font_for(
+    family: crate::text::FontFamily,
+    weight: crate::text::FontWeight,
+    style: crate::text::FontStyle,
+) -> Option<ab_glyph::FontArc> {
+    let key = FontKey {
+        family,
+        weight,
+        style,
+    };
+    let cache = SYSTEM_FONTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().expect("font cache mutex poisoned");
+    if let Some(existing) = guard.get(&key) {
+        return existing.clone();
+    }
+    let resolved = query_system_font(key);
+    guard.insert(key, resolved.clone());
+    resolved
+}
+
+/// One-time fontdb scan for a single triple. See [`font_for`].
+fn query_system_font(key: FontKey) -> Option<ab_glyph::FontArc> {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    let family = match key.family {
+        crate::text::FontFamily::Serif => fontdb::Family::Serif,
+        crate::text::FontFamily::Monospace => fontdb::Family::Monospace,
+        _ => fontdb::Family::SansSerif,
+    };
+    let weight = match key.weight {
+        crate::text::FontWeight::Bold => fontdb::Weight::BOLD,
+        _ => fontdb::Weight::NORMAL,
+    };
+    let style = match key.style {
+        crate::text::FontStyle::Italic => fontdb::Style::Italic,
+        _ => fontdb::Style::Normal,
+    };
+    let id = db.query(&fontdb::Query {
+        families: &[family],
+        weight,
+        stretch: fontdb::Stretch::Normal,
+        style,
+    })?;
+    let face = db.face(id)?;
+    match &face.source {
+        fontdb::Source::Binary(data) => {
+            let bytes: &[u8] = (**data).as_ref();
+            ab_glyph::FontArc::try_from_vec(bytes.to_vec()).ok()
+        }
+        fontdb::Source::File(path) => std::fs::read(path)
+            .ok()
+            .and_then(|bytes| ab_glyph::FontArc::try_from_vec(bytes).ok()),
+        fontdb::Source::SharedFile(_path, data) => {
+            let bytes: &[u8] = (**data).as_ref();
+            ab_glyph::FontArc::try_from_vec(bytes.to_vec()).ok()
+        }
+    }
+}
+
+/// Rasterize `text` into `img` at `pos` (the top-left anchor) using
+/// `font` per `style`. Each `\n` starts a new line whose baseline is
+/// `size * line_spacing` below the previous one. Lines are aligned per
+/// `style.align` relative to the widest line's advance. Glyphs are
+/// source-over alpha-composited so the text renders correctly over any
+/// background (annotation over screenshot).
 ///
 /// Out-of-bounds glyph pixels are clipped (`ab_glyph` emits them for
 /// ascenders / descenders past the image edge); this is a no-op for
 /// those pixels, not an error.
+///
+/// Background and outline are handled by the caller ([`ImageCanvas::draw_text`])
+/// so the same measurement / offset math is shared with the egui view.
 #[allow(
     clippy::cast_precision_loss,
     reason = "glyph pixel offsets (gx, gy) are ≤ image dimensions ≤ 2^24, exact in f32"
@@ -833,46 +955,72 @@ fn rasterize_text(
     img: &mut image::RgbaImage,
     pos: Point,
     text: &str,
-    size: f32,
-    color: Color,
+    style: &TextStyle,
     font: &ab_glyph::FontArc,
 ) {
     use ab_glyph::{Font, ScaleFont};
+    let size = style.size;
+    let color = style.color;
     let scale = ab_glyph::PxScale::from(size);
     let scaled = font.as_scaled(scale);
-    // `pos` is the top-left; ab_glyph positions glyphs by the pen
-    // point at the baseline. Lift `y` by the ascent so the glyph's
-    // top edge lands at `pos.y`.
-    let mut pen_x = pos.x;
-    let pen_y = pos.y + scaled.ascent();
-    for ch in text.chars() {
-        let glyph_id = scaled.glyph_id(ch);
-        let glyph = ab_glyph::Glyph {
-            id: glyph_id,
-            scale,
-            position: ab_glyph::point(pen_x, pen_y),
-        };
-        if let Some(outlined) = font.outline_glyph(glyph) {
-            let bounds = outlined.px_bounds();
-            let min_x = bounds.min.x;
-            let min_y = bounds.min.y;
-            outlined.draw(|gx, gy, coverage| {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "glyph px coords are non-negative and within image after the bounds check"
-                )]
-                let px = min_x + gx as f32;
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "see above"
-                )]
-                let py = min_y + gy as f32;
-                blend_pixel(img, px, py, color, coverage);
-            });
+    let line_height = size * style.line_spacing;
+    let line_advance = |line: &str| -> f32 {
+        line.chars()
+            .map(|ch| scaled.h_advance(scaled.glyph_id(ch)))
+            .sum()
+    };
+    // Widest line drives the alignment box; computed up front so each
+    // line's left-edge offset is consistent (Left = 0, Center = half the
+    // slack, Right = full slack).
+    let lines: Vec<&str> = text.split('\n').collect();
+    let max_w = lines
+        .iter()
+        .map(|l| line_advance(l))
+        .fold(0.0_f32, f32::max);
+    let align_offset = |line_w: f32| -> f32 {
+        let slack = (max_w - line_w).max(0.0);
+        match style.align {
+            crate::text::TextAlign::Center => slack / 2.0,
+            crate::text::TextAlign::Right => slack,
+            _ => 0.0,
         }
-        pen_x += scaled.h_advance(glyph_id);
+    };
+    // `pos` is the top-left; ab_glyph positions glyphs by the pen point
+    // at the baseline. Lift `y` by the ascent so the first line's glyph
+    // tops land at `pos.y`.
+    let mut baseline_y = pos.y + scaled.ascent();
+    for line in lines.iter().copied() {
+        let mut pen_x = pos.x + align_offset(line_advance(line));
+        for ch in line.chars() {
+            let glyph_id = scaled.glyph_id(ch);
+            let glyph = ab_glyph::Glyph {
+                id: glyph_id,
+                scale,
+                position: ab_glyph::point(pen_x, baseline_y),
+            };
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                let min_x = bounds.min.x;
+                let min_y = bounds.min.y;
+                outlined.draw(|gx, gy, coverage| {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "glyph px coords are non-negative and within image after the bounds check"
+                    )]
+                    let px = min_x + gx as f32;
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "see above"
+                    )]
+                    let py = min_y + gy as f32;
+                    blend_pixel(img, px, py, color, coverage);
+                });
+            }
+            pen_x += scaled.h_advance(glyph_id);
+        }
+        baseline_y += line_height;
     }
 }
 
@@ -1023,10 +1171,8 @@ pub enum DrawCall {
         pos: Point,
         /// Text content.
         text: String,
-        /// Font size in physical px.
-        size: f32,
-        /// Text color.
-        color: Color,
+        /// Full text style bundle.
+        style: TextStyle,
     },
 }
 
@@ -1112,26 +1258,41 @@ impl Canvas for MockCanvas {
         });
     }
 
-    fn draw_text(&mut self, pos: Point, text: &str, size: f32, color: Color) {
+    fn draw_text(&mut self, pos: Point, text: &str, style: &TextStyle) {
         self.calls.push(DrawCall::DrawText {
             pos,
             text: text.to_owned(),
-            size,
-            color,
+            style: *style,
         });
     }
 
-    /// Deterministic monospace-style estimate: `len * size * 0.6`.
-    /// Real shells use their shaping backend; the mock only needs a
-    /// predictable value so caret-position assertions in render tests
+    /// Deterministic monospace-style estimate: `len * size * 0.6` per
+    /// line. Real shells use their shaping backend; the mock only needs
+    /// a predictable value so caret / bbox assertions in render tests
     /// can compute the expected geometry without re-implementing
-    /// `ab_glyph` / egui's layouter.
+    /// `ab_glyph` / egui's layouter. Multi-line runs split on `\n`;
+    /// `width` is the widest line, `last_line_width` is where the
+    /// caret sits.
     #[allow(
         clippy::cast_precision_loss,
         reason = "char count is bounded by the draft string length; realistic screenshots have ≤ 2^24 chars"
     )]
-    fn measure_text(&self, text: &str, size: f32) -> f32 {
-        text.chars().count() as f32 * size * 0.6
+    fn measure_text(&self, text: &str, style: &TextStyle) -> TextMetrics {
+        let line_width = |line: &str| line.chars().count() as f32 * style.size * 0.6;
+        let mut width = 0.0_f32;
+        let mut last_line_width = 0.0_f32;
+        let mut line_count = 0_usize;
+        for line in text.split('\n') {
+            let w = line_width(line);
+            width = width.max(w);
+            last_line_width = w;
+            line_count += 1;
+        }
+        TextMetrics {
+            width,
+            height: line_count as f32 * style.size * style.line_spacing,
+            last_line_width,
+        }
     }
 }
 
@@ -1349,12 +1510,11 @@ mod tests {
 
         render_ann(
             &mut canvas,
-            &Annotation::Text {
-                pos: Point::new(5.0, 5.0),
-                text: "hi".to_owned(),
-                font_size: 12.0,
-                color: Color::RED,
-            },
+            &Annotation::text(
+                Point::new(5.0, 5.0),
+                "hi",
+                TextStyle::simple(12.0, Color::RED),
+            ),
             &source,
         );
         match canvas.calls.last() {
@@ -1454,12 +1614,11 @@ mod tests {
         let pos = Point::new(10.0, 5.0);
         let font_size = 16.0;
         let color = Color::rgb(0, 0, 0);
-        state.pending = Some(Annotation::Text {
+        state.pending = Some(Annotation::text(
             pos,
-            text: "hi".to_owned(),
-            font_size,
-            color,
-        });
+            "hi",
+            TextStyle::simple(font_size, color),
+        ));
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
@@ -1473,31 +1632,41 @@ mod tests {
             Some(DrawCall::DrawText {
                 pos: p,
                 text,
-                size,
-                color: c,
+                style,
             }) => {
                 assert_eq!(*p, pos);
                 assert_eq!(text, "hi");
-                assert_eq!(*size, font_size);
-                assert_eq!(*c, color);
+                assert_eq!(style.size, font_size);
+                assert_eq!(style.color, color);
             }
             other => panic!("expected DrawText for pending run, got {other:?}"),
         }
         // MockCanvas::measure_text returns `len * size * 0.6`, so
         // advance for "hi" at size 16.0 = 19.2 px.
         let advance = 19.2_f32;
+        let block_w = block_caret_width(font_size);
+        // Bounding-box outline around the laid-out text block.
         match it.next() {
-            Some(DrawCall::DrawLine { a, b, stroke }) => {
-                assert_eq!(*a, Point::new(pos.x + advance, pos.y), "caret top");
-                assert_eq!(
-                    *b,
-                    Point::new(pos.x + advance, pos.y + font_size),
-                    "caret bottom"
+            Some(DrawCall::DrawRectOutline { rect, stroke }) => {
+                let want = Rect::from_xywh(
+                    pos.x - TEXT_BBOX_PAD,
+                    pos.y - TEXT_BBOX_PAD,
+                    advance + block_w + TEXT_BBOX_PAD * 2.0,
+                    font_size * crate::text::DEFAULT_LINE_SPACING + TEXT_BBOX_PAD * 2.0,
                 );
-                assert_eq!(stroke.color, color, "caret uses text colour");
-                assert_eq!(stroke.width, CARET_STROKE_WIDTH, "caret stroke width");
+                assert_eq!(*rect, want, "bbox geometry");
+                assert_eq!(*stroke, TEXT_BBOX_STROKE, "bbox stroke");
             }
-            other => panic!("expected DrawLine caret, got {other:?}"),
+            other => panic!("expected DrawRectOutline bbox, got {other:?}"),
+        }
+        // Solid block caret at the insertion point.
+        match it.next() {
+            Some(DrawCall::DrawRectFilled { rect, color: c }) => {
+                let want = Rect::from_xywh(pos.x + advance, pos.y, block_w, font_size);
+                assert_eq!(*rect, want, "block caret geometry");
+                assert_eq!(*c, color, "caret uses text colour");
+            }
+            other => panic!("expected DrawRectFilled block caret, got {other:?}"),
         }
         assert!(it.next().is_none(), "no further draw calls");
     }
@@ -1511,28 +1680,28 @@ mod tests {
         let mut state = EditorState::new(image::RgbaImage::new(100, 40));
         let pos = Point::new(33.0, 12.0);
         let font_size = 20.0;
-        state.pending = Some(Annotation::Text {
+        state.pending = Some(Annotation::text(
             pos,
-            text: String::new(),
-            font_size,
-            color: Color::RED,
-        });
+            "",
+            TextStyle::simple(font_size, Color::RED),
+        ));
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
         render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // The empty run still emits a DrawText (the dispatcher doesn't
-        // special-case it), followed by the caret at pos.x (advance 0).
+        // special-case it), followed by a block caret at pos.x (advance 0).
+        let block_w = block_caret_width(font_size);
         let has_caret_at_pos = canvas.calls.iter().any(|c| match c {
-            DrawCall::DrawLine { a, b, .. } => {
-                *a == Point::new(pos.x, pos.y) && *b == Point::new(pos.x, pos.y + font_size)
+            DrawCall::DrawRectFilled { rect, .. } => {
+                *rect == Rect::from_xywh(pos.x, pos.y, block_w, font_size)
             }
             _ => false,
         });
         assert!(
             has_caret_at_pos,
-            "empty draft must still draw caret at pos.x"
+            "empty draft must still draw block caret at pos.x"
         );
     }
 
@@ -1544,18 +1713,19 @@ mod tests {
     #[test]
     fn render_committed_text_emits_no_caret() {
         let mut state = EditorState::new(image::RgbaImage::new(100, 40));
-        state.anns.push(Annotation::Text {
-            pos: Point::new(10.0, 5.0),
-            text: "committed".to_owned(),
-            font_size: 16.0,
-            color: Color::rgb(0, 0, 0),
-        });
+        state.anns.push(Annotation::text(
+            Point::new(10.0, 5.0),
+            "committed",
+            TextStyle::simple(16.0, Color::rgb(0, 0, 0)),
+        ));
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
         render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
-        // The committed text emits exactly one DrawText (no DrawLine).
+        // The committed text emits exactly one DrawText — no block
+        // caret (DrawRectFilled) and no bounding box (DrawRectOutline),
+        // since the indicators are a `pending`-only affordance.
         assert!(
             canvas
                 .calls
@@ -1567,8 +1737,15 @@ mod tests {
             !canvas
                 .calls
                 .iter()
-                .any(|c| matches!(c, DrawCall::DrawLine { .. })),
-            "committed text must not emit a caret"
+                .any(|c| matches!(c, DrawCall::DrawRectFilled { .. })),
+            "committed text must not emit a block caret"
+        );
+        assert!(
+            !canvas
+                .calls
+                .iter()
+                .any(|c| matches!(c, DrawCall::DrawRectOutline { .. })),
+            "committed text must not emit a bounding box"
         );
     }
 
@@ -1906,12 +2083,11 @@ mod tests {
     fn compose_final_renders_text_or_skips_gracefully() {
         let bg = image::RgbaImage::from_pixel(100, 40, image::Rgba([255, 255, 255, 255]));
         let mut state = EditorState::new(bg);
-        state.anns.push(Annotation::Text {
-            pos: Point::new(5.0, 5.0),
-            text: "flintshot".to_owned(),
-            font_size: 16.0,
-            color: Color::rgb(0, 0, 0),
-        });
+        state.anns.push(Annotation::text(
+            Point::new(5.0, 5.0),
+            "flintshot",
+            TextStyle::simple(16.0, Color::rgb(0, 0, 0)),
+        ));
 
         let out = compose_final(&state);
         // Must succeed and preserve dimensions regardless of font.

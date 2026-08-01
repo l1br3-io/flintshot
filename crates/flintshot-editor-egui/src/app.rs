@@ -20,8 +20,11 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    compose_final, compose_final_region, render::render, BlurCache, Color, Config, DispatchOutcome,
-    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, Point, Rect, Tool,
+    compose_final, compose_final_region,
+    render::render,
+    text::{FontFamily, FontStyle, FontWeight, TextAlign, TextOutline},
+    BlurCache, Color, Config, DispatchOutcome, EditorOutcome, EditorState, FlintshotError,
+    InputEvent, Key, Modifiers, Point, Rect, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -180,6 +183,7 @@ impl EditorApp {
             }
         };
         cfg.ui.default_color = self.state.color;
+        cfg.ui.default_text_color = self.state.text_color;
         cfg.ui.default_stroke_width = self.state.stroke_width;
         cfg.ui.default_font_size = self.state.font_size;
         if let Err(e) = cfg.save() {
@@ -187,6 +191,68 @@ impl EditorApp {
                 error = %e,
                 "could not save config; UI defaults not persisted this session"
             );
+        }
+    }
+
+    /// Text-tool-only toolbar controls. Text gets its own colour picker
+    /// decoupled from the drawing-tools `state.color` (so e.g. red
+    /// arrows and white labels coexist without re-picking on every tool
+    /// switch) plus the font-size slider. Phase D appends the family /
+    /// weight / style / align / outline / background controls here.
+    ///
+    /// Associated (not `&mut self`) so the call site can borrow
+    /// `&mut self.state` without conflicting with the toolbar closure's
+    /// other `self.state` field captures.
+    fn draw_text_controls(state: &mut EditorState, ui: &mut egui::Ui) {
+        ui.separator();
+        // Dedicated text colour (decoupled from the drawing-tools colour).
+        let mut rgb = [state.text_color.r, state.text_color.g, state.text_color.b];
+        ui.color_edit_button_srgb(&mut rgb);
+        if rgb != [state.text_color.r, state.text_color.g, state.text_color.b] {
+            state.text_color = Color::rgb(rgb[0], rgb[1], rgb[2]);
+        }
+        ui.add(egui::Slider::new(&mut state.font_size, 8.0..=72.0).text("Font"));
+
+        // Family / weight / style / alignment (Phase D).
+        ui.separator();
+        ui.selectable_value(&mut state.font_family, FontFamily::SansSerif, "Sans");
+        ui.selectable_value(&mut state.font_family, FontFamily::Monospace, "Mono");
+        ui.selectable_value(&mut state.font_weight, FontWeight::Normal, "Regular");
+        ui.selectable_value(&mut state.font_weight, FontWeight::Bold, "Bold");
+        ui.selectable_value(&mut state.font_style, FontStyle::Normal, "AA");
+        ui.selectable_value(&mut state.font_style, FontStyle::Italic, "It");
+        ui.selectable_value(&mut state.text_align, TextAlign::Left, "⬅");
+        ui.selectable_value(&mut state.text_align, TextAlign::Center, "↔");
+        ui.selectable_value(&mut state.text_align, TextAlign::Right, "➡");
+
+        // Background highlight toggle + colour.
+        ui.separator();
+        let mut bg_on = state.text_background.is_some();
+        ui.checkbox(&mut bg_on, "BG");
+        if bg_on {
+            let cur = state.text_background.unwrap_or(Color::rgb(255, 235, 0));
+            let mut brgb = [cur.r, cur.g, cur.b];
+            ui.color_edit_button_srgb(&mut brgb);
+            state.text_background = Some(Color::rgb(brgb[0], brgb[1], brgb[2]));
+        } else {
+            state.text_background = None;
+        }
+
+        // Outline toggle + colour + width.
+        let mut ol_on = state.text_outline.is_some();
+        ui.checkbox(&mut ol_on, "Outline");
+        if ol_on {
+            let mut o = state.text_outline.unwrap_or(TextOutline {
+                color: Color::rgb(0, 0, 0),
+                width: 2.0,
+            });
+            let mut orgb = [o.color.r, o.color.g, o.color.b];
+            ui.color_edit_button_srgb(&mut orgb);
+            o.color = Color::rgb(orgb[0], orgb[1], orgb[2]);
+            ui.add(egui::Slider::new(&mut o.width, 1.0..=8.0).text("OL"));
+            state.text_outline = Some(o);
+        } else {
+            state.text_outline = None;
         }
     }
 
@@ -500,12 +566,12 @@ impl App for EditorApp {
                     ui.add(
                         egui::Slider::new(&mut self.state.stroke_width, 1.0..=20.0).text("Width"),
                     );
-                    // Font-size control shows only for Text (matches
-                    // the blur-kind-gated pattern).
+                    // Text-tool-only controls live in a helper so the
+                    // toolbar stays under clippy's line budget as text
+                    // customisation grows (Phase D adds family / weight
+                    // / style / align / outline / background).
                     if self.state.tool == Tool::Text {
-                        ui.add(
-                            egui::Slider::new(&mut self.state.font_size, 8.0..=72.0).text("Font"),
-                        );
+                        Self::draw_text_controls(&mut self.state, ui);
                     }
                     // Select-tool: offer crop when a non-degenerate
                     // selection is active. Enter also confirms (the
