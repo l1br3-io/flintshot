@@ -235,6 +235,7 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
         Ok(cfg) => {
             let mut s = EditorState::new(img);
             s.color = cfg.ui.default_color;
+            s.text_color = cfg.ui.default_text_color;
             s.stroke_width = cfg.ui.default_stroke_width;
             s.font_size = cfg.ui.default_font_size;
             s

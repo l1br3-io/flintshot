@@ -47,6 +47,10 @@ pub struct UiConfig {
     /// Default annotation color.
     #[serde(default = "default_color")]
     pub default_color: Color,
+    /// Default text-tool color (decoupled from `default_color` so a
+    /// user can keep e.g. red arrows and white labels simultaneously).
+    #[serde(default = "default_text_color")]
+    pub default_text_color: Color,
     /// Default stroke width for outlined shapes, in physical pixels.
     #[serde(default = "default_stroke_width")]
     pub default_stroke_width: f32,
@@ -59,6 +63,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             default_color: default_color(),
+            default_text_color: default_text_color(),
             default_stroke_width: default_stroke_width(),
             default_font_size: default_font_size(),
         }
@@ -127,6 +132,10 @@ fn default_fullscreen_hotkey() -> String {
 }
 
 fn default_color() -> Color {
+    Color::RED
+}
+
+fn default_text_color() -> Color {
     Color::RED
 }
 
@@ -257,6 +266,11 @@ impl Config {
                 ui,
                 "default-color",
                 toml_edit::Value::from(format_color(&self.ui.default_color)),
+            );
+            set_value(
+                ui,
+                "default-text-color",
+                toml_edit::Value::from(format_color(&self.ui.default_text_color)),
             );
             set_value(
                 ui,

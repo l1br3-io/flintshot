@@ -350,6 +350,28 @@ Categories used below:
 - The tray's per-monitor submenu is built at tray creation; muda/tray-
   icon don't portably expose a submenu-open event, so hot-plugging a
   monitor mid-session needs a daemon restart (documented limitation).
+- Text tool overhaul (see ADR-0021):
+  - **Box indicator**: a solid block caret at the insertion point plus
+    a hollow bounding box around the in-flight text (replaces the thin
+    caret bar). Live-view-only; never reaches Save/Copy output.
+  - **Multi-line text** (`Shift+Enter` inserts a newline; plain `Enter`
+    still commits). Pulled forward from Phase 2 — both the egui view
+    and the `ImageCanvas` save path now lay out multiple baselines.
+  - **Decoupled text colour**: the Text tool gets its own colour
+    picker distinct from the drawing-tools colour (persisted as
+    `[ui] default-text-color`).
+  - **Text customisation**: font family (Sans / Mono), weight
+    (Regular / Bold), style (Upright / Italic), alignment
+    (Left / Center / Right), optional background highlight, and
+    optional outline (colour + width). New core types `FontFamily`,
+    `FontWeight`, `FontStyle`, `TextAlign`, `TextOutline`,
+    `TextStyle`, `TextMetrics`; `Annotation::Text` gained matching
+    fields with `#[serde(default)]`. `Canvas::draw_text` /
+    `Canvas::measure_text` now take a `&TextStyle` bundle and return
+    `TextMetrics` (width / height / last-line width). Bold is real on
+    the save path (fontdb weight query) and faux on the egui view
+    (egui 0.35 has no weight API); serif family falls back to sans
+    until a serif face is bundled.
 
 ### Changed
 
