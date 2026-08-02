@@ -491,6 +491,14 @@ Categories used below:
   before Copy / Crop read it. The shell now tracks whether the
   current press began inside the canvas, and only emits drag/up
   events for canvas-originated presses.
+- Text caret now follows the insertion point. Previously the block
+  caret was pinned to the first line's end — after `Shift+Enter` it
+  stayed on line 0 while typing continued on the new line below. A
+  `text_cursor` (char index into the draft) now tracks the real
+  insertion point; `←`/`→`/`↑`/`↓` move it (wrapping across line
+  breaks, preserving the column), and `Home`/`End` jump to the line
+  edges. Typing, backspace, and newline all operate at the cursor, so
+  text can now be edited mid-string rather than only appended.
 
 ### Notes
 

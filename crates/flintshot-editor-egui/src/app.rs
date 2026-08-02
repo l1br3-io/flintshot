@@ -305,6 +305,26 @@ impl EditorApp {
                         modifiers,
                     });
                 }
+                egui::Event::Key {
+                    key, pressed: true, ..
+                } => {
+                    // Arrow / Home / End feed the text cursor; the
+                    // dispatcher's text-editing branch moves the
+                    // insertion point when a draft is active.
+                    let mapped = match key {
+                        egui::Key::ArrowLeft => Some(Key::ArrowLeft),
+                        egui::Key::ArrowRight => Some(Key::ArrowRight),
+                        egui::Key::ArrowUp => Some(Key::ArrowUp),
+                        egui::Key::ArrowDown => Some(Key::ArrowDown),
+                        egui::Key::Home => Some(Key::Home),
+                        egui::Key::End => Some(Key::End),
+                        _ => None,
+                    };
+                    if let Some(k) = mapped {
+                        self.state
+                            .dispatch_input(&InputEvent::Key { key: k, modifiers });
+                    }
+                }
                 _ => {}
             }
         }

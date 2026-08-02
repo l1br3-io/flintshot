@@ -198,6 +198,18 @@ pub enum Key {
     Backspace,
     /// `Tab`.
     Tab,
+    /// `←` arrow.
+    ArrowLeft,
+    /// `→` arrow.
+    ArrowRight,
+    /// `↑` arrow.
+    ArrowUp,
+    /// `↓` arrow.
+    ArrowDown,
+    /// `Home` (start of line / text).
+    Home,
+    /// `End` (end of line / text).
+    End,
     /// Left Ctrl.
     Ctrl,
     /// Left Shift.

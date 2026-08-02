@@ -267,6 +267,13 @@ pub struct EditorState {
     /// the shell when the user clicks an existing annotation; not yet
     /// wired into the dispatcher (Phase 2 select-and-move tool).
     pub selected_index: Option<usize>,
+    /// Insertion-point position within the in-flight `Tool::Text`
+    /// draft, as a **char index** (not byte index) into
+    /// `pending`'s `text`. Reset to 0 when a draft begins; advanced by
+    /// typing / newline, retreated by backspace, and moved by the arrow
+    /// / Home / End keys. The renderer reads this to place the block
+    /// caret on the correct line and column.
+    pub text_cursor: usize,
 }
 
 impl EditorState {
@@ -295,6 +302,7 @@ impl EditorState {
             text_background: None,
             next_number: 1,
             selected_index: None,
+            text_cursor: 0,
         }
     }
 
@@ -375,6 +383,9 @@ impl EditorState {
             // points are tool-specific (see method doc).
             Tool::Number | Tool::Select => return,
         };
+        if self.tool == Tool::Text {
+            self.text_cursor = 0;
+        }
         self.pending = Some(ann);
     }
 
@@ -706,6 +717,44 @@ impl EditorState {
                 self.backspace_text();
                 DispatchOutcome::Continue
             }
+            // Arrow / Home / End move the insertion point within the
+            // draft. Left/Right wrap across line breaks; Up/Down
+            // preserve the column; Home/End jump to the line edges.
+            InputEvent::Key {
+                key: Key::ArrowLeft,
+                ..
+            } => {
+                self.cursor_left();
+                DispatchOutcome::Continue
+            }
+            InputEvent::Key {
+                key: Key::ArrowRight,
+                ..
+            } => {
+                self.cursor_right();
+                DispatchOutcome::Continue
+            }
+            InputEvent::Key {
+                key: Key::ArrowUp, ..
+            } => {
+                self.cursor_up();
+                DispatchOutcome::Continue
+            }
+            InputEvent::Key {
+                key: Key::ArrowDown,
+                ..
+            } => {
+                self.cursor_down();
+                DispatchOutcome::Continue
+            }
+            InputEvent::Key { key: Key::Home, .. } => {
+                self.cursor_home();
+                DispatchOutcome::Continue
+            }
+            InputEvent::Key { key: Key::End, .. } => {
+                self.cursor_end();
+                DispatchOutcome::Continue
+            }
             InputEvent::TextInput(ch) => {
                 self.type_char(*ch);
                 DispatchOutcome::Continue
@@ -731,29 +780,87 @@ impl EditorState {
         }
     }
 
-    /// Append a typed character to the in-flight text draft.
+    /// Append a typed character to the in-flight text draft **at the
+    /// cursor**, then advance the cursor past it.
     ///
     /// No-op when no text draft is active (`is_editing_text()` is
     /// false). Called by the dispatcher's text-editing branch.
     fn type_char(&mut self, ch: char) {
         if let Some(Annotation::Text { text, .. }) = &mut self.pending {
-            text.push(ch);
+            let byte = char_to_byte(text, self.text_cursor);
+            text.insert(byte, ch);
+            self.text_cursor += 1;
         }
     }
 
-    /// Insert a line break into the in-flight text draft (Shift+Enter).
-    /// The `\n` is stored verbatim; both renderers split on it to lay
-    /// out subsequent lines. No-op when no text draft is active.
+    /// Insert a line break at the cursor (Shift+Enter), then advance
+    /// the cursor onto the new line. The `\n` is stored verbatim; both
+    /// renderers split on it to lay out subsequent lines. No-op when no
+    /// text draft is active.
     fn insert_newline(&mut self) {
         if let Some(Annotation::Text { text, .. }) = &mut self.pending {
-            text.push('\n');
+            let byte = char_to_byte(text, self.text_cursor);
+            text.insert(byte, '\n');
+            self.text_cursor += 1;
         }
     }
 
-    /// Delete the last character from the in-flight text draft.
+    /// Delete the character immediately before the cursor and retreat
+    /// the cursor. No-op when the cursor is at the start of the draft
+    /// (column 0 of line 0) or when no draft is active.
     fn backspace_text(&mut self) {
         if let Some(Annotation::Text { text, .. }) = &mut self.pending {
-            text.pop();
+            if self.text_cursor > 0 {
+                let prev = char_to_byte(text, self.text_cursor - 1);
+                let cur = char_to_byte(text, self.text_cursor);
+                text.replace_range(prev..cur, "");
+                self.text_cursor -= 1;
+            }
+        }
+    }
+
+    /// Move the cursor left one char (wrapping across line breaks to
+    /// the end of the previous line). Clamps at 0.
+    fn cursor_left(&mut self) {
+        self.text_cursor = self.text_cursor.saturating_sub(1);
+    }
+
+    /// Move the cursor right one char (wrapping across line breaks to
+    /// the start of the next line). Clamps at the end of the draft.
+    fn cursor_right(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            let len = text.chars().count();
+            self.text_cursor = (self.text_cursor + 1).min(len);
+        }
+    }
+
+    /// Move the cursor up one line, preserving the column. Clamps to
+    /// column 0 of the first line when already there.
+    fn cursor_up(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            self.text_cursor = cursor_up(text, self.text_cursor);
+        }
+    }
+
+    /// Move the cursor down one line, preserving the column. Clamps to
+    /// the end of the draft when already on the last line.
+    fn cursor_down(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            self.text_cursor = cursor_down(text, self.text_cursor);
+        }
+    }
+
+    /// Move the cursor to the start of the current line.
+    fn cursor_home(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            self.text_cursor = cursor_line_start(text, self.text_cursor);
+        }
+    }
+
+    /// Move the cursor to the end of the current line.
+    fn cursor_end(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            self.text_cursor = cursor_line_end(text, self.text_cursor);
         }
     }
 
@@ -1118,6 +1225,80 @@ fn distance_to_segment(point: Point, a: Point, b: Point) -> f32 {
 /// Whether `point` lies inside `rect` (boundaries inclusive).
 fn point_in_rect(point: Point, rect: Rect) -> bool {
     point.x >= rect.min.x && point.x <= rect.max.x && point.y >= rect.min.y && point.y <= rect.max.y
+}
+
+// --- Text-cursor navigation helpers (char-index based) ---
+//
+// All operate on a `&str` draft plus a `char_idx` cursor (the count of
+// chars before the insertion point). `\n` is a single byte in UTF-8 and
+// never part of a multi-byte sequence, so scanning for it over char
+// indices is sound.
+
+/// Convert a char index into `s` to its matching byte index. A char
+/// index at the end maps to `s.len()`.
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map_or(s.len(), |(byte_idx, _)| byte_idx)
+}
+
+/// Char index of the first char on the line containing `char_idx`
+/// (i.e. just past the last `\n` before it, or 0).
+fn cursor_line_start(text: &str, char_idx: usize) -> usize {
+    let mut start = 0;
+    for (i, c) in text.chars().enumerate() {
+        if i >= char_idx {
+            break;
+        }
+        if c == '\n' {
+            start = i + 1;
+        }
+    }
+    start
+}
+
+/// Char index one past the last char on the line containing
+/// `char_idx` (i.e. at the next `\n` at/after it, or the char count if
+/// the line runs to the end).
+fn cursor_line_end(text: &str, char_idx: usize) -> usize {
+    for (i, c) in text.chars().enumerate() {
+        if i < char_idx {
+            continue;
+        }
+        if c == '\n' {
+            return i;
+        }
+    }
+    text.chars().count()
+}
+
+/// Move `char_idx` up one line, preserving the column. Clamps to 0
+/// when already on the first line.
+fn cursor_up(text: &str, char_idx: usize) -> usize {
+    let line_start = cursor_line_start(text, char_idx);
+    if line_start == 0 {
+        return 0;
+    }
+    let column = char_idx - line_start;
+    let prev_end = line_start - 1;
+    let prev_start = cursor_line_start(text, prev_end);
+    let prev_len = prev_end - prev_start;
+    prev_start + column.min(prev_len)
+}
+
+/// Move `char_idx` down one line, preserving the column. Clamps to the
+/// end of the draft when already on the last line.
+fn cursor_down(text: &str, char_idx: usize) -> usize {
+    let total = text.chars().count();
+    let line_end = cursor_line_end(text, char_idx);
+    if line_end >= total {
+        return total;
+    }
+    let column = char_idx - cursor_line_start(text, char_idx);
+    let next_start = line_end + 1;
+    let next_end = cursor_line_end(text, next_start);
+    let next_len = next_end - next_start;
+    next_start + column.min(next_len)
 }
 
 #[cfg(test)]
@@ -1872,6 +2053,161 @@ mod tests {
             Annotation::Text { text, .. } => assert_eq!(text, "ab\ncd"),
             other => panic!("expected committed multi-line Text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn shift_enter_advances_cursor_to_new_line() {
+        // Regression: after Shift+Enter the caret must sit on the new
+        // (second) line, not stay pinned to the first. The cursor
+        // (char index) should point just past the '\n'.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        for ch in "ab".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        });
+        // "ab\n" = 3 chars; cursor at 3 means the next typed char lands
+        // on line 1 (the second line), column 0.
+        assert_eq!(s.text_cursor, 3, "cursor advanced past the newline");
+        s.dispatch_input(&InputEvent::TextInput('x'));
+        match &s.pending {
+            Some(Annotation::Text { text, .. }) => assert_eq!(text, "ab\nx"),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arrow_left_then_type_inserts_mid_string() {
+        // Arrow Left retreats the cursor so the next typed char
+        // inserts before the last char rather than appending.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        for ch in "abc".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        assert_eq!(s.text_cursor, 3);
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::ArrowLeft,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.text_cursor, 2, "Left retreated cursor");
+        s.dispatch_input(&InputEvent::TextInput('X'));
+        match &s.pending {
+            Some(Annotation::Text { text, .. }) => assert_eq!(text, "abXc"),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+        // Cursor now sits between X and c.
+        assert_eq!(s.text_cursor, 3);
+    }
+
+    #[test]
+    fn backspace_deletes_at_cursor_mid_string() {
+        // Backspace removes the char immediately before the cursor,
+        // not always the last char of the draft.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        for ch in "abc".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        // Move to between 'a' and 'b' (cursor 1).
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::ArrowLeft,
+            modifiers: Modifiers::default(),
+        });
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::ArrowLeft,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.text_cursor, 1);
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Backspace,
+            modifiers: Modifiers::default(),
+        });
+        match &s.pending {
+            Some(Annotation::Text { text, .. }) => assert_eq!(text, "bc"),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+        assert_eq!(s.text_cursor, 0);
+    }
+
+    #[test]
+    fn arrow_keys_navigate_multiline() {
+        // Up/Down preserve the column across lines; Left/Right wrap
+        // across '\n'; Home/End jump to the line edges.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        // Build "abc\ndefgh" (line 0 width 3, line 1 width 5).
+        for ch in "abc\ndefgh".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        assert_eq!(s.text_cursor, 9, "cursor at end");
+        // Home → start of line 1 (char 4).
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Home,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.text_cursor, 4, "Home → line start");
+        // Up → column 0 of line 0 (char 0).
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::ArrowUp,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.text_cursor, 0, "Up to first line, col 0");
+        // End → end of line 0 (char 3, before '\n').
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::End,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.text_cursor, 3, "End → line end");
+        // Down → same column (3) on line 1 (char 7).
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::ArrowDown,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.text_cursor, 7, "Down preserves column onto line 1");
+        // Down again → already last line, clamp to end (9).
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::ArrowDown,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.text_cursor, 9, "Down on last line clamps to end");
+    }
+
+    #[test]
+    fn cursor_helpers_unit_checks() {
+        // Direct checks on the free navigation helpers.
+        // char indices: a0 b1 \n2 c3 d4 e5 \n6 f7  (count = 8)
+        let text = "ab\ncde\nf";
+        assert_eq!(cursor_line_start(text, 4), 3, "line start of 'd'");
+        assert_eq!(cursor_line_end(text, 4), 6, "line end of 'd' is the \\n");
+        assert_eq!(cursor_up(text, 4), 1, "up from 'd' col1 -> 'b' col1");
+        assert_eq!(cursor_down(text, 1), 4, "down from 'b' col1 -> 'd' col1");
+        // Up from first line clamps to 0.
+        assert_eq!(cursor_up(text, 1), 0);
+        // Down on the last line clamps to the end of the text (8).
+        assert_eq!(cursor_down(text, 7), 8, "down on last line -> end");
+        // Column clamps to a shorter target line: col 2 of "cde" down
+        // to "f" (len 1) lands past 'f' at 8.
+        assert_eq!(cursor_down(text, 5), 8, "column clamped to last line len");
+        // Separate text for a clean mid-line column clamp:
+        // "abcd\nef" -> a0 b1 c2 d3 \n4 e5 f6 (count 7). Down from
+        // col 3 of line 0 to line 1 (len 2) clamps to col 2 -> pos 7.
+        let t2 = "abcd\nef";
+        assert_eq!(cursor_down(t2, 3), 7, "col 3 clamps to line-1 len 2");
     }
 
     #[test]
