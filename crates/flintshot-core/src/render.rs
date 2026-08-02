@@ -161,7 +161,7 @@ pub fn render<C: Canvas>(
         // typed text will land, because `draw_text` with an empty string
         // (or any string between keystrokes) draws nothing.
         if let Annotation::Text { pos, text, .. } = pending {
-            draw_text_indicators(canvas, *pos, text, &pending.text_style());
+            draw_text_indicators(canvas, *pos, text, state.text_cursor, &pending.text_style());
         }
     }
 
@@ -387,7 +387,7 @@ pub fn arrow_barbs(a: Point, b: Point, head_size: f32) -> [Point; 2] {
 
 /// Draw the in-flight text indicators: a hollow bounding box around
 /// the laid-out text block and a solid block caret at the insertion
-/// point (end of the last line).
+/// point (tracked by `cursor`, a char index into `text`).
 ///
 /// Both are live-view-only — drawn solely for `pending`
 /// `Annotation::Text` via [`render`]; the saved / copied image excludes
@@ -395,13 +395,30 @@ pub fn arrow_barbs(a: Point, b: Point, head_size: f32) -> [Point; 2] {
 /// the user has no feedback where typed text will land, because
 /// `draw_text` with an empty string (or between keystrokes) draws
 /// nothing.
-fn draw_text_indicators<C: Canvas>(canvas: &mut C, pos: Point, text: &str, style: &TextStyle) {
+///
+/// The caret's line and horizontal offset are derived from `cursor`:
+/// the char index maps to a (line, column) pair, and `measure_text`
+/// sizes the prefix on that line so the caret lands at the right spot
+/// even after a `Shift+Enter` moved it onto a new line, or after an
+/// arrow key moved it mid-string. Alignment shifts the whole line block
+/// so a centred / right-aligned caret still tracks its glyph.
+#[allow(clippy::cast_precision_loss, reason = "line count is tiny")]
+fn draw_text_indicators<C: Canvas>(
+    canvas: &mut C,
+    pos: Point,
+    text: &str,
+    cursor: usize,
+    style: &TextStyle,
+) {
     let metrics = canvas.measure_text(text, style);
     let pad = TEXT_BBOX_PAD;
     let block_w = block_caret_width(style.size);
+    // Caret offset from `pos` (text origin) and 0-based line index.
+    let (caret_dx, caret_line) = caret_coords(text, cursor, canvas, style);
+    let line_h = style.size * style.line_spacing;
     // Bounding box: spans the widest line, extended to cover the caret
-    // (which sits just past the last line's end).
-    let bbox_w = metrics.width.max(metrics.last_line_width + block_w);
+    // (which sits just past the cursor's column on its line).
+    let bbox_w = metrics.width.max(caret_dx + block_w);
     let bbox = Rect::from_xywh(
         pos.x - pad,
         pos.y - pad,
@@ -410,8 +427,48 @@ fn draw_text_indicators<C: Canvas>(canvas: &mut C, pos: Point, text: &str, style
     );
     canvas.draw_rect_outline(bbox, &TEXT_BBOX_STROKE);
     // Solid block caret at the insertion point.
-    let caret = Rect::from_xywh(pos.x + metrics.last_line_width, pos.y, block_w, style.size);
+    let caret = Rect::from_xywh(
+        pos.x + caret_dx,
+        pos.y + caret_line as f32 * line_h,
+        block_w,
+        style.size,
+    );
     canvas.draw_rect_filled(caret, style.color);
+}
+
+/// Resolve the caret's horizontal offset from the text origin and its
+/// line index (0-based) from a char-indexed `cursor` into `text`.
+///
+/// Splits `text` at the cursor: everything before determines the line
+/// and the prefix-on-this-line; everything after extends to the line's
+/// end. `measure_text` sizes both so the caret's x accounts for the
+/// line's alignment offset (centred / right lines shift as a block).
+fn caret_coords<C: Canvas>(
+    text: &str,
+    cursor: usize,
+    canvas: &mut C,
+    style: &TextStyle,
+) -> (f32, usize) {
+    let before: String = text.chars().take(cursor).collect();
+    let after: String = text.chars().skip(cursor).collect();
+    let caret_line = before.matches('\n').count();
+    // Prefix on the current line = text after the last '\n' in `before`.
+    let prefix = before.rsplit('\n').next().unwrap_or(&before);
+    // Rest of the current line up to the next '\n' (or end).
+    let rest = after.split('\n').next().unwrap_or("");
+    let prefix_w = canvas.measure_text(prefix, style).width;
+    // The full current line's width, needed to apply alignment.
+    let mut full_line = String::with_capacity(prefix.len() + rest.len());
+    full_line.push_str(prefix);
+    full_line.push_str(rest);
+    let line_w = canvas.measure_text(&full_line, style).width;
+    let max_w = canvas.measure_text(text, style).width;
+    let align_offset = match style.align {
+        crate::text::TextAlign::Left => 0.0,
+        crate::text::TextAlign::Center => (max_w - line_w) / 2.0,
+        crate::text::TextAlign::Right => max_w - line_w,
+    };
+    (prefix_w + align_offset, caret_line)
 }
 
 /// Cache of precomputed blurred images for committed `Annotation::Blur`
@@ -1619,6 +1676,8 @@ mod tests {
             "hi",
             TextStyle::simple(font_size, color),
         ));
+        // Cursor at end of the typed run ("hi" = 2 chars).
+        state.text_cursor = 2;
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
