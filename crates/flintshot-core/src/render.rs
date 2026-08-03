@@ -1957,6 +1957,33 @@ mod tests {
         assert_eq!(line_count, 2);
     }
 
+    /// A committed `Annotation::Line` renders as exactly one `DrawLine`
+    /// call through the full `render()` path — not a polyline of
+    /// segments (that's Marker/Pencil) and not zero (would mean the
+    /// dispatch dropped it). Locks the single-segment contract so a
+    /// regression that fragments Line into per-pixel segments, or
+    /// drops it entirely, is caught.
+    #[test]
+    fn render_committed_line_emits_single_draw_line() {
+        let mut state = EditorState::new(image::RgbaImage::new(40, 40));
+        state.anns.push(Annotation::Line {
+            a: Point::new(5.0, 5.0),
+            b: Point::new(35.0, 35.0),
+            stroke: Stroke::new(Color::RED, 2.0),
+        });
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
+
+        let line_count = canvas
+            .calls
+            .iter()
+            .filter(|c| matches!(c, DrawCall::DrawLine { .. }))
+            .count();
+        assert_eq!(line_count, 1, "committed line emits exactly one DrawLine");
+    }
+
     /// TODO Task 9 acceptance: `compose_final` renders `anns` into a
     /// clone of `state.image`. Pixel-level assertions on a known
     /// fixture state — see Task 9 close-out for why we chose pixel
