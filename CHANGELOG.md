@@ -372,6 +372,12 @@ Categories used below:
     the save path (fontdb weight query) and faux on the egui view
     (egui 0.35 has no weight API); serif family falls back to sans
     until a serif face is bundled.
+- Ellipse tool end-to-end (Phase 2b Task 001): `EguiCanvas::draw_ellipse`
+  renders an `EllipseShape` (outline + optional fill via the egui
+  `Painter`); `ImageCanvas::draw_ellipse` rasterizes fill + outline into
+  the `RgbaImage` so committed ellipses appear in saved/copied PNGs
+  (fixes a latent Phase 1 bug where the no-op silently dropped them).
+  Toolbar exposes "◯ Ellipse" alongside "▭ Rectangle".
 
 ### Changed
 

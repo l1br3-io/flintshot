@@ -21,8 +21,8 @@ pub struct EguiTexture(pub egui::TextureHandle);
 /// blits and annotation primitives both go through the painter.
 ///
 /// Phase 1 Task 8 implemented `draw_rect_outline` / `draw_rect_filled`;
-/// Task 11 adds `draw_line` / `draw_arrow`. The remaining primitives
-/// (`draw_ellipse`, `draw_text`) stay as stubs until Tasks 12–13.
+/// Task 11 added `draw_line` / `draw_arrow`. Phase 2b adds
+/// `draw_ellipse` (outline + optional fill via `EllipseShape`).
 pub struct EguiCanvas {
     /// Stable toolkit context, captured by reference at construction.
     ctx: egui::Context,
@@ -205,7 +205,20 @@ impl Canvas for EguiCanvas {
         );
     }
 
-    fn draw_ellipse(&mut self, _rect: Rect, _stroke: &Stroke, _fill: Option<Color>) {}
+    fn draw_ellipse(&mut self, rect: Rect, stroke: &Stroke, fill: Option<Color>) {
+        let Some(painter) = &self.painter else {
+            return;
+        };
+        let ppp = self.ppp();
+        let er = to_egui_rect(rect, ppp, self.origin);
+        painter.add(egui::epaint::EllipseShape {
+            center: er.center(),
+            radius: er.size() / 2.0,
+            fill: fill.map_or(egui::Color32::TRANSPARENT, to_egui_color),
+            stroke: to_egui_stroke(*stroke, ppp),
+            angle: 0.0,
+        });
+    }
 
     fn draw_line(&mut self, a: Point, b: Point, stroke: &Stroke) {
         let Some(painter) = &self.painter else {
@@ -347,5 +360,56 @@ impl Canvas for EguiCanvas {
             height: size.y * ppp,
             last_line_width,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flintshot_core::{Color, Rect, Stroke};
+
+    /// `draw_ellipse` emits at least one `egui::Painter` shape — guards
+    /// against the Phase 1 regression where the method body was empty.
+    #[test]
+    fn draw_ellipse_emits_shape() {
+        let ctx = egui::Context::default();
+        let clip_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        let painter = egui::Painter::new(ctx.clone(), egui::LayerId::debug(), clip_rect);
+
+        let mut canvas = EguiCanvas::new(ctx);
+        canvas.bind_painter(&painter);
+        canvas.draw_ellipse(
+            Rect::from_xywh(10.0, 10.0, 100.0, 60.0),
+            &Stroke::new(Color::rgb(0, 0, 255), 2.0),
+            Some(Color::rgb(0, 255, 0)),
+        );
+
+        let mut count = 0;
+        let mut has_ellipse = false;
+        painter.for_each_shape(|cs| {
+            count += 1;
+            if matches!(cs.shape, egui::Shape::Ellipse(_)) {
+                has_ellipse = true;
+            }
+        });
+
+        assert!(count > 0, "draw_ellipse must emit at least one shape");
+        assert!(
+            has_ellipse,
+            "draw_ellipse must emit an Ellipse variant, not a no-op"
+        );
+    }
+
+    /// `draw_ellipse` with no painter bound is a safe no-op (matching
+    /// the other draw methods' infallible contract).
+    #[test]
+    fn draw_ellipse_without_painter_is_noop() {
+        let ctx = egui::Context::default();
+        let mut canvas = EguiCanvas::new(ctx);
+        canvas.draw_ellipse(
+            Rect::from_xywh(0.0, 0.0, 50.0, 50.0),
+            &Stroke::new(Color::RED, 2.0),
+            None,
+        );
     }
 }
