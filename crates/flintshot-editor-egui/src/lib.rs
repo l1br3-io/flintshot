@@ -7,6 +7,8 @@
 //!   `impl Canvas` (background primitives live here).
 //! - [`app`] — the internal `EditorApp` (`impl eframe::App`) that
 //!   drives the per-frame render loop.
+//! - [`magnifier`] — the toolkit-owned pixel-zoom inset widget (no
+//!   core abstraction; reads `EditorState::image` directly).
 //! - [`shell`] — the public `EguiShell` (`impl EditorShell`) that
 //!   owns the eframe lifecycle and the outcome slot.
 //!
@@ -24,7 +26,9 @@
 
 mod app;
 mod canvas;
+mod magnifier;
 mod shell;
 
 pub use canvas::{EguiCanvas, EguiTexture};
+pub use magnifier::{sample_zoomed_region, Magnifier};
 pub use shell::EguiShell;

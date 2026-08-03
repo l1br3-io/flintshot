@@ -57,6 +57,16 @@ pub struct UiConfig {
     /// Default font size for the text tool, in physical pixels.
     #[serde(default = "default_font_size")]
     pub default_font_size: f32,
+    /// Modifier (as an egui key name) that, while held, reveals the
+    /// pixel-zoom magnifier inset in the editor. Default `"Space"`.
+    /// The egui shell parses this to an `egui::Key`; unknown values
+    /// fall back to `Space` with a `tracing::warn!`.
+    #[serde(default = "default_magnifier_modifier")]
+    pub magnifier_modifier: String,
+    /// When `true`, the magnifier inset is always shown (no modifier
+    /// hold required). Useful for pixel-precise drawing workflows.
+    #[serde(default)]
+    pub magnifier_always_on: bool,
 }
 
 impl Default for UiConfig {
@@ -66,6 +76,8 @@ impl Default for UiConfig {
             default_text_color: default_text_color(),
             default_stroke_width: default_stroke_width(),
             default_font_size: default_font_size(),
+            magnifier_modifier: default_magnifier_modifier(),
+            magnifier_always_on: false,
         }
     }
 }
@@ -145,6 +157,10 @@ fn default_stroke_width() -> f32 {
 
 fn default_font_size() -> f32 {
     16.0
+}
+
+fn default_magnifier_modifier() -> String {
+    "Space".into()
 }
 
 fn default_include_cursor() -> bool {
@@ -281,6 +297,16 @@ impl Config {
                 ui,
                 "default-font-size",
                 toml_edit::Value::from(f64::from(self.ui.default_font_size)),
+            );
+            set_value(
+                ui,
+                "magnifier-modifier",
+                toml_edit::Value::from(self.ui.magnifier_modifier.as_str()),
+            );
+            set_value(
+                ui,
+                "magnifier-always-on",
+                toml_edit::Value::from(self.ui.magnifier_always_on),
             );
         }
         if let Some(cap) = doc.get_mut("capture").and_then(|i| i.as_table_mut()) {
@@ -521,6 +547,48 @@ include-cursor = true  # hide cursor when capturing presentations
 
         let back = Config::load_from(&path).unwrap();
         assert_eq!(back.ui.default_color, Color::rgba(0xff, 0x00, 0x00, 0x80));
+    }
+
+    #[test]
+    fn magnifier_defaults_when_absent() {
+        let cfg = Config::load_from(&{
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            fs::write(&path, "[ui]\ndefault-color = \"#000000\"\n").unwrap();
+            path
+        })
+        .unwrap();
+        assert_eq!(cfg.ui.magnifier_modifier, "Space");
+        assert!(!cfg.ui.magnifier_always_on);
+        // Default impl matches.
+        let d = UiConfig::default();
+        assert_eq!(d.magnifier_modifier, "Space");
+        assert!(!d.magnifier_always_on);
+    }
+
+    #[test]
+    fn magnifier_fields_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.ui.magnifier_modifier = "Alt".into();
+        cfg.ui.magnifier_always_on = true;
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("magnifier-modifier = \"Alt\""),
+            "magnifier-modifier not persisted:\n{written}"
+        );
+        assert!(
+            written.contains("magnifier-always-on = true"),
+            "magnifier-always-on not persisted:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.ui.magnifier_modifier, "Alt");
+        assert!(back.ui.magnifier_always_on);
     }
 
     #[test]

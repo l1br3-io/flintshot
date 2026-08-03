@@ -22,7 +22,7 @@ project resumes from.
 **Checkpoint C** — all five deferred tools work end-to-end.
 
 ## Phase 2b.D — Magnifier
-- [ ] Task 005 — Magnifier widget (egui-only, reads `EditorState::image`) → [`tasks/005-magnifier.md`](tasks/005-magnifier.md)
+- [x] Task 005 — Magnifier widget (egui-only, reads `EditorState::image`) → [`tasks/005-magnifier.md`](tasks/005-magnifier.md)
 
 **Checkpoint D** — full editor exit criteria met including magnifier.
 
