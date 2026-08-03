@@ -21,8 +21,11 @@ pub struct EguiTexture(pub egui::TextureHandle);
 /// blits and annotation primitives both go through the painter.
 ///
 /// Phase 1 Task 8 implemented `draw_rect_outline` / `draw_rect_filled`;
-/// Task 11 added `draw_line` / `draw_arrow`. Phase 2b adds
-/// `draw_ellipse` (outline + optional fill via `EllipseShape`).
+/// Task 11 added `draw_line` / `draw_arrow`. Phase 2b added
+/// `draw_ellipse` (outline + optional fill via `EllipseShape`) and
+/// `draw_polyline` (one `PathShape::line` for Marker/Pencil freehand
+/// strokes — see ADR-0022 on why per-segment `draw_line` can't carry a
+/// translucent marker without stamp-compounding toward opaque).
 pub struct EguiCanvas {
     /// Stable toolkit context, captured by reference at construction.
     ctx: egui::Context,

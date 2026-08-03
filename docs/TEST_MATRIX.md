@@ -101,6 +101,41 @@ deferred to `phase-2b` and tested there.
 | Ctrl-C → clean daemon shutdown (socket reclaimed)           |    |    |    |    |    |    |    |    |    |
 
 
+## Phase 2b — annotation tools + magnifier
+
+Exercised via `flintshot region` → editor. All five tools route through
+`flintshot-core::render::render()`, so the saved/copied PNG matches the
+live editor (WYSIWYG per ADR-0015). The magnifier is toolkit-owned
+(egui-only; no core abstraction, per ARCHITECTURE.md §What stays
+toolkit-specific) and reads `EditorState::image` directly. See
+ADR-0022 for the Marker/Pencil freehand smoothing + per-pixel-once
+compositing decision.
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| Ellipse: drag preview → commit → `Ctrl+Z` → click-inside to select | |  |    |    |    |    |    |    |    |
+| Line: drag preview → commit → click-near to select (thin-stroke tolerance) | | | | | | | | | |
+| Marker: translucent highlight, background text visible through stroke | |  |    |    |    |    |    |    |    |
+| Pencil: smooth opaque freehand (Catmull-Rom, no jagged polyline) | |  |    |    |    |    |    |    |    |
+| Number: click places `1`,`2`,`3` bubbles; undo decrements counter | |  |    |    |    |    |    |    |    |
+| Magnifier: hold `Space` (default) shows 4× inset; release hides |    |    |    |    |    |    |    |    |    |
+| Magnifier: `[ui] magnifier-always-on = true` stays up while drawing | |  |    |    |    |    |    |    |    |
+| Magnifier: `[ui] magnifier-modifier = "<key>"` swaps the hold key | |  |    |    |    |    |    |    |    |
+| Save → re-open PNG: every annotation rasterized identically to the live view (WYSIWYG) | | | | | | | | | |
+
+### Phase 2b known caveats
+
+- **Marker WYSIWYG is near-exact, not bit-exact.** egui's
+  `PathShape::line` and `ImageCanvas`'s square-stamp union use different
+  cap/join geometry, so a translucent marker's silhouette can differ by
+  ±1 px at stroke ends/corners between the live view and the saved PNG.
+  The interior translucency (the property the exit criterion names)
+  matches. See ADR-0022.
+- **Magnifier zoom is fixed at 4×** (config controls only the trigger,
+  not the zoom factor). A future config knob could expose it.
+
+
+
 ## Phase 3 — pin-to-desktop + COSMIC applet
 
 Subcommand: `flintshot pin`

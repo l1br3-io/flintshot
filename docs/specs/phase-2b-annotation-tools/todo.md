@@ -27,6 +27,6 @@ project resumes from.
 **Checkpoint D** — full editor exit criteria met including magnifier.
 
 ## Phase 2b.E — Hardening
-- [ ] Task 006 — Boundary test, CHANGELOG, ADR-0022, TEST_MATRIX, doc cleanups → [`tasks/006-hardening.md`](tasks/006-hardening.md)
+- [x] Task 006 — Boundary test, CHANGELOG, ADR-0022, TEST_MATRIX, doc cleanups → [`tasks/006-hardening.md`](tasks/006-hardening.md)
 
 **Checkpoint E** — Phase 2b exit criteria met; ready for review.
