@@ -28,6 +28,7 @@ use flintshot_core::{
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
+use crate::magnifier::Magnifier;
 
 /// Outcome slot shared between the shell (which lives after
 /// `eframe::run_native` returns) and the [`EditorApp`] (which is
@@ -97,6 +98,18 @@ pub(crate) struct EditorApp {
     /// frame — without it, a few blur regions saturate the CPU at 60 fps
     /// and the editor freezes. Cleared when crop replaces `state.image`.
     blur_cache: BlurCache,
+    /// Pixel-zoom magnifier inset state (cached texture handle). Shown
+    /// when `magnifier_always_on` is set or `magnifier_key` is held.
+    /// Toolkit-owned per ARCHITECTURE.md §What stays toolkit-specific;
+    /// reads `state.image` directly, no core abstraction.
+    magnifier: Magnifier,
+    /// Whether the magnifier shows without a modifier hold (config:
+    /// `[ui] magnifier-always-on`).
+    magnifier_always_on: bool,
+    /// Key whose hold reveals the magnifier (config: `[ui]
+    /// magnifier-modifier`). Defaults to `Space`; unknown config
+    /// values fall back to `Space` with a warning.
+    magnifier_key: egui::Key,
 }
 
 /// Which toolbar button the user clicked this frame (if any).
@@ -122,6 +135,12 @@ impl EditorApp {
     /// [`Context`] for texture loading outside the per-frame `ui` call.
     pub(crate) fn new(state: EditorState, ctx: &Context, outcome: OutcomeSlot) -> Self {
         let img_dims = state.image.dimensions();
+        // Magnifier config is read once at construction (filesystem
+        // read per-frame would be wasteful, and the trigger key /
+        // always-on flag don't change mid-session).
+        let cfg = Config::load().unwrap_or_default();
+        let magnifier_always_on = cfg.ui.magnifier_always_on;
+        let magnifier_key = parse_magnifier_key(&cfg.ui.magnifier_modifier);
         Self {
             state,
             canvas: EguiCanvas::new(ctx.clone()),
@@ -133,6 +152,9 @@ impl EditorApp {
             clipboard: None,
             copied: false,
             blur_cache: BlurCache::new(),
+            magnifier: Magnifier::new(),
+            magnifier_always_on,
+            magnifier_key,
         }
     }
 
@@ -367,6 +389,48 @@ impl EditorApp {
         let new_size = egui::vec2(target_w, target_h + toolbar_h);
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
         ctx.request_repaint();
+    }
+
+    /// Paint the magnifier inset when its trigger is active and the
+    /// cursor is over the canvas. No-op otherwise. Reads
+    /// `state.image` directly (the magnifier is toolkit-owned per
+    /// ARCHITECTURE.md §What stays toolkit-specific).
+    ///
+    /// Suppressed during text-editing so holding the trigger key while
+    /// typing doesn't pop the loupe over the caret.
+    fn paint_magnifier_if_active(&mut self, ctx: &Context, painter: &egui::Painter) {
+        if self.state.is_editing_text() {
+            return;
+        }
+        let active = self.magnifier_always_on || ctx.input(|i| i.key_down(self.magnifier_key));
+        if !active {
+            return;
+        }
+        let Some(canvas_rect) = self.canvas_rect else {
+            return;
+        };
+        let ppp = ctx.pixels_per_point();
+        let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else {
+            return;
+        };
+        // Only when the cursor is inside the canvas panel: showing the
+        // loupe while the pointer is over the toolbar would cover the
+        // buttons the user is interacting with.
+        if !canvas_rect.contains(pos) {
+            return;
+        }
+        // Screen-logical → canvas-physical, matching the pointer
+        // translation in `logic()`.
+        let local = pos - canvas_rect.min;
+        let cursor_phys = Point::new(local.x * ppp, local.y * ppp);
+        self.magnifier.show(
+            painter,
+            ctx,
+            &self.state.image,
+            cursor_phys,
+            canvas_rect,
+            ppp,
+        );
     }
 }
 
@@ -680,6 +744,13 @@ impl App for EditorApp {
             return;
         }
 
+        // Magnifier inset overlay (Task 005). Painted after render
+        // succeeds, in screen-logical space (uses the cached
+        // `canvas_rect`, not the canvas-bound painter). Suppressed
+        // during text-editing so the trigger key doesn't pop the
+        // loupe over the caret.
+        self.paint_magnifier_if_active(ui.ctx(), ui.painter());
+
         // Handle toolbar button clicks outside the toolbar closure so
         // we can borrow `&self.outcome` cleanly. Each handler runs the
         // corresponding output pipeline (save / copy) and either
@@ -869,5 +940,31 @@ fn translate_modifiers(egui_mods: egui::Modifiers) -> Modifiers {
         shift: egui_mods.shift,
         alt: egui_mods.alt,
         super_key: egui_mods.mac_cmd,
+    }
+}
+
+/// Parse the `[ui] magnifier-modifier` config string into an
+/// [`egui::Key`]. The default is `Space`; unknown values fall back to
+/// `Space` with a `tracing::warn!` so a typo doesn't silently disable
+/// the feature.
+///
+/// Only a curated set of `egui::Key` variants that make ergonomic sense
+/// as a *hold-to-reveal* trigger are mapped: ordinary character keys
+/// (`S`, `C`, `Z`…) collide with the drawing shortcuts, and egui models
+/// Alt / Ctrl / Shift / Super as modifier *flags* rather than `Key`
+/// variants (so they can't be queried via `key_down`). Add a named
+/// branch here when a new trigger key is needed.
+fn parse_magnifier_key(name: &str) -> egui::Key {
+    match name.trim() {
+        "Space" => egui::Key::Space,
+        "Tab" => egui::Key::Tab,
+        "Insert" => egui::Key::Insert,
+        other => {
+            tracing::warn!(
+                key = other,
+                "unknown or unsupported magnifier-modifier; falling back to Space"
+            );
+            egui::Key::Space
+        }
     }
 }
