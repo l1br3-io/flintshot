@@ -372,12 +372,23 @@ Categories used below:
     the save path (fontdb weight query) and faux on the egui view
     (egui 0.35 has no weight API); serif family falls back to sans
     until a serif face is bundled.
+
+#### Phase 2b — annotation tools + magnifier
+
 - Ellipse tool end-to-end (Phase 2b Task 001): `EguiCanvas::draw_ellipse`
   renders an `EllipseShape` (outline + optional fill via the egui
   `Painter`); `ImageCanvas::draw_ellipse` rasterizes fill + outline into
   the `RgbaImage` so committed ellipses appear in saved/copied PNGs
   (fixes a latent Phase 1 bug where the no-op silently dropped them).
   Toolbar exposes "◯ Ellipse" alongside "▭ Rectangle".
+- Line tool end-to-end (Phase 2b Task 002): toolbar exposes "╱ Line"
+  alongside the other shape tools. Drag from one point to another
+  commits an `Annotation::Line` with a live rubber-band preview;
+  click-without-drag (sub-1px length) is now treated as degenerate and
+  cancels rather than committing an invisible zero-length stroke — the
+  `finish_pointer_up` guard mirrors the existing Arrow check. Hit-test
+  reuses the point-to-segment distance tolerance so thin strokes stay
+  clickable.
 - Marker + Pencil freehand tools (Phase 2b Task 003). New pure
   `flintshot-core::freehand` module: `smooth_polyline(points, tension)`
   applies a Catmull-Rom spline to raw pointer samples inside
@@ -407,6 +418,18 @@ Categories used below:
   (white on dark fills, black on light) so the number stays legible
   regardless of bubble colour. Toolbar exposes "# Number" alongside
   the other tools.
+- Magnifier widget (Phase 2b Task 005). New toolkit-owned
+  `flintshot-editor-egui::magnifier` module: a pixel-zoom inset
+  (`INSET_PX = 96`, `ZOOM = 4.0`) that samples `EditorState::image`
+  directly and paints a cached one-frame texture. Triggered by holding
+  a modifier (default `Space`, configurable via `[ui] magnifier-modifier`)
+  or always-on-while-drawing (`[ui] magnifier-always-on = true`, default
+  `false`). The pure `sample_zoomed_region(image, cursor, zoom, inset)`
+  helper is unit-tested headless (center-sample, edge-clamp,
+  smaller-than-inset fallback, `zoom < 1.0` clamp). No core abstraction —
+  an iced/slint shell implements its own per ARCHITECTURE.md §What stays
+  toolkit-specific. Two new `[ui]` config fields (`#[serde(default)]`,
+  kebab-case per convention).
 
 ### Changed
 
@@ -494,6 +517,13 @@ Categories used below:
 
 ### Fixed
 
+- `ImageCanvas::draw_ellipse` was a no-op throughout Phase 1 — committed
+  ellipses silently dropped from saved/copied PNGs even though they
+  rendered correctly in the live editor (a WYSIWYG hole masked because
+  no Phase 1 tool ever committed an `Annotation::Ellipse`). Phase 2b
+  Task 001 filled in the real rasterizer (fill + outline into the
+  `RgbaImage`), so ellipses now round-trip through Save / Copy
+  identically to the live view.
 - Crop no longer leaves the cropped image partly hidden behind the
   editor toolbar. The egui canvas now offsets every draw call by the
   canvas panel's top-left, so the image's (0, 0) lands at the panel

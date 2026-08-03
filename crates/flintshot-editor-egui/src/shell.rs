@@ -11,7 +11,8 @@ use flintshot_core::{EditorOutcome, EditorShell, EditorState, FlintshotError, Re
 use crate::app::{eframe_err_to_flintshot, EditorApp, OutcomeSlot};
 
 /// Window title shown in the titlebar and used as the WM class hint.
-/// Matches the TODO spec (`"flintshot — annotate"` with an em-dash).
+/// Matches the Phase 1 editor-window spec (`"flintshot — annotate"` with
+/// an em-dash).
 const WINDOW_TITLE: &str = "flintshot — annotate";
 
 /// egui implementation of the [`EditorShell`] trait.

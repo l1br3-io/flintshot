@@ -31,3 +31,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0019 | [Daemon spawns worker processes, resolves binary via `current_exe`](ADR-0019-daemon-spawns-worker-processes.md) |
 | ADR-0020 | [Single-instance lock scoped to the daemon role, with a `--replace` handshake](ADR-0020-single-instance-daemon-role-replace-handshake.md) |
 | ADR-0021 | [Text-tool customization data model + Phase 2 multiline pulled forward](ADR-0021-text-tool-customization-data-model.md) |
+| ADR-0022 | [Shared Marker/Pencil freehand path: Catmull-Rom in core + per-pixel-once polyline compositing](ADR-0022-shared-freehand-catmull-rom.md) |
