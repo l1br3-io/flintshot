@@ -378,6 +378,19 @@ Categories used below:
   the `RgbaImage` so committed ellipses appear in saved/copied PNGs
   (fixes a latent Phase 1 bug where the no-op silently dropped them).
   Toolbar exposes "◯ Ellipse" alongside "▭ Rectangle".
+- Marker + Pencil freehand tools (Phase 2b Task 003). New pure
+  `flintshot-core::freehand` module: `smooth_polyline(points, tension)`
+  applies a Catmull-Rom spline to raw pointer samples inside
+  `render_ann` (pending + committed, so WYSIWYG holds), and
+  `MARKER_ALPHA` (`0x66`) is applied to `Annotation::Marker.color` at
+  construction so every backend renders a translucent highlight with no
+  render-path special-casing. New `Canvas::draw_polyline` method (with
+  a `draw_line`-looping default) lets `ImageCanvas` composite the whole
+  stroke once per pixel (avoids stamp-compounding a translucent marker
+  toward opaque in saved PNGs) and `EguiCanvas` issue one
+  `PathShape::line`; `MockCanvas` records a `DrawPolyline`. Toolbar
+  exposes "🖍 Marker" and "✏ Pencil". See ADR-0022.
+- `Color::with_alpha(a)` helper on `flintshot-core::Color`.
 
 ### Changed
 

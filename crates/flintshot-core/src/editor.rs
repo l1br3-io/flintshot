@@ -352,7 +352,11 @@ impl EditorState {
             },
             Tool::Marker => Annotation::Marker {
                 points: vec![at],
-                color: self.color,
+                // Drop alpha at construction so every backend renders a
+                // translucent highlight with no render-path special-casing
+                // (ADR-0022). Pencil below keeps the user's full-opacity
+                // color — the only freehand-tool divergence.
+                color: self.color.with_alpha(crate::freehand::MARKER_ALPHA),
                 width: self.stroke_width,
             },
             Tool::Pencil => Annotation::Pencil {
@@ -1313,6 +1317,7 @@ mod tests {
     use super::*;
     use crate::geom::Key;
     use crate::input::{DispatchOutcome, InputEvent, Modifiers};
+    use crate::MARKER_ALPHA;
 
     fn blank_image() -> image::RgbaImage {
         image::RgbaImage::new(2, 2)
@@ -1390,6 +1395,38 @@ mod tests {
             other => panic!("expected pending Rect, got {other:?}"),
         }
         assert!(s.anns.is_empty(), "update does not commit");
+    }
+
+    /// The marker tool stores a translucent color at construction time
+    /// (alpha reduced to `MARKER_ALPHA`) so every backend renders it as
+    /// a highlight without render-path special-casing. Pencil keeps the
+    /// user's full-opacity color — the only freehand-tool divergence
+    /// (ADR-0022).
+    #[test]
+    fn begin_marker_stores_translucent_color_pencil_stays_opaque() {
+        let mut s = EditorState::new(blank_image());
+        s.color = Color::rgb(255, 0, 0);
+        s.stroke_width = 8.0;
+
+        s.tool = Tool::Marker;
+        s.begin_annotation(Point::new(5.0, 5.0));
+        match &s.pending {
+            Some(Annotation::Marker { color, width, .. }) => {
+                assert_eq!(*color, Color::rgba(255, 0, 0, MARKER_ALPHA));
+                assert!(*width >= 8.0, "marker keeps the user's stroke width");
+            }
+            other => panic!("expected pending Marker, got {other:?}"),
+        }
+
+        s.pending = None;
+        s.tool = Tool::Pencil;
+        s.begin_annotation(Point::new(6.0, 6.0));
+        match &s.pending {
+            Some(Annotation::Pencil { color, .. }) => {
+                assert_eq!(*color, Color::rgb(255, 0, 0), "pencil stays fully opaque");
+            }
+            other => panic!("expected pending Pencil, got {other:?}"),
+        }
     }
 
     /// Drag up-left from the anchor: anchor stays at `min`, current
