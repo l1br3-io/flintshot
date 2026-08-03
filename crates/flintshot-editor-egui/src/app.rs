@@ -563,6 +563,7 @@ impl App for EditorApp {
                     ui.selectable_value(&mut self.state.tool, Tool::Pencil, "✏ Pencil");
                     ui.selectable_value(&mut self.state.tool, Tool::Text, "T Text");
                     ui.selectable_value(&mut self.state.tool, Tool::Blur, "░ Blur");
+                    ui.selectable_value(&mut self.state.tool, Tool::Number, "# Number");
                     if self.state.tool == Tool::Blur {
                         ui.separator();
                         ui.label("Kind:");

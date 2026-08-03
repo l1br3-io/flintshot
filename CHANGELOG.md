@@ -391,6 +391,22 @@ Categories used below:
   `PathShape::line`; `MockCanvas` records a `DrawPolyline`. Toolbar
   exposes "🖍 Marker" and "✏ Pencil". See ADR-0022.
 - `Color::with_alpha(a)` helper on `flintshot-core::Color`.
+- `Stroke::ZERO` constant on `flintshot-core::Stroke` — a zero-width
+  stroke that renders nothing, used by callers that need a `&Stroke`
+  for a fill-only shape (e.g. `Canvas::draw_ellipse` with `Some(fill)`
+  and no outline, as the Number tool's bubble does).
+- Number tool end-to-end (Phase 2b Task 004). Click-to-place dispatch
+  path: a `PointerDown` with `Tool::Number` commits an
+  `Annotation::Number` immediately (no drag, no `pending`) via the new
+  `EditorState::place_number(pos)` entry point, increments
+  `next_number`, and pushes a `Snapshot`. The bubble renders as a true
+  filled circle via `Canvas::draw_ellipse(bbox, &Stroke::ZERO,
+  Some(color))` (equal axes — a circle is an inscribed ellipse; reuses
+  Task 001's impl), replacing the square `draw_rect_filled`
+  placeholder. Digit text colour is picked by Rec. 601 luminance
+  (white on dark fills, black on light) so the number stays legible
+  regardless of bubble colour. Toolbar exposes "# Number" alongside
+  the other tools.
 
 ### Changed
 
@@ -413,6 +429,14 @@ Categories used below:
   `image: Some(pre_crop)`. Callers that pushed raw `Vec<Annotation>`
   onto `undo` / `redo` must switch to `Snapshot::anns_only(vec)` or
   `Snapshot::full(vec, img)`.
+- `Snapshot` extended with `next_number: u32` (Phase 2b Task 004) so
+  undoing a Number-tool placement decrements the auto-incrementing
+  counter (otherwise it would ratchet upward across undos and the
+  next placement would skip a number). Constructor signatures widen:
+  `Snapshot::anns_only(anns)` → `Snapshot::anns_only(anns,
+  next_number)`, and `Snapshot::full(anns, image)` →
+  `Snapshot::full(anns, image, next_number)`. The undo / redo paths
+  always restore `next_number` from the snapshot.
 - `EditorState::selection` field renamed to `selected_index` (Phase 1
   Task 14). The old `selection: Option<usize>` held the hit-tested
   annotation index; it collided with the new `selection: Option<Rect>`

@@ -168,10 +168,13 @@ pub enum Annotation {
 /// A captured editor state used for undo/redo history.
 ///
 /// Captures the fields a mutating action can change: always `anns`
-/// (every mutation touches the annotation list), and `image` only when
-/// the mutation replaced the source screenshot (crop, Task 14).
-/// Annotation-only commits set `image` to `None` so the undo path
-/// leaves `state.image` untouched; crop sets it to `Some(pre_crop_image)`.
+/// (every mutation touches the annotation list) and `next_number`
+/// (so undoing a Number placement decrements the counter — otherwise
+/// the bubble count would ratchet upward across undos, which is
+/// unintuitive), and `image` only when the mutation replaced the
+/// source screenshot (crop, Task 14). Annotation-only commits set
+/// `image` to `None` so the undo path leaves `state.image` untouched;
+/// crop sets it to `Some(pre_crop_image)`.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     /// Annotation list at capture time (pre-mutation).
@@ -179,23 +182,36 @@ pub struct Snapshot {
     /// Source image at capture time. `None` when the action did not
     /// touch the image (annotation commit); `Some` when it did (crop).
     pub image: Option<image::RgbaImage>,
+    /// `next_number` at capture time. Captured so undoing a Number
+    /// placement decrements the counter back to the pre-placement
+    /// value — without this the next click after an undo would skip a
+    /// number. Annotation commits and crops both snapshot it (every
+    /// mutation could be followed by a Number placement).
+    pub next_number: u32,
 }
 
 impl Snapshot {
     /// Construct an annotation-only snapshot (no image change).
-    /// Used by [`EditorState::commit_annotation`].
+    /// Used by [`EditorState::commit_annotation`] and
+    /// [`EditorState::place_number`]. Captures `next_number` so undo
+    /// restores the pre-commit counter.
     #[must_use]
-    pub fn anns_only(anns: Vec<Annotation>) -> Self {
-        Self { anns, image: None }
+    pub fn anns_only(anns: Vec<Annotation>, next_number: u32) -> Self {
+        Self {
+            anns,
+            image: None,
+            next_number,
+        }
     }
 
-    /// Construct a full snapshot capturing both image and anns.
+    /// Construct a full snapshot capturing image, anns, and counter.
     /// Used by [`EditorState::crop`].
     #[must_use]
-    pub fn full(anns: Vec<Annotation>, image: image::RgbaImage) -> Self {
+    pub fn full(anns: Vec<Annotation>, image: image::RgbaImage, next_number: u32) -> Self {
         Self {
             anns,
             image: Some(image),
+            next_number,
         }
     }
 }
@@ -433,7 +449,8 @@ impl EditorState {
         // Clone-then-push: snapshot must capture pre-commit `anns`
         // (without the new annotation). `mem::take` here would wipe
         // `self.anns` and lose prior annotations.
-        self.undo.push(Snapshot::anns_only(self.anns.clone()));
+        self.undo
+            .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
         self.redo.clear();
         self.anns.push(ann);
     }
@@ -441,6 +458,35 @@ impl EditorState {
     /// Drop the in-flight annotation without committing.
     pub fn cancel_annotation(&mut self) {
         self.pending = None;
+    }
+
+    /// Place a numbered bubble at `pos` and increment `next_number`.
+    ///
+    /// Entry point for `Tool::Number`'s click-to-place model: a single
+    /// `PointerDown` commits an `Annotation::Number` immediately (no
+    /// drag, no `pending`), snapshots the pre-placement `anns` +
+    /// `next_number` onto `undo` (so undo decrements the counter), and
+    /// clears `redo`. The bubble's colour comes from the active
+    /// [`color`](Self::color) (same picker the drawing tools use); its
+    /// diameter is a fixed default — a per-state size control is
+    /// currently out of scope.
+    ///
+    /// Public so a future keyboard shortcut ("place next number at
+    /// cursor") can call it without going through `dispatch_input`.
+    pub fn place_number(&mut self, pos: Point) {
+        let ann = Annotation::Number {
+            pos,
+            n: self.next_number,
+            color: self.color,
+            diameter: NUMBER_DEFAULT_DIAMETER,
+        };
+        // Snapshot pre-placement state so undo restores next_number
+        // to the pre-increment value. `mem::take` would wipe self.anns.
+        self.undo
+            .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
+        self.redo.clear();
+        self.anns.push(ann);
+        self.next_number = self.next_number.saturating_add(1);
     }
 
     // --- Region selection (Tool::Select, Task 14) ---
@@ -504,7 +550,7 @@ impl EditorState {
         if cw == 0 || ch == 0 {
             return;
         }
-        let snapshot = Snapshot::full(self.anns.clone(), self.image.clone());
+        let snapshot = Snapshot::full(self.anns.clone(), self.image.clone(), self.next_number);
         self.image = new_image;
         self.anns.retain_mut(|ann| ann.crop_and_translate(n));
         self.pending = None;
@@ -517,8 +563,9 @@ impl EditorState {
     /// Also clears `pending` (Ctrl+Z mid-drag cancels the in-flight
     /// annotation, matching typical editor behaviour). If the snapshot
     /// carries an image (crop), the pre-crop image is restored too.
-    /// The current state is pushed onto `redo` before the swap. No-op
-    /// when `undo` is empty.
+    /// `next_number` is always restored from the snapshot so undoing a
+    /// Number placement decrements the counter. The current state is
+    /// pushed onto `redo` before the swap. No-op when `undo` is empty.
     pub fn undo(&mut self) {
         self.pending = None;
         let Some(prev) = self.undo.pop() else {
@@ -531,9 +578,11 @@ impl EditorState {
         let current = Snapshot {
             anns: std::mem::take(&mut self.anns),
             image: prev.image.as_ref().map(|_| self.image.clone()),
+            next_number: self.next_number,
         };
         self.redo.push(current);
         self.anns = prev.anns;
+        self.next_number = prev.next_number;
         if let Some(img) = prev.image {
             self.image = img;
         }
@@ -542,10 +591,10 @@ impl EditorState {
     /// Pop the last undone state from `redo` and swap it into `anns`.
     ///
     /// Mirrors [`undo`](Self::undo): if the redo snapshot carries an
-    /// image, it is restored. The current state is pushed onto `undo`
-    /// before the swap. No-op when `redo` is empty (which is always
-    /// the case immediately after a commit or crop, since both clear
-    /// `redo`).
+    /// image, it is restored; `next_number` is always restored. The
+    /// current state is pushed onto `undo` before the swap. No-op when
+    /// `redo` is empty (which is always the case immediately after a
+    /// commit or crop, since both clear `redo`).
     pub fn redo(&mut self) {
         let Some(next) = self.redo.pop() else {
             return;
@@ -553,9 +602,11 @@ impl EditorState {
         let current = Snapshot {
             anns: std::mem::take(&mut self.anns),
             image: next.image.as_ref().map(|_| self.image.clone()),
+            next_number: self.next_number,
         };
         self.undo.push(current);
         self.anns = next.anns;
+        self.next_number = next.next_number;
         if let Some(img) = next.image {
             self.image = img;
         }
@@ -640,6 +691,12 @@ impl EditorState {
             InputEvent::PointerDown { pos } => {
                 if self.tool == Tool::Select {
                     self.begin_selection(*pos);
+                } else if self.tool == Tool::Number {
+                    // Number is click-to-place: a single PointerDown
+                    // commits the bubble immediately (no pending, no
+                    // drag). The dedicated entry point keeps the
+                    // counter + snapshot logic in one place.
+                    self.place_number(*pos);
                 } else {
                     self.begin_annotation(*pos);
                 }
@@ -772,6 +829,8 @@ impl EditorState {
                 self.commit_text_draft();
                 if self.tool == Tool::Select {
                     self.begin_selection(*pos);
+                } else if self.tool == Tool::Number {
+                    self.place_number(*pos);
                 } else {
                     self.begin_annotation(*pos);
                 }
@@ -971,6 +1030,12 @@ const ARROW_DEFAULT_HEAD_SIZE: f32 = 10.0;
 
 /// Default blur strength (sigma for Gaussian, block size for Pixelate).
 const BLUR_DEFAULT_STRENGTH: u8 = 8;
+
+/// Default Number-tool bubble diameter in physical pixels. Big enough
+/// to fit two-digit numbers (1–99) at `diameter * 0.6` font size,
+/// matching the visual scale of numbered bubbles in flameshot /
+/// sharex-style annotation tools.
+const NUMBER_DEFAULT_DIAMETER: f32 = 28.0;
 
 /// Hit-test tolerance in physical pixels, added to half the stroke
 /// width so thin lines are still grabbable.
@@ -1691,7 +1756,7 @@ mod tests {
         // state machine's `commit_annotation` normally does this; we
         // bypass it here to isolate dispatcher behaviour).
         s.undo
-            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]));
+            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)], 1));
 
         assert_eq!(s.dispatch_input(&ctrl('z')), DispatchOutcome::Continue);
         assert_eq!(s.anns.len(), 1);
@@ -1712,9 +1777,9 @@ mod tests {
     fn dispatch_ctrl_y_redoes() {
         let mut s = EditorState::new(blank_image());
         s.anns.push(rect_ann(0.0, 0.0, 10.0, 10.0));
-        s.undo.push(Snapshot::anns_only(Vec::new()));
+        s.undo.push(Snapshot::anns_only(Vec::new(), 1));
         s.redo
-            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]));
+            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)], 1));
         s.anns.clear();
 
         assert_eq!(s.dispatch_input(&ctrl('y')), DispatchOutcome::Continue);
@@ -1726,9 +1791,9 @@ mod tests {
     fn dispatch_ctrl_shift_z_redoes() {
         let mut s = EditorState::new(blank_image());
         s.anns.push(rect_ann(0.0, 0.0, 10.0, 10.0));
-        s.undo.push(Snapshot::anns_only(Vec::new()));
+        s.undo.push(Snapshot::anns_only(Vec::new(), 1));
         s.redo
-            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)]));
+            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)], 1));
         s.anns.clear();
 
         assert_eq!(
@@ -2745,5 +2810,177 @@ mod tests {
         assert_eq!(s.anns.len(), 2);
         assert_eq!(s.dispatch_input(&ctrl('z')), DispatchOutcome::Continue);
         assert_eq!(s.anns.len(), 1, "Ctrl+Z undid last commit");
+    }
+
+    // --- Task 004: Number tool state machine tests ---
+    //
+    // Number is click-to-place: a PointerDown with `Tool::Number`
+    // commits `Annotation::Number { pos, n: next_number, color,
+    // diameter }` immediately (no `pending`, no drag), increments
+    // `next_number`, and pushes a `Snapshot` so undo decrements the
+    // counter. PointerDrag / PointerUp are no-ops for Number (pending
+    // is always None).
+
+    fn number_state() -> EditorState {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Number;
+        s.color = Color::rgb(255, 0, 0);
+        s
+    }
+
+    /// `PointerDown` with `Tool::Number` commits the bubble immediately
+    /// — no `pending` annotation is created (Number is click-to-place,
+    /// not drag). The first bubble is numbered `1` and `next_number`
+    /// advances to `2`.
+    #[test]
+    fn dispatch_number_click_places_bubble_immediately() {
+        let mut s = number_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 30.0),
+        });
+        assert!(s.pending.is_none(), "Number is click-to-place, no pending");
+        assert_eq!(s.anns.len(), 1, "exactly one bubble committed");
+        assert_eq!(s.next_number, 2, "counter advanced");
+        assert_eq!(s.undo.len(), 1, "snapshot pushed for undo");
+        assert!(s.redo.is_empty(), "fresh commit clears redo");
+        match &s.anns[0] {
+            Annotation::Number {
+                pos,
+                n,
+                color,
+                diameter,
+            } => {
+                assert_eq!(*pos, Point::new(20.0, 30.0), "bubble at click position");
+                assert_eq!(*n, 1, "first bubble is 1");
+                assert_eq!(*color, Color::rgb(255, 0, 0), "uses active drawing color");
+                assert!(*diameter > 0.0, "diameter defaults to a positive constant");
+            }
+            other => panic!("expected Number, got {other:?}"),
+        }
+    }
+
+    /// Three successive clicks place bubbles labelled 1, 2, 3; a
+    /// fourth click would place 4 (counter ready).
+    #[test]
+    fn dispatch_number_increments_label_across_clicks() {
+        let mut s = number_state();
+        // Zip positions with their expected bubble numbers so the
+        // loop body never has to cast `enumerate`'s usize to u32.
+        let positions = [
+            Point::new(10.0, 10.0),
+            Point::new(20.0, 10.0),
+            Point::new(30.0, 10.0),
+        ];
+        for (expected_n, pos) in [1_u32, 2, 3].into_iter().zip(positions) {
+            s.dispatch_input(&InputEvent::PointerDown { pos });
+            let idx = usize::try_from(expected_n - 1).expect("non-zero");
+            match &s.anns[idx] {
+                Annotation::Number { n, pos: p, .. } => {
+                    assert_eq!(
+                        *n, expected_n,
+                        "bubble {expected_n} is numbered {expected_n}"
+                    );
+                    assert_eq!(*p, pos);
+                }
+                other => panic!("expected Number at index {idx}, got {other:?}"),
+            }
+        }
+        assert_eq!(s.next_number, 4, "counter ready for the fourth bubble");
+    }
+
+    /// Undo after placing `3` decrements `next_number` from `4` back to
+    /// `3`, so the next placement re-places `3` (counter monotonic only
+    /// across forward placements, not across undo).
+    #[test]
+    fn dispatch_number_undo_decrements_counter() {
+        let mut s = number_state();
+        for pos in [
+            Point::new(10.0, 10.0),
+            Point::new(20.0, 10.0),
+            Point::new(30.0, 10.0),
+        ] {
+            s.dispatch_input(&InputEvent::PointerDown { pos });
+        }
+        assert_eq!(s.next_number, 4);
+        assert_eq!(s.anns.len(), 3);
+        // Undo removes bubble 3 AND decrements the counter to 3.
+        s.dispatch_input(&ctrl('z'));
+        assert_eq!(s.anns.len(), 2, "undo removed the third bubble");
+        assert_eq!(
+            s.next_number, 3,
+            "counter decremented so the next bubble is 3 again"
+        );
+        // Re-place: the new bubble is numbered 3, not 4.
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(40.0, 10.0),
+        });
+        match &s.anns[2] {
+            Annotation::Number { n, .. } => assert_eq!(*n, 3, "counter reused the undone number"),
+            other => panic!("expected Number, got {other:?}"),
+        }
+    }
+
+    /// Redo after undoing a Number placement re-applies the bubble and
+    /// restores the counter to its post-placement value. Locks the
+    /// `next_number` round-trip through both stacks (not just undo).
+    #[test]
+    fn dispatch_number_redo_reincrements_counter() {
+        let mut s = number_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        assert_eq!(s.next_number, 2);
+        s.dispatch_input(&ctrl('z'));
+        assert_eq!(s.next_number, 1, "undo decremented");
+        s.dispatch_input(&ctrl('y'));
+        assert_eq!(s.anns.len(), 1, "redo re-applied the bubble");
+        assert_eq!(s.next_number, 2, "redo re-incremented the counter");
+    }
+
+    /// Number's `PointerDrag` and `PointerUp` are no-ops: there's no
+    /// `pending` annotation to update or commit. A click is the entire
+    /// interaction.
+    #[test]
+    fn dispatch_number_drag_and_up_are_noops() {
+        let mut s = number_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 30.0),
+        });
+        // A stray drag (e.g. the user wiggled the mouse before
+        // releasing) must not crash or conjure extra annotations.
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(50.0, 60.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.anns.len(), 1, "still exactly one bubble");
+        assert!(s.pending.is_none());
+    }
+
+    /// Clicking with `Tool::Number` while editing a text draft commits
+    /// the draft and places a number bubble at the click position —
+    /// matches the Flameshot-like "click commits and starts the next
+    /// action" contract already in place for Select / drag tools.
+    #[test]
+    fn dispatch_text_pointer_switches_to_number_tool() {
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::TextInput('x'));
+        // Simulate a toolbar tool change while the draft is open.
+        s.tool = Tool::Number;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(50.0, 50.0),
+        });
+        // Draft committed + number bubble placed.
+        assert_eq!(s.anns.len(), 2);
+        assert!(matches!(s.anns[0], Annotation::Text { .. }));
+        match &s.anns[1] {
+            Annotation::Number { pos, n, .. } => {
+                assert_eq!(*pos, Point::new(50.0, 50.0));
+                assert_eq!(*n, 1);
+            }
+            other => panic!("expected Number at index 1, got {other:?}"),
+        }
     }
 }
