@@ -198,6 +198,16 @@ impl Stroke {
     pub const fn new(color: Color, width: f32) -> Self {
         Self { color, width }
     }
+
+    /// A zero-width stroke — renders nothing. Used by callers that
+    /// need a `&Stroke` for a fill-only shape (e.g. `Canvas::draw_ellipse`
+    /// with `Some(fill)` and no outline band, as the Number tool's
+    /// bubble does). The colour is left at its default (black) since a
+    /// 0-width band never samples it.
+    pub const ZERO: Self = Self {
+        color: Color::rgb(0, 0, 0),
+        width: 0.0,
+    };
 }
 
 /// Toolkit-agnostic key representation for keyboard input.

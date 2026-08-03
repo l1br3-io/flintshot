@@ -17,7 +17,7 @@ project resumes from.
 **Checkpoint B** — Ellipse, Line, Marker, Pencil work end-to-end (4 of 5 tools).
 
 ## Phase 2b.C — Number
-- [ ] Task 004 — Number click-to-place + circular bubble + contrast text + undo counter → [`tasks/004-number-tool.md`](tasks/004-number-tool.md)
+- [x] Task 004 — Number click-to-place + circular bubble + contrast text + undo counter → [`tasks/004-number-tool.md`](tasks/004-number-tool.md)
 
 **Checkpoint C** — all five deferred tools work end-to-end.
 

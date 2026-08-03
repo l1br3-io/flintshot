@@ -342,21 +342,22 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::R
             color,
             diameter,
         } => {
-            // Bubble: filled circle approximated as a square rect;
-            // fine for hit-testing and visible feedback, refined when
-            // Task 11 / 12 add real primitives.
+            // Filled circular bubble: a circle is an ellipse inscribed
+            // in a square bounding rect, so equal width/height +
+            // `draw_ellipse` with `Some(fill)` reuses the Task 001 impl
+            // verbatim. A 0-width stroke means no outline band — the
+            // bubble reads as a solid disc (the bubble's "edge" is
+            // just the fill boundary). Replaces the previous
+            // `draw_rect_filled` square placeholder.
             let half = *diameter / 2.0;
             let bbox = Rect::from_xywh(pos.x - half, pos.y - half, *diameter, *diameter);
-            canvas.draw_rect_filled(bbox, *color);
+            canvas.draw_ellipse(bbox, &Stroke::ZERO, Some(*color));
             let label = n.to_string();
-            // Contrast text: white on dark fills, black on light. We
-            // don't compute luminance here; pick white as a default —
-            // refined in Task 15 when pickers land.
-            canvas.draw_text(
-                *pos,
-                &label,
-                &TextStyle::simple(*diameter * 0.6, Color::rgb(255, 255, 255)),
-            );
+            // Contrast-aware digit colour: white on dark fills, black
+            // on light. Picked by Rec. 601 luminance — see
+            // `contrast_text_color`.
+            let text = TextStyle::simple(*diameter * 0.6, contrast_text_color(*color));
+            canvas.draw_text(*pos, &label, &text);
         }
     }
 }
@@ -374,6 +375,36 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::R
 )]
 fn image_rect(image: &image::RgbaImage) -> Rect {
     Rect::from_xywh(0.0, 0.0, image.width() as f32, image.height() as f32)
+}
+
+/// Luminance threshold for [`contrast_text_color`]. Colours with
+/// luminance below this get white text; at-or-above get black.
+///
+/// Rec. 601 luminance (`Y = 0.299R + 0.587G + 0.114B`, range 0–255)
+/// approximates perceived brightness closely enough for a binary
+/// black-or-white text pick. The 128 mid-point is the conventional
+/// threshold used by GitHub, Bootstrap, and most contrast-pick
+/// helpers; common annotation colours (red, blue, yellow, white,
+/// black) all land clearly on one side. WCAG's relative-luminance
+/// formula would be more principled but requires gamma-decoding each
+/// channel; for a binary choice the linear approximation is close
+/// enough and cheaper.
+const CONTRAST_LUMINANCE_THRESHOLD: f32 = 128.0;
+
+/// Pick a text colour that contrasts with `bg`: white on dark fills,
+/// black on light. Used by the Number tool's bubble label so the digit
+/// is readable regardless of the user's chosen bubble colour.
+///
+/// See [`CONTRAST_LUMINANCE_THRESHOLD`] for the formula and threshold
+/// rationale.
+#[must_use]
+fn contrast_text_color(bg: Color) -> Color {
+    let y = 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b);
+    if y < CONTRAST_LUMINANCE_THRESHOLD {
+        Color::rgb(255, 255, 255)
+    } else {
+        Color::rgb(0, 0, 0)
+    }
 }
 
 /// cos(30°) — barb half-angle from the reversed shaft direction.
@@ -2938,5 +2969,145 @@ mod tests {
                 .any(|c| matches!(c, DrawCall::DrawImageRegion { .. })),
             "blur should re-render after cache clear"
         );
+    }
+
+    // --- Task 004: Number-tool render path tests ---
+
+    /// `contrast_text_color` picks white on dark fills and black on
+    /// light ones, using Rec. 601 luminance (`Y = 0.299R + 0.587G +
+    /// 0.114B`) with a 128-threshold. Pure green is the canonical
+    /// boundary case for the formula: at full intensity it lands at
+    /// `255 × 0.587 ≈ 150`, above the threshold, so it gets black —
+    /// which matches the perceptual intuition that pure green is
+    /// "bright". The test pins every common annotation colour so a
+    /// future refactor of the formula doesn't silently flip a case.
+    #[test]
+    fn contrast_text_color_picks_white_on_dark_black_on_light() {
+        // Dark fills → white text.
+        assert_eq!(
+            contrast_text_color(Color::rgb(0, 0, 0)),
+            Color::rgb(255, 255, 255),
+            "black bg → white"
+        );
+        assert_eq!(
+            contrast_text_color(Color::rgb(255, 0, 0)),
+            Color::rgb(255, 255, 255),
+            "red bg → white"
+        );
+        assert_eq!(
+            contrast_text_color(Color::rgb(0, 0, 255)),
+            Color::rgb(255, 255, 255),
+            "blue bg → white"
+        );
+        assert_eq!(
+            contrast_text_color(Color::rgb(128, 0, 128)),
+            Color::rgb(255, 255, 255),
+            "purple bg → white"
+        );
+        // Light fills → black text.
+        assert_eq!(
+            contrast_text_color(Color::rgb(255, 255, 255)),
+            Color::rgb(0, 0, 0),
+            "white bg → black"
+        );
+        assert_eq!(
+            contrast_text_color(Color::rgb(255, 255, 0)),
+            Color::rgb(0, 0, 0),
+            "yellow bg → black"
+        );
+        // Boundary: pure green at full intensity lands just above 128
+        // (Y = 0.587 × 255 = 149.7), so it picks black. Halving the
+        // green channel drops Y to 74.8 — well under the threshold,
+        // back to white. This is the "boundary unit test" the task
+        // acceptance criteria call for: a small change in luminance
+        // around the threshold flips the result predictably.
+        assert_eq!(
+            contrast_text_color(Color::rgb(0, 255, 0)),
+            Color::rgb(0, 0, 0),
+            "bright green (Y≈150) → black"
+        );
+        assert_eq!(
+            contrast_text_color(Color::rgb(0, 128, 0)),
+            Color::rgb(255, 255, 255),
+            "dim green (Y≈75) → white"
+        );
+    }
+
+    /// A committed `Annotation::Number` renders as exactly one filled
+    /// `DrawEllipse` (a circle — equal width / height) followed by one
+    /// `DrawText` for the digit. The text colour is the
+    /// luminance-contrast pick (white on the dark-blue fill here).
+    /// Replaces the old square-bubble placeholder (`draw_rect_filled`).
+    #[test]
+    fn render_ann_number_emits_filled_ellipse_and_text() {
+        let mut canvas = MockCanvas::default();
+        let source = image::RgbaImage::new(1, 1);
+        render_ann(
+            &mut canvas,
+            &Annotation::Number {
+                pos: Point::new(50.0, 50.0),
+                n: 7,
+                color: Color::rgb(0, 0, 255), // dark blue → white text
+                diameter: 28.0,
+            },
+            &source,
+        );
+
+        // Exactly two calls — no `draw_rect_filled` square placeholder.
+        assert_eq!(canvas.calls.len(), 2, "filled ellipse + text only");
+        match &canvas.calls[0] {
+            DrawCall::DrawEllipse { rect, fill, stroke } => {
+                // Equal axes → a true circle (ellipse inscribed in a
+                // square bbox). Bounding rect is centred on `pos`.
+                assert_eq!(rect.width(), rect.height(), "equal axes (circle, not oval)");
+                let half = 14.0;
+                assert_eq!(*rect, Rect::from_xywh(50.0 - half, 50.0 - half, 28.0, 28.0));
+                assert_eq!(
+                    *fill,
+                    Some(Color::rgb(0, 0, 255)),
+                    "filled with bubble colour"
+                );
+                assert_eq!(stroke.width, 0.0, "no outline on the bubble");
+            }
+            other => panic!("expected DrawEllipse, got {other:?}"),
+        }
+        match &canvas.calls[1] {
+            DrawCall::DrawText { text, style, pos } => {
+                assert_eq!(text, "7", "digit label");
+                // Luminance pick: dark-blue fill → white text.
+                assert_eq!(style.color, Color::rgb(255, 255, 255));
+                // Font size scales with diameter (existing behaviour).
+                assert!((style.size - 28.0 * 0.6).abs() < f32::EPSILON);
+                assert_eq!(*pos, Point::new(50.0, 50.0));
+            }
+            other => panic!("expected DrawText, got {other:?}"),
+        }
+    }
+
+    /// On a light bubble fill (yellow), the digit text is black rather
+    /// than white. Pins the contrast pick on the other side of the
+    /// luminance threshold so a regression that hardcodes white text
+    /// fails loudly.
+    #[test]
+    fn render_ann_number_picks_black_text_on_light_fill() {
+        let mut canvas = MockCanvas::default();
+        let source = image::RgbaImage::new(1, 1);
+        render_ann(
+            &mut canvas,
+            &Annotation::Number {
+                pos: Point::new(10.0, 10.0),
+                n: 1,
+                color: Color::rgb(255, 255, 0), // yellow → black text
+                diameter: 20.0,
+            },
+            &source,
+        );
+        match canvas.calls.iter().find_map(|c| match c {
+            DrawCall::DrawText { style, .. } => Some(style.color),
+            _ => None,
+        }) {
+            Some(c) => assert_eq!(c, Color::rgb(0, 0, 0), "black text on yellow bubble"),
+            None => panic!("expected a DrawText call"),
+        }
     }
 }
