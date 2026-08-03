@@ -580,9 +580,8 @@ impl Default for BlurCache {
 ///
 /// Drawing happens into a private [`ImageCanvas`] that implements
 /// [`Canvas`] on top of an [`image::RgbaImage`]. Phase 1 Task 9 filled
-/// in the rect primitives; Task 11 adds line + arrow (line is needed
-/// by arrow's barbs). Ellipse / text remain `tracing::warn!` no-ops
-/// until Tasks 12 / 13 wire up the corresponding tools.
+/// in the rect primitives; Task 11 added line + arrow. Phase 2b added
+/// `draw_ellipse`. Text was completed in Phase 2.
 #[must_use]
 pub fn compose_final(state: &EditorState) -> image::RgbaImage {
     let mut canvas = ImageCanvas::new(state.image.clone());
@@ -740,11 +739,8 @@ impl Canvas for ImageCanvas {
         fill_rect(&mut self.image, n.min.x, n.min.y, n.max.x, n.max.y, color);
     }
 
-    fn draw_ellipse(&mut self, _rect: Rect, _stroke: &Stroke, _fill: Option<Color>) {
-        tracing::warn!(
-            target: "flintshot::render::image_canvas",
-            "draw_ellipse not yet implemented in ImageCanvas; annotation omitted from saved/copied output (Ellipse tool is Phase 2 scope)"
-        );
+    fn draw_ellipse(&mut self, rect: Rect, stroke: &Stroke, fill: Option<Color>) {
+        paint_ellipse(&mut self.image, rect, *stroke, fill);
     }
 
     fn draw_line(&mut self, a: Point, b: Point, stroke: &Stroke) {
@@ -1151,6 +1147,94 @@ fn fill_rect(img: &mut image::RgbaImage, x0: f32, y0: f32, x1: f32, y1: f32, col
     for y in y0..y1 {
         for x in x0..x1 {
             img.put_pixel(x, y, pixel);
+        }
+    }
+}
+
+/// Paint an ellipse inscribed in `rect`: optionally fill the interior,
+/// then stroke the outline band (`StrokeKind::Inside`, matching
+/// [`ImageCanvas::draw_rect_outline`]).
+///
+/// Anti-aliasing-free coverage — every pixel whose centre falls inside
+/// the implicit ellipse is painted, matching the save path's existing
+/// rect / line raster style. The stroke band is the set of pixels
+/// inside the outer ellipse (radii `rx`, `ry`) but outside a concentric
+/// inner ellipse with radii shrunk by `stroke.width`. This makes the
+/// stroke width vary slightly around the perimeter (exact `w` on the
+/// axes, marginally less at diagonal angles), which is acceptable for
+/// an aa-free screenshot annotation and indistinguishable at typical
+/// stroke widths (2–6 px).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::similar_names,
+    reason = "coords clamped/rounded before cast (dims ≤ 2^24 exact in f32); x/y suffix pairs are inherent to 2D geometry, matching the cw/ch convention in draw_image_region"
+)]
+fn paint_ellipse(img: &mut image::RgbaImage, rect: Rect, stroke: Stroke, fill: Option<Color>) {
+    let n = rect.normalized();
+    let rw = n.width();
+    let rh = n.height();
+    if rw <= 0.0 || rh <= 0.0 {
+        return;
+    }
+    let cx = n.min.x + rw / 2.0;
+    let cy = n.min.y + rh / 2.0;
+    let rx = rw / 2.0;
+    let ry = rh / 2.0;
+
+    let sw = stroke.width;
+    let has_stroke = sw > 0.0;
+    // StrokeKind::Inside: stroke band sits between the outer ellipse
+    // boundary and a concentric inner ellipse shrunk by stroke width.
+    let inner_rx = (rx - sw).max(0.0);
+    let inner_ry = (ry - sw).max(0.0);
+    let has_inner = inner_rx > 0.0 && inner_ry > 0.0;
+
+    let (img_w, img_h) = img.dimensions();
+    let (iw_f, ih_f) = (img_w as f32, img_h as f32);
+    let x0 = n.min.x.floor().clamp(0.0, iw_f) as u32;
+    let x1 = n.max.x.ceil().clamp(0.0, iw_f) as u32;
+    let y0 = n.min.y.floor().clamp(0.0, ih_f) as u32;
+    let y1 = n.max.y.ceil().clamp(0.0, ih_f) as u32;
+
+    let inv_rx2 = 1.0 / (rx * rx);
+    let inv_ry2 = 1.0 / (ry * ry);
+    let inv_irx2 = if has_inner {
+        1.0 / (inner_rx * inner_rx)
+    } else {
+        0.0
+    };
+    let inv_iry2 = if has_inner {
+        1.0 / (inner_ry * inner_ry)
+    } else {
+        0.0
+    };
+
+    let stroke_px = image::Rgba([
+        stroke.color.r,
+        stroke.color.g,
+        stroke.color.b,
+        stroke.color.a,
+    ]);
+    let fill_px = fill.map(|c| image::Rgba([c.r, c.g, c.b, c.a]));
+
+    for py in y0..y1 {
+        let dy = py as f32 + 0.5 - cy;
+        let dy_outer = dy * dy * inv_ry2;
+        for px in x0..x1 {
+            let dx = px as f32 + 0.5 - cx;
+            if dy_outer + dx * dx * inv_rx2 > 1.0 {
+                continue;
+            }
+            // Inside outer ellipse — stroke band or fill?
+            let in_stroke =
+                has_stroke && (!has_inner || dy * dy * inv_iry2 + dx * dx * inv_irx2 > 1.0);
+            if in_stroke {
+                img.put_pixel(px, py, stroke_px);
+            } else if let Some(fp) = fill_px {
+                img.put_pixel(px, py, fp);
+            }
         }
     }
 }
@@ -1949,6 +2033,61 @@ mod tests {
             out.get_pixel(20, 20),
             &image::Rgba([0, 0, 255, 255]),
             "corner should be stroke colour"
+        );
+    }
+
+    /// `compose_final` bakes a filled ellipse: fill colour inside the
+    /// inscribed ellipse, stroke colour in the outline band, background
+    /// outside. This is the Task 001 acceptance test — before the
+    /// `ImageCanvas::draw_ellipse` impl, the no-op silently dropped
+    /// ellipses from saved/copied PNGs.
+    #[test]
+    fn compose_final_renders_filled_ellipse() {
+        // Background: white 100×100.
+        let bg = image::RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255]));
+        let mut state = EditorState::new(bg);
+        // Ellipse bounding rect (20,30)-(80,70): rx=30, ry=20, centre
+        // (50,50). Blue 2-px stroke, green fill.
+        state.anns.push(Annotation::Ellipse {
+            rect: Rect::from_xywh(20.0, 30.0, 60.0, 40.0),
+            stroke: Stroke::new(Color::rgb(0, 0, 255), 2.0),
+            fill: Some(Color::rgb(0, 255, 0)),
+        });
+
+        let out = compose_final(&state);
+
+        // Centre is inside the inner ellipse → fill.
+        assert_eq!(
+            out.get_pixel(50, 50),
+            &image::Rgba([0, 255, 0, 255]),
+            "centre should be fill colour"
+        );
+        // Left edge of the ellipse at centre height → stroke band.
+        // Pixel (21,50): centre (21.5,50.5), dx=−28.5 → outside the
+        // inner ellipse (rx−2=28) but inside the outer (rx=30).
+        assert_eq!(
+            out.get_pixel(21, 50),
+            &image::Rgba([0, 0, 255, 255]),
+            "left stroke band should be stroke colour"
+        );
+        // Bounding-rect corner is outside the inscribed ellipse →
+        // background unchanged.
+        assert_eq!(
+            out.get_pixel(20, 30),
+            &image::Rgba([255, 255, 255, 255]),
+            "corner outside ellipse should be background"
+        );
+        // Well outside the ellipse → background.
+        assert_eq!(
+            out.get_pixel(90, 90),
+            &image::Rgba([255, 255, 255, 255]),
+            "far-outside pixel should be background"
+        );
+        // Background image not mutated.
+        assert_eq!(
+            state.image.get_pixel(50, 50),
+            &image::Rgba([255, 255, 255, 255]),
+            "state.image must be unchanged (compose_final clones)"
         );
     }
 
