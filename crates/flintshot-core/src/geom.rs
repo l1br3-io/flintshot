@@ -163,6 +163,22 @@ impl Color {
         Self { r, g, b, a }
     }
 
+    /// Return this color with the alpha channel replaced by `a`.
+    ///
+    /// Used by the marker tool to drop a full-opacity user color to
+    /// [`MARKER_ALPHA`](crate::MARKER_ALPHA) at construction time so
+    /// every backend renders it translucently without render-path
+    /// special-casing (ADR-0022).
+    #[must_use]
+    pub const fn with_alpha(self, a: u8) -> Self {
+        Self {
+            r: self.r,
+            g: self.g,
+            b: self.b,
+            a,
+        }
+    }
+
     /// Pure red convenience constant (default annotation color).
     pub const RED: Self = Self::rgb(255, 0, 0);
 }

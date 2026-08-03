@@ -14,13 +14,20 @@
 //! for the render path: tests construct an `EditorState`, run `render`
 //! against a `MockCanvas`, and assert the recorded `Vec<DrawCall>`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     editor::{Annotation, BlurKind, EditorState},
+    freehand::smooth_polyline,
     geom::{Color, Point, Rect, Stroke},
     text::{TextMetrics, TextStyle},
 };
+
+/// Catmull-Rom tension applied to freehand strokes at render time. The
+/// default (0.5) is the classic Catmull-Rom spline; lower flattens,
+/// higher exaggerates. Applied identically to pending and committed
+/// polylines so WYSIWYG holds (ADR-0022).
+const FREEHAND_TENSION: f32 = 0.5;
 
 /// Immediate-mode drawing primitives for annotations.
 ///
@@ -63,6 +70,24 @@ pub trait Canvas {
 
     /// Stroke a line segment from `a` to `b`.
     fn draw_line(&mut self, a: Point, b: Point, stroke: &Stroke);
+
+    /// Stroke a connected polyline through `points` as a single stroke.
+    ///
+    /// Used by the freehand tools (Marker / Pencil). Backends that
+    /// composite per-pixel (the [`ImageCanvas`] save path) MUST blend
+    /// each covered pixel at most once across the whole polyline so a
+    /// translucent marker stays uniformly translucent — re-stamping
+    /// overlapping segment caps would compound the alpha toward opaque
+    /// (ADR-0022). GPU backends (egui) can rely on their tessellator's
+    /// single-coverage path. The default impl loops [`draw_line`] per
+    /// segment, which is correct for opaque strokes but compounds for
+    /// translucent ones; backends that render freehand strokes should
+    /// override it.
+    fn draw_polyline(&mut self, points: &[Point], stroke: &Stroke) {
+        for w in points.windows(2) {
+            self.draw_line(w[0], w[1], stroke);
+        }
+    }
 
     /// Stroke an arrow from `a` (tail) to `b` (head), with barbs of `head_size`.
     fn draw_arrow(&mut self, a: Point, b: Point, stroke: &Stroke, head_size: f32);
@@ -269,9 +294,17 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::R
             width,
         } => {
             let stroke = Stroke::new(*color, *width);
-            for w in points.windows(2) {
-                canvas.draw_line(w[0], w[1], &stroke);
-            }
+            // GOTCHA: smoothing re-runs every frame on the pending
+            // preview. Catmull-Rom is O(n) in the raw sample count and
+            // the per-span subdivision is bounded, so this is negligible
+            // for typical freehand strokes; revisit only if very long
+            // strokes show up in profiles. Applied here (not at update
+            // / commit) so the pending preview and the committed form
+            // pass through the identical smoothing pass and WYSIWYG
+            // holds between the live editor and saved/copied output
+            // (ADR-0022).
+            let smoothed = smooth_polyline(points, FREEHAND_TENSION);
+            canvas.draw_polyline(&smoothed, &stroke);
         }
         Annotation::Text { pos, text, .. } => {
             canvas.draw_text(*pos, text, &ann.text_style());
@@ -747,6 +780,10 @@ impl Canvas for ImageCanvas {
         stroke_segment(&mut self.image, a, b, *stroke);
     }
 
+    fn draw_polyline(&mut self, points: &[Point], stroke: &Stroke) {
+        stamp_polyline(&mut self.image, points, *stroke);
+    }
+
     fn draw_arrow(&mut self, a: Point, b: Point, stroke: &Stroke, head_size: f32) {
         stroke_segment(&mut self.image, a, b, *stroke);
         let [left, right] = arrow_barbs(a, b, head_size);
@@ -896,6 +933,116 @@ fn stroke_segment(img: &mut image::RgbaImage, a: Point, b: Point, stroke: Stroke
             cx + half,
             cy + half,
             stroke.color,
+        );
+    }
+}
+
+/// Stamp a whole polyline as one stroke, blending each covered pixel
+/// exactly once.
+///
+/// This is the [`ImageCanvas`] freehand path used by Marker / Pencil.
+/// It computes the union of the per-segment stamp squares (the same
+/// coverage [`stroke_segment`] would produce) into a set, then
+/// source-over blends the stroke colour into each covered pixel once.
+/// Without the union step the overlapping stamps at every smoothed
+/// joint would re-blend the same pixel ~`width` times, compounding a
+/// translucent marker's alpha toward opaque and breaking the "text
+/// visible through it" exit criterion (ADR-0022).
+///
+/// For an opaque stroke (`color.a == 255`) source-over degenerates to
+/// a hard replace, so Pencil output is identical to per-segment
+/// stamping — only the translucent (Marker) case behaves differently,
+/// and only in the direction of correctness.
+fn stamp_polyline(img: &mut image::RgbaImage, points: &[Point], stroke: Stroke) {
+    if points.len() < 2 || stroke.width <= 0.0 {
+        return;
+    }
+    let mut covered: HashSet<(u32, u32)> = HashSet::new();
+    let dim = img.dimensions();
+    for w in points.windows(2) {
+        collect_stamp_pixels(dim, w[0], w[1], stroke.width, &mut covered);
+    }
+    blend_stamp(img, &covered, stroke.color);
+}
+
+/// Collect the integer pixel coordinates covered by stamping a
+/// `stroke.width`-side square at ~1-px steps along `a -> b` into `out`.
+///
+/// Mirrors [`stroke_segment`]'s loop and [`fill_rect`]'s clamp+round
+/// so an opaque polyline covers the same pixels as the per-segment
+/// path. Degenerate segments (`len < 0.5`) contribute nothing, again
+/// matching [`stroke_segment`].
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "coords clamped to image bounds and rounded before cast; \
+              len/indices ≤ image diagonal ≤ 2^24, exact in f32"
+)]
+fn collect_stamp_pixels(
+    (img_w, img_h): (u32, u32),
+    a: Point,
+    b: Point,
+    width: f32,
+    out: &mut HashSet<(u32, u32)>,
+) {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 0.25 {
+        return;
+    }
+    let len = len_sq.sqrt();
+    let steps = len.ceil() as usize;
+    let half = width / 2.0;
+    let max_x = img_w as f32;
+    let max_y = img_h as f32;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let cx = a.x + dx * t;
+        let cy = a.y + dy * t;
+        let x0 = (cx - half).clamp(0.0, max_x).round() as u32;
+        let x1 = (cx + half).clamp(0.0, max_x).round() as u32;
+        let y0 = (cy - half).clamp(0.0, max_y).round() as u32;
+        let y1 = (cy + half).clamp(0.0, max_y).round() as u32;
+        for py in y0..y1 {
+            for px in x0..x1 {
+                out.insert((px, py));
+            }
+        }
+    }
+}
+
+/// Source-over blend `color` into every pixel in `covered`. Each pixel
+/// is written at most once, so this is the single compositing pass for
+/// a whole polyline stroke. Opaque `color` collapses to a hard replace
+/// (mathematically identical to [`fill_rect`]); translucent `color`
+/// produces the uniform blend a marker highlight needs.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "composited values clamped to [0, 255] before the u8 cast"
+)]
+fn blend_stamp(img: &mut image::RgbaImage, covered: &HashSet<(u32, u32)>, color: Color) {
+    let alpha = f32::from(color.a) / 255.0;
+    let inv = 1.0 - alpha;
+    for &(px, py) in covered {
+        let bg = img.get_pixel(px, py);
+        let out_r = f32::from(color.r) * alpha + f32::from(bg.0[0]) * inv;
+        let out_g = f32::from(color.g) * alpha + f32::from(bg.0[1]) * inv;
+        let out_b = f32::from(color.b) * alpha + f32::from(bg.0[2]) * inv;
+        // Keep the background alpha: screenshots are opaque, and
+        // compositing the source alpha would make the highlight itself
+        // transparent (matching `blend_pixel` for text).
+        img.put_pixel(
+            px,
+            py,
+            image::Rgba([
+                out_r.round().clamp(0.0, 255.0) as u8,
+                out_g.round().clamp(0.0, 255.0) as u8,
+                out_b.round().clamp(0.0, 255.0) as u8,
+                bg.0[3],
+            ]),
         );
     }
 }
@@ -1295,6 +1442,13 @@ pub enum DrawCall {
         /// Stroke style.
         stroke: Stroke,
     },
+    /// `Canvas::draw_polyline` — a connected freehand stroke.
+    DrawPolyline {
+        /// Smoothed polyline points.
+        points: Vec<Point>,
+        /// Stroke style (alpha reduced for `Tool::Marker`).
+        stroke: Stroke,
+    },
     /// `Canvas::draw_arrow`.
     DrawArrow {
         /// Tail endpoint.
@@ -1386,6 +1540,13 @@ impl Canvas for MockCanvas {
         self.calls.push(DrawCall::DrawLine {
             a,
             b,
+            stroke: *stroke,
+        });
+    }
+
+    fn draw_polyline(&mut self, points: &[Point], stroke: &Stroke) {
+        self.calls.push(DrawCall::DrawPolyline {
+            points: points.to_vec(),
             stroke: *stroke,
         });
     }
@@ -1662,6 +1823,27 @@ mod tests {
             Some(DrawCall::DrawText { text, .. }) => assert_eq!(text, "hi"),
             other => panic!("expected DrawText, got {other:?}"),
         }
+
+        // Marker / Pencil dispatch through the smoothed-polyline path,
+        // not per-segment draw_line (ADR-0022).
+        render_ann(
+            &mut canvas,
+            &Annotation::Marker {
+                points: vec![Point::new(0.0, 0.0), Point::new(5.0, 5.0)],
+                color: Color::RED,
+                width: 4.0,
+            },
+            &source,
+        );
+        match canvas.calls.last() {
+            Some(DrawCall::DrawPolyline { points, .. }) => {
+                assert!(
+                    points.len() > 2,
+                    "polyline carries the smoothed points, not the raw 2"
+                );
+            }
+            other => panic!("expected DrawPolyline for marker, got {other:?}"),
+        }
     }
 
     /// `Annotation::Blur` dispatches through `image_ops::blur` and
@@ -1929,32 +2111,60 @@ mod tests {
         );
     }
 
-    /// Pending marker renders as a polyline of consecutive `draw_line`
-    /// calls — one per segment.
+    /// A pending marker renders as a single smoothed polyline via one
+    /// `draw_polyline` call — not per-segment `draw_line` calls. Locks
+    /// the freehand dispatch contract (ADR-0022): smoothing lives in
+    /// `render_ann`, the canvas sees the already-smoothed points, and a
+    /// 3-point raw input is subdivided into more rendered samples.
     #[test]
-    fn render_pending_marker_emits_segment_lines() {
+    fn render_pending_marker_emits_single_smoothed_polyline() {
         let mut canvas = MockCanvas::default();
         let source = image::RgbaImage::new(1, 1);
+        let pts = vec![
+            Point::new(0.0, 0.0),
+            Point::new(5.0, 5.0),
+            Point::new(10.0, 0.0),
+        ];
         render_ann(
             &mut canvas,
             &Annotation::Marker {
-                points: vec![
-                    Point::new(0.0, 0.0),
-                    Point::new(5.0, 5.0),
-                    Point::new(10.0, 0.0),
-                ],
+                points: pts.clone(),
                 color: Color::RED,
                 width: 4.0,
             },
             &source,
         );
-        // 3 points → 2 segments → 2 draw_line calls.
+        // No per-segment DrawLine — the whole stroke is one polyline.
         let line_count = canvas
             .calls
             .iter()
             .filter(|c| matches!(c, DrawCall::DrawLine { .. }))
             .count();
-        assert_eq!(line_count, 2);
+        assert_eq!(line_count, 0, "marker must not emit per-segment DrawLine");
+
+        // Exactly one DrawPolyline carrying the smoothed points.
+        let polys: Vec<_> = canvas
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                DrawCall::DrawPolyline { points, stroke } => Some((points.clone(), *stroke)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(polys.len(), 1, "exactly one DrawPolyline");
+        let (smoothed, stroke) = &polys[0];
+        assert_eq!(stroke.color, Color::RED);
+        assert_eq!(stroke.width, 4.0);
+        assert!(
+            smoothed.len() > pts.len(),
+            "smoothing must subdivide: {} raw -> {} rendered",
+            pts.len(),
+            smoothed.len()
+        );
+        // Catmull-Rom passes through the control points, so the
+        // smoothed polyline's endpoints match the raw input.
+        assert_eq!(smoothed.first(), pts.first());
+        assert_eq!(smoothed.last(), pts.last());
     }
 
     /// A committed `Annotation::Line` renders as exactly one `DrawLine`
@@ -2115,6 +2325,66 @@ mod tests {
             state.image.get_pixel(50, 50),
             &image::Rgba([255, 255, 255, 255]),
             "state.image must be unchanged (compose_final clones)"
+        );
+    }
+
+    /// A committed marker is a translucent highlight: in the saved /
+    /// copied PNG its pixels are a source-over blend of the marker
+    /// colour over the background, not a hard replace. Pins the marker
+    /// alpha + per-pixel-once compositing contract (ADR-0022): a
+    /// regression that drops alpha, restamps overlapping segments, or
+    /// skips the polyline path would make the centreline pixel either
+    /// pure-yellow (0) or pure-white (255) on the blue channel.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test-only: value clamped to [0,255] before the u8 cast"
+    )]
+    #[test]
+    fn compose_final_marker_blends_translucently_with_background() {
+        let bg = image::RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255]));
+        let mut state = EditorState::new(bg);
+        state.color = Color::rgb(255, 255, 0); // yellow
+        state.stroke_width = 8.0;
+        state.tool = Tool::Marker;
+        // Straight horizontal stroke — `begin_annotation` stores the
+        // marker colour with MARKER_ALPHA already applied.
+        state.begin_annotation(Point::new(20.0, 50.0));
+        state.update_annotation(Point::new(80.0, 50.0));
+        state.commit_annotation();
+
+        let out = compose_final(&state);
+
+        let centre = out.get_pixel(50, 50);
+        // Source-over keeps the opaque screenshot alpha.
+        assert_eq!(centre.0[3], 255, "composited pixel keeps opaque alpha");
+        // Red + green: marker and background are both 255 → stays 255.
+        assert_eq!(centre.0[0], 255, "red unchanged");
+        assert_eq!(centre.0[1], 255, "green unchanged");
+        // Blue: marker 0 over background 255 at MARKER_ALPHA → a value
+        // strictly between 0 and 255, matching the exact blend.
+        let alpha = f32::from(crate::MARKER_ALPHA) / 255.0;
+        let expected_b = (255.0 * (1.0 - alpha)).round().clamp(0.0, 255.0) as u8;
+        assert_eq!(
+            centre.0[2], expected_b,
+            "blue channel is the source-over blend (between bg and marker)"
+        );
+        assert!(
+            centre.0[2] > 0 && centre.0[2] < 255,
+            "blended pixel must be strictly between marker and background"
+        );
+
+        // A pixel off the stroke is untouched background.
+        assert_eq!(
+            out.get_pixel(50, 20).0,
+            [255, 255, 255, 255],
+            "off-stroke pixel is background"
+        );
+        // Background image not mutated.
+        assert_eq!(
+            state.image.get_pixel(50, 50).0,
+            [255, 255, 255, 255],
+            "state.image unchanged"
         );
     }
 

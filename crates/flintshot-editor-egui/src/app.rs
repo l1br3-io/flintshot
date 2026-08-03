@@ -559,6 +559,8 @@ impl App for EditorApp {
                     ui.selectable_value(&mut self.state.tool, Tool::Ellipse, "◯ Ellipse");
                     ui.selectable_value(&mut self.state.tool, Tool::Arrow, "→ Arrow");
                     ui.selectable_value(&mut self.state.tool, Tool::Line, "／ Line");
+                    ui.selectable_value(&mut self.state.tool, Tool::Marker, "🖍 Marker");
+                    ui.selectable_value(&mut self.state.tool, Tool::Pencil, "✏ Pencil");
                     ui.selectable_value(&mut self.state.tool, Tool::Text, "T Text");
                     ui.selectable_value(&mut self.state.tool, Tool::Blur, "░ Blur");
                     if self.state.tool == Tool::Blur {

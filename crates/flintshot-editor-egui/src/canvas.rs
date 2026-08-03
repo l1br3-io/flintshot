@@ -234,6 +234,28 @@ impl Canvas for EguiCanvas {
         );
     }
 
+    fn draw_polyline(&mut self, points: &[Point], stroke: &Stroke) {
+        let Some(painter) = &self.painter else {
+            return;
+        };
+        let ppp = self.ppp();
+        // One `PathShape::line` (a single tessellated strip) renders the
+        // whole freehand stroke with per-pixel coverage computed once,
+        // so a translucent marker doesn't compound at the segment joints
+        // the way per-segment `line_segment` calls would (ADR-0022).
+        if points.len() < 2 {
+            return;
+        }
+        let path: Vec<egui::Pos2> = points
+            .iter()
+            .map(|&p| to_egui_pos(p, ppp, self.origin))
+            .collect();
+        painter.add(egui::epaint::PathShape::line(
+            path,
+            to_egui_stroke(*stroke, ppp),
+        ));
+    }
+
     fn draw_arrow(&mut self, a: Point, b: Point, stroke: &Stroke, head_size: f32) {
         let Some(painter) = &self.painter else {
             return;
