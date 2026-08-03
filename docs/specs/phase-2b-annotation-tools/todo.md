@@ -11,7 +11,7 @@ project resumes from.
 **Checkpoint A** — ellipse renders in editor AND in saved/copied PNGs; latent `ImageCanvas` bug fixed.
 
 ## Phase 2b.B — Shape + freehand tools
-- [ ] Task 002 — Line toolbar entry + degenerate-pointer-up guard → [`tasks/002-line-tool.md`](tasks/002-line-tool.md)
+- [x] Task 002 — Line toolbar entry + degenerate-pointer-up guard → [`tasks/002-line-tool.md`](tasks/002-line-tool.md)
 - [ ] Task 003 — Shared freehand smoother (Catmull-Rom) + Marker translucency + toolbar entries → [`tasks/003-freehand-smoothing-marker.md`](tasks/003-freehand-smoothing-marker.md)
 
 **Checkpoint B** — Ellipse, Line, Marker, Pencil work end-to-end (4 of 5 tools).

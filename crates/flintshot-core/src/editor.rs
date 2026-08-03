@@ -931,6 +931,10 @@ impl EditorState {
     ///   render as nothing and the user would see a silent no-op
     ///   instead of the cancel they expect from the Rect tool's
     ///   click-without-drag behaviour (Task 11).
+    /// - `Line` cancels under the same < 1 px length test: it is also
+    ///   a two-point drag tool, so a click-without-drag would otherwise
+    ///   commit an invisible zero-length segment. Grouped with Arrow
+    ///   since both share the `a`/`b` endpoint shape (Task 002).
     fn finish_pointer_up(&mut self) {
         let degenerate = match &self.pending {
             Some(
@@ -941,7 +945,9 @@ impl EditorState {
                 let n = rect.normalized();
                 n.width().abs() < 1.0 || n.height().abs() < 1.0
             }
-            Some(Annotation::Arrow { a, b, .. }) => {
+            // Line and Arrow are both two-point tools; a sub-1px span is
+            // a click-without-drag and commits nothing visible.
+            Some(Annotation::Line { a, b, .. } | Annotation::Arrow { a, b, .. }) => {
                 let dx = b.x - a.x;
                 let dy = b.y - a.y;
                 (dx * dx + dy * dy).sqrt() < 1.0
@@ -1878,6 +1884,22 @@ mod tests {
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.pending.is_none(), "degenerate arrow cancelled");
+        assert_eq!(s.anns.len(), 0, "no annotation committed");
+    }
+
+    /// Mirrors the Arrow degenerate-cancel contract above for the other
+    /// two-point drag tool: a Line click-without-drag (`a == b`) is
+    /// sub-1px long and must cancel rather than commit an invisible
+    /// zero-length segment.
+    #[test]
+    fn dispatch_line_click_without_drag_cancels() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Line;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.pending.is_none(), "degenerate line cancelled");
         assert_eq!(s.anns.len(), 0, "no annotation committed");
     }
 
