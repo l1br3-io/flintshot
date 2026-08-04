@@ -13,6 +13,12 @@ use crate::{editor::EditorState, error::Result, geom::Rect};
 pub enum EditorOutcome {
     /// User saved to disk; contains the chosen path.
     Saved(PathBuf),
+    /// User pinned the composed image to the desktop; contains the
+    /// pin-cache path the editor wrote (not the user's save path). The
+    /// pin persists as its own process — the editor spawns
+    /// `flintshot pin <path>` detached and exits, leaving the pin window
+    /// on screen. See ADR-0023 (pin-as-process).
+    Pinned(PathBuf),
     /// User copied the result to the clipboard.
     CopiedToClipboard,
     /// User uploaded and got back a URL.

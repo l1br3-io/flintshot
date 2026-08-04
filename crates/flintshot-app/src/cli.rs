@@ -264,7 +264,23 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
     match outcome {
         EditorOutcome::Saved(p) => {
             tracing::info!(path = %p.display(), "editor saved");
-            report_editor_save(&p);
+            report_path_to_daemon(&p);
+        }
+        EditorOutcome::Pinned(p) => {
+            tracing::info!(path = %p.display(), "editor pinned; spawning pin window");
+            // RATIONALE: the pin is its own process so it outlives the
+            // editor (ADR-0023). The editor already published
+            // `Pinned(path)` and closed; a spawn failure here is logged
+            // but cannot undo the close — the cache file still exists,
+            // so the user can recover via `flintshot pin <path>` manually.
+            if let Err(e) = spawn_pin_window(&p) {
+                tracing::error!(
+                    error = %e,
+                    path = %p.display(),
+                    "failed to spawn pin window; the editor has already closed"
+                );
+            }
+            report_path_to_daemon(&p);
         }
         EditorOutcome::CopiedToClipboard => {
             tracing::info!("editor copied to clipboard");
@@ -280,20 +296,52 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
     Ok(())
 }
 
-/// Worker → daemon: tell the running daemon that the editor saved to
-/// `path` so it can broadcast [`Event::Saved`] to IPC subscribers and
-/// record the path for `Request::PinLast` (Phase 3, Task 004).
+/// Spawn `flintshot pin <path>` as a detached child so the pin window
+/// persists after the editor exits. Reuses the Phase 2
+/// [`worker::CommandSpawner`] pattern (`current_exe` + stdin/stdout null +
+/// a lightweight reaper thread that waits on the child so it doesn't
+/// linger as a zombie).
 ///
-/// Fire-and-forget and never fatal: standalone captures (no daemon) log
-/// at `debug` and continue; the editor outcome stands either way. The
-/// send happens *after* the editor window closes (we only report a
-/// finalised outcome). Task 003 will add a sibling `Pinned(path)` report
-/// by routing through the same [`report`](crate::ipc_client::report)
-/// seam with a different [`Request`].
+/// The argv is built by [`worker::pin_argv`], shared with the daemon's
+/// upcoming `PinLast` (Task 004) so both pin-spawning call sites stay
+/// in lockstep.
+///
+/// # Errors
+/// Propagates a spawn failure (couldn't resolve `current_exe`, couldn't
+/// fork, couldn't start the reaper thread). The caller logs and
+/// continues — the editor outcome is unaffected.
+#[cfg(feature = "egui")]
+fn spawn_pin_window(path: &std::path::Path) -> Result<()> {
+    use crate::worker::Spawner as _;
+    let argv = crate::worker::pin_argv(path);
+    crate::worker::CommandSpawner
+        .spawn(&argv.iter().map(String::as_str).collect::<Vec<_>>())
+        .with_context(|| format!("spawning pin window for {}", path.display()))?;
+    Ok(())
+}
+
+/// Headless-build fallback for [`spawn_pin_window`]: matches its feature
+/// gate so the helper is defined on every feature set.
+#[cfg(not(feature = "egui"))]
+fn spawn_pin_window(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+/// Worker → daemon: report `path` (the editor's save or pin-cache
+/// location) so the daemon can broadcast [`Event::Saved`] to IPC
+/// subscribers and record it as `last_saved` for `Request::PinLast`
+/// (Phase 3, Task 004).
+///
+/// Called from both the `Saved` and `Pinned` arms — a pin writes to the
+/// pin-cache dir and its path is just as valid a "last capture" for
+/// `PinLast` to re-open. Fire-and-forget and never fatal: standalone
+/// captures (no daemon) log at `debug` and continue; the editor outcome
+/// stands either way. The send happens *after* the editor window closes
+/// (we only report a finalised outcome).
 ///
 /// [`Event::Saved`]: flintshot_core::ipc::Event::Saved
 #[cfg(feature = "egui")]
-fn report_editor_save(path: &std::path::Path) {
+fn report_path_to_daemon(path: &std::path::Path) {
     crate::ipc_client::report(&Request::ReportSaved {
         path: path.to_path_buf(),
     });
@@ -303,7 +351,7 @@ fn report_editor_save(path: &std::path::Path) {
 /// gate so the helper is defined on every feature set (the call site is
 /// uniformly gated).
 #[cfg(not(feature = "egui"))]
-fn report_editor_save(_path: &std::path::Path) {}
+fn report_path_to_daemon(_path: &std::path::Path) {}
 
 /// Headless-build fallback: editor is unavailable without the `egui`
 /// feature. The image argument is accepted (and dropped) purely so the

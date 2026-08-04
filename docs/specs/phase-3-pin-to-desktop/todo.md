@@ -16,7 +16,7 @@ project resumes from.
 **Checkpoint B** — daemon-driven capture whose editor saves emits `Event::Saved { path }` to IPC subscribers.
 
 ## Phase 3.C — Editor Pin button
-- [ ] Task 003 — `EditorOutcome::Pinned(PathBuf)` + pin-cache dir helper + editor *Pin* toolbar button + spawn handling → [`tasks/003-editor-pin-button.md`](tasks/003-editor-pin-button.md)
+- [x] Task 003 — `EditorOutcome::Pinned(PathBuf)` + pin-cache dir helper + editor *Pin* toolbar button + spawn handling → [`tasks/003-editor-pin-button.md`](tasks/003-editor-pin-button.md)
 
 **Checkpoint C** — editor *Pin* button works end-to-end (pin appears, editor closes, pin persists).
 

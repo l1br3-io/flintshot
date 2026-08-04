@@ -128,6 +128,9 @@ enum ToolbarAction {
     Save,
     /// Copy button clicked — write to clipboard.
     Copy,
+    /// Pin button clicked — write to pin-cache + close the editor so the
+    /// pin window (spawned by the CLI) can take over.
+    Pin,
 }
 
 impl EditorApp {
@@ -680,20 +683,7 @@ impl App for EditorApp {
                     ui.separator();
                     ui.label(format!("{} annotations", self.state.anns.len()));
                     ui.separator();
-                    if ui.button("💾 Save").clicked() {
-                        action = ToolbarAction::Save;
-                    }
-                    let copy_label = if self.copied {
-                        "✓ Copied!"
-                    } else {
-                        "📋 Copy"
-                    };
-                    if ui.button(copy_label).clicked() {
-                        action = ToolbarAction::Copy;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.small("Drag to draw · Ctrl+Z undo · Esc cancel");
-                    });
+                    action = self.draw_output_buttons(ui, action);
                 });
                 action
             })
@@ -760,12 +750,40 @@ impl App for EditorApp {
         match action {
             ToolbarAction::Save => self.handle_save(ui.ctx()),
             ToolbarAction::Copy => self.handle_copy(ui.ctx()),
+            ToolbarAction::Pin => self.handle_pin(ui.ctx()),
             ToolbarAction::None => {}
         }
     }
 }
 
 impl EditorApp {
+    /// Draw the Save / Copy / Pin output buttons and the right-aligned
+    /// hint label. Returns the [`ToolbarAction`] the user triggered (or
+    /// the incoming `prev` if no button was clicked). Extracted from
+    /// `ui` so that method stays under clippy's line budget as the
+    /// output toolbar grows.
+    fn draw_output_buttons(&self, ui: &mut egui::Ui, prev: ToolbarAction) -> ToolbarAction {
+        let mut action = prev;
+        if ui.button("💾 Save").clicked() {
+            action = ToolbarAction::Save;
+        }
+        let copy_label = if self.copied {
+            "✓ Copied!"
+        } else {
+            "📋 Copy"
+        };
+        if ui.button(copy_label).clicked() {
+            action = ToolbarAction::Copy;
+        }
+        if ui.button("📍 Pin").clicked() {
+            action = ToolbarAction::Pin;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.small("Drag to draw · Ctrl+Z undo · Esc cancel");
+        });
+        action
+    }
+
     /// Save button handler: compose the final image, prompt for a
     /// path via `rfd`, write PNG, publish `Saved(path)` on success.
     fn handle_save(&self, ctx: &Context) {
@@ -811,6 +829,38 @@ impl EditorApp {
             }
             Err(err) => {
                 tracing::error!(error = %err, "copy failed");
+                self.publish_outcome(Err(err));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Pin button handler: compose the final image, write it to the
+    /// pin-cache dir, publish `Pinned(path)`, and close the editor. The
+    /// CLI's `run_editor_for_capture` then spawns `flintshot pin <path>`
+    /// detached so the pin persists as its own process (ADR-0023).
+    ///
+    /// Unlike Copy (which stays open to keep the X11 clipboard alive),
+    /// Pin **closes the editor** — the pin is a separate process and has
+    /// no need for its parent to linger. Closer to Save's lifecycle than
+    /// Copy's.
+    ///
+    /// Write-failure surfaces `Err(FlintshotError::...)` and closes,
+    /// matching `handle_save`'s failure shape — the editor can't
+    /// produce a pin without a cache file to point at.
+    fn handle_pin(&self, ctx: &Context) {
+        let dir = resolve_pin_cache_dir_or_fallback();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        match write_pin_to_cache(&self.state, &dir, timestamp) {
+            Ok(path) => {
+                tracing::info!(path = %path.display(), "editor pinned; cache file written");
+                self.publish_outcome(Ok(EditorOutcome::Pinned(path)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "pin write failed; closing editor session");
                 self.publish_outcome(Err(err));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -870,17 +920,7 @@ fn copy_to_clipboard(
     state: &EditorState,
     slot: &mut Option<arboard::Clipboard>,
 ) -> flintshot_core::Result<()> {
-    // Selection-aware output: crop the composed image to the active
-    // selection rect when one is present and non-degenerate. The
-    // 1.0-px threshold matches the render path's selection-rect guard
-    // (`render::render`) and `EditorState::crop`'s degenerate no-op,
-    // so "what the user sees outlined" is exactly "what gets copied".
-    let img = match state.selection.map(Rect::normalized) {
-        Some(n) if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 => {
-            compose_final_region(state, n)
-        }
-        _ => compose_final(state),
-    };
+    let img = compose_output_image(state);
     // Reuse the existing Clipboard handle, or create one if this is
     // the first copy this session.
     let mut clipboard = match slot.take() {
@@ -907,6 +947,61 @@ fn copy_to_clipboard(
     // alive until the editor window closes.
     *slot = Some(clipboard);
     Ok(())
+}
+
+/// Compose the final output image, selection-aware.
+///
+/// When a non-degenerate `state.selection` is active, emits just the
+/// selected region (Flameshot-style): the user expects the active
+/// selection to define what gets output, separate from the Crop tool
+/// which permanently narrows the editor. A degenerate selection
+/// (< 1 px) falls back to the full image, matching the no-selection
+/// behaviour.
+///
+/// Shared by [`copy_to_clipboard`] and the Pin button's
+/// [`write_pin_to_cache`] so WYSIWYG holds by construction — every
+/// output path uses the same composition. The 1.0-px threshold matches
+/// the render path's selection-rect guard and `EditorState::crop`'s
+/// degenerate no-op.
+fn compose_output_image(state: &EditorState) -> image::RgbaImage {
+    match state.selection.map(Rect::normalized) {
+        Some(n) if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 => {
+            compose_final_region(state, n)
+        }
+        _ => compose_final(state),
+    }
+}
+
+/// Compose the pin image (via [`compose_output_image`]) and write it as
+/// a PNG to `<dir>/pin-<timestamp>.png`, creating `dir` first if needed.
+///
+/// `timestamp` is injected (not read from the clock here) so the call is
+/// deterministic and unit-testable — the caller passes
+/// `SystemTime::now().duration_since(UNIX_EPOCH).as_nanos()`. Returns
+/// the written path so the shell can spawn `flintshot pin <path>`.
+///
+/// # Errors
+/// Surfaces [`FlintshotError::Io`] if the dir or file can't be created,
+/// or [`FlintshotError::Image`] if PNG encoding fails.
+fn write_pin_to_cache(
+    state: &EditorState,
+    dir: &std::path::Path,
+    timestamp: u128,
+) -> flintshot_core::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir).map_err(FlintshotError::from)?;
+    let path = dir.join(format!("pin-{timestamp}.png"));
+    let img = compose_output_image(state);
+    img.save_with_format(&path, image::ImageFormat::Png)
+        .map_err(FlintshotError::from)?;
+    Ok(path)
+}
+
+/// Resolve the pin-cache dir, falling back to a per-process temp dir
+/// when the platform has no cache convention (`pin_cache_dir() -> None`).
+/// Exposed as a small helper so `handle_pin` has one call site and the
+/// fallback shape is unit-tested by the `pin_cache_dir_in` seam in core.
+fn resolve_pin_cache_dir_or_fallback() -> std::path::PathBuf {
+    flintshot_core::pin_cache_dir().unwrap_or_else(|| std::env::temp_dir().join("flintshot-pins"))
 }
 
 /// Convert an `eframe::Error` into a [`FlintshotError::Shell`].
@@ -966,5 +1061,96 @@ fn parse_magnifier_key(name: &str) -> egui::Key {
             );
             egui::Key::Space
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flintshot_core::{EditorState, Rect};
+    use std::path::PathBuf;
+
+    fn state_with_image(w: u32, h: u32) -> EditorState {
+        EditorState::new(image::RgbaImage::new(w, h))
+    }
+
+    /// No selection → `compose_output_image` returns the full image
+    /// dimensions (WYSIWYG: what the user sees is what gets pinned).
+    #[test]
+    fn compose_output_image_without_selection_returns_full_image() {
+        let state = state_with_image(20, 10);
+        let out = compose_output_image(&state);
+        assert_eq!(out.dimensions(), (20, 10));
+    }
+
+    /// A degenerate (< 1 px) selection is treated as no selection — the
+    /// full image is returned. Guards against an accidental click
+    /// producing a 0×0 pin.
+    #[test]
+    fn compose_output_image_with_degenerate_selection_falls_back_to_full() {
+        let mut state = state_with_image(20, 10);
+        state.selection = Some(Rect::from_xywh(5.0, 5.0, 0.5, 0.5));
+        let out = compose_output_image(&state);
+        assert_eq!(out.dimensions(), (20, 10));
+    }
+
+    /// A non-degenerate selection crops the output to the selection
+    /// rect — the pin shows just what the user outlined.
+    #[test]
+    fn compose_output_image_with_selection_crops_to_region() {
+        let mut state = state_with_image(20, 10);
+        state.selection = Some(Rect::from_xywh(4.0, 2.0, 8.0, 5.0));
+        let out = compose_output_image(&state);
+        assert_eq!(out.dimensions(), (8, 5));
+    }
+
+    /// `write_pin_to_cache` creates the dir, writes a PNG, and returns a
+    /// path whose filename carries the timestamp.
+    #[test]
+    fn write_pin_to_cache_writes_file_and_returns_timestamped_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("nested").join("pins");
+        let state = state_with_image(4, 4);
+
+        let path =
+            write_pin_to_cache(&state, &cache_dir, 1_700_000_000_000_000_000).expect("write ok");
+
+        assert!(
+            path.is_file(),
+            "pin file should exist at {}",
+            path.display()
+        );
+        assert_eq!(path.file_name().unwrap(), "pin-1700000000000000000.png");
+        assert_eq!(
+            path.parent().unwrap(),
+            cache_dir.as_path(),
+            "file must land in the requested cache dir"
+        );
+    }
+
+    /// Two writes with distinct timestamps produce distinct files
+    /// (uniqueness contract for the timestamp-based filename).
+    #[test]
+    fn write_pin_to_cache_distinct_timestamps_produce_distinct_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_image(2, 2);
+        let a = write_pin_to_cache(&state, dir.path(), 1).unwrap();
+        let b = write_pin_to_cache(&state, dir.path(), 2).unwrap();
+        assert_ne!(a, b, "distinct timestamps must yield distinct paths");
+        assert!(a.is_file() && b.is_file());
+    }
+
+    /// `EditorOutcome::Pinned` round-trips its path through Clone + Eq
+    /// (the shell match in cli.rs relies on the variant carrying the
+    /// path; this guards against an accidental future change to a
+    /// unit-style variant).
+    #[test]
+    fn editor_outcome_pinned_carries_path() {
+        let p = EditorOutcome::Pinned(PathBuf::from("/tmp/pin-1.png"));
+        let cloned = p.clone();
+        assert_eq!(
+            cloned,
+            EditorOutcome::Pinned(PathBuf::from("/tmp/pin-1.png"))
+        );
     }
 }
