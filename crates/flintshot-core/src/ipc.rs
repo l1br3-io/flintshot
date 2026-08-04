@@ -1,6 +1,6 @@
 //! IPC protocol types for `flintshot`.
 //!
-//! Only the *schema* lives here so external clients (the Phase 3 COSMIC
+//! Only the *schema* lives here so external clients (the Phase 3b COSMIC
 //! applet, scripts, future shells) can depend on [`flintshot-core`]
 //! alone. The transport ([`interprocess`](https://docs.rs/interprocess)
 //! local socket) and length-prefixed framing live in `flintshot-app`;
@@ -72,8 +72,8 @@ pub enum Request {
         /// Filesystem path the editor wrote to.
         path: PathBuf,
     },
-    // Forward-compat variants — defined now, unsupported until Phase 3:
-    /// Re-open the most recently saved capture (Phase 3).
+    // Forward-compat variants — defined now, unsupported until their phases:
+    /// Re-open the most recently saved capture (not yet implemented).
     OpenLast,
     /// Pin the most recently saved capture to the desktop by spawning
     /// `flintshot pin <last_saved>` as a worker process. The daemon

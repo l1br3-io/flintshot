@@ -40,7 +40,7 @@ pub struct DaemonState {
     /// The most recently worker-reported save path, or `None` until the
     /// first save arrives. Written by the IPC server's
     /// `Request::ReportSaved` handler; read by `Request::PinLast`
-    /// (Phase 3, Task 004) to re-pin the last capture.
+    /// `Request::PinLast` to re-pin the last capture.
     ///
     /// `Mutex` over `RwLock`: the write is a single `replace` and reads
     /// are rare (only on `PinLast`); the lock is held for microseconds.

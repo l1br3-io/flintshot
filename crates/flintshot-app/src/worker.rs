@@ -76,7 +76,7 @@ impl Spawner for CommandSpawner {
 ///
 /// `CaptureStarted` is emitted the moment a worker is launched. The
 /// worker reports its final editor outcome back over IPC via
-/// `Request::ReportSaved` (Phase 3, Task 002), which the IPC server
+/// `Request::ReportSaved`, which the IPC server
 /// intercepts to store the path + broadcast `Event::Saved`;
 /// `EditorOpened` remains a process-started proxy (there is no
 /// worker→daemon "opened" report). `Quit` requests shutdown (the caller

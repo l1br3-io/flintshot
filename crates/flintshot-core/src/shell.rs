@@ -54,8 +54,8 @@ pub trait EditorShell {
     /// size); `rect.min` carries the desired screen position when the
     /// caller knows it. A default `Rect` (`min == (0, 0)`) signals "let
     /// the WM place the window" — the implementation skips positioning
-    /// in that case. Phase 3's callers (`flintshot pin <path>` and the
-    /// editor's Pin button) both pass a default `Rect`; the Phase 5
+    /// in that case. Both current callers (`flintshot pin <path>` and the
+    /// editor's Pin button) pass a default `Rect`; the Phase 5
     /// live overlay will pass a real screen position so a pin opens
     /// where the capture was taken.
     ///

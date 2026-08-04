@@ -28,7 +28,7 @@ const WINDOW_TITLE: &str = "flintshot — pin";
 ///
 /// `rect`'s dimensions are advisory (the image's own dimensions are the
 /// source of truth for `inner_size`); `rect.min` carries the desired
-/// screen position when the caller knows it. Both Phase 3 callers
+/// screen position when the caller knows it. Both current callers
 /// (`flintshot pin <path>` and the editor's Pin button) pass a default
 /// `Rect` with `min == (0, 0)`, which is interpreted as "let the WM
 /// place the window" — `with_position` is skipped so the compositor

@@ -431,6 +431,45 @@ Categories used below:
   toolkit-specific. Two new `[ui]` config fields (`#[serde(default)]`,
   kebab-case per convention).
 
+#### Phase 3 — Pin-to-desktop
+
+- Pin primitive (Task 001): `EditorShell::run_pin(image, rect)` opens a
+  borderless always-on-top floating window (egui `ViewportBuilder` with
+  `with_decorations(false)`, `with_always_on_top()`,
+  `with_resizable(false)`; `ViewportCommand::StartDrag` on pointer-down).
+  `flintshot pin <path>` loads any image the `image` crate decodes and
+  opens it. Esc / WM-close dismisses. See ADR-0023.
+- `Request::ReportSaved { path }` + worker→daemon feedback loop
+  (Task 002): the worker sends this fire-and-forget after the editor
+  saves/pins; the daemon stores the path as `last_saved` and broadcasts
+  the real `Event::Saved { path }` to IPC subscribers. Closes the Phase 2
+  gap where `EditorOpened` was only a process-started proxy and
+  `Event::Saved` never reached subscribers. Non-fatal on no-daemon
+  (standalone captures). See ADR-0024.
+- `DaemonState` shared-state container (Task 002/004): holds the
+  `SubscriberBus`, `last_saved: Arc<Mutex<Option<PathBuf>>>`, and
+  `next_pin_id: Arc<AtomicU64>` — shared between the IPC server thread
+  and the main-thread tray/hotkey dispatch loop.
+- Editor *Pin* button (Task 003): `EditorOutcome::Pinned(PathBuf)`
+  variant; the "📍 Pin" toolbar button composes the final image
+  (selection-aware, via the shared `compose_output_image` helper),
+  writes it to `pin_cache_dir()/pin-<timestamp>.png`, publishes
+  `Pinned(path)`, and closes the editor. The CLI then spawns
+  `flintshot pin <path>` detached so the pin outlives the editor.
+- `pin_cache_dir()` helper (Task 003) in `flintshot-core::config`
+  (re-exported): resolves `<cache_dir>/flintshot/pins/`; falls back to
+  `temp_dir/flintshot-pins` when the platform has no cache convention.
+  Pure `pin_cache_dir_in(base)` seam for unit tests.
+- `Request::PinLast` daemon handler (Task 004): reads `last_saved`,
+  spawns `flintshot pin <path>` as a worker, broadcasts
+  `Event::Pinned { id }` with a per-daemon monotonic id; empty
+  `last_saved` → `Error { code: "no-last-capture" }`. The third pin
+  entry point (after the CLI and the editor button) — all three
+  converge on `run_pin`.
+- `worker::dispatch` signature refactored (Task 004): the sink closure
+  is replaced by `&DaemonState`, collapsing the bus handle + adding
+  `last_saved` / `next_pin_id` access through one parameter.
+
 ### Changed
 
 - Planning docs reorganized to the canonical OpenCode harness v0.5.0+
@@ -574,6 +613,16 @@ Categories used below:
   text can now be edited mid-string rather than only appended.
 
 ### Notes
+
+- **Phase 3 (Pin-to-desktop) shipped 2026-08-05.** All three pin entry
+  points work end-to-end: `flintshot pin <path>` (CLI), the editor's
+  *Pin* toolbar button, and `Request::PinLast` over IPC. Exit criteria
+  in `docs/specs/phase-3-pin-to-desktop/spec.md` met. The COSMIC panel
+  applet originally bundled under "Phase 3" is deferred to
+  `phase-3b-cosmic-applet` (fresh branch + spec), matching the Phase 2 →
+  Phase 2b precedent — it consumes this phase's `PinLast` and Phase 2's
+  IPC server. No version tag cut; `0.x.y` remains in effect until Phase 4
+  per the versioning policy.
 
 - **Phase 1 (Capture + Editor Window) shipped 2026-07-28.** All
   checkpoints A–F complete; exit criteria in

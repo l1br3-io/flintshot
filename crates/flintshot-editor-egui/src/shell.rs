@@ -22,7 +22,7 @@ const WINDOW_TITLE: &str = "flintshot — annotate";
 /// eframe app: it opens a window sized to the screenshot, runs the
 /// shared `render()` path each frame, and returns [`EditorOutcome`]
 /// when the window closes (`Esc` → `Cancelled`, X button → `Cancelled`
-/// via the slot defaulting). `run_pin` (Phase 3) opens a borderless
+/// via the slot defaulting). `run_pin` opens a borderless
 /// always-on-top window that blits the image and supports drag-to-move.
 #[derive(Default)]
 pub struct EguiShell;
