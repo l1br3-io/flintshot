@@ -19,6 +19,7 @@
 //! [`Request::PinLast`]: flintshot_core::ipc::Request::PinLast
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use flintshot_core::ipc::Event;
@@ -44,15 +45,25 @@ pub struct DaemonState {
     /// `Mutex` over `RwLock`: the write is a single `replace` and reads
     /// are rare (only on `PinLast`); the lock is held for microseconds.
     last_saved: Arc<Mutex<Option<PathBuf>>>,
+    /// Per-daemon monotonic pin id counter, read by `PinLast` to tag
+    /// [`Event::Pinned { id }`]. Relaxed ordering is sufficient — the id
+    /// only needs to be unique within this daemon run (it resets on
+    /// restart; it's a handle for a future "close pin N", not a globally
+    /// unique key).
+    ///
+    /// [`Event::Pinned { id }`]: flintshot_core::ipc::Event::Pinned
+    next_pin_id: Arc<AtomicU64>,
 }
 
 impl DaemonState {
-    /// Fresh state: empty subscriber bus, no last-saved path.
+    /// Fresh state: empty subscriber bus, no last-saved path, pin ids
+    /// start at 0.
     #[must_use]
     pub fn new() -> Self {
         Self {
             bus: SubscriberBus::new(),
             last_saved: Arc::new(Mutex::new(None)),
+            next_pin_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -68,6 +79,7 @@ impl DaemonState {
         Self {
             bus,
             last_saved: Arc::new(Mutex::new(None)),
+            next_pin_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -89,21 +101,29 @@ impl DaemonState {
 
     /// The most recently worker-reported save path, or `None` if no save
     /// has arrived yet. Clones the path (callers are infrequent —
-    /// `PinLast` is the only current reader).
+    /// `PinLast` is the only current reader). The lock is released
+    /// before return, so the caller never holds it across a spawn.
     ///
     /// # Panics
     /// Only on a poisoned mutex.
-    //
-    // Not yet read by production code (Task 004's `PinLast` is the
-    // consumer); the unit tests and the Phase 3 integration test
-    // exercise it today.
-    #[allow(dead_code)]
     #[must_use]
     pub fn last_saved(&self) -> Option<PathBuf> {
         self.last_saved
             .lock()
             .expect("last_saved mutex poisoned")
             .clone()
+    }
+
+    /// Allocate the next monotonic pin id. Used by `PinLast` to tag
+    /// [`Event::Pinned { id }`]. Ids start at 0 and increment for each
+    /// pin the daemon spawns; they reset on daemon restart and are not
+    /// globally unique — they're a per-daemon handle for a future "close
+    /// pin N" feature.
+    ///
+    /// [`Event::Pinned { id }`]: flintshot_core::ipc::Event::Pinned
+    #[must_use]
+    pub fn next_pin_id(&self) -> u64 {
+        self.next_pin_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -234,5 +254,28 @@ mod tests {
         let state = DaemonState::new();
         state.record_save(PathBuf::from("/tmp/lonely.png"));
         assert_eq!(state.last_saved(), Some(PathBuf::from("/tmp/lonely.png")));
+    }
+
+    /// `next_pin_id` returns monotonically increasing ids, starting at 0.
+    /// Each call hands out a distinct value — the daemon uses these to
+    /// tag `Event::Pinned { id }` so a future "close pin N" can address
+    /// a specific pin.
+    #[test]
+    fn next_pin_id_is_monotonic_from_zero() {
+        let state = DaemonState::new();
+        assert_eq!(state.next_pin_id(), 0, "first id must be 0");
+        assert_eq!(state.next_pin_id(), 1);
+        assert_eq!(state.next_pin_id(), 2);
+    }
+
+    /// Clones of `DaemonState` share the pin-id counter — the IPC server
+    /// thread and the dispatch loop see the same sequence.
+    #[test]
+    fn next_pin_id_is_shared_across_clones() {
+        let state = DaemonState::new();
+        let clone = state.clone();
+        assert_eq!(state.next_pin_id(), 0);
+        assert_eq!(clone.next_pin_id(), 1, "clone must see the increment");
+        assert_eq!(state.next_pin_id(), 2);
     }
 }

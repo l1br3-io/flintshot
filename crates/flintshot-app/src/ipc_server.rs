@@ -344,12 +344,9 @@ async fn handle_connection(
 
         // Everything else routes through the worker dispatch table:
         // capture requests spawn a `flintshot` child + broadcast
-        // CaptureStarted; Quit signals shutdown; unbuilt phases
-        // broadcast an `unsupported` Error.
-        let outcome =
-            crate::worker::dispatch(&request, &crate::worker::CommandSpawner, &mut |event| {
-                state.bus.broadcast(event);
-            })?;
+        // CaptureStarted; PinLast spawns a pin worker; Quit signals
+        // shutdown; unbuilt phases broadcast an `unsupported` Error.
+        let outcome = crate::worker::dispatch(&request, &crate::worker::CommandSpawner, &state)?;
         if matches!(outcome, crate::worker::DispatchOutcome::Shutdown) {
             tracing::info!("IPC Request::Quit received; signalling daemon shutdown");
             // Wake every waiter (the IPC accept loop AND the daemon's

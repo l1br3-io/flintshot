@@ -70,22 +70,26 @@ impl Spawner for CommandSpawner {
     }
 }
 
-/// Dispatch a [`Request`]: spawn the right worker (if any), emit the
-/// resulting [`Event`]s to `sink`, and report whether the daemon should
-/// keep running or shut down.
+/// Dispatch a [`Request`]: spawn the right worker (if any), broadcast
+/// the resulting [`Event`]s via `state.bus`, and report whether the
+/// daemon should keep running or shut down.
 ///
 /// `CaptureStarted` is emitted the moment a worker is launched. The
 /// worker reports its final editor outcome back over IPC via
 /// `Request::ReportSaved` (Phase 3, Task 002), which the IPC server
-/// intercepts to store the path + broadcast `Event::Saved`; until Task
-/// 003 lands, `EditorOpened` remains a process-started proxy (there is
-/// no worker→daemon "opened" report). `Quit` requests shutdown (the
-/// caller performs it). Requests for unbuilt phases emit
+/// intercepts to store the path + broadcast `Event::Saved`;
+/// `EditorOpened` remains a process-started proxy (there is no
+/// worker→daemon "opened" report). `Quit` requests shutdown (the caller
+/// performs it). `PinLast` reads `state.last_saved` and spawns
+/// `flintshot pin <path>`, tagging the result with a monotonic pin id
+/// from `state.next_pin_id()`. Requests for unbuilt phases emit
 /// `Error { code: "unsupported" }`.
 ///
 /// # Errors
 /// Propagates a [`Spawner::spawn`] failure (no event is emitted on
-/// failure).
+/// failure for capture requests; for `PinLast` the error propagates
+/// before the `Pinned` event is broadcast, mirroring capture's
+/// failure-ordering).
 #[allow(
     clippy::wildcard_enum_match_arm,
     reason = "Request is #[non_exhaustive]; `_` is mandatory and groups the unsupported cases"
@@ -93,34 +97,64 @@ impl Spawner for CommandSpawner {
 pub fn dispatch(
     request: &Request,
     spawner: &dyn Spawner,
-    sink: &mut impl FnMut(Event),
+    state: &crate::daemon_state::DaemonState,
 ) -> eyre::Result<DispatchOutcome> {
     match request {
         Request::CaptureRegion { monitor, delay_ms } => {
             let argv = region_argv(*monitor, *delay_ms);
-            sink(Event::CaptureStarted);
+            state.bus.broadcast(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
             // The worker process is confirmed launched (spawn returned
             // Ok). The worker reports `Saved` back over IPC
             // (`Request::ReportSaved`, handled in `handle_connection`);
             // `EditorOpened` has no worker→daemon report yet, so it
             // remains a process-started proxy.
-            sink(Event::EditorOpened);
+            state.bus.broadcast(Event::EditorOpened);
             Ok(DispatchOutcome::Continue)
         }
         Request::CaptureFullscreen { monitor } => {
             let argv = fullscreen_argv(*monitor);
-            sink(Event::CaptureStarted);
+            state.bus.broadcast(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
-            sink(Event::EditorOpened);
+            state.bus.broadcast(Event::EditorOpened);
             Ok(DispatchOutcome::Continue)
         }
         Request::Quit => Ok(DispatchOutcome::Shutdown),
-        // Subscribe (handled by the connection layer in Task 004),
-        // OpenLast/PinLast/UploadLast (their phases), and any future
-        // variant: report unsupported rather than pretending to act.
+        // RATIONALE: PinLast reuses the worker-spawn model (ADR-0019)
+        // and the pin-as-process model (ADR-0023) — the daemon spawns
+        // `flintshot pin <path>` exactly like a capture, so the pin
+        // outlives the daemon and crashes independently. `last_saved`
+        // is populated by the editor's ReportSaved (Task 002) or
+        // ReportPinned-on-save (Task 003). The path is cloned out
+        // before spawn so the Mutex isn't held across fork/exec.
+        Request::PinLast => {
+            // RATIONALE: PinLast reuses the worker-spawn model (ADR-0019)
+            // and the pin-as-process model (ADR-0023) — the daemon spawns
+            // `flintshot pin <path>` exactly like a capture, so the pin
+            // outlives the daemon and crashes independently. `last_saved`
+            // is populated by the editor's ReportSaved (Task 002) or the
+            // editor's Pin button (Task 003). The path is cloned out
+            // before spawn so the Mutex isn't held across fork/exec.
+            if let Some(path) = state.last_saved() {
+                let argv = pin_argv(&path);
+                spawn_argv(spawner, &argv)?;
+                let id = state.next_pin_id();
+                state.bus.broadcast(Event::Pinned { id });
+            } else {
+                state.bus.broadcast(Event::Error {
+                    code: "no-last-capture".to_string(),
+                    message: "no capture has been saved yet; save or \
+                        pin from the editor first"
+                        .to_string(),
+                });
+            }
+            Ok(DispatchOutcome::Continue)
+        }
+        // Subscribe (handled by the connection layer), OpenLast /
+        // UploadLast (their phases), and any future variant: report
+        // unsupported rather than pretending to act.
         _ => {
-            sink(Event::Error {
+            state.bus.broadcast(Event::Error {
                 code: "unsupported".to_string(),
                 message: format!(
                     "`{}` is not implemented in this phase of flintshot",
@@ -195,7 +229,21 @@ fn variant_name(request: &Request) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon_state::DaemonState;
+    use crate::ipc_server::SubscriberBus;
     use std::sync::Mutex;
+
+    /// Drain every pending event from a broadcast receiver into a `Vec`.
+    /// `dispatch` broadcasts synchronously, so by the time it returns
+    /// every event is already in the channel — `try_recv` collects them
+    /// without an async runtime.
+    fn drain_events(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
 
     /// Test spawner: records every spawn's argv, never forks.
     struct RecordingSpawner {
@@ -236,14 +284,15 @@ mod tests {
     #[test]
     fn capture_region_spawns_region_subcommand_and_emits_started() {
         let spawner = RecordingSpawner::new();
-        let mut events = Vec::new();
+        let state = DaemonState::new();
+        let mut rx = state.bus.subscribe();
         let outcome = dispatch(
             &Request::CaptureRegion {
                 monitor: Some(1),
                 delay_ms: 200,
             },
             &spawner,
-            &mut |ev| events.push(ev),
+            &state,
         )
         .unwrap();
 
@@ -259,7 +308,7 @@ mod tests {
             ]]
         );
         assert_eq!(
-            events,
+            drain_events(&mut rx),
             vec![Event::CaptureStarted, Event::EditorOpened],
             "CaptureStarted on receipt, EditorOpened once the worker is confirmed running"
         );
@@ -268,13 +317,14 @@ mod tests {
     #[test]
     fn capture_region_omits_flags_at_defaults() {
         let spawner = RecordingSpawner::new();
+        let state = DaemonState::new();
         dispatch(
             &Request::CaptureRegion {
                 monitor: None,
                 delay_ms: 0,
             },
             &spawner,
-            &mut |_| {},
+            &state,
         )
         .unwrap();
         assert_eq!(
@@ -287,24 +337,29 @@ mod tests {
     #[test]
     fn capture_fullscreen_spawns_fullscreen_subcommand() {
         let spawner = RecordingSpawner::new();
-        let mut events = Vec::new();
+        let state = DaemonState::new();
+        let mut rx = state.bus.subscribe();
         dispatch(
             &Request::CaptureFullscreen { monitor: None },
             &spawner,
-            &mut |ev| events.push(ev),
+            &state,
         )
         .unwrap();
         assert_eq!(spawner.snapshot(), vec![vec!["fullscreen".to_string()]]);
-        assert_eq!(events, vec![Event::CaptureStarted, Event::EditorOpened]);
+        assert_eq!(
+            drain_events(&mut rx),
+            vec![Event::CaptureStarted, Event::EditorOpened]
+        );
     }
 
     #[test]
     fn capture_fullscreen_passes_monitor() {
         let spawner = RecordingSpawner::new();
+        let state = DaemonState::new();
         dispatch(
             &Request::CaptureFullscreen { monitor: Some(2) },
             &spawner,
-            &mut |_| {},
+            &state,
         )
         .unwrap();
         assert_eq!(
@@ -329,39 +384,43 @@ mod tests {
     #[test]
     fn quit_signals_shutdown_without_spawning_or_emitting() {
         let spawner = RecordingSpawner::new();
-        let mut events = Vec::new();
-        let outcome = dispatch(&Request::Quit, &spawner, &mut |ev| events.push(ev)).unwrap();
+        let state = DaemonState::new();
+        let mut rx = state.bus.subscribe();
+        let outcome = dispatch(&Request::Quit, &spawner, &state).unwrap();
         assert_eq!(outcome, DispatchOutcome::Shutdown);
         assert!(
             spawner.snapshot().is_empty(),
             "Quit must not spawn a worker"
         );
         assert!(
-            events.is_empty(),
+            drain_events(&mut rx).is_empty(),
             "Quit signals shutdown; it does not emit an event itself"
         );
     }
 
     #[test]
     fn unsupported_requests_emit_error_and_continue() {
+        // PinLast is handled (see `pin_last_*` tests); only Subscribe,
+        // OpenLast, and UploadLast remain unsupported.
         let cases = [
             Request::Subscribe,
             Request::OpenLast,
-            Request::PinLast,
             Request::UploadLast {
                 backend: "imgur".into(),
             },
         ];
         for request in cases {
             let spawner = RecordingSpawner::new();
-            let mut events = Vec::new();
-            let outcome = dispatch(&request, &spawner, &mut |ev| events.push(ev)).unwrap();
+            let state = DaemonState::new();
+            let mut rx = state.bus.subscribe();
+            let outcome = dispatch(&request, &spawner, &state).unwrap();
             assert_eq!(
                 outcome,
                 DispatchOutcome::Continue,
                 "stayed running for {request:?}"
             );
             assert!(spawner.snapshot().is_empty(), "no worker for {request:?}");
+            let events = drain_events(&mut rx);
             assert_eq!(events.len(), 1, "exactly one event for {request:?}");
             match &events[0] {
                 Event::Error { code, message } => {
@@ -375,22 +434,123 @@ mod tests {
 
     #[test]
     fn spawn_failure_propagates_after_capture_started() {
-        let mut events = Vec::new();
+        let state = DaemonState::new();
+        let mut rx = state.bus.subscribe();
         let result = dispatch(
             &Request::CaptureRegion {
                 monitor: None,
                 delay_ms: 0,
             },
             &FailSpawner,
-            &mut |ev| events.push(ev),
+            &state,
         );
         assert!(result.is_err(), "spawn failure must propagate");
         // CaptureStarted was emitted "on receipt" (before spawn); the
         // EditorOpened event is suppressed since the worker never ran.
         assert_eq!(
-            events,
+            drain_events(&mut rx),
             vec![Event::CaptureStarted],
             "CaptureStarted on receipt; EditorOpened suppressed on spawn failure"
         );
     }
+
+    /// `PinLast` with a populated `last_saved` spawns `flintshot pin
+    /// <path>`, broadcasts exactly one `Event::Pinned { id }`, and
+    /// returns `Continue`.
+    #[test]
+    fn pin_last_with_saved_path_spawns_pin_and_emits_pinned() {
+        let spawner = RecordingSpawner::new();
+        let state = DaemonState::new();
+        state.record_save(std::path::PathBuf::from("/tmp/x.png"));
+        let mut rx = state.bus.subscribe();
+
+        let outcome = dispatch(&Request::PinLast, &spawner, &state).unwrap();
+
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["pin".to_string(), "/tmp/x.png".into()]],
+            "PinLast must spawn `flintshot pin <last_saved>`"
+        );
+        let events = drain_events(&mut rx);
+        assert_eq!(events.len(), 1, "exactly one event (Pinned)");
+        assert!(
+            matches!(events[0], Event::Pinned { .. }),
+            "expected Pinned event, got {:?}",
+            events[0]
+        );
+    }
+
+    /// `PinLast` with no prior save broadcasts a clear
+    /// `Error { code: "no-last-capture" }` and spawns nothing.
+    #[test]
+    fn pin_last_without_saved_path_emits_no_last_capture_error() {
+        let spawner = RecordingSpawner::new();
+        let state = DaemonState::new();
+        let mut rx = state.bus.subscribe();
+
+        let outcome = dispatch(&Request::PinLast, &spawner, &state).unwrap();
+
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(
+            spawner.snapshot().is_empty(),
+            "no path → no spawn (nothing to pin)"
+        );
+        let events = drain_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Error { code, message } => {
+                assert_eq!(code, "no-last-capture");
+                assert!(!message.is_empty(), "error must carry a human message");
+            }
+            other => panic!("expected no-last-capture Error, got {other:?}"),
+        }
+    }
+
+    /// Consecutive `PinLast` calls produce strictly increasing pin ids
+    /// (the `next_pin_id` counter is per-daemon monotonic).
+    #[test]
+    fn pin_last_ids_are_monotonic_across_calls() {
+        let spawner = RecordingSpawner::new();
+        let state = DaemonState::new();
+        state.record_save(std::path::PathBuf::from("/tmp/a.png"));
+
+        let mut rx1 = state.bus.subscribe();
+        dispatch(&Request::PinLast, &spawner, &state).unwrap();
+        let ev1 = drain_events(&mut rx1).pop().expect("first Pinned event");
+
+        let mut rx2 = state.bus.subscribe();
+        dispatch(&Request::PinLast, &spawner, &state).unwrap();
+        let ev2 = drain_events(&mut rx2).pop().expect("second Pinned event");
+
+        let (Event::Pinned { id: id1 }, Event::Pinned { id: id2 }) = (ev1, ev2) else {
+            panic!("both events must be Pinned");
+        };
+        assert!(
+            id2 > id1,
+            "second pin id ({id2}) must exceed the first ({id1})"
+        );
+    }
+
+    /// `PinLast` spawn failure propagates the error *before* the
+    /// `Pinned` event is broadcast (mirrors capture's failure ordering).
+    #[test]
+    fn pin_last_spawn_failure_propagates_without_emitting_pinned() {
+        let state = DaemonState::new();
+        state.record_save(std::path::PathBuf::from("/tmp/x.png"));
+        let mut rx = state.bus.subscribe();
+
+        let result = dispatch(&Request::PinLast, &FailSpawner, &state);
+        assert!(result.is_err(), "PinLast spawn failure must propagate");
+        assert!(
+            drain_events(&mut rx).is_empty(),
+            "no Pinned event on spawn failure"
+        );
+    }
+
+    /// Suppress unused-import warning for `SubscriberBus` — kept so the
+    /// test module's imports document which bus type `DaemonState`
+    /// carries without readers jumping files.
+    #[allow(dead_code)]
+    type _SubscriberBusImport = SubscriberBus;
 }

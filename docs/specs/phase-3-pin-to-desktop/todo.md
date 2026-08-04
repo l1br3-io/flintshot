@@ -21,7 +21,7 @@ project resumes from.
 **Checkpoint C** — editor *Pin* button works end-to-end (pin appears, editor closes, pin persists).
 
 ## Phase 3.D — PinLast over IPC
-- [ ] Task 004 — Daemon handles `Request::PinLast` (reads `last_saved`, spawns pin worker, emits `Event::Pinned { id }`; empty → `Error { code: "no-last-capture" }`) → [`tasks/004-pin-last-ipc.md`](tasks/004-pin-last-ipc.md)
+- [x] Task 004 — Daemon handles `Request::PinLast` (reads `last_saved`, spawns pin worker, emits `Event::Pinned { id }`; empty → `Error { code: "no-last-capture" }`) → [`tasks/004-pin-last-ipc.md`](tasks/004-pin-last-ipc.md)
 
 **Checkpoint D** — full Phase 3 exit criteria met (all three pin entry points work).
 

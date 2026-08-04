@@ -75,7 +75,11 @@ pub enum Request {
     // Forward-compat variants — defined now, unsupported until Phase 3:
     /// Re-open the most recently saved capture (Phase 3).
     OpenLast,
-    /// Pin the most recently saved capture to the desktop (Phase 3).
+    /// Pin the most recently saved capture to the desktop by spawning
+    /// `flintshot pin <last_saved>` as a worker process. The daemon
+    /// tracks `last_saved` from worker `ReportSaved` messages; if no
+    /// capture has been saved yet, the daemon broadcasts
+    /// [`Event::Error`] with `code: "no-last-capture"`.
     PinLast,
     /// Upload the most recently saved capture via the named backend
     /// (Phase 4).
@@ -115,10 +119,17 @@ pub enum Event {
         /// Human-readable message.
         message: String,
     },
-    // Phase 3/4 variants — defined now, emitted later:
-    /// A capture was pinned to the desktop (Phase 3).
+    // Phase 3/4 variants — `Pinned` is live (emitted by PinLast);
+    // `Uploaded` awaits Phase 4:
+    /// A capture was pinned to the desktop by [`Request::PinLast`].
+    ///
+    /// Emitted *after* the pin worker is confirmed spawned. The `id` is
+    /// a per-daemon monotonic counter (starts at 0, increments per
+    /// pin); it resets on daemon restart and is **not** globally
+    /// unique — it's a handle for a future "close pin N" / "list pins"
+    /// feature, not a stable key.
     Pinned {
-        /// Opaque id the pin window is tracked under.
+        /// Opaque per-daemon id the pin is tracked under.
         id: u64,
     },
     /// A capture was uploaded (Phase 4).
