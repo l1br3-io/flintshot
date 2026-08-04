@@ -1,6 +1,7 @@
 ---
-status: active
+status: shipped
 started: 2026-07-28
+shipped: 2026-08-04
 ---
 
 # Spec — Phase 2: Daemon, Tray, Hotkeys, IPC

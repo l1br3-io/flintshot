@@ -1,6 +1,7 @@
 ---
-status: draft
+status: shipped
 started: 2026-08-03
+shipped: 2026-08-04
 ---
 
 # Spec — Phase 2b: Annotation Tools + Magnifier
