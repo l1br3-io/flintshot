@@ -43,7 +43,7 @@ pub enum Command {
     Fullscreen(FullscreenArgs),
     /// Print the resolved configuration as TOML to stdout.
     Config,
-    /// Open a pin-to-desktop window for an existing image. [Phase 3]
+    /// Open a pin-to-desktop window for an existing image.
     Pin(PinArgs),
     /// Upload an image to a backend and print the resulting URL. [Phase 4]
     Upload(UploadArgs),
@@ -330,7 +330,7 @@ fn spawn_pin_window(_path: &std::path::Path) -> Result<()> {
 /// Worker → daemon: report `path` (the editor's save or pin-cache
 /// location) so the daemon can broadcast [`Event::Saved`] to IPC
 /// subscribers and record it as `last_saved` for `Request::PinLast`
-/// (Phase 3, Task 004).
+/// record the path for `Request::PinLast`.
 ///
 /// Called from both the `Saved` and `Pinned` arms — a pin writes to the
 /// pin-cache dir and its path is just as valid a "last capture" for
@@ -392,7 +392,7 @@ fn write_png(img: &image::RgbaImage, path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("writing PNG to {}", path.display()))
 }
 
-/// `flintshot pin <path>` — Phase 3.
+/// `flintshot pin <path>` — pin-to-desktop.
 ///
 /// Loads an image from disk (any format the `image` crate decodes) and
 /// opens a borderless always-on-top floating window showing it. The pin

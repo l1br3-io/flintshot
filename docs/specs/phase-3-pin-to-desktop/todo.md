@@ -26,6 +26,6 @@ project resumes from.
 **Checkpoint D** — full Phase 3 exit criteria met (all three pin entry points work).
 
 ## Phase 3.E — Hardening
-- [ ] Task 005 — Boundary test, CHANGELOG, ADR-0023 + ADR-0024, TEST_MATRIX rows, Wayland caveat → [`tasks/005-hardening.md`](tasks/005-hardening.md)
+- [x] Task 005 — Boundary test, CHANGELOG, ADR-0023 + ADR-0024, TEST_MATRIX rows, Wayland caveat → [`tasks/005-hardening.md`](tasks/005-hardening.md)
 
 **Checkpoint E** — Phase 3 ready for review.
