@@ -53,6 +53,25 @@ pub enum Request {
     /// Open a long-lived subscription stream; the client receives
     /// [`Event`]s as they happen.
     Subscribe,
+    /// Worker → daemon: report that the editor saved to `path`.
+    ///
+    /// Direction inversion: every other variant in this enum is
+    /// client → daemon (a client asks, the daemon acts). `ReportSaved`
+    /// flows the other way — a worker process (spawned by the daemon
+    /// for `CaptureRegion`/`CaptureFullscreen`) reports its final
+    /// editor outcome back to the daemon. The daemon is still the IPC
+    /// server; this is a request the daemon *receives* rather than
+    /// *acts on* in the spawn sense.
+    ///
+    /// Fire-and-forget: the daemon stores the path as its last-saved
+    /// capture (so [`PinLast`](Self::PinLast) can re-pin it) and
+    /// broadcasts [`Event::Saved`] to subscribers. No response is sent
+    /// (matching [`Subscribe`](Self::Subscribe)'s no-response shape);
+    /// a missing daemon (standalone capture) is silent and non-fatal.
+    ReportSaved {
+        /// Filesystem path the editor wrote to.
+        path: PathBuf,
+    },
     // Forward-compat variants — defined now, unsupported until Phase 3:
     /// Re-open the most recently saved capture (Phase 3).
     OpenLast,
@@ -186,6 +205,9 @@ mod tests {
             Request::CaptureFullscreen { monitor: Some(1) },
             Request::Quit,
             Request::Subscribe,
+            Request::ReportSaved {
+                path: PathBuf::from("/tmp/x.png"),
+            },
             Request::OpenLast,
             Request::PinLast,
             Request::UploadLast {

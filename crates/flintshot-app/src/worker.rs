@@ -74,10 +74,14 @@ impl Spawner for CommandSpawner {
 /// resulting [`Event`]s to `sink`, and report whether the daemon should
 /// keep running or shut down.
 ///
-/// `CaptureStarted` is emitted the moment a worker is launched; later
-/// events (`EditorOpened`/`Saved`) need the worker to report back, which
-/// is wired in Task 006. `Quit` requests shutdown (the caller performs
-/// it). Requests for unbuilt phases emit `Error { code: "unsupported" }`.
+/// `CaptureStarted` is emitted the moment a worker is launched. The
+/// worker reports its final editor outcome back over IPC via
+/// `Request::ReportSaved` (Phase 3, Task 002), which the IPC server
+/// intercepts to store the path + broadcast `Event::Saved`; until Task
+/// 003 lands, `EditorOpened` remains a process-started proxy (there is
+/// no worker→daemon "opened" report). `Quit` requests shutdown (the
+/// caller performs it). Requests for unbuilt phases emit
+/// `Error { code: "unsupported" }`.
 ///
 /// # Errors
 /// Propagates a [`Spawner::spawn`] failure (no event is emitted on
@@ -97,9 +101,10 @@ pub fn dispatch(
             sink(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
             // The worker process is confirmed launched (spawn returned
-            // Ok). True "editor window opened" detection needs the
-            // worker to report back over IPC; until then we emit
-            // `EditorOpened` as a process-started proxy.
+            // Ok). The worker reports `Saved` back over IPC
+            // (`Request::ReportSaved`, handled in `handle_connection`);
+            // `EditorOpened` has no worker→daemon report yet, so it
+            // remains a process-started proxy.
             sink(Event::EditorOpened);
             Ok(DispatchOutcome::Continue)
         }

@@ -67,6 +67,43 @@ pub(crate) fn delegate_to(
     })
 }
 
+/// Worker → daemon fire-and-forget report: send a `Request` (currently
+/// [`Request::ReportSaved`], soon [`Request::ReportPinned`] in Task 003)
+/// to a running daemon and return the outcome. Never fatal — a missing
+/// daemon is the common case for standalone captures, and transport
+/// errors are logged + mapped to [`DelegateOutcome::NoDaemon`] so the
+/// caller's editor outcome is unaffected.
+///
+/// Returns the [`DelegateOutcome`] so tests (and callers that care) can
+/// distinguish "sent" from "no daemon". `report` (no path suffix) is the
+/// production wrapper; `report_to` is the testable seam.
+///
+/// [`Request::ReportSaved`]: flintshot_core::ipc::Request::ReportSaved
+pub(crate) fn report(request: &Request) -> DelegateOutcome {
+    report_to(None, request)
+}
+
+/// Testable seam for [`report`]: send against an explicit socket path.
+pub(crate) fn report_to(override_path: Option<&Path>, request: &Request) -> DelegateOutcome {
+    match delegate_to(override_path, request) {
+        Ok(outcome @ DelegateOutcome::Delegated) => {
+            tracing::debug!("reported outcome to daemon");
+            outcome
+        }
+        Ok(outcome @ DelegateOutcome::NoDaemon) => {
+            tracing::debug!("no daemon reachable; outcome report skipped (standalone capture)");
+            outcome
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not report outcome to daemon; continuing (editor outcome unaffected)"
+            );
+            DelegateOutcome::NoDaemon
+        }
+    }
+}
+
 /// Does this connect error mean "no daemon" (fall back) vs a real fault?
 fn is_no_daemon(error: &std::io::Error) -> bool {
     use std::io::ErrorKind;
@@ -90,5 +127,23 @@ mod tests {
         )
         .expect("absent path should not error");
         assert_eq!(outcome, DelegateOutcome::NoDaemon);
+    }
+
+    /// A worker reporting a save with no daemon reachable must not fail
+    /// — `report_to` maps "no daemon" to a benign `NoDaemon` outcome
+    /// (the standalone-capture path), never an `Err`.
+    #[test]
+    fn report_saved_to_absent_socket_is_non_fatal() {
+        let outcome = report_to(
+            Some(Path::new("/this/does/not/exist/flintshot-report.sock")),
+            &Request::ReportSaved {
+                path: std::path::PathBuf::from("/tmp/x.png"),
+            },
+        );
+        assert_eq!(
+            outcome,
+            DelegateOutcome::NoDaemon,
+            "no daemon must map to NoDaemon, not panic or error"
+        );
     }
 }

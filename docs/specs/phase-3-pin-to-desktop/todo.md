@@ -11,7 +11,7 @@ project resumes from.
 **Checkpoint A** — `flintshot pin <path>` opens a borderless always-on-top window; Esc/close dismisses it.
 
 ## Phase 3.B — Worker→daemon outcome reporting
-- [ ] Task 002 — `Request::ReportSaved { path }` (daemon stores `last_saved` + broadcasts `Event::Saved`; worker sends fire-and-forget on `Saved`) → [`tasks/002-report-saved.md`](tasks/002-report-saved.md)
+- [x] Task 002 — `Request::ReportSaved { path }` (daemon stores `last_saved` + broadcasts `Event::Saved`; worker sends fire-and-forget on `Saved`) → [`tasks/002-report-saved.md`](tasks/002-report-saved.md)
 
 **Checkpoint B** — daemon-driven capture whose editor saves emits `Event::Saved { path }` to IPC subscribers.
 
