@@ -264,6 +264,7 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
     match outcome {
         EditorOutcome::Saved(p) => {
             tracing::info!(path = %p.display(), "editor saved");
+            report_editor_save(&p);
         }
         EditorOutcome::CopiedToClipboard => {
             tracing::info!("editor copied to clipboard");
@@ -278,6 +279,31 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Worker → daemon: tell the running daemon that the editor saved to
+/// `path` so it can broadcast [`Event::Saved`] to IPC subscribers and
+/// record the path for `Request::PinLast` (Phase 3, Task 004).
+///
+/// Fire-and-forget and never fatal: standalone captures (no daemon) log
+/// at `debug` and continue; the editor outcome stands either way. The
+/// send happens *after* the editor window closes (we only report a
+/// finalised outcome). Task 003 will add a sibling `Pinned(path)` report
+/// by routing through the same [`report`](crate::ipc_client::report)
+/// seam with a different [`Request`].
+///
+/// [`Event::Saved`]: flintshot_core::ipc::Event::Saved
+#[cfg(feature = "egui")]
+fn report_editor_save(path: &std::path::Path) {
+    crate::ipc_client::report(&Request::ReportSaved {
+        path: path.to_path_buf(),
+    });
+}
+
+/// Headless-build fallback: matches [`run_editor_for_capture`]'s feature
+/// gate so the helper is defined on every feature set (the call site is
+/// uniformly gated).
+#[cfg(not(feature = "egui"))]
+fn report_editor_save(_path: &std::path::Path) {}
 
 /// Headless-build fallback: editor is unavailable without the `egui`
 /// feature. The image argument is accepted (and dropped) purely so the

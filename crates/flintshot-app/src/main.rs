@@ -8,6 +8,7 @@
 mod cli;
 mod config_watcher;
 mod daemon;
+mod daemon_state;
 mod hotkeys;
 mod ipc_client;
 mod ipc_server;

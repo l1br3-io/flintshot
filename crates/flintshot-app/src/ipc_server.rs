@@ -132,7 +132,7 @@ impl SubscriberBus {
     }
 
     /// Subscribe, returning a receiver of the [`Event`] stream.
-    fn subscribe(&self) -> broadcast::Receiver<IpcEvent> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<IpcEvent> {
         self.tx.subscribe()
     }
 }
@@ -151,37 +151,58 @@ type Listener = interprocess::local_socket::tokio::Listener;
 /// The tokio local-socket stream type.
 pub(crate) type Stream = interprocess::local_socket::tokio::Stream;
 
-/// The IPC server: owns the listener, the subscriber bus, and a
-/// shutdown signal.
+/// The IPC server: owns the listener, shared daemon state (subscriber
+/// bus + `last_saved`), and a shutdown signal.
 pub struct IpcServer {
     listener: Listener,
-    bus: SubscriberBus,
+    state: crate::daemon_state::DaemonState,
     shutdown: Arc<Notify>,
 }
 
 impl IpcServer {
     /// Bind a listener on [`socket_path`] (`override_path` honoured),
     /// reclaiming any stale socket file on Unix via `try_overwrite`,
-    /// with a fresh subscriber bus.
+    /// with fresh daemon state.
     ///
     /// # Errors
     /// - If the socket name can't be resolved.
     /// - If binding the listener fails (e.g. a live socket already
     ///   holds the path and can't be replaced).
-    //
-    // The daemon uses `bind_with_bus` (it shares a bus with the tray
-    // path); this convenience is used by the integration tests.
+    ///
+    // The daemon uses `bind_with_state` (it shares state with the
+    // tray/hotkey path); this convenience is used by the integration
+    // tests.
     #[allow(dead_code)]
     pub fn bind(override_path: Option<&Path>) -> eyre::Result<Self> {
-        Self::bind_with_bus(override_path, SubscriberBus::new())
+        Self::bind_with_state(override_path, crate::daemon_state::DaemonState::new())
     }
 
-    /// Like [`bind`](Self::bind) but uses an externally-provided
-    /// `bus`. The daemon shares one bus between the IPC server (which
-    /// fans `Event`s to IPC subscribers) and its own tray/hotkey
-    /// dispatch path, so a capture started from the tray reaches IPC
-    /// subscribers and vice versa.
+    /// Like [`bind`](Self::bind) but reuses an externally-provided
+    /// [`SubscriberBus`]. The bus is wrapped in fresh
+    /// [`DaemonState`]; prefer [`bind_with_state`](Self::bind_with_state)
+    /// for new call sites that want to share `last_saved` too.
+    //
+    // The daemon now uses `bind_with_state` directly (it shares the
+    // whole `DaemonState`); this convenience is retained for callers
+    // (and tests) that only have a bus.
+    #[allow(dead_code)]
     pub fn bind_with_bus(override_path: Option<&Path>, bus: SubscriberBus) -> eyre::Result<Self> {
+        Self::bind_with_state(
+            override_path,
+            crate::daemon_state::DaemonState::with_bus(bus),
+        )
+    }
+
+    /// Like [`bind`](Self::bind) but uses externally-provided
+    /// [`DaemonState`]. The daemon shares one state struct between the
+    /// IPC server (which receives `ReportSaved` and fans `Event`s to
+    /// subscribers) and its own tray/hotkey dispatch path, so a capture
+    /// started from the tray reaches IPC subscribers and the
+    /// `last_saved` path is consistent across readers.
+    pub fn bind_with_state(
+        override_path: Option<&Path>,
+        state: crate::daemon_state::DaemonState,
+    ) -> eyre::Result<Self> {
         let path = socket_path(override_path);
         let name = socket_name(&path)?;
         let listener = interprocess::local_socket::ListenerOptions::new()
@@ -192,20 +213,25 @@ impl IpcServer {
         tracing::info!(path = %path.display(), "IPC server bound");
         Ok(Self {
             listener,
-            bus,
+            state,
             shutdown: Arc::new(Notify::new()),
         })
     }
 
     /// A cloneable handle to broadcast [`Event`]s to subscribers. The
     /// daemon keeps one and calls [`SubscriberBus::broadcast`] as
-    /// capture outcomes arrive (Task 006).
-    //
-    // Only the integration test uses this externally; the daemon's
-    // `handle_connection` broadcasts via its own bus clone.
+    /// capture outcomes arrive.
     #[allow(dead_code)]
     pub fn bus(&self) -> SubscriberBus {
-        self.bus.clone()
+        self.state.bus.clone()
+    }
+
+    /// A cloneable handle to the shared daemon state (subscriber bus +
+    /// `last_saved`). Used by integration tests to assert state changes
+    /// after a round-trip.
+    #[allow(dead_code)]
+    pub fn state(&self) -> crate::daemon_state::DaemonState {
+        self.state.clone()
     }
 
     /// The daemon-wide shutdown signal. `Request::Quit` (via
@@ -226,7 +252,7 @@ impl IpcServer {
     /// indicate the listener itself broke).
     pub async fn serve(self) -> eyre::Result<()> {
         let shutdown = Arc::clone(&self.shutdown);
-        let bus = self.bus.clone();
+        let state = self.state.clone();
         let listener = self.listener;
         loop {
             tokio::select! {
@@ -243,10 +269,10 @@ impl IpcServer {
                             continue;
                         }
                     };
-                    let bus = bus.clone();
+                    let state = state.clone();
                     let shutdown = Arc::clone(&shutdown);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, bus, shutdown).await {
+                        if let Err(e) = handle_connection(stream, state, shutdown).await {
                             tracing::debug!(error = %e, "IPC connection ended");
                         }
                     });
@@ -259,23 +285,36 @@ impl IpcServer {
 
 /// Handle one connection: read framed [`Request`]s until the client
 /// disconnects. `Subscribe` converts the connection into a pure
-/// [`Event`] sink; `Quit` signals daemon shutdown; other requests are
-/// handled in Task 006.
+/// [`Event`] sink; `Quit` signals daemon shutdown; `ReportSaved`
+/// (worker → daemon feedback) stores the path + broadcasts
+/// [`Event::Saved`]; other requests route through the worker dispatch
+/// table (capture requests spawn a `flintshot` child; unbuilt phases
+/// broadcast an `unsupported` Error).
 async fn handle_connection(
     mut stream: Stream,
-    bus: SubscriberBus,
+    state: crate::daemon_state::DaemonState,
     shutdown: Arc<Notify>,
 ) -> eyre::Result<()> {
     loop {
         let payload = read_frame(&mut stream).await?;
         let request = decode_request(&payload)?;
+
+        // Worker → daemon outcome reporting: store the save path and
+        // broadcast Event::Saved. Fire-and-forget — no response is sent
+        // (matching Subscribe's no-response shape). Intercepted before
+        // the dispatch table so it never reaches the "unsupported" arm.
+        if let Some(path) = crate::daemon_state::extract_report_saved_path(&request) {
+            state.record_save(path.to_path_buf());
+            continue;
+        }
+
         if matches!(request, IpcRequest::Subscribe) {
             tracing::debug!("IPC subscriber registered");
             // Subscribe synchronously — the receiver is registered
             // the moment Subscribe is read, before the forwarder
             // task is scheduled, so a client that sends Subscribe
             // then waits for events doesn't race the task spawn.
-            let rx = bus.subscribe();
+            let rx = state.bus.subscribe();
             tokio::spawn(async move {
                 let mut rx = rx;
                 let mut stream = stream;
@@ -309,7 +348,7 @@ async fn handle_connection(
         // broadcast an `unsupported` Error.
         let outcome =
             crate::worker::dispatch(&request, &crate::worker::CommandSpawner, &mut |event| {
-                bus.broadcast(event);
+                state.bus.broadcast(event);
             })?;
         if matches!(outcome, crate::worker::DispatchOutcome::Shutdown) {
             tracing::info!("IPC Request::Quit received; signalling daemon shutdown");
@@ -556,6 +595,98 @@ mod tests {
         assert_eq!(decoded, event);
 
         drop(client);
+        server_task.abort();
+    }
+
+    /// Worker → daemon feedback over a real socket: a subscriber
+    /// connects, then a worker sends `Request::ReportSaved`, and the
+    /// subscriber must receive `Event::Saved { path }` (and the daemon
+    /// must record the path in `last_saved`). `#[ignore]` (needs a real
+    /// local socket). Run with:
+    /// `cargo test -p flintshot-app -- --ignored ipc_server`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a real local socket (no display); run explicitly"]
+    async fn integration_report_saved_broadcasts_event_and_records_path() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let n = UNIQUE.fetch_add(1, Ordering::Relaxed);
+        let sock = dir.path().join(format!("flintshot-report-{n}.sock"));
+
+        let server = IpcServer::bind(Some(&sock)).unwrap();
+        let state = server.state();
+        let server_task = tokio::spawn(async move { server.serve().await });
+
+        // 1. Subscribe first so the later broadcast reaches us.
+        let name = socket_name(&sock).unwrap();
+        let mut subscriber =
+            <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name)
+                .await
+                .unwrap();
+        let sub = Request::Subscribe;
+        write_frame(&mut subscriber, &encode_msg(&sub).unwrap())
+            .await
+            .unwrap();
+
+        // Retry until the subscribe has registered (mirrors the
+        // subscribe integration test's race-avoidance).
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if read_frame(&mut subscriber).await.is_ok() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .ok();
+
+        // 2. Open a second connection (the "worker") and send
+        //    ReportSaved. Fire-and-forget: close immediately after.
+        let report = Request::ReportSaved {
+            path: std::path::PathBuf::from("/tmp/flintshot-report.png"),
+        };
+        send_request(Some(&sock), &report)
+            .await
+            .expect("sending ReportSaved");
+
+        // 3. The subscriber must receive Event::Saved with the same path.
+        let payload = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_frame(&mut subscriber),
+        )
+        .await
+        .expect("timed out waiting for Event::Saved")
+        .expect("read failed");
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert_eq!(
+            decoded,
+            Event::Saved {
+                path: std::path::PathBuf::from("/tmp/flintshot-report.png"),
+            }
+        );
+
+        // 4. The daemon state must have recorded the path too.
+        //    Retry briefly — the broadcast and the store happen in the
+        //    same handler call, but the test observer races the spawn.
+        let recorded = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if state.last_saved().is_some() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(recorded, "last_saved was never recorded");
+        assert_eq!(
+            state.last_saved(),
+            Some(std::path::PathBuf::from("/tmp/flintshot-report.png"))
+        );
+
+        drop(subscriber);
         server_task.abort();
     }
 
