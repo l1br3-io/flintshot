@@ -6,10 +6,8 @@ status-flipped in place when shipped). For the narrative "why", see
 [`VISION.md`](VISION.md); for decision rationale, see
 [`adrs/`](adrs/).
 
-**CURRENT MILESTONE: Phase 2 — Daemon, tray, hotkeys, IPC** (review-
-ready; spec at [`specs/phase-2-daemon-tray-hotkeys/`](specs/phase-2-daemon-tray-hotkeys/)).
-Annotation tools, magnifier, and UX polish split off to
-`phase-2b-annotation-tools`.
+**CURRENT MILESTONE: Phase 3 — Pin-to-desktop + COSMIC applet** (not
+yet specced; see [`specs/`](specs/) for shipped Phase 2 / 2b efforts).
 
 ## Milestones
 
@@ -17,9 +15,9 @@ Annotation tools, magnifier, and UX polish split off to
 | ---------------------------------------------- | ------------- |
 | Phase 0 — Scaffolding                          | Shipped       |
 | Phase 1 — Capture + editor window              | Shipped       |
-| Phase 2 — Daemon, tray, hotkeys, IPC           | **Review-ready** |
-| Phase 2b — Annotation tools, magnifier, polish | Planned       |
-| Phase 3 — Pin-to-desktop + COSMIC applet       | Planned       |
+| Phase 2 — Daemon, tray, hotkeys, IPC           | Shipped          |
+| Phase 2b — Annotation tools, magnifier, polish | Shipped          |
+| Phase 3 — Pin-to-desktop + COSMIC applet       | **Next**         |
 | Phase 4 — Upload                               | Planned       |
 | Phase 5 — Live overlay (Flameshot-style)       | Planned       |
 | Phase 6 — Wayland global hotkeys via `ashpd`   | Planned       |
