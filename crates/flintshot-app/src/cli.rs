@@ -318,21 +318,52 @@ fn write_png(img: &image::RgbaImage, path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("writing PNG to {}", path.display()))
 }
 
-/// `flintshot pin` — Phase 3.
+/// `flintshot pin <path>` — Phase 3.
+///
+/// Loads an image from disk (any format the `image` crate decodes) and
+/// opens a borderless always-on-top floating window showing it. The pin
+/// persists as its own process until the user closes it (`Esc` or the
+/// WM close button). See ADR-0023 for why a pin is a separate process.
 pub fn run_pin(args: &PinArgs) -> Result<()> {
+    let img = image::open(&args.path)
+        .map_err(|e| {
+            color_eyre::eyre::eyre!("could not decode image at {}: {e}", args.path.display())
+        })
+        .with_context(|| format!("loading pin source {}", args.path.display()))?
+        .to_rgba8();
+    let (w, h) = img.dimensions();
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "image dims ≤ 2^24 are exact in f32"
+    )]
+    let rect = flintshot_core::Rect::from_xywh(0.0, 0.0, w as f32, h as f32);
     tracing::info!(
         path = %args.path.display(),
-        "pin subcommand: not implemented yet (Phase 3)"
+        dims = ?img.dimensions(),
+        "opening pin window"
     );
-    // Touch the path so we surface common mistakes (missing file, permission)
-    // even in the stub — gives the user early feedback.
-    if !args.path.exists() {
-        return Err(color_eyre::eyre::eyre!(
-            "no such file: {}",
-            args.path.display()
-        ));
-    }
-    Ok(())
+    run_pin_for_image(img, rect)
+}
+
+/// Hand the decoded image to the egui pin window. Gated on the `egui`
+/// feature, matching [`run_editor_for_capture`]'s pattern.
+#[cfg(feature = "egui")]
+fn run_pin_for_image(img: image::RgbaImage, rect: flintshot_core::Rect) -> Result<()> {
+    use flintshot_core::EditorShell;
+    flintshot_editor_egui::EguiShell::new()
+        .run_pin(img, rect)
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
+        .context("running pin window")
+}
+
+/// Headless-build fallback: the pin window requires eframe, which is
+/// gated on the `egui` feature. Without it the subcommand can't open a
+/// window and surfaces a clear error rather than silently exiting.
+#[cfg(not(feature = "egui"))]
+fn run_pin_for_image(_img: image::RgbaImage, _rect: flintshot_core::Rect) -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "pin requires the `egui` feature; rebuild with default features"
+    ))
 }
 
 /// `flintshot upload` — Phase 4.

@@ -6,9 +6,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use eframe::{AppCreator, NativeOptions};
-use flintshot_core::{EditorOutcome, EditorShell, EditorState, FlintshotError, Rect};
+use flintshot_core::{EditorOutcome, EditorShell, EditorState, Rect};
 
 use crate::app::{eframe_err_to_flintshot, EditorApp, OutcomeSlot};
+use crate::pin_window::{pin_viewport_builder, PinApp};
 
 /// Window title shown in the titlebar and used as the WM class hint.
 /// Matches the Phase 1 editor-window spec (`"flintshot — annotate"` with
@@ -21,7 +22,8 @@ const WINDOW_TITLE: &str = "flintshot — annotate";
 /// eframe app: it opens a window sized to the screenshot, runs the
 /// shared `render()` path each frame, and returns [`EditorOutcome`]
 /// when the window closes (`Esc` → `Cancelled`, X button → `Cancelled`
-/// via the slot defaulting). `run_pin` is still a Phase 3 stub.
+/// via the slot defaulting). `run_pin` (Phase 3) opens a borderless
+/// always-on-top window that blits the image and supports drag-to-move.
 #[derive(Default)]
 pub struct EguiShell;
 
@@ -38,9 +40,8 @@ impl EditorShell for EguiShell {
         run_editor_blocking(state)
     }
 
-    fn run_pin(&self, _image: image::RgbaImage, _rect: Rect) -> flintshot_core::Result<()> {
-        // Phase 3: borderless always-on-top viewport.
-        Err(FlintshotError::NotImplemented("EguiShell::run_pin"))
+    fn run_pin(&self, image: image::RgbaImage, rect: Rect) -> flintshot_core::Result<()> {
+        run_pin_blocking(image, rect)
     }
 }
 
@@ -96,4 +97,35 @@ fn run_editor_blocking(state: EditorState) -> flintshot_core::Result<EditorOutco
         .take()
         .unwrap_or(Ok(EditorOutcome::Cancelled));
     resolved
+}
+
+/// Block on eframe's native event loop for a pin window. The pin is
+/// borderless, always-on-top, and sized to the image; it closes on
+/// `Esc` or the WM close button and has no outcome to report (unlike
+/// the editor, `run_pin` returns `Ok(())` once the window closes).
+///
+/// RATIONALE: ADR-0023 (drafted in Task 005) — a pin is its own
+/// process, not a deferred viewport inside the editor's eframe
+/// instance. egui viewports die with their root window; an
+/// editor-spawned pin viewport would close when the editor closes,
+/// which is the opposite of "pin to desktop." The editor and daemon
+/// both spawn `flintshot pin <path>` as a detached child to keep the
+/// pin alive after they exit.
+fn run_pin_blocking(image: image::RgbaImage, rect: Rect) -> flintshot_core::Result<()> {
+    let img_dims = image.dimensions();
+    let viewport = pin_viewport_builder(img_dims, rect);
+
+    let options = NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+
+    let app_creator: AppCreator<'_> = Box::new(move |cc| {
+        let app = PinApp::new(image, &cc.egui_ctx);
+        Ok(Box::new(app))
+    });
+
+    eframe::run_native("flintshot-pin", options, app_creator)
+        .map_err(|e| eframe_err_to_flintshot(&e))?;
+    Ok(())
 }
