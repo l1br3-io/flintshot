@@ -115,12 +115,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     //    drops the channel sender → the loop exits cleanly.
     tracing::info!("daemon event loop running; press Ctrl-C to exit");
     let mut hotkey_registry = hotkey_registry;
-    run_event_loop(
-        &rx,
-        &state.bus,
-        &mut hotkey_registry,
-        config_watcher.as_ref(),
-    );
+    run_event_loop(&rx, &state, &mut hotkey_registry, config_watcher.as_ref());
 
     // Wait for the tokio side to finish so we don't leak the runtime.
     let _ = tokio_join.join();
@@ -162,19 +157,19 @@ fn replace_running_daemon() -> eyre::Result<()> {
 fn run_event_loop(
     rx: &mpsc::Receiver<()>,
     #[cfg_attr(not(feature = "tray"), allow(unused_variables))]
-    bus: &crate::ipc_server::SubscriberBus,
+    state: &crate::daemon_state::DaemonState,
     hotkeys: &mut crate::hotkeys::HotkeyRegistry,
     config_watcher: Option<&crate::config_watcher::ConfigWatcher>,
 ) {
     loop {
         #[cfg(feature = "tray")]
-        if drain_tray_menu(bus) {
+        if drain_tray_menu(state) {
             // Tray *Quit*: stop polling. `run` then returns, the lock
             // is released, and the daemon exits.
             tracing::info!("tray Quit clicked; exiting event loop");
             break;
         }
-        drain_hotkeys(hotkeys, bus);
+        drain_hotkeys(hotkeys, state);
 
         // Config hot-reload: re-read on change; re-register hotkeys only
         // when [hotkeys] actually changed. A mid-write parse failure is
@@ -212,16 +207,14 @@ fn run_event_loop(
 /// quit → shutdown) or opening the config. Returns `true` if *Quit* was
 /// clicked. Best-effort: a no-op if no tray was built.
 #[cfg(feature = "tray")]
-fn drain_tray_menu(bus: &crate::ipc_server::SubscriberBus) -> bool {
+fn drain_tray_menu(state: &crate::daemon_state::DaemonState) -> bool {
     use tray_icon::menu::MenuEvent;
 
     let rx = MenuEvent::receiver();
     while let Ok(event) = rx.try_recv() {
         match crate::tray::action_for(&event) {
             Some(crate::tray::TrayAction::Request(request)) => {
-                match crate::worker::dispatch(&request, &crate::worker::CommandSpawner, &mut |ev| {
-                    bus.broadcast(ev);
-                }) {
+                match crate::worker::dispatch(&request, &crate::worker::CommandSpawner, state) {
                     Ok(crate::worker::DispatchOutcome::Shutdown) => return true,
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error = %e, "tray dispatch failed"),
@@ -265,7 +258,7 @@ fn open_config_file() -> eyre::Result<()> {
 /// empty).
 fn drain_hotkeys(
     registry: &crate::hotkeys::HotkeyRegistry,
-    bus: &crate::ipc_server::SubscriberBus,
+    state: &crate::daemon_state::DaemonState,
 ) {
     use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 
@@ -275,10 +268,7 @@ fn drain_hotkeys(
             continue;
         }
         if let Some(request) = registry.lookup(event.id) {
-            if let Err(e) =
-                crate::worker::dispatch(request, &crate::worker::CommandSpawner, &mut |ev| {
-                    bus.broadcast(ev);
-                })
+            if let Err(e) = crate::worker::dispatch(request, &crate::worker::CommandSpawner, state)
             {
                 tracing::warn!(error = %e, "hotkey dispatch failed");
             }
