@@ -6,7 +6,7 @@ Flat status checklist. One line per task, mirroring
 project resumes from.
 
 ## Phase 3.A — Foundation: the pin primitive
-- [ ] Task 001 — Pin primitive (`EguiShell::run_pin` real impl + `flintshot pin <path>` real CLI body) → [`tasks/001-pin-primitive.md`](tasks/001-pin-primitive.md)
+- [x] Task 001 — Pin primitive (`EguiShell::run_pin` real impl + `flintshot pin <path>` real CLI body) → [`tasks/001-pin-primitive.md`](tasks/001-pin-primitive.md)
 
 **Checkpoint A** — `flintshot pin <path>` opens a borderless always-on-top window; Esc/close dismisses it.
 
