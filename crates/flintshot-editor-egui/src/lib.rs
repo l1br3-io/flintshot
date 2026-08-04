@@ -27,8 +27,10 @@
 mod app;
 mod canvas;
 mod magnifier;
+mod pin_window;
 mod shell;
 
 pub use canvas::{EguiCanvas, EguiTexture};
 pub use magnifier::{sample_zoomed_region, Magnifier};
+pub use pin_window::pin_viewport_builder;
 pub use shell::EguiShell;

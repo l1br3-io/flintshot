@@ -37,7 +37,21 @@ pub trait EditorShell {
 
     /// Open a pin-to-desktop window showing `image` at `rect`.
     ///
-    /// Blocks until the user closes the pin.
+    /// Blocks until the user closes the pin (via `Esc`, the WM close
+    /// button, or process termination). The pin is a borderless
+    /// always-on-top floating window sized to the image; the user can
+    /// drag it around the desktop. Multiple pins coexist as separate
+    /// processes (the caller spawns one `run_pin` call per pin).
+    ///
+    /// **`rect` semantics:** `rect`'s dimensions are advisory (the
+    /// image's own dimensions are the source of truth for window
+    /// size); `rect.min` carries the desired screen position when the
+    /// caller knows it. A default `Rect` (`min == (0, 0)`) signals "let
+    /// the WM place the window" — the implementation skips positioning
+    /// in that case. Phase 3's callers (`flintshot pin <path>` and the
+    /// editor's Pin button) both pass a default `Rect`; the Phase 5
+    /// live overlay will pass a real screen position so a pin opens
+    /// where the capture was taken.
     ///
     /// # Errors
     /// Surfaces [`crate::FlintshotError`] for window-system or image failures.
