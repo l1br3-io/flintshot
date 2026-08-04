@@ -30,7 +30,7 @@ pub mod text;
 pub mod upload;
 
 pub use capture::{capture_fullscreen, capture_region, monitors, MonitorInfo};
-pub use config::{config_path, CaptureConfig, Config, HotkeyConfig, UiConfig};
+pub use config::{config_path, pin_cache_dir, CaptureConfig, Config, HotkeyConfig, UiConfig};
 pub use editor::{Annotation, BlurKind, EditorState, Snapshot, Tool};
 pub use error::{FlintshotError, Result};
 pub use freehand::{smooth_polyline, MARKER_ALPHA};

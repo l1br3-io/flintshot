@@ -156,6 +156,17 @@ fn fullscreen_argv(monitor: Option<u32>) -> Vec<String> {
     argv
 }
 
+/// Build the `flintshot pin <path>` argv for the editor's Pin button and
+/// the daemon's `PinLast` (Task 004). The path is converted via
+/// `to_string_lossy` — the pin-cache dir lives under `dirs::cache_dir`
+/// (or the temp fallback), which is UTF-8 on every supported platform;
+/// non-UTF8 cache dirs are exotic and would surface as a "no such file"
+/// spawn error rather than silent corruption in practice.
+#[must_use]
+pub fn pin_argv(path: &std::path::Path) -> Vec<String> {
+    vec!["pin".to_string(), path.to_string_lossy().into_owned()]
+}
+
 /// Hand an owned-string argv to [`Spawner::spawn`] (which takes `&[&str]`).
 fn spawn_argv(spawner: &dyn Spawner, argv: &[String]) -> eyre::Result<()> {
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -303,6 +314,15 @@ mod tests {
                 "--monitor".into(),
                 "2".into()
             ]]
+        );
+    }
+
+    #[test]
+    fn pin_argv_builds_pin_subcommand_with_path() {
+        let argv = pin_argv(std::path::Path::new("/tmp/flintshot/pins/pin-42.png"));
+        assert_eq!(
+            argv,
+            vec!["pin".to_string(), "/tmp/flintshot/pins/pin-42.png".into()]
         );
     }
 
