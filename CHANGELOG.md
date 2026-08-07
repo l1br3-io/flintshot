@@ -20,6 +20,15 @@ Categories used below:
 
 ### Added
 
+- COSMIC applet daemon-absent UX (Phase 3b Task 005): when no daemon
+  answers, the applet popup disables every capture/pin/config/quit
+  action, shows a "daemon not running" hint, and offers a single *Start
+  daemon* button that spawns `flintshot daemon` (resolved on `PATH`)
+  detached. The IPC subscriber stream now loops with a bounded backoff
+  (250 ms → 1 s) rather than ending on `DaemonGone`, so the applet
+  self-heals — once the daemon's socket answers, the stream emits
+  `DaemonUp` and the popup re-enables without an applet restart. A spawn
+  failure surfaces as honest status-line text, never a panic.
 - New `flintshot-ipc` workspace crate (Phase 3b Task 001): the shared
   IPC transport — length-prefixed postcard framing (`MAX_FRAME_LEN`,
   `read_frame`, `write_frame`, `encode_msg`), socket helpers

@@ -70,6 +70,32 @@ pub fn daemon_argv() -> Vec<String> {
     vec!["flintshot".to_string(), "daemon".to_string()]
 }
 
+/// Run the *Start daemon* spawn via `spawner` using [`daemon_argv`], and
+/// return the status-line text describing the outcome.
+///
+/// RATIONALE: this is factored out of `App::update`'s `ClickStartDaemon`
+/// arm so the argv + honest-failure classification are unit-tested with a
+/// recording/failing spawner (no real fork). The real path passes
+/// [`RealDaemonSpawner`], which resolves `flintshot` on `PATH` — a
+/// production install puts it there; dev runs launch the daemon directly.
+/// A spawn failure surfaces as status text (the `Err` arm), never a panic
+/// — the "honesty about platform limits" principle from `VISION.md`
+/// extended to the daemon lifecycle.
+///
+/// # Returns
+/// - `"starting daemon…"` on `Ok` — the transitional status until the
+///   subscriber stream emits [`DaemonUp`](crate::app::Message::DaemonUp).
+/// - `"could not start daemon: <e>"` on `Err`.
+#[must_use]
+pub fn start_daemon(spawner: &dyn DaemonSpawner) -> String {
+    let argv = daemon_argv();
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match spawner.spawn(&refs) {
+        Ok(()) => "starting daemon…".to_string(),
+        Err(e) => format!("could not start daemon: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

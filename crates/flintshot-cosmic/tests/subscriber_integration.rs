@@ -37,7 +37,10 @@ const NEXT_TIMEOUT: Duration = Duration::from_secs(5);
 ///    through the expected status-text sequence.
 /// 4. Mock closes → subscriber yields `DaemonGone` → `App::apply` flips
 ///    `connection` to `NoDaemon`.
-/// 5. Stream ends (`next()` → `None`).
+/// 5. Stream backs off (alive, not ended) — no further message within a
+///    short window. Task 005's loop-with-backoff means a lost daemon no
+///    longer permanently silences the subscriber: the stream stays alive
+///    and retries connect until the daemon returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a real local socket (no display); run explicitly"]
 async fn subscriber_streams_events_then_signals_daemon_gone() {
@@ -147,11 +150,16 @@ async fn subscriber_streams_events_then_signals_daemon_gone() {
     app.apply(&msg);
     assert_eq!(app.connection(), ConnectionState::NoDaemon);
 
-    // 6. Stream has ended.
-    let ended = timeout(NEXT_TIMEOUT, stream.next())
-        .await
-        .expect("timed out waiting for stream end");
-    assert!(ended.is_none(), "stream should end after DaemonGone");
+    // 6. Stream is now backing off (alive, not ended) — no further
+    //    message within a short window. The stream loops-with-backoff on
+    //    failure (Task 005), so the dead mock doesn't end it: it keeps
+    //    retrying connect and would emit `DaemonUp` if a daemon
+    //    reappeared. We assert silence (a timeout), not `None`.
+    let backing_off = timeout(Duration::from_millis(500), stream.next()).await;
+    assert!(
+        backing_off.is_err(),
+        "stream should be backing off (no message within 500 ms), not ended"
+    );
 
     // ── restore env ────────────────────────────────────────────────
     match prev_xdg {

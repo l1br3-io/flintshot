@@ -70,10 +70,6 @@ pub enum Message {
     /// *Quit* clicked (sends `Request::Quit` to the daemon).
     ClickQuit,
     /// *Start daemon* clicked (spawns `flintshot daemon` detached).
-    #[allow(
-        dead_code,
-        reason = "constructed by Task 005's Start-daemon button in popup_view"
-    )]
     ClickStartDaemon,
     /// The popup window was dismissed (libcosmic lifecycle).
     PopupClosed(Id),
@@ -261,10 +257,18 @@ impl cosmic::Application for App {
         let app = App {
             core,
             popup: None,
-            // Provisional: optimistic Connected so buttons are enabled on
-            // first paint when a daemon is running. Task 005 flips this to
-            // NoDaemon-aware (probe on startup).
-            connection: ConnectionState::Connected,
+            // RATIONALE: start in NoDaemon — never render enabled capture
+            // actions until the subscriber confirms the daemon is up. The
+            // popup is closed at startup (it opens on click), so this
+            // initial state is never seen by the user; the subscriber's
+            // first successful connect emits DaemonUp and flips to
+            // Connected within milliseconds. Safer than the optimistic
+            // Connected default: a stray click against a dead daemon would
+            // send a doomed IPC request, whereas a stray *Start daemon*
+            // click when a daemon is already running is harmless (the
+            // daemon detects and delegates). Honesty about platform
+            // limits, extended to the daemon lifecycle.
+            connection: ConnectionState::NoDaemon,
             last_event_text: String::new(),
         };
         (app, Task::none())
@@ -300,7 +304,26 @@ impl cosmic::Application for App {
                 Task::none()
             }
             Message::ClickStartDaemon => {
-                // TODO(005): spawn via DaemonSpawner + one-shot re-probe.
+                // RATIONALE: spawn `flintshot daemon` resolved on `PATH`
+                // (production installs put it there; dev runs launch the
+                // daemon directly). A spawn failure surfaces as status
+                // text — the honest-failure surface — never a panic.
+                //
+                // No separate one-shot re-probe `Task` is returned: the
+                // self-healing backoff subscription
+                // ([`ipc::subscriber_stream`]) is the re-probe. A daemon
+                // is not instantly ready after `spawn()` (it must bind its
+                // socket, ~hundreds of ms), so a single one-shot connect
+                // would race the bind and fail; the subscription's
+                // bounded retry loop reconnects and emits
+                // [`DaemonUp`](Message::DaemonUp) once the socket
+                // answers. The spec task notes ("try that first; add a
+                // one-shot only if reconnect latency is too high")
+                // authorize this simpler single-prober shape, and it
+                // sidesteps the double-connect coordination a one-shot
+                // would introduce.
+                self.last_event_text =
+                    crate::daemon_probe::start_daemon(&crate::daemon_probe::RealDaemonSpawner);
                 Task::none()
             }
             Message::IpcEvent(_) | Message::DaemonGone | Message::DaemonUp => {

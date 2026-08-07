@@ -13,10 +13,6 @@
 #![warn(clippy::pedantic)]
 
 pub mod app;
-#[allow(
-    dead_code,
-    reason = "daemon-probe seam consumed by Task 005's Start-daemon button + unit tests"
-)]
 pub mod daemon_probe;
 pub mod ipc;
 pub mod menu;
