@@ -5,6 +5,7 @@ members = [
     "crates/flintshot-core",
     "crates/flintshot-cosmic",
     "crates/flintshot-editor-egui",
+    "crates/flintshot-ipc",
 ]
 default-members = ["crates/flintshot-app"]
 
@@ -20,6 +21,7 @@ authors = ["flintshot contributors"]
 [workspace.dependencies]
 flintshot-core = { path = "crates/flintshot-core", version = "0.0.0" }
 flintshot-editor-egui = { path = "crates/flintshot-editor-egui", version = "0.0.0" }
+flintshot-ipc = { path = "crates/flintshot-ipc", version = "0.0.0" }
 
 arboard = { version = "3", default-features = false }
 clap = { version = "4.5", features = ["derive"] }

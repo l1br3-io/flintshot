@@ -2266,6 +2266,7 @@ dependencies = [
  "color-eyre",
  "flintshot-core",
  "flintshot-editor-egui",
+ "flintshot-ipc",
  "global-hotkey",
  "gtk",
  "image",
@@ -2322,6 +2323,18 @@ dependencies = [
  "rfd 0.17.2",
  "tempfile",
  "tracing",
+]
+
+[[package]]
+name = "flintshot-ipc"
+version = "0.0.0"
+dependencies = [
+ "color-eyre",
+ "flintshot-core",
+ "interprocess",
+ "postcard",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

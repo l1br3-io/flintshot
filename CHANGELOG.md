@@ -20,6 +20,17 @@ Categories used below:
 
 ### Added
 
+- New `flintshot-ipc` workspace crate (Phase 3b Task 001): the shared
+  IPC transport — length-prefixed postcard framing (`MAX_FRAME_LEN`,
+  `read_frame`, `write_frame`, `encode_msg`), socket helpers
+  (`socket_name`, `Stream` re-export), and fire-and-forget client
+  helpers (`send_request`, `send_request_blocking`, `is_no_daemon`) —
+  extracted byte-identical from `flintshot-app::ipc_server` /
+  `ipc_client`. Both bins (`flintshot-app` the daemon,
+  `flintshot-cosmic` the applet) now share one wire-format
+  implementation. NOT in `default-members` (opt-in via `--workspace`).
+  Boundary test `no_daemon_types_in_ipc.rs` asserts the crate is
+  transport-only. See ADR-0025.
 - Workspace scaffolding with four crates: `flintshot-app` (bin, default),
   `flintshot-core` (lib), `flintshot-editor-egui` (lib),
   `flintshot-cosmic` (bin, opt-in).

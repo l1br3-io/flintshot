@@ -130,7 +130,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
 fn replace_running_daemon() -> eyre::Result<()> {
     use flintshot_core::ipc::Request;
 
-    match crate::ipc_server::send_request_blocking(None, &Request::Quit) {
+    match flintshot_ipc::send_request_blocking(None, &Request::Quit) {
         Ok(()) => {
             tracing::info!("--replace: asked the running daemon to quit; waiting for it to exit");
         }

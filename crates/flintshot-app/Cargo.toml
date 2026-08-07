@@ -27,6 +27,7 @@ tray = ["dep:tray-icon", "dep:gtk"]
 [dependencies]
 flintshot-core = { workspace = true }
 flintshot-editor-egui = { workspace = true, optional = true }
+flintshot-ipc = { workspace = true }
 clap = { workspace = true }
 color-eyre = { workspace = true }
 global-hotkey = { workspace = true }

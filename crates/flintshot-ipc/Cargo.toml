@@ -1,0 +1,21 @@
+[package]
+name = "flintshot-ipc"
+description = "IPC transport shared by flintshot-app (daemon) and flintshot-cosmic (applet): interprocess socket + length-prefixed postcard framing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+flintshot-core = { workspace = true }
+interprocess = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+color-eyre = { workspace = true }

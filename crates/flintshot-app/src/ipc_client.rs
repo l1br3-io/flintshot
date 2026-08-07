@@ -3,15 +3,15 @@
 //! stream for subscribers); if no daemon answers, they fall back to the
 //! Phase 1 in-process capture+editor path unchanged.
 //!
-//! Transport reuses [`crate::ipc_server`]'s framing + socket-name
-//! helpers so the wire format stays identical.
+//! Transport (framing + socket helpers + `is_no_daemon`) comes from the
+//! shared `flintshot-ipc` crate so the wire format is identical to the
+//! daemon's.
 
 use std::path::Path;
 
 use color_eyre::eyre;
 use flintshot_core::ipc::{socket_path, Request};
-
-use crate::ipc_server::{encode_msg, socket_name, write_frame, Stream};
+use flintshot_ipc::{encode_msg, is_no_daemon, socket_name, write_frame, Stream};
 
 /// The result of trying to delegate a capture to the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,15 +102,6 @@ pub(crate) fn report_to(override_path: Option<&Path>, request: &Request) -> Dele
             DelegateOutcome::NoDaemon
         }
     }
-}
-
-/// Does this connect error mean "no daemon" (fall back) vs a real fault?
-fn is_no_daemon(error: &std::io::Error) -> bool {
-    use std::io::ErrorKind;
-    matches!(
-        error.kind(),
-        ErrorKind::ConnectionRefused | ErrorKind::NotFound | ErrorKind::PermissionDenied
-    )
 }
 
 #[cfg(test)]
