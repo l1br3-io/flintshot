@@ -105,12 +105,100 @@ Dev shortcuts exist for capture subcommands too — e.g.
 - Daemon with tray, hotkeys, and IPC server
 - Pin-to-desktop (`flintshot pin`, editor Pin button, `Request::PinLast`)
 
-### Coming next (Phase 3b / 4)
+### Coming next (Phase 4)
 
-- COSMIC panel applet
 - Upload backends (Imgur, …)
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone index.
+
+## COSMIC panel applet
+
+`flintshot-cosmic` is an alternate front-end for COSMIC desktop users: a
+panel button + popup that talks IPC to a running `flintshot daemon` (no
+capture or editing in-process — it mirrors the tray's actions and adds a
+live status line the tray can't show). It is **Linux-only** (libcosmic is
+Linux/COSMIC-only); macOS and Windows users keep the tray.
+
+> **N/A on macOS / Windows.** The applet crate is not in `default-members`
+> and won't build there. Those platforms use the daemon + tray surface
+> (see [§Daemon, tray & hotkeys](#daemon-tray--hotkeys-phase-2)).
+
+### Prerequisites (Linux)
+
+The applet needs the libcosmic system deps on top of the xcap deps listed
+above. On Debian / Ubuntu (full list in
+[`AGENTS.md`](AGENTS.md) §COSMIC crate system deps):
+
+```bash
+sudo apt-get install -y cmake libxkbcommon-dev libfontconfig-dev \
+  libfreetype6-dev libglib2.0-dev libgfxbuffer-dev pkg-config
+```
+
+### Build
+
+```bash
+cargo build -p flintshot-cosmic
+```
+
+(The crate is opt-in — it's deliberately not in `default-members` because
+libcosmic pulls extra system libraries a default build shouldn't require.)
+
+### Install the `.desktop` (one-time, per machine)
+
+`dist/io.github.anomalyco.Flintshot.desktop` is the discovery descriptor
+COSMIC's panel-settings picker scans for. Copy it where COSMIC looks for
+applets — either a user install or system-wide:
+
+```bash
+# User install (no root):
+mkdir -p ~/.local/share/cosmic/applets
+cp dist/io.github.anomalyco.Flintshot.desktop ~/.local/share/cosmic/applets/
+
+# System-wide:
+sudo cp dist/io.github.anomalyco.Flintshot.desktop /usr/share/cosmic/applets/
+```
+
+The filename is the app id (`io.github.anomalyco.Flintshot`) — that's how
+`cosmic-panel` correlates a running applet with its config slot, so don't
+rename it. The `.desktop` carries `Categories=COSMIC;` +
+`X-CosmicApplet=true` (the markers the picker requires); its header
+comment records the `pop-os/cosmic-panel` + `cosmic-applets` revisions
+the markers were confirmed against, in case a future COSMIC release
+drifts.
+
+### Add it from COSMIC panel settings
+
+1. Start the daemon: `flintshot daemon` (the applet is a client — it does
+   nothing useful without one).
+2. Open **COSMIC Settings → Panel** and add "flintshot". The panel button
+   (a camera-photo-symbolic icon) appears.
+3. Click the button → the popup opens with *Capture region* / *Capture
+   fullscreen* / per-monitor entries / *Pin last* / *Open config* /
+   *Quit*, plus a live status line that updates through a capture
+   ("capturing…" → "editor open" → "saved: \<path\>" → "pinned #N").
+
+### Daemon-absent flow (*Start daemon*)
+
+When no daemon answers, the popup disables every capture/pin action and
+shows a single *Start daemon* button. Clicking it spawns
+`flintshot daemon` resolved on `PATH` — so **a production install must
+put `flintshot` on `PATH`** (`cargo install --path crates/flintshot-app`,
+or your distro's package). Running the applet via `cargo run -p
+flintshot-cosmic` won't find `flintshot` on `PATH`; launch the daemon
+directly in that case. Once the daemon's socket answers, the applet
+self-heals (the subscriber reconnects with bounded backoff and the
+actions re-enable) — no applet restart needed.
+
+### Tray coexistence
+
+On COSMIC both the tray and the applet appear when the daemon runs. Both
+are harmless IPC clients; neither interferes with the other. Hiding the
+tray when a COSMIC session is detected is future polish.
+
+<!-- TODO: replace the placeholder Icon=camera-photo-symbolic with a real
+     flintshot symbolic asset (io.github.anomalyco.Flintshot-symbolic)
+     in dist/io.github.anomalyco.Flintshot.desktop + an installed theme.
+     Polish effort, not gated on Phase 3b. -->
 
 ## Documentation
 

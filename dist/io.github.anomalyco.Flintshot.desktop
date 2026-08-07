@@ -1,0 +1,31 @@
+# flintshot COSMIC panel applet — discovery descriptor.
+#
+# COSMIC's panel-settings picker scans $XDG_DATA_DIRS/cosmic/applets/ for
+# .desktop files carrying the markers below (Categories=COSMIC; +
+# X-CosmicApplet=true). cosmic-panel then correlates a running applet with
+# its config slot via the app id — i.e. THIS FILENAME without ".desktop".
+# It must match `App::APP_ID` in crates/flintshot-cosmic/src/app.rs exactly.
+#
+# Markers confirmed against:
+#   - pop-os/cosmic-panel  d6699ffc423a3830bf4cab7e2c7f08a173e998f0
+#     (the discovery scanner; pinned in Cargo.lock's cosmic-panel-config entry)
+#   - pop-os/cosmic-applets  master (cosmic-applet-audio .desktop was the
+#     reference template at Phase 3b planning time; no crate-level pin)
+#   - libcosmic applet example  ef162b8e16ba4493e05c169cd56c7b9f77f0fda5
+# If a future COSMIC release changes the picker's required keys, update the
+# markers here AND the SHA references above so the drift is traceable.
+#
+# Icon is a placeholder — a symbolic name most icon themes ship. A real
+# flintshot asset (io.github.anomalyco.Flintshot-symbolic) is a polish effort.
+[Desktop Entry]
+Type=Application
+Name=flintshot
+Comment=Cross-platform screenshot capture and annotation — COSMIC panel applet
+Exec=flintshot-cosmic
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;flintshot;screenshot;
+Icon=camera-photo-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true

@@ -180,9 +180,10 @@ image; it persists as its own process (ADR-0023). All three entry points
 
 Applet binary: `flintshot-cosmic` (Linux/COSMIC only; not in `default-members`).
 Talks IPC to a running `flintshot daemon` — no capture, no editing in-process.
-
-> **Draft rows — Task 006 finalizes.** Manual check needs a COSMIC Wayland
-> session (platform L5). The rows below cover Checkpoints C, D, and E.
+Rows cover Checkpoints C, D, and E; manual check needs a COSMIC Wayland session
+(platform L5), so every row is N/A on the other platforms. Install
+`dist/io.github.anomalyco.Flintshot.desktop` to `$XDG_DATA_DIRS/cosmic/applets/`
+first (see [README §COSMIC panel applet](../README.md#cosmic-panel-applet)).
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |

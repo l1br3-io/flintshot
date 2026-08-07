@@ -34,3 +34,5 @@ Format: **Context · Decision · Consequences**.
 | ADR-0022 | [Shared Marker/Pencil freehand path: Catmull-Rom in core + per-pixel-once polyline compositing](ADR-0022-shared-freehand-catmull-rom.md) |
 | ADR-0023 | [A pin is a separate process, spawned via `worker::CommandSpawner`](ADR-0023-pin-as-separate-process.md) |
 | ADR-0024 | [Worker reports saved-path to daemon over the existing IPC socket](ADR-0024-worker-reports-saved-to-daemon.md) |
+| ADR-0025 | [Extract `flintshot-ipc` as the shared IPC transport](ADR-0025-extract-flintshot-ipc.md) |
+| ADR-0026 | [COSMIC applet as a `.desktop`-discovered panel applet + daemon-absent *Start daemon* UX](ADR-0026-cosmic-applet-and-daemon-absent-ux.md) |

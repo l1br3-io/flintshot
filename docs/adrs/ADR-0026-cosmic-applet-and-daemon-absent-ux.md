@@ -1,6 +1,6 @@
 # ADR-0026: COSMIC applet as a `.desktop`-discovered panel applet + daemon-absent *Start daemon* UX
 
-**Status.** Draft (full text lands in Task 006).
+**Status.** Accepted.
 
 **Context.** Phase 3b fills the Phase 0 `flintshot-cosmic` stub with a
 real COSMIC panel applet — a `libcosmic` panel button + popup that talks
@@ -62,3 +62,17 @@ button that spawns `flintshot daemon` detached and re-probes.
 - *Start daemon* assumes `flintshot` is on `PATH`. Dev runs (`cargo run`)
   don't install the binary; the README documents this (Task 006). A spawn
   failure surfaces as a tracing warning, not a panic.
+- The tray and the applet coexist when the daemon runs on COSMIC — both
+  are harmless IPC clients. Tray suppression (detect a COSMIC session and
+  skip tray init) is deferred to a future polish effort (spec Q5). Today
+  the user may see both surfaces; neither interferes with the other.
+
+**Cross-references.** ADR-0005 (`libcosmic` as a separate applet binary +
+the master-tracking choice); ADR-0010 (`interprocess` transport the applet
+reuses via `flintshot-ipc`); ADR-0018 (the side-thread/main-loop bridge the
+daemon uses; the applet instead uses iced's `Subscription` for its
+background stream); ADR-0025 (the shared `flintshot-ipc` transport this
+applet consumes); ADR-0023 / ADR-0024 (the pin + `Saved` reporting the
+applet's *Pin last* and status line surface). Phase 3b Task 003 (applet
+shell), Task 004 (subscriber stream), Task 005 (daemon-absent UX), Task
+006 (`.desktop` + this record).

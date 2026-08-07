@@ -1,6 +1,6 @@
 # ADR-0025: Extract `flintshot-ipc` as the shared IPC transport
 
-**Status.** Draft (full text lands in Task 006).
+**Status.** Accepted.
 
 **Context.** Phase 2 placed the IPC transport — framing (`read_frame` /
 `write_frame` / `encode_msg`), socket helpers (`socket_name`, `Stream`),

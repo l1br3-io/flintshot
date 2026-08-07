@@ -29,6 +29,26 @@ Categories used below:
   self-heals — once the daemon's socket answers, the stream emits
   `DaemonUp` and the popup re-enables without an applet restart. A spawn
   failure surfaces as honest status-line text, never a panic.
+- Real COSMIC panel applet (Phase 3b Tasks 003 + 004): `flintshot-cosmic`
+  is no longer a stub. It enters via `cosmic::applet::run::<App>(())` with
+  `impl cosmic::Application for App` (`APP_ID = "io.github.anomalyco.
+  Flintshot"`), renders a panel button + popup mirroring the Phase 2 tray
+  (Capture region / Capture fullscreen / per-monitor submenu / *Pin last*
+  / *Open config* / *Quit*), and a live status line driven by an iced
+  `Subscription` that connects, sends `Request::Subscribe`, and loops
+  `read_frame` → `Message::IpcEvent` (CaptureStarted → EditorOpened →
+  Saved → Pinned). Clicks dispatch fire-and-forget `send_request`s on a
+  background `Task`; the UI thread never blocks on the socket. See
+  ADR-0026.
+- `dist/io.github.anomalyco.Flintshot.desktop` (Phase 3b Task 006): the
+  COSMIC panel-applet discovery descriptor. Carries
+  `Categories=COSMIC;` + `X-CosmicApplet=true` (the markers the panel-
+  settings picker scans for); its filename is the reverse-DNS `APP_ID`,
+  which is how `cosmic-panel` correlates a running applet with its config
+  slot. Install path `$XDG_DATA_DIRS/cosmic/applets/` (documented in the
+  README); the distro packaging step that copies it there is deferred.
+  Placeholder `Icon=camera-photo-symbolic` (a real flintshot asset is a
+  polish effort).
 - New `flintshot-ipc` workspace crate (Phase 3b Task 001): the shared
   IPC transport — length-prefixed postcard framing (`MAX_FRAME_LEN`,
   `read_frame`, `write_frame`, `encode_msg`), socket helpers
@@ -492,6 +512,12 @@ Categories used below:
 
 ### Changed
 
+- `flintshot-app`'s IPC transport now re-uses the new `flintshot-ipc`
+  crate (Phase 3b Task 001): `ipc_server` / `ipc_client` re-import the
+  framing + socket + client helpers from `flintshot_ipc` instead of
+  defining them inline. Behaviour-preserving — the framing tests moved
+  unchanged and are the byte-identity proof; Phase 2 daemon IPC,
+  detect-and-delegate, and `--replace` paths are untouched. See ADR-0025.
 - Planning docs reorganized to the canonical OpenCode harness v0.5.0+
   layout. Root `SPEC.md`, `tasks/plan.md`, `tasks/todo.md`, and
   `tasks/archive/` are eliminated; in their place, each effort lives at
