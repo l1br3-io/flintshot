@@ -18,6 +18,7 @@ flintshot-core = { workspace = true }
 flintshot-ipc = { workspace = true }
 color-eyre = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 # libcosmic is heavy (cmake, fontconfig, xkbcommon) and is NOT published to
 # crates.io — pop-os ships it via git only. We track `master` (the integration
 # branch pop-os's own applets use); release tags like `v0.12` bit-rot quickly
@@ -26,6 +27,7 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic.git", branch = "master"
     "tokio",
     "wayland",
     "multi-window",
+    "applet",
 ] }
 
 [dev-dependencies]

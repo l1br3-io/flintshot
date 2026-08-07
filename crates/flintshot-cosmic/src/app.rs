@@ -15,9 +15,15 @@
 //! from a subscriber `Subscription`; Task 005 wires `ConnectionState`
 //! into the popup's enabled flags.
 
-use cosmic::app::Core;
+use cosmic::app::{Action as AppAction, Core, Task};
 use cosmic::iced::window::Id;
+use cosmic::iced::Rectangle;
+use cosmic::surface::action::{app_popup, destroy_popup, LiveSettings};
+use cosmic::surface::Action as SurfaceAction;
+use cosmic::Action as CosmicAction;
+use cosmic::Element;
 use flintshot_core::ipc::{Event, Request};
+use std::process::Command;
 
 /// Applet-wide connection state. Drives which actions the popup enables
 /// (Task 005): [`NoDaemon`](Self::NoDaemon) disables capture/pin and shows
@@ -38,11 +44,15 @@ pub enum ConnectionState {
 /// Click variants originate from the popup menu (Task 003). [`IpcEvent`]
 /// is forwarded by the background subscriber (Task 004).
 /// [`DaemonGone`]/[`DaemonUp`] are lifecycle signals from the subscriber
-/// connect/read path.
+/// connect/read path. [`PopupClosed`] is fired by libcosmic when the
+/// popup window is dismissed. [`Surface`] carries popup open/close
+/// actions for the libcosmic surface lifecycle.
 ///
 /// [`IpcEvent`]: Message::IpcEvent
 /// [`DaemonGone`]: Message::DaemonGone
 /// [`DaemonUp`]: Message::DaemonUp
+/// [`PopupClosed`]: Message::PopupClosed
+/// [`Surface`]: Message::Surface
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -59,13 +69,35 @@ pub enum Message {
     /// *Quit* clicked (sends `Request::Quit` to the daemon).
     ClickQuit,
     /// *Start daemon* clicked (spawns `flintshot daemon` detached).
+    #[allow(
+        dead_code,
+        reason = "constructed by Task 005's Start-daemon button in popup_view"
+    )]
     ClickStartDaemon,
+    /// The popup window was dismissed (libcosmic lifecycle).
+    PopupClosed(Id),
     /// A forwarded daemon [`Event`] from the subscriber stream.
+    #[allow(
+        dead_code,
+        reason = "constructed by Task 004's subscriber Subscription"
+    )]
     IpcEvent(Event),
     /// The subscriber lost the daemon connection.
+    #[allow(
+        dead_code,
+        reason = "constructed by Task 004's subscriber on connect/read failure"
+    )]
     DaemonGone,
     /// A probe / start-daemon succeeded — the daemon is reachable.
+    #[allow(
+        dead_code,
+        reason = "constructed by Task 004/005 on successful connect/probe"
+    )]
     DaemonUp,
+    /// A libcosmic surface lifecycle action (popup open/close). Produced
+    /// by the panel button and consumed by `update` to drive
+    /// `cosmic::app::Action::Surface`.
+    Surface(SurfaceAction),
 }
 
 /// The libcosmic applet application model.
@@ -113,12 +145,14 @@ impl App {
             Message::ClickQuit => Some(Request::Quit),
             // OpenConfig is handled locally (Task 003 spawns $EDITOR);
             // StartDaemon is handled via DaemonSpawner (Task 005); IPC
-            // events and lifecycle signals are not requests.
+            // events, lifecycle signals, and surface actions are not requests.
             Message::ClickOpenConfig
             | Message::ClickStartDaemon
+            | Message::PopupClosed(_)
             | Message::IpcEvent(_)
             | Message::DaemonGone
-            | Message::DaemonUp => None,
+            | Message::DaemonUp
+            | Message::Surface(_) => None,
         }
     }
 
@@ -167,6 +201,189 @@ impl App {
             self.last_event_text = Self::status_text(event);
         }
         self.connection = Self::next_state(self.connection, msg);
+    }
+
+    /// The current status-line text (rendered into the popup by
+    /// [`menu::popup_view`](crate::menu::popup_view)). Empty until the
+    /// subscriber stream delivers the first [`Event`] (Task 004).
+    #[must_use]
+    pub fn last_event_text(&self) -> &str {
+        &self.last_event_text
+    }
+}
+
+/// Reverse-DNS app id. Must match the `.desktop` filename (Task 006)
+/// exactly — `cosmic-panel` correlates a running applet with its config
+/// slot via this string.
+const APP_ID: &str = "io.github.anomalyco.Flintshot";
+
+/// Open `config.toml` in `$EDITOR` (fallback `$VISUAL`); log the path
+/// if neither is set.
+///
+/// RATIONALE: this replicates the daemon's `open_config_file`
+/// (`crates/flintshot-app/src/daemon.rs:237`) because the daemon's
+/// helper is in-process and unreachable from the applet — a bin cannot
+/// call another bin's private function. The spawn is fire-and-forget
+/// (detached child); the daemon process is unaffected.
+fn open_config_file() -> color_eyre::eyre::Result<()> {
+    let path = flintshot_core::config_path()
+        .ok_or_else(|| color_eyre::eyre::eyre!("no platform config_dir available"))?;
+    if let Some(editor) = std::env::var_os("EDITOR").or_else(|| std::env::var_os("VISUAL")) {
+        Command::new(&editor).arg(&path).spawn().map_err(|e| {
+            color_eyre::eyre::eyre!("launching {editor:?} on {}: {e}", path.display())
+        })?;
+        tracing::info!(editor = ?editor, path = %path.display(), "opened config");
+    } else {
+        tracing::info!(path = %path.display(), "no $EDITOR/$VISUAL; config path logged");
+    }
+    Ok(())
+}
+
+/// Build a fire-and-forget background [`Task`] that sends `req` to the
+/// daemon.
+///
+/// RATIONALE: the UI thread never blocks on the socket; `send_request`
+/// runs on the executor and any error is logged. The daemon's reaction
+/// arrives via the subscriber stream (Task 004), not a response — the
+/// tray uses the same fire-and-forget shape.
+fn send_request_task(req: Request) -> Task<Message> {
+    cosmic::iced::Task::future(async move {
+        if let Err(e) = flintshot_ipc::send_request(None, &req).await {
+            tracing::warn!(error = %e, "applet IPC send failed");
+        }
+    })
+    .discard()
+}
+
+impl cosmic::Application for App {
+    type Executor = cosmic::SingleThreadExecutor;
+    type Flags = ();
+    type Message = Message;
+    const APP_ID: &'static str = APP_ID;
+
+    fn init(core: Core, _flags: Self::Flags) -> (Self, Task<Self::Message>) {
+        let app = App {
+            core,
+            popup: None,
+            // Provisional: optimistic Connected so buttons are enabled on
+            // first paint when a daemon is running. Task 005 flips this to
+            // NoDaemon-aware (probe on startup).
+            connection: ConnectionState::Connected,
+            last_event_text: String::new(),
+        };
+        (app, Task::none())
+    }
+
+    fn core(&self) -> &Core {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
+
+    fn on_close_requested(&self, id: Id) -> Option<Message> {
+        Some(Message::PopupClosed(id))
+    }
+
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match &message {
+            Message::PopupClosed(id) => {
+                if self.popup.as_ref() == Some(id) {
+                    self.popup = None;
+                }
+                Task::none()
+            }
+            Message::Surface(action) => {
+                cosmic::task::message(CosmicAction::Cosmic(AppAction::Surface(action.clone())))
+            }
+            Message::ClickOpenConfig => {
+                if let Err(e) = open_config_file() {
+                    tracing::warn!(error = %e, "opening config from applet");
+                }
+                Task::none()
+            }
+            Message::ClickStartDaemon => {
+                // TODO(005): spawn via DaemonSpawner + one-shot re-probe.
+                Task::none()
+            }
+            Message::IpcEvent(_) | Message::DaemonGone | Message::DaemonUp => {
+                self.apply(&message);
+                Task::none()
+            }
+            // ClickRegion / ClickFullscreen / ClickMonitor(_) / ClickPinLast
+            // / ClickQuit — dispatch via background IPC Task.
+            _ => match App::request_for(&message) {
+                Some(req) => send_request_task(req),
+                None => Task::none(),
+            },
+        }
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "popup positioner anchor rect uses i32; the f32 values are screen-space pixel coordinates from libcosmic's on_press_with_rectangle — mirrors examples/applet/src/window.rs:116-121 verbatim"
+    )]
+    fn view(&self) -> Element<'_, Message> {
+        let have_popup = self.popup;
+        let btn = self
+            .core
+            .applet
+            .icon_button("camera-photo-symbolic")
+            // TODO: replace with a real flintshot icon asset (Task 006 / polish).
+            .on_press_with_rectangle(move |offset, bounds| {
+                if let Some(id) = have_popup {
+                    Message::Surface(destroy_popup(id))
+                } else {
+                    Message::Surface(app_popup::<App>(
+                        |_| LiveSettings::default(),
+                        move |state: &mut App| {
+                            let new_id = Id::unique();
+                            state.popup = Some(new_id);
+                            let main_window = state.core.main_window_id().unwrap_or(Id::RESERVED);
+                            let mut popup_settings = state.core.applet.get_popup_settings(
+                                main_window,
+                                new_id,
+                                None,
+                                None,
+                                None,
+                            );
+                            popup_settings.positioner.anchor_rect = Rectangle {
+                                x: (bounds.x - offset.x) as i32,
+                                y: (bounds.y - offset.y) as i32,
+                                width: bounds.width as i32,
+                                height: bounds.height as i32,
+                            };
+                            popup_settings
+                        },
+                        Some(Box::new(move |state: &App| {
+                            let content = crate::menu::popup_view(state);
+                            Element::from(state.core.applet.popup_container(content))
+                                .map(CosmicAction::App)
+                        })),
+                    ))
+                }
+            });
+
+        Element::from(self.core.applet.applet_tooltip::<Message>(
+            btn,
+            "flintshot",
+            self.popup.is_some(),
+            Message::Surface,
+            None,
+        ))
+    }
+
+    fn view_window(&self, _id: Id) -> Element<'_, Message> {
+        // GOTCHA: popup content is built inside the app_popup closure's
+        // third argument in view() — the example at revision ef162b8
+        // confirms this pattern (its view_window returns "oops").
+        // Delegating here too so the default trait impl's panic never fires.
+        crate::menu::popup_view(self)
+    }
+
+    fn style(&self) -> Option<cosmic::iced::theme::Style> {
+        Some(cosmic::applet::style())
     }
 }
 
@@ -240,6 +457,16 @@ mod tests {
     fn non_action_clicks_map_to_none() {
         assert_eq!(App::request_for(&Message::ClickOpenConfig), None);
         assert_eq!(App::request_for(&Message::ClickStartDaemon), None);
+    }
+
+    #[test]
+    fn surface_action_maps_to_none() {
+        let action = destroy_popup(Id::unique());
+        assert_eq!(
+            App::request_for(&Message::Surface(action)),
+            None,
+            "Surface actions are framework routing, not daemon requests"
+        );
     }
 
     #[test]

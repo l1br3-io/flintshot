@@ -176,6 +176,28 @@ image; it persists as its own process (ADR-0023). All three entry points
   to delete at any time (a pin reads its image into memory once and
   holds no file handle). The OS may reap the cache dir independently.
 
+## Phase 3b — COSMIC panel applet
+
+Applet binary: `flintshot-cosmic` (Linux/COSMIC only; not in `default-members`).
+Talks IPC to a running `flintshot daemon` — no capture, no editing in-process.
+
+> **Draft rows — Task 006 finalizes.** Manual check needs a COSMIC Wayland
+> session (platform L5). The rows below cover Checkpoints C, D, and E.
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| Panel button appears after adding "flintshot" in COSMIC settings | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| Click button → popup opens with all menu items              | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| *Capture region* → editor opens (applet sent `CaptureRegion`) | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| *Capture fullscreen* → editor opens (applet sent `CaptureFullscreen`) | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| Per-monitor entries enumerate at popup-open time            | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| *Pin last* (after save) → pin window appears                | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| *Open config* → `$EDITOR` opens `config.toml`               | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| *Quit* → daemon exits (`Request::Quit`)                     | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| Status line updates live through a capture (Task 004)       | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| No-daemon: actions disabled + hint shown (Task 005)         | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| *Start daemon* spawns `flintshot daemon` + re-enables (Task 005) | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+
 ## Phase 4 — upload
 
 Subcommand: `flintshot upload`
