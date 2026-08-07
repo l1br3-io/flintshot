@@ -3,7 +3,7 @@
 //! [`popup_view`] builds the popup's [`Element`] tree: the capture/pin/
 //! config/quit buttons (mirroring the Phase 2 tray), a live per-monitor
 //! enumeration (re-called on each popup-open), and a status-line slot
-//! that Task 004 fills from the subscriber stream.
+//! fed by the subscriber stream ([`crate::ipc`]).
 //!
 //! The buttons are enabled unconditionally here — Task 005 wires
 //! [`ConnectionState`](crate::app::ConnectionState) into their `enabled`
@@ -54,8 +54,8 @@ pub fn popup_view(app: &App) -> Element<'_, Message> {
         .add(list_column::button(text("Open config")).on_press(Message::ClickOpenConfig))
         .add(list_column::button(text("Quit")).on_press(Message::ClickQuit));
 
-    // TODO(004): wire to the live subscriber stream. Empty string → no
-    // visible line this task.
+    // Live status line: populated by the subscriber stream (Task 004).
+    // Empty until the first Event lands — no visible line when idle.
     if !app.last_event_text().is_empty() {
         col = col.add(text(app.last_event_text()).width(Length::Fill).size(12));
     }

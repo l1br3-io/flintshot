@@ -10,14 +10,6 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-mod app;
-#[allow(
-    dead_code,
-    reason = "daemon-probe seam consumed by Task 005's Start-daemon button + unit tests"
-)]
-mod daemon_probe;
-mod menu;
-
 fn main() -> cosmic::iced::Result {
-    cosmic::applet::run::<app::App>(())
+    cosmic::applet::run::<flintshot_cosmic::app::App>(())
 }

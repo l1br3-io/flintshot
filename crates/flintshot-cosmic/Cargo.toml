@@ -9,6 +9,10 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[lib]
+name = "flintshot_cosmic"
+path = "src/lib.rs"
+
 [[bin]]
 name = "flintshot-cosmic"
 path = "src/main.rs"
@@ -17,6 +21,8 @@ path = "src/main.rs"
 flintshot-core = { workspace = true }
 flintshot-ipc = { workspace = true }
 color-eyre = { workspace = true }
+interprocess = { workspace = true }
+postcard = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 # libcosmic is heavy (cmake, fontconfig, xkbcommon) and is NOT published to
@@ -32,3 +38,4 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic.git", branch = "master"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+futures = "0.3"

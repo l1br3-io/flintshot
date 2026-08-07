@@ -18,6 +18,7 @@
 use cosmic::app::{Action as AppAction, Core, Task};
 use cosmic::iced::window::Id;
 use cosmic::iced::Rectangle;
+use cosmic::iced::Subscription;
 use cosmic::surface::action::{app_popup, destroy_popup, LiveSettings};
 use cosmic::surface::Action as SurfaceAction;
 use cosmic::Action as CosmicAction;
@@ -77,22 +78,10 @@ pub enum Message {
     /// The popup window was dismissed (libcosmic lifecycle).
     PopupClosed(Id),
     /// A forwarded daemon [`Event`] from the subscriber stream.
-    #[allow(
-        dead_code,
-        reason = "constructed by Task 004's subscriber Subscription"
-    )]
     IpcEvent(Event),
     /// The subscriber lost the daemon connection.
-    #[allow(
-        dead_code,
-        reason = "constructed by Task 004's subscriber on connect/read failure"
-    )]
     DaemonGone,
     /// A probe / start-daemon succeeded — the daemon is reachable.
-    #[allow(
-        dead_code,
-        reason = "constructed by Task 004/005 on successful connect/probe"
-    )]
     DaemonUp,
     /// A libcosmic surface lifecycle action (popup open/close). Produced
     /// by the panel button and consumed by `update` to drive
@@ -209,6 +198,13 @@ impl App {
     #[must_use]
     pub fn last_event_text(&self) -> &str {
         &self.last_event_text
+    }
+
+    /// The current daemon reachability state. Drives the popup's
+    /// enabled actions (Task 005).
+    #[must_use]
+    pub fn connection(&self) -> ConnectionState {
+        self.connection
     }
 }
 
@@ -385,6 +381,27 @@ impl cosmic::Application for App {
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
         Some(cosmic::applet::style())
     }
+
+    fn subscription(&self) -> Subscription<Self::Message> {
+        crate::ipc::subscription()
+    }
+}
+
+impl App {
+    /// Construct a minimal `App` for integration tests. Starts in
+    /// [`ConnectionState::Connected`] with an empty status line — the
+    /// real path is [`Application::init`](cosmic::Application::init),
+    /// which needs a display and a libcosmic runtime.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn new_for_integration_test() -> Self {
+        Self {
+            core: Core::default(),
+            popup: None,
+            connection: ConnectionState::Connected,
+            last_event_text: String::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -392,12 +409,10 @@ impl App {
     /// Test-only constructor: build an `App` with the given state fields
     /// and a default [`Core`] (no display required).
     fn for_test(connection: ConnectionState, last_event_text: &str) -> Self {
-        Self {
-            core: Core::default(),
-            popup: None,
-            connection,
-            last_event_text: last_event_text.to_string(),
-        }
+        let mut app = Self::new_for_integration_test();
+        app.connection = connection;
+        app.last_event_text = last_event_text.to_string();
+        app
     }
 }
 
