@@ -10,7 +10,7 @@ project resumes from.
 
 **Checkpoint A** — `flintshot pin <path>` loads an image, reaches `run_pin`; `[pin]` config round-trips. Plumbing proven.
 
-- [ ] Task 2 — Pin window end-to-end (`run_pin` real + `PinApp`, all 5 UX features) → [`tasks/002-pin-window.md`](tasks/002-pin-window.md)
+- [x] Task 2 — Pin window end-to-end (`run_pin` real + `PinApp`, all 5 UX features) → [`tasks/002-pin-window.md`](tasks/002-pin-window.md)
 
 **Checkpoint B** — `flintshot pin <path>` floats a borderless always-on-top window; drag/close/hover-opacity/resize/copy-on-close work.
 

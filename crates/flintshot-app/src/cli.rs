@@ -337,10 +337,10 @@ fn write_png(img: &image::RgbaImage, path: &std::path::Path) -> Result<()> {
 ///
 /// Loads an image from disk, resolves the window geometry (image natural
 /// size by default; `--size` overrides; active-monitor centre by
-/// default, `--at` overrides), merges CLI overrides over `[pin]` config,
-/// and hands the image + rect to the egui pin viewport. Task 1 only
-/// proves the plumbing — the viewport itself is still a `NotImplemented`
-/// stub (logged gracefully, not panicked) until Task 2.
+/// default, `--at` overrides), merges CLI overrides over `[pin]` config
+/// (`--opacity`, `--no-clipboard`), and hands the image + rect + resolved
+/// config to the egui pin viewport (`EguiShell::run_pin`), which opens
+/// a borderless always-on-top window.
 pub fn run_pin(args: &PinArgs) -> Result<()> {
     if !args.path.exists() {
         return Err(color_eyre::eyre::eyre!(
@@ -366,46 +366,53 @@ pub fn run_pin(args: &PinArgs) -> Result<()> {
         }
     };
 
-    // CLI overrides win over config defaults.
-    let opacity = args.opacity.unwrap_or(cfg.pin.default_opacity);
-    let copy_on_close = if args.no_clipboard {
-        false
-    } else {
-        cfg.pin.copy_on_close
-    };
+    // CLI overrides win over config defaults. The resolved PinConfig
+    // is passed to the egui shell via its builder (the `run_pin` trait
+    // signature stays `(image, rect)` — config rides the shell).
+    let mut pin_cfg = cfg.pin.clone();
+    if let Some(op) = args.opacity {
+        pin_cfg.default_opacity = op;
+    }
+    if args.no_clipboard {
+        pin_cfg.copy_on_close = false;
+    }
 
     let rect = pin_window_rect(img.dimensions(), args.at, args.size, active_monitor_geo());
 
     tracing::debug!(
-        opacity,
-        copy_on_close,
+        opacity = pin_cfg.default_opacity,
+        copy_on_close = pin_cfg.copy_on_close,
         rect = ?rect,
         "pin resolved; opening viewport"
     );
 
-    run_pin_window(img, rect)
+    run_pin_window(img, rect, pin_cfg)
 }
 
-/// Open the pin viewport. Task 1 leaves the egui shell's `run_pin` as a
-/// `NotImplemented` stub; it is logged gracefully rather than panicked so
-/// the plumbing is provable end-to-end. Task 2 replaces the stub.
+/// Open the pin viewport. Task 2 hands the image + rect + resolved
+/// config to the egui shell's real borderless always-on-top window.
 #[cfg(feature = "egui")]
-fn run_pin_window(img: image::RgbaImage, rect: Rect) -> Result<()> {
-    use flintshot_core::{EditorShell, FlintshotError};
+fn run_pin_window(
+    img: image::RgbaImage,
+    rect: Rect,
+    config: flintshot_core::PinConfig,
+) -> Result<()> {
+    use flintshot_core::EditorShell;
 
-    match flintshot_editor_egui::EguiShell::new().run_pin(img, rect) {
-        Ok(()) => Ok(()),
-        Err(FlintshotError::NotImplemented(what)) => {
-            tracing::warn!("pin window not yet implemented: {what}");
-            Ok(())
-        }
-        Err(e) => Err(color_eyre::eyre::eyre!("running pin window: {e}")),
-    }
+    flintshot_editor_egui::EguiShell::new()
+        .with_pin_config(config)
+        .run_pin(img, rect)
+        .map_err(|e| color_eyre::eyre::eyre!("running pin window: {e}"))?;
+    Ok(())
 }
 
 /// Headless-build fallback: the pin viewport needs the `egui` feature.
 #[cfg(not(feature = "egui"))]
-fn run_pin_window(_img: image::RgbaImage, _rect: Rect) -> Result<()> {
+fn run_pin_window(
+    _img: image::RgbaImage,
+    _rect: Rect,
+    _config: flintshot_core::PinConfig,
+) -> Result<()> {
     Err(color_eyre::eyre::eyre!(
         "pin window not built; this binary was compiled without the `egui` feature"
     ))
