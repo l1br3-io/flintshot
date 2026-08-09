@@ -21,7 +21,7 @@ project resumes from.
 **Checkpoint C** — daemon responds to `PinLast`/`OpenLast` over IPC; `Event::Pinned { id }` broadcasts with monotonic ids.
 
 ## Phase 3.C — Editor Pin button
-- [ ] Task 5 — Editor toolbar Pin button (compose → tempfile → spawn pin → close) → [`tasks/005-editor-pin-button.md`](tasks/005-editor-pin-button.md)
+- [x] Task 5 — Editor toolbar Pin button (compose → tempfile → spawn pin → close) → [`tasks/005-editor-pin-button.md`](tasks/005-editor-pin-button.md)
 
 **Checkpoint D** — pin works from all three entry points (CLI, daemon, editor). Pin-to-desktop feature-complete and independently shippable.
 

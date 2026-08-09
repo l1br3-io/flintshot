@@ -312,6 +312,9 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
         EditorOutcome::Uploaded(url) => {
             tracing::info!(%url, "editor uploaded");
         }
+        EditorOutcome::Pinned => {
+            tracing::info!("editor pinned image to desktop");
+        }
         EditorOutcome::Cancelled => {
             tracing::info!("editor cancelled; no file written");
         }

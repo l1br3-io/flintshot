@@ -17,6 +17,10 @@ pub enum EditorOutcome {
     CopiedToClipboard,
     /// User uploaded and got back a URL.
     Uploaded(String),
+    /// User pinned the result to the desktop (a `flintshot pin` window
+    /// was spawned from the editor). The pin worker reads the image
+    /// from a temp file; the editor closes immediately after spawning.
+    Pinned,
     /// User cancelled (`Esc`, window close, etc.).
     Cancelled,
 }

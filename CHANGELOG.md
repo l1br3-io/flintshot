@@ -486,6 +486,16 @@ Categories used below:
   point (IPC `handle_connection`, tray `drain_tray_menu`, hotkey
   `drain_hotkeys`). New `flintshot open <path>` CLI subcommand loads an
   existing image into the editor (no capture).
+- Editor toolbar Pin button (Phase 3 Task 005). A "📌 Pin" button in the
+  egui editor toolbar composes the final image (selection-aware, like
+  Copy),   writes it to a temp PNG (`flintshot-pin-<pid>-<n>.png` under
+  the OS temp dir, persisted for the pin worker to read), and spawns
+  `flintshot pin <tmpfile>` as a detached child resolved via
+  `current_exe` (mirroring `worker::CommandSpawner`). The editor closes
+  on success. New `EditorOutcome::Pinned` variant names the outcome so
+  the daemon / future callers can distinguish it. Compose / temp-write
+  failures close the editor with an error; spawn failures keep the
+  editor usable (Save / Copy still work) so the user can fall back.
 
 ### Changed
 
