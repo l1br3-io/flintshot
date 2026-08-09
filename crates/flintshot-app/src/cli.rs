@@ -14,7 +14,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
 use flintshot_core::ipc::Request;
-use flintshot_core::{capture_fullscreen, Config};
+use flintshot_core::{capture_fullscreen, Config, Point, Rect};
 use image::ImageFormat;
 
 /// Cross-platform screenshot capture and annotation.
@@ -113,6 +113,21 @@ pub struct FullscreenArgs {
 pub struct PinArgs {
     /// Path to the image file to pin.
     pub path: PathBuf,
+    /// Window top-left position as `X,Y` (physical px). Defaults to the
+    /// active monitor's centre.
+    #[arg(long, value_name = "X,Y", value_parser = parse_point)]
+    pub at: Option<Point>,
+    /// Window size as `WxH` (physical px). Defaults to the image's
+    /// natural dimensions.
+    #[arg(long, value_name = "WxH", value_parser = parse_size)]
+    pub size: Option<(u32, u32)>,
+    /// Resting opacity in `0.0..=1.0`. Overrides `[pin] default-opacity`.
+    #[arg(long, value_name = "N")]
+    pub opacity: Option<f32>,
+    /// Do not copy the image to the clipboard when the pin closes
+    /// (overrides `[pin] copy-on-close = true`).
+    #[arg(long)]
+    pub no_clipboard: bool,
 }
 
 /// Arguments for `flintshot upload`.
@@ -319,20 +334,183 @@ fn write_png(img: &image::RgbaImage, path: &std::path::Path) -> Result<()> {
 }
 
 /// `flintshot pin` — Phase 3.
+///
+/// Loads an image from disk, resolves the window geometry (image natural
+/// size by default; `--size` overrides; active-monitor centre by
+/// default, `--at` overrides), merges CLI overrides over `[pin]` config,
+/// and hands the image + rect to the egui pin viewport. Task 1 only
+/// proves the plumbing — the viewport itself is still a `NotImplemented`
+/// stub (logged gracefully, not panicked) until Task 2.
 pub fn run_pin(args: &PinArgs) -> Result<()> {
-    tracing::info!(
-        path = %args.path.display(),
-        "pin subcommand: not implemented yet (Phase 3)"
-    );
-    // Touch the path so we surface common mistakes (missing file, permission)
-    // even in the stub — gives the user early feedback.
     if !args.path.exists() {
         return Err(color_eyre::eyre::eyre!(
             "no such file: {}",
             args.path.display()
         ));
     }
-    Ok(())
+
+    let img = image::open(&args.path)
+        .with_context(|| format!("loading pin image {}", args.path.display()))?
+        .to_rgba8();
+
+    // A config load failure is non-fatal: fall back to built-in pin
+    // defaults so the pin still opens.
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not load config; using built-in pin defaults"
+            );
+            Config::default()
+        }
+    };
+
+    // CLI overrides win over config defaults.
+    let opacity = args.opacity.unwrap_or(cfg.pin.default_opacity);
+    let copy_on_close = if args.no_clipboard {
+        false
+    } else {
+        cfg.pin.copy_on_close
+    };
+
+    let rect = pin_window_rect(img.dimensions(), args.at, args.size, active_monitor_geo());
+
+    tracing::debug!(
+        opacity,
+        copy_on_close,
+        rect = ?rect,
+        "pin resolved; opening viewport"
+    );
+
+    run_pin_window(img, rect)
+}
+
+/// Open the pin viewport. Task 1 leaves the egui shell's `run_pin` as a
+/// `NotImplemented` stub; it is logged gracefully rather than panicked so
+/// the plumbing is provable end-to-end. Task 2 replaces the stub.
+#[cfg(feature = "egui")]
+fn run_pin_window(img: image::RgbaImage, rect: Rect) -> Result<()> {
+    use flintshot_core::{EditorShell, FlintshotError};
+
+    match flintshot_editor_egui::EguiShell::new().run_pin(img, rect) {
+        Ok(()) => Ok(()),
+        Err(FlintshotError::NotImplemented(what)) => {
+            tracing::warn!("pin window not yet implemented: {what}");
+            Ok(())
+        }
+        Err(e) => Err(color_eyre::eyre::eyre!("running pin window: {e}")),
+    }
+}
+
+/// Headless-build fallback: the pin viewport needs the `egui` feature.
+#[cfg(not(feature = "egui"))]
+fn run_pin_window(_img: image::RgbaImage, _rect: Rect) -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "pin window not built; this binary was compiled without the `egui` feature"
+    ))
+}
+
+/// A monitor's geometry, used to centre the pin window. Stripped from
+/// [`flintshot_core::MonitorInfo`] so the centre math is pure and
+/// headless-testable — `MonitorInfo` is `#[non_exhaustive]` and thus not
+/// constructable in this crate's unit tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonitorGeo {
+    /// Virtual-desktop origin X (physical px).
+    x: i32,
+    /// Virtual-desktop origin Y (physical px).
+    y: i32,
+    /// Width (physical px).
+    width: u32,
+    /// Height (physical px).
+    height: u32,
+}
+
+/// Pick the active monitor's geometry for pin centring: the primary
+/// monitor, falling back to the first. Returns `None` (with a warning)
+/// when no monitors are available or enumeration fails — callers then
+/// place the pin at the origin.
+fn active_monitor_geo() -> Option<MonitorGeo> {
+    match flintshot_core::monitors() {
+        Ok(list) if !list.is_empty() => {
+            let primary = list.iter().find(|m| m.is_primary).unwrap_or(&list[0]);
+            Some(MonitorGeo {
+                x: primary.x,
+                y: primary.y,
+                width: primary.width,
+                height: primary.height,
+            })
+        }
+        Ok(_) => {
+            tracing::warn!("no monitors available; placing pin at (0, 0)");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not enumerate monitors; placing pin at (0, 0)");
+            None
+        }
+    }
+}
+
+/// Resolve the pin window rect from the image dimensions and any CLI
+/// overrides. Size defaults to the image's natural dimensions; position
+/// defaults to the active monitor's centre. A window larger than its
+/// monitor is clamped to the monitor's top-left rather than placed at a
+/// negative coordinate.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "monitor coords/dims fit f32 exactly"
+)]
+fn pin_window_rect(
+    img_dims: (u32, u32),
+    at: Option<Point>,
+    size: Option<(u32, u32)>,
+    monitor: Option<MonitorGeo>,
+) -> Rect {
+    let (w, h) = size.unwrap_or(img_dims);
+    let pos = at.unwrap_or_else(|| match monitor {
+        Some(m) => {
+            let off_x = (m.width as f32 - w as f32).max(0.0) / 2.0;
+            let off_y = (m.height as f32 - h as f32).max(0.0) / 2.0;
+            Point::new(m.x as f32 + off_x, m.y as f32 + off_y)
+        }
+        None => Point::new(0.0, 0.0),
+    });
+    Rect::from_xywh(pos.x, pos.y, w as f32, h as f32)
+}
+
+/// Parse an `--at X,Y` value into a [`Point`]. Both halves accept any
+/// `f32`-parseable text (so `100,200` and `3.5,4` both work).
+fn parse_point(s: &str) -> Result<Point, String> {
+    let (xs, ys) = s
+        .split_once(',')
+        .ok_or_else(|| format!("`{s}` is not `X,Y` (expected a comma)"))?;
+    let x = xs
+        .trim()
+        .parse::<f32>()
+        .map_err(|e| format!("invalid X coordinate `{xs}`: {e}"))?;
+    let y = ys
+        .trim()
+        .parse::<f32>()
+        .map_err(|e| format!("invalid Y coordinate `{ys}`: {e}"))?;
+    Ok(Point::new(x, y))
+}
+
+/// Parse a `--size WxH` value into a `(width, height)` pair.
+fn parse_size(s: &str) -> Result<(u32, u32), String> {
+    let (ws, hs) = s
+        .split_once('x')
+        .ok_or_else(|| format!("`{s}` is not `WxH` (expected an `x`)"))?;
+    let w = ws
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| format!("invalid width `{ws}`: {e}"))?;
+    let h = hs
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| format!("invalid height `{hs}`: {e}"))?;
+    Ok((w, h))
 }
 
 /// `flintshot upload` — Phase 4.
@@ -351,4 +529,100 @@ pub fn run_upload(args: &UploadArgs) -> Result<()> {
         .with_context(|| format!("validating upload source: {}", args.path.display()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::float_cmp, reason = "exact pixel coords, no arithmetic error")]
+mod tests {
+    use super::*;
+
+    const fn geo(x: i32, y: i32, w: u32, h: u32) -> MonitorGeo {
+        MonitorGeo {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn pin_rect_defaults_to_image_size_at_origin_without_monitor() {
+        let r = pin_window_rect((100, 200), None, None, None);
+        assert_eq!(r, Rect::from_xywh(0.0, 0.0, 100.0, 200.0));
+    }
+
+    #[test]
+    fn pin_rect_size_override_changes_size_not_position() {
+        let r = pin_window_rect((100, 200), None, Some((50, 80)), None);
+        assert_eq!(r, Rect::from_xywh(0.0, 0.0, 50.0, 80.0));
+    }
+
+    #[test]
+    fn pin_rect_at_override_sets_top_left() {
+        let r = pin_window_rect((100, 200), Some(Point::new(10.0, 20.0)), None, None);
+        assert_eq!(r.min, Point::new(10.0, 20.0));
+        assert_eq!(r.width(), 100.0);
+        assert_eq!(r.height(), 200.0);
+    }
+
+    #[test]
+    fn pin_rect_centers_on_monitor() {
+        // 1000x800 monitor at origin, 200x100 window → centre (400, 350).
+        let r = pin_window_rect((200, 100), None, None, Some(geo(0, 0, 1000, 800)));
+        assert_eq!(r.min, Point::new(400.0, 350.0));
+        assert_eq!(r.width(), 200.0);
+        assert_eq!(r.height(), 100.0);
+    }
+
+    #[test]
+    fn pin_rect_centers_on_monitor_with_offset_origin() {
+        // Secondary monitor at (1920, 0), 1000x800, 200x100 window.
+        let r = pin_window_rect((200, 100), None, None, Some(geo(1920, 0, 1000, 800)));
+        assert_eq!(r.min, Point::new(1920.0 + 400.0, 350.0));
+    }
+
+    #[test]
+    fn pin_rect_clamps_to_origin_when_bigger_than_monitor() {
+        let r = pin_window_rect((2000, 2000), None, None, Some(geo(0, 0, 1000, 800)));
+        assert_eq!(r.min, Point::new(0.0, 0.0));
+    }
+
+    #[test]
+    fn pin_rect_at_overrides_monitor_centering() {
+        let r = pin_window_rect(
+            (200, 100),
+            Some(Point::new(5.0, 6.0)),
+            None,
+            Some(geo(0, 0, 1000, 800)),
+        );
+        assert_eq!(r.min, Point::new(5.0, 6.0));
+    }
+
+    #[test]
+    fn parse_point_accepts_comma_pair() {
+        assert_eq!(parse_point("100,200").unwrap(), Point::new(100.0, 200.0));
+        assert_eq!(parse_point(" 3 , 4 ").unwrap(), Point::new(3.0, 4.0));
+    }
+
+    #[test]
+    fn parse_point_rejects_missing_comma() {
+        assert!(parse_point("100 200").is_err());
+    }
+
+    #[test]
+    fn parse_point_rejects_non_numeric() {
+        assert!(parse_point("a,b").is_err());
+    }
+
+    #[test]
+    fn parse_size_accepts_x_pair() {
+        assert_eq!(parse_size("800x600").unwrap(), (800, 600));
+        assert_eq!(parse_size(" 1280 x 720 ").unwrap(), (1280, 720));
+    }
+
+    #[test]
+    fn parse_size_rejects_garbage() {
+        assert!(parse_size("800").is_err());
+        assert!(parse_size("800,600").is_err());
+    }
 }

@@ -431,6 +431,23 @@ Categories used below:
   toolkit-specific. Two new `[ui]` config fields (`#[serde(default)]`,
   kebab-case per convention).
 
+#### Phase 3 — Pin-to-desktop + COSMIC applet
+
+- `flintshot pin` scaffolding (Phase 3 Task 001). New `[pin]` config
+  section (`flintshot-core::config::PinConfig`: `default_opacity = 0.5`,
+  `copy_on_close = false`, `default_position = "center"`; re-exported
+  from `flintshot-core`). `flintshot pin <path>` now loads the image,
+  resolves window geometry (natural size by default; `--size WxH`
+  overrides; active-monitor centre by default, `--at X,Y` overrides),
+  merges CLI overrides (`--opacity`, `--no-clipboard`) over `[pin]`
+  config, and reaches `EguiShell::run_pin` — still a `NotImplemented`
+  stub until Task 2 (logged gracefully, not panicked).
+- `flintshot-core::capture::MonitorInfo` gained `x`, `y`, `width`,
+  `height` (the monitor's virtual-desktop geometry in physical px) so
+  the pin window can centre itself on the active monitor via
+  `flintshot_core::monitors()`. Existing readers (tray submenu) are
+  unaffected.
+
 ### Changed
 
 - Planning docs reorganized to the canonical OpenCode harness v0.5.0+

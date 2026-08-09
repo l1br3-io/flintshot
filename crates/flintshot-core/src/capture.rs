@@ -37,6 +37,10 @@ use crate::geom::Rect;
 /// A discoverable monitor, for UI surfaces (e.g. the tray's per-monitor
 /// submenu). `index` is the value to pass to [`capture_fullscreen`]'s
 /// `Some(index)` argument; `name`/`is_primary` are for labelling.
+///
+/// `x`/`y`/`width`/`height` give the monitor's geometry in the virtual
+/// desktop (physical pixels), used by the pin window to centre itself on
+/// the active monitor (`flintshot pin`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MonitorInfo {
@@ -47,6 +51,14 @@ pub struct MonitorInfo {
     pub name: String,
     /// Whether `xcap` flags this as the primary monitor.
     pub is_primary: bool,
+    /// Monitor origin X in the virtual desktop (physical px).
+    pub x: i32,
+    /// Monitor origin Y in the virtual desktop (physical px).
+    pub y: i32,
+    /// Monitor width in physical px.
+    pub width: u32,
+    /// Monitor height in physical px.
+    pub height: u32,
 }
 
 /// Enumerate monitors in the order [`capture_fullscreen`] expects
@@ -69,6 +81,10 @@ pub fn monitors() -> Result<Vec<MonitorInfo>> {
             })?,
             name: m.name().unwrap_or_default(),
             is_primary: m.is_primary().unwrap_or(false),
+            x: m.x().unwrap_or(0),
+            y: m.y().unwrap_or(0),
+            width: m.width().unwrap_or(0),
+            height: m.height().unwrap_or(0),
         });
     }
     Ok(out)
