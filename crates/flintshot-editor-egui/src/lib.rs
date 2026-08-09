@@ -9,6 +9,9 @@
 //!   drives the per-frame render loop.
 //! - [`magnifier`] — the toolkit-owned pixel-zoom inset widget (no
 //!   core abstraction; reads `EditorState::image` directly).
+//! - [`pin`] — the internal `PinApp` (`impl eframe::App`) for the
+//!   Phase 3 pin-to-desktop window (drag / hover-opacity / resize /
+//!   copy-on-close).
 //! - [`shell`] — the public `EguiShell` (`impl EditorShell`) that
 //!   owns the eframe lifecycle and the outcome slot.
 //!
@@ -27,6 +30,7 @@
 mod app;
 mod canvas;
 mod magnifier;
+mod pin;
 mod shell;
 
 pub use canvas::{EguiCanvas, EguiTexture};

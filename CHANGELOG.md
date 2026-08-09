@@ -447,6 +447,21 @@ Categories used below:
   the pin window can centre itself on the active monitor via
   `flintshot_core::monitors()`. Existing readers (tray submenu) are
   unaffected.
+- `flintshot pin <path>` now floats a real borderless, always-on-top,
+  transparent window (Phase 3 Task 002). `EguiShell::run_pin` opens an
+  eframe viewport (`.with_decorations(false)`, `.with_always_on_top()`,
+  `.with_transparent(true)`, `.with_resizable(true)`, positioned/sized
+  from the `Rect` arg) driven by the new
+  `flintshot-editor-egui` `PinApp` (`eframe::App`). The window blits the
+  image once (cached texture) and implements all five UX features:
+  drag-to-move anywhere (via `ViewportCommand::StartDrag`), close on
+  `Esc` or double-click, instant hover-opacity (opaque while hovered,
+  `[pin] default-opacity` otherwise), aspect-locked resize via a
+  bottom-right handle (`ViewportCommand::InnerSize`), and optional
+  copy-on-close to the clipboard via `arboard`. Resolved
+  `--opacity` / `--no-clipboard` overrides reach the window through a
+  new `EguiShell::with_pin_config` builder (the `EditorShell::run_pin`
+  trait signature stays `(image, rect)`).
 
 ### Changed
 
