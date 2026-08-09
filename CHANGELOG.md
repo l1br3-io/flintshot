@@ -462,6 +462,18 @@ Categories used below:
   `--opacity` / `--no-clipboard` overrides reach the window through a
   new `EguiShell::with_pin_config` builder (the `EditorShell::run_pin`
   trait signature stays `(image, rect)`).
+- Worker save reporting + daemon last-saved state (Phase 3 Task 003).
+  New `flintshot_core::ipc::Request::ReportSaved { path }` variant: a
+  worker that closes its editor with `EditorOutcome::Saved(path)`
+  reports the path back to the daemon (best-effort — silently skipped
+  when no daemon answers, so a standalone worker is unaffected). The
+  daemon tracks the most recent save in a new
+  `flintshot_app::ipc_server::LastSaved`
+  (`Arc<std::sync::Mutex<Option<PathBuf>>>`), created in `daemon::run`
+  and shared with the IPC server; `PinLast`/`OpenLast` (Task 4) and
+  Phase 4 upload-from-last read it back. On receipt the daemon also
+  broadcasts the previously-unused `Event::Saved { path }` to
+  subscribers. See ADR-0023.
 
 ### Changed
 

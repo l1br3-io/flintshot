@@ -111,6 +111,13 @@ pub fn dispatch(
             Ok(DispatchOutcome::Continue)
         }
         Request::Quit => Ok(DispatchOutcome::Shutdown),
+        // ReportSaved is a worker-originated state update. The IPC
+        // connection layer intercepts it to record the path in the
+        // daemon's last-saved state (it owns that state; dispatch does
+        // not). This defensive arm ensures dispatch never reports
+        // ReportSaved as "unsupported" if a future refactor routes it
+        // here — it is a silent no-op. See ADR-0023.
+        Request::ReportSaved { .. } => Ok(DispatchOutcome::Continue),
         // Subscribe (handled by the connection layer in Task 004),
         // OpenLast/PinLast/UploadLast (their phases), and any future
         // variant: report unsupported rather than pretending to act.
@@ -169,6 +176,7 @@ fn variant_name(request: &Request) -> &'static str {
         Request::CaptureFullscreen { .. } => "capture-fullscreen",
         Request::Quit => "quit",
         Request::Subscribe => "subscribe",
+        Request::ReportSaved { .. } => "report-saved",
         Request::OpenLast => "open-last",
         Request::PinLast => "pin-last",
         Request::UploadLast { .. } => "upload-last",
@@ -367,5 +375,69 @@ mod tests {
             vec![Event::CaptureStarted],
             "CaptureStarted on receipt; EditorOpened suppressed on spawn failure"
         );
+    }
+
+    #[test]
+    fn report_saved_is_a_no_op_in_dispatch() {
+        // ReportSaved is a state-update handled in the IPC connection
+        // layer, not the spawn table. dispatch must treat it as a silent
+        // Continue — no worker spawn, no event — so it never emits an
+        // "unsupported" error if routed here.
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        let outcome = dispatch(
+            &Request::ReportSaved {
+                path: std::path::PathBuf::from("/tmp/x.png"),
+            },
+            &spawner,
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(spawner.snapshot().is_empty(), "ReportSaved spawns nothing");
+        assert!(events.is_empty(), "ReportSaved emits nothing from dispatch");
+    }
+
+    #[test]
+    fn variant_name_covers_every_current_variant() {
+        // variant_name feeds "unsupported" error messages; it must name
+        // every current variant so messages stay readable (and never
+        // fall through to the generic "request").
+        let cases = [
+            (
+                Request::CaptureRegion {
+                    monitor: None,
+                    delay_ms: 0,
+                },
+                "capture-region",
+            ),
+            (
+                Request::CaptureFullscreen { monitor: None },
+                "capture-fullscreen",
+            ),
+            (Request::Quit, "quit"),
+            (Request::Subscribe, "subscribe"),
+            (
+                Request::ReportSaved {
+                    path: std::path::PathBuf::from("/tmp/x.png"),
+                },
+                "report-saved",
+            ),
+            (Request::OpenLast, "open-last"),
+            (Request::PinLast, "pin-last"),
+            (
+                Request::UploadLast {
+                    backend: "imgur".into(),
+                },
+                "upload-last",
+            ),
+        ];
+        for (request, expected) in cases {
+            assert_eq!(
+                variant_name(&request),
+                expected,
+                "variant_name mismatch for {request:?}"
+            );
+        }
     }
 }

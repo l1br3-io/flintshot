@@ -73,12 +73,14 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     //    and the tray/hotkey dispatch (main loop), so a capture started
     //    from any source reaches every subscriber.
     let bus = crate::ipc_server::SubscriberBus::new();
+    let last_saved = crate::ipc_server::LastSaved::new();
     let (tx, rx) = mpsc::channel::<()>();
     let builder = thread::Builder::new().name("flintshot-tokio".into());
     let tokio_join = builder
         .spawn({
             let bus = bus.clone();
-            move || run_tokio_side(tx, bus)
+            let last_saved = last_saved.clone();
+            move || run_tokio_side(tx, bus, last_saved)
         })
         .map_err(|e| eyre::eyre!("spawning tokio side thread: {e}"))?;
 
@@ -286,7 +288,11 @@ fn drain_hotkeys(
 /// (Ctrl-C or `Request::Quit` via `--replace`), the sender drops, the
 /// main loop's `recv_timeout` returns `Disconnected`, and the daemon
 /// exits.
-fn run_tokio_side(tx: mpsc::Sender<()>, bus: crate::ipc_server::SubscriberBus) {
+fn run_tokio_side(
+    tx: mpsc::Sender<()>,
+    bus: crate::ipc_server::SubscriberBus,
+    last_saved: crate::ipc_server::LastSaved,
+) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -301,25 +307,25 @@ fn run_tokio_side(tx: mpsc::Sender<()>, bus: crate::ipc_server::SubscriberBus) {
     runtime.block_on(async move {
         // Bind the IPC server inside the reactor, sharing the daemon's
         // bus so tray/hotkey-initiated captures reach IPC subscribers.
-        let (serve_handle, shutdown) = match crate::ipc_server::IpcServer::bind_with_bus(None, bus)
-        {
-            Ok(ipc) => {
-                let shutdown = ipc.shutdown_signal();
-                let handle = tokio::spawn(async move {
-                    if let Err(e) = ipc.serve().await {
-                        tracing::error!(error = %e, "IPC server accept loop ended with error");
-                    }
-                });
-                (handle, Some(shutdown))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "IPC server unavailable; continuing without it (tray + hotkeys still work)"
-                );
-                (tokio::spawn(async {}), None)
-            }
-        };
+        let (serve_handle, shutdown) =
+            match crate::ipc_server::IpcServer::bind_with_bus(None, bus, last_saved) {
+                Ok(ipc) => {
+                    let shutdown = ipc.shutdown_signal();
+                    let handle = tokio::spawn(async move {
+                        if let Err(e) = ipc.serve().await {
+                            tracing::error!(error = %e, "IPC server accept loop ended with error");
+                        }
+                    });
+                    (handle, Some(shutdown))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "IPC server unavailable; continuing without it (tray + hotkeys still work)"
+                    );
+                    (tokio::spawn(async {}), None)
+                }
+            };
 
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         // Discard the immediate first tick so heartbeats are paced.

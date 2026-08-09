@@ -15,8 +15,8 @@
 //! [`Request`]: flintshot_core::ipc::Request
 //! [`Event`]: flintshot_core::ipc::Event
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use color_eyre::eyre::{self, WrapErr};
@@ -143,6 +143,49 @@ impl Default for SubscriberBus {
     }
 }
 
+// ── last-saved state ─────────────────────────────────────────────────
+
+/// Daemon-wide "last saved capture" path.
+///
+/// Workers report saves via [`Request::ReportSaved`]; the IPC connection
+/// layer records the path here. [`Request::PinLast`] / [`Request::OpenLast`]
+/// (Task 4) and Phase 4 upload-from-last read it back. Cheap shared
+/// state — an [`Arc`] around a [`Mutex`] guarding an [`Option<PathBuf>`].
+/// The critical section is a single clone/swap (never held across an
+/// `.await`), so a `std::sync::Mutex` is correct and avoids a tokio
+/// mutex's overhead. See ADR-0023.
+///
+/// [`Request::ReportSaved`]: flintshot_core::ipc::Request::ReportSaved
+/// [`Request::PinLast`]: flintshot_core::ipc::Request::PinLast
+/// [`Request::OpenLast`]: flintshot_core::ipc::Request::OpenLast
+#[derive(Clone, Default)]
+pub struct LastSaved {
+    path: Arc<Mutex<Option<PathBuf>>>,
+}
+
+impl LastSaved {
+    /// Create an empty tracker (no save recorded yet).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a freshly-saved path, overwriting any previous value.
+    pub fn set(&self, path: PathBuf) {
+        *self.path.lock().expect("last-saved mutex poisoned") = Some(path);
+    }
+
+    /// Clone out the current last-saved path, or `None` if no worker has
+    /// reported a save yet.
+    #[must_use]
+    // No reader yet — Task 4 (`PinLast`/`OpenLast`) and the Phase 3
+    // integration test consume this. Mirrors `bus()` / `last_saved()`.
+    #[allow(dead_code)]
+    pub fn get(&self) -> Option<PathBuf> {
+        self.path.lock().expect("last-saved mutex poisoned").clone()
+    }
+}
+
 // ── server ───────────────────────────────────────────────────────────
 
 /// The tokio local-socket listener type, aliased to keep the cfg noise
@@ -156,6 +199,7 @@ pub(crate) type Stream = interprocess::local_socket::tokio::Stream;
 pub struct IpcServer {
     listener: Listener,
     bus: SubscriberBus,
+    last_saved: LastSaved,
     shutdown: Arc<Notify>,
 }
 
@@ -173,7 +217,7 @@ impl IpcServer {
     // path); this convenience is used by the integration tests.
     #[allow(dead_code)]
     pub fn bind(override_path: Option<&Path>) -> eyre::Result<Self> {
-        Self::bind_with_bus(override_path, SubscriberBus::new())
+        Self::bind_with_bus(override_path, SubscriberBus::new(), LastSaved::new())
     }
 
     /// Like [`bind`](Self::bind) but uses an externally-provided
@@ -181,7 +225,11 @@ impl IpcServer {
     /// fans `Event`s to IPC subscribers) and its own tray/hotkey
     /// dispatch path, so a capture started from the tray reaches IPC
     /// subscribers and vice versa.
-    pub fn bind_with_bus(override_path: Option<&Path>, bus: SubscriberBus) -> eyre::Result<Self> {
+    pub fn bind_with_bus(
+        override_path: Option<&Path>,
+        bus: SubscriberBus,
+        last_saved: LastSaved,
+    ) -> eyre::Result<Self> {
         let path = socket_path(override_path);
         let name = socket_name(&path)?;
         let listener = interprocess::local_socket::ListenerOptions::new()
@@ -193,6 +241,7 @@ impl IpcServer {
         Ok(Self {
             listener,
             bus,
+            last_saved,
             shutdown: Arc::new(Notify::new()),
         })
     }
@@ -206,6 +255,17 @@ impl IpcServer {
     #[allow(dead_code)]
     pub fn bus(&self) -> SubscriberBus {
         self.bus.clone()
+    }
+
+    /// A cloneable handle to the daemon's last-saved path. The daemon
+    /// keeps one; Task 4 (`PinLast`/`OpenLast`) reads it to act on the
+    /// most recent worker save.
+    //
+    // Only the integration tests use this externally; the daemon's
+    // `handle_connection` updates via its own `last_saved` clone.
+    #[allow(dead_code)]
+    pub fn last_saved(&self) -> LastSaved {
+        self.last_saved.clone()
     }
 
     /// The daemon-wide shutdown signal. `Request::Quit` (via
@@ -227,6 +287,7 @@ impl IpcServer {
     pub async fn serve(self) -> eyre::Result<()> {
         let shutdown = Arc::clone(&self.shutdown);
         let bus = self.bus.clone();
+        let last_saved = self.last_saved.clone();
         let listener = self.listener;
         loop {
             tokio::select! {
@@ -244,9 +305,10 @@ impl IpcServer {
                         }
                     };
                     let bus = bus.clone();
+                    let last_saved = last_saved.clone();
                     let shutdown = Arc::clone(&shutdown);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, bus, shutdown).await {
+                        if let Err(e) = handle_connection(stream, bus, last_saved, shutdown).await {
                             tracing::debug!(error = %e, "IPC connection ended");
                         }
                     });
@@ -259,11 +321,14 @@ impl IpcServer {
 
 /// Handle one connection: read framed [`Request`]s until the client
 /// disconnects. `Subscribe` converts the connection into a pure
-/// [`Event`] sink; `Quit` signals daemon shutdown; other requests are
-/// handled in Task 006.
+/// [`Event`] sink; `ReportSaved` records the worker's path in the
+/// daemon's last-saved state (and broadcasts [`Event::Saved`]);
+/// `Quit` signals daemon shutdown; other requests route through the
+/// worker dispatch table.
 async fn handle_connection(
     mut stream: Stream,
     bus: SubscriberBus,
+    last_saved: LastSaved,
     shutdown: Arc<Notify>,
 ) -> eyre::Result<()> {
     loop {
@@ -301,6 +366,18 @@ async fn handle_connection(
                 }
             });
             return Ok(());
+        }
+
+        // ReportSaved: a worker reports the path it just saved. Record
+        // it as the daemon's last-saved (for PinLast/OpenLast and
+        // upload-from-last) and broadcast Event::Saved so subscribers
+        // learn about the save. This is a state update, not a spawn —
+        // it never reaches the worker dispatch table. See ADR-0023.
+        if let IpcRequest::ReportSaved { path } = &request {
+            tracing::info!(path = %path.display(), "worker reported save");
+            last_saved.set(path.clone());
+            bus.broadcast(IpcEvent::Saved { path: path.clone() });
+            continue;
         }
 
         // Everything else routes through the worker dispatch table:
@@ -567,6 +644,50 @@ mod tests {
             .expect("absent path is immediately free");
     }
 
+    #[test]
+    fn last_saved_starts_empty() {
+        let ls = LastSaved::new();
+        assert_eq!(ls.get(), None, "a fresh tracker has no save recorded");
+    }
+
+    #[test]
+    fn last_saved_set_then_get_round_trips_the_path() {
+        let ls = LastSaved::new();
+        ls.set(PathBuf::from("/tmp/flintshot/shot.png"));
+        assert_eq!(
+            ls.get(),
+            Some(PathBuf::from("/tmp/flintshot/shot.png")),
+            "set must record the path for read-back"
+        );
+    }
+
+    #[test]
+    fn last_saved_set_overwrites_previous() {
+        let ls = LastSaved::new();
+        ls.set(PathBuf::from("/tmp/a.png"));
+        ls.set(PathBuf::from("/tmp/b.png"));
+        assert_eq!(
+            ls.get(),
+            Some(PathBuf::from("/tmp/b.png")),
+            "the most recent save wins"
+        );
+    }
+
+    #[test]
+    fn last_saved_clones_share_state() {
+        // Cloning the handle (one per IPC connection) shares the
+        // underlying Arc<Mutex<…>>; a write on one clone is visible to
+        // every other.
+        let a = LastSaved::new();
+        let b = a.clone();
+        a.set(PathBuf::from("/tmp/shared.png"));
+        assert_eq!(
+            b.get(),
+            Some(PathBuf::from("/tmp/shared.png")),
+            "clones must observe writes from each other"
+        );
+    }
+
     /// The `--replace` core mechanism on a real socket: a client sends
     /// `Request::Quit`, the server's shutdown signal fires, and the
     /// socket file is reclaimed. `#[ignore]` (needs a real local
@@ -613,6 +734,61 @@ mod tests {
         .await
         .is_ok();
         assert!(freed, "socket file was not reclaimed after Quit");
+
+        server_task.abort();
+    }
+
+    /// A worker sends `Request::ReportSaved`; the daemon's last-saved
+    /// state must hold the reported path. `#[ignore]` (needs a real
+    /// local socket). Run with:
+    /// `cargo test -p flintshot-app -- --ignored ipc_server`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a real local socket (no display); run explicitly"]
+    async fn integration_report_saved_updates_last_saved() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let n = UNIQUE.fetch_add(1, Ordering::Relaxed);
+        let sock = dir.path().join(format!("flintshot-report-{n}.sock"));
+
+        let server = IpcServer::bind(Some(&sock)).unwrap();
+        let last_saved = server.last_saved();
+        let server_task = tokio::spawn(async move { server.serve().await });
+
+        // Send ReportSaved. The listener may not be ready immediately, so
+        // retry the connect/send briefly.
+        let path = std::path::PathBuf::from("/tmp/flintshot-reported.png");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match send_request(Some(&sock), &Request::ReportSaved { path: path.clone() }).await
+                {
+                    Ok(()) => return,
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("timed out sending ReportSaved");
+
+        // The connection layer updates last_saved asynchronously; poll
+        // until it lands (bounded).
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(p) = last_saved.get() {
+                    if p == path {
+                        return true;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(
+            observed,
+            "last-saved state was not updated to the reported path"
+        );
 
         server_task.abort();
     }

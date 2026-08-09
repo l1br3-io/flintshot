@@ -15,7 +15,7 @@ project resumes from.
 **Checkpoint B** — `flintshot pin <path>` floats a borderless always-on-top window; drag/close/hover-opacity/resize/copy-on-close work.
 
 ## Phase 3.B — Daemon last-saved + PinLast/OpenLast
-- [ ] Task 3 — Worker result reporting (`Request::ReportSaved`) + daemon last-saved state → [`tasks/003-worker-report-saved.md`](tasks/003-worker-report-saved.md)
+- [x] Task 3 — Worker result reporting (`Request::ReportSaved`) + daemon last-saved state → [`tasks/003-worker-report-saved.md`](tasks/003-worker-report-saved.md)
 - [ ] Task 4 — Daemon `PinLast` / `OpenLast` dispatch (spawn worker, emit `Event::Pinned`) → [`tasks/004-daemon-pin-last-open-last.md`](tasks/004-daemon-pin-last-open-last.md)
 
 **Checkpoint C** — daemon responds to `PinLast`/`OpenLast` over IPC; `Event::Pinned { id }` broadcasts with monotonic ids.

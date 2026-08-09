@@ -279,6 +279,7 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
     match outcome {
         EditorOutcome::Saved(p) => {
             tracing::info!(path = %p.display(), "editor saved");
+            report_saved_to_daemon(&p);
         }
         EditorOutcome::CopiedToClipboard => {
             tracing::info!("editor copied to clipboard");
@@ -303,6 +304,46 @@ fn run_editor_for_capture(_img: image::RgbaImage, _mode: &str) -> Result<()> {
         "editor not built; pass --out PATH to capture headlessly \
          (this binary was compiled without the `egui` feature)"
     ))
+}
+
+/// Report a save back to a running daemon so it can track the path as
+/// "last saved" (for `PinLast`/`OpenLast` and upload-from-last).
+/// Best-effort: a missing daemon is a silent no-op (the worker may be
+/// standalone). See ADR-0023.
+#[cfg(feature = "egui")]
+fn report_saved_to_daemon(path: &std::path::Path) {
+    report_saved_to_daemon_at(None, path);
+}
+
+/// Testable seam for [`report_saved_to_daemon`]: report against an
+/// explicit socket path. `NoDaemon` (absent socket / refused connect) is
+/// a silent no-op; transport errors are logged at `warn` and swallowed
+/// so a report failure never breaks a successful save. Reuses
+/// [`ipc_client::delegate_to`]'s connect+frame path.
+#[cfg(feature = "egui")]
+fn report_saved_to_daemon_at(
+    override_path: Option<&std::path::Path>,
+    saved_path: &std::path::Path,
+) {
+    match crate::ipc_client::delegate_to(
+        override_path,
+        &Request::ReportSaved {
+            path: saved_path.to_path_buf(),
+        },
+    ) {
+        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {
+            tracing::debug!(path = %saved_path.display(), "reported save to daemon");
+        }
+        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {
+            tracing::debug!("no daemon running; skipping save report");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not report save to the daemon; ignoring"
+            );
+        }
+    }
 }
 
 /// `flintshot config` — Phase 1 Task 3.
@@ -631,5 +672,19 @@ mod tests {
     fn parse_size_rejects_garbage() {
         assert!(parse_size("800").is_err());
         assert!(parse_size("800,600").is_err());
+    }
+
+    /// A standalone worker (no daemon) must not error when it tries to
+    /// report a save — the absent socket yields `NoDaemon`, which the
+    /// helper swallows. Reaching the end of the call = success.
+    #[cfg(feature = "egui")]
+    #[test]
+    fn report_saved_to_daemon_is_silent_when_no_daemon() {
+        report_saved_to_daemon_at(
+            Some(std::path::Path::new(
+                "/this/does/not/exist/flintshot-test-report.sock",
+            )),
+            std::path::Path::new("/tmp/flintshot-saved.png"),
+        );
     }
 }
