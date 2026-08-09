@@ -73,14 +73,14 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     //    and the tray/hotkey dispatch (main loop), so a capture started
     //    from any source reaches every subscriber.
     let bus = crate::ipc_server::SubscriberBus::new();
-    let last_saved = crate::ipc_server::LastSaved::new();
+    let state = crate::worker::DispatchState::new();
     let (tx, rx) = mpsc::channel::<()>();
     let builder = thread::Builder::new().name("flintshot-tokio".into());
     let tokio_join = builder
         .spawn({
             let bus = bus.clone();
-            let last_saved = last_saved.clone();
-            move || run_tokio_side(tx, bus, last_saved)
+            let state = state.clone();
+            move || run_tokio_side(tx, bus, state)
         })
         .map_err(|e| eyre::eyre!("spawning tokio side thread: {e}"))?;
 
@@ -115,7 +115,13 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     //    drops the channel sender → the loop exits cleanly.
     tracing::info!("daemon event loop running; press Ctrl-C to exit");
     let mut hotkey_registry = hotkey_registry;
-    run_event_loop(&rx, &bus, &mut hotkey_registry, config_watcher.as_ref());
+    run_event_loop(
+        &rx,
+        &bus,
+        &state,
+        &mut hotkey_registry,
+        config_watcher.as_ref(),
+    );
 
     // Wait for the tokio side to finish so we don't leak the runtime.
     let _ = tokio_join.join();
@@ -158,18 +164,19 @@ fn run_event_loop(
     rx: &mpsc::Receiver<()>,
     #[cfg_attr(not(feature = "tray"), allow(unused_variables))]
     bus: &crate::ipc_server::SubscriberBus,
+    state: &crate::worker::DispatchState,
     hotkeys: &mut crate::hotkeys::HotkeyRegistry,
     config_watcher: Option<&crate::config_watcher::ConfigWatcher>,
 ) {
     loop {
         #[cfg(feature = "tray")]
-        if drain_tray_menu(bus) {
+        if drain_tray_menu(bus, state) {
             // Tray *Quit*: stop polling. `run` then returns, the lock
             // is released, and the daemon exits.
             tracing::info!("tray Quit clicked; exiting event loop");
             break;
         }
-        drain_hotkeys(hotkeys, bus);
+        drain_hotkeys(hotkeys, bus, state);
 
         // Config hot-reload: re-read on change; re-register hotkeys only
         // when [hotkeys] actually changed. A mid-write parse failure is
@@ -207,16 +214,24 @@ fn run_event_loop(
 /// quit → shutdown) or opening the config. Returns `true` if *Quit* was
 /// clicked. Best-effort: a no-op if no tray was built.
 #[cfg(feature = "tray")]
-fn drain_tray_menu(bus: &crate::ipc_server::SubscriberBus) -> bool {
+fn drain_tray_menu(
+    bus: &crate::ipc_server::SubscriberBus,
+    state: &crate::worker::DispatchState,
+) -> bool {
     use tray_icon::menu::MenuEvent;
 
     let rx = MenuEvent::receiver();
     while let Ok(event) = rx.try_recv() {
         match crate::tray::action_for(&event) {
             Some(crate::tray::TrayAction::Request(request)) => {
-                match crate::worker::dispatch(&request, &crate::worker::CommandSpawner, &mut |ev| {
-                    bus.broadcast(ev);
-                }) {
+                match crate::worker::dispatch(
+                    &request,
+                    &crate::worker::CommandSpawner,
+                    state,
+                    &mut |ev| {
+                        bus.broadcast(ev);
+                    },
+                ) {
                     Ok(crate::worker::DispatchOutcome::Shutdown) => return true,
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error = %e, "tray dispatch failed"),
@@ -261,6 +276,7 @@ fn open_config_file() -> eyre::Result<()> {
 fn drain_hotkeys(
     registry: &crate::hotkeys::HotkeyRegistry,
     bus: &crate::ipc_server::SubscriberBus,
+    state: &crate::worker::DispatchState,
 ) {
     use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 
@@ -271,7 +287,7 @@ fn drain_hotkeys(
         }
         if let Some(request) = registry.lookup(event.id) {
             if let Err(e) =
-                crate::worker::dispatch(request, &crate::worker::CommandSpawner, &mut |ev| {
+                crate::worker::dispatch(request, &crate::worker::CommandSpawner, state, &mut |ev| {
                     bus.broadcast(ev);
                 })
             {
@@ -291,7 +307,7 @@ fn drain_hotkeys(
 fn run_tokio_side(
     tx: mpsc::Sender<()>,
     bus: crate::ipc_server::SubscriberBus,
-    last_saved: crate::ipc_server::LastSaved,
+    state: crate::worker::DispatchState,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -308,7 +324,7 @@ fn run_tokio_side(
         // Bind the IPC server inside the reactor, sharing the daemon's
         // bus so tray/hotkey-initiated captures reach IPC subscribers.
         let (serve_handle, shutdown) =
-            match crate::ipc_server::IpcServer::bind_with_bus(None, bus, last_saved) {
+            match crate::ipc_server::IpcServer::bind_with_bus(None, bus, state) {
                 Ok(ipc) => {
                     let shutdown = ipc.shutdown_signal();
                     let handle = tokio::spawn(async move {

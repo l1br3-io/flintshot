@@ -45,6 +45,8 @@ pub enum Command {
     Config,
     /// Open a pin-to-desktop window for an existing image. [Phase 3]
     Pin(PinArgs),
+    /// Open an existing image in the editor. [Phase 3]
+    Open(OpenArgs),
     /// Upload an image to a backend and print the resulting URL. [Phase 4]
     Upload(UploadArgs),
 }
@@ -140,6 +142,13 @@ pub struct UploadArgs {
     pub backend: Option<String>,
 }
 
+/// Arguments for `flintshot open`.
+#[derive(Debug, Args)]
+pub struct OpenArgs {
+    /// Path to the image file to open in the editor.
+    pub path: PathBuf,
+}
+
 /// `flintshot daemon` — Phase 2.
 ///
 /// Starts the long-running daemon: single-instance lock, tokio side
@@ -189,6 +198,22 @@ pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
         return Ok(());
     }
     capture_and_dispatch(args.monitor, "fullscreen", &args.output)
+}
+
+/// `flintshot open <path>` — Phase 3. Load an existing image from disk
+/// into the editor (no capture). Spawned by the daemon's `OpenLast`
+/// dispatch so the user can re-edit the most recently saved capture.
+pub fn run_open(args: &OpenArgs) -> Result<()> {
+    if !args.path.exists() {
+        return Err(color_eyre::eyre::eyre!(
+            "no such file: {}",
+            args.path.display()
+        ));
+    }
+    let img = image::open(&args.path)
+        .with_context(|| format!("loading image {}", args.path.display()))?
+        .to_rgba8();
+    run_editor_for_capture(img, "open")
 }
 
 /// Try to hand a capture `request` to a running daemon. Returns `true`

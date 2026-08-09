@@ -32,6 +32,7 @@ fn main() -> Result<()> {
         Some(Command::Fullscreen(args)) => cli::run_fullscreen(&args),
         Some(Command::Config) => cli::run_config(),
         Some(Command::Pin(args)) => cli::run_pin(&args),
+        Some(Command::Open(args)) => cli::run_open(&args),
         Some(Command::Upload(args)) => cli::run_upload(&args),
         None => Ok(()),
     }
