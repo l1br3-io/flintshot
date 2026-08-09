@@ -53,6 +53,16 @@ pub enum Request {
     /// Open a long-lived subscription stream; the client receives
     /// [`Event`]s as they happen.
     Subscribe,
+    /// Worker → daemon save report (Phase 3). A worker that closed its
+    /// editor with a save sends the resulting path back so the daemon can
+    /// track it as "last saved" (for [`Request::PinLast`] /
+    /// [`Request::OpenLast`] and Phase 4 upload-from-last). Sent
+    /// best-effort: silently dropped when no daemon answers (a standalone
+    /// worker has no one to report to).
+    ReportSaved {
+        /// Filesystem path the worker just wrote the image to.
+        path: PathBuf,
+    },
     // Forward-compat variants — defined now, unsupported until Phase 3:
     /// Re-open the most recently saved capture (Phase 3).
     OpenLast,
@@ -186,6 +196,9 @@ mod tests {
             Request::CaptureFullscreen { monitor: Some(1) },
             Request::Quit,
             Request::Subscribe,
+            Request::ReportSaved {
+                path: PathBuf::from("/tmp/flintshot/shot.png"),
+            },
             Request::OpenLast,
             Request::PinLast,
             Request::UploadLast {
