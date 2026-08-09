@@ -295,6 +295,11 @@ default_delay_ms = 0
 region = "Ctrl+Shift+PrintScreen"
 fullscreen = "Ctrl+Alt+PrintScreen"
 
+[pin]
+default_opacity = 0.5          # resting opacity; snaps to 1.0 while hovered
+copy_on_close = false          # copy image to clipboard when the pin closes
+default_position = "center"    # "center" (active monitor) or "X,Y"
+
 [upload]
 default_backend = "imgur"
 

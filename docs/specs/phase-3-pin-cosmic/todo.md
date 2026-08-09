@@ -6,7 +6,7 @@ Flat status checklist. One line per task, mirroring
 project resumes from.
 
 ## Phase 3.A — Pin foundation
-- [ ] Task 1 — PinConfig (`[pin]` section) + `flintshot pin` CLI scaffolding → [`tasks/001-pin-config-and-cli.md`](tasks/001-pin-config-and-cli.md)
+- [x] Task 1 — PinConfig (`[pin]` section) + `flintshot pin` CLI scaffolding → [`tasks/001-pin-config-and-cli.md`](tasks/001-pin-config-and-cli.md)
 
 **Checkpoint A** — `flintshot pin <path>` loads an image, reaches `run_pin`; `[pin]` config round-trips. Plumbing proven.
 
