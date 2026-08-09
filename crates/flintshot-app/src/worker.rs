@@ -11,8 +11,13 @@
 //! [`Event`]s to emit, and is unit-testable via [`RecordingSpawner`]
 //! without forking a single process.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use color_eyre::eyre;
 use flintshot_core::ipc::{Event, Request};
+
+use crate::ipc_server::LastSaved;
 
 /// What the daemon should do after [`dispatch`] handles a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +27,62 @@ pub enum DispatchOutcome {
     /// Shut the daemon down — [`Request::Quit`] (used by `--replace`,
     /// Task 006).
     Shutdown,
+}
+
+/// Monotonic pin-id counter, incremented once per successful `PinLast`.
+///
+/// Wraps an [`Arc<AtomicU64>`] so clones share the same counter — every
+/// dispatch entry point (IPC, tray, hotkey) allocates from the same
+/// sequence. [`next`](Self::next) returns 1-based ids (first call → 1).
+#[derive(Clone, Default)]
+pub struct PinIdSource {
+    next: Arc<AtomicU64>,
+}
+
+impl PinIdSource {
+    /// Create a fresh counter (next id will be 1).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Allocate and return the next pin id.
+    pub fn next(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+/// Daemon-wide shared state that [`dispatch`] reads or mutates beyond the
+/// spawner: the last-saved capture path (set by [`Request::ReportSaved`],
+/// read by [`Request::PinLast`] / [`Request::OpenLast`]) and the
+/// monotonic pin-id counter.
+///
+/// Cloning shares the underlying state (both fields are `Arc`-backed),
+/// so every entry point observes the same last-saved path and pin-id
+/// sequence.
+#[derive(Clone)]
+pub struct DispatchState {
+    /// Last worker-reported save path.
+    pub(crate) last_saved: LastSaved,
+    /// Monotonic pin-id counter (incremented per successful `PinLast`).
+    pub(crate) pin_ids: PinIdSource,
+}
+
+impl Default for DispatchState {
+    fn default() -> Self {
+        Self {
+            last_saved: LastSaved::new(),
+            pin_ids: PinIdSource::new(),
+        }
+    }
+}
+
+impl DispatchState {
+    /// Fresh state: no last save recorded, pin ids starting at 1.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// Launches a `flintshot` worker subprocess. The real impl
@@ -77,7 +138,10 @@ impl Spawner for CommandSpawner {
 /// `CaptureStarted` is emitted the moment a worker is launched; later
 /// events (`EditorOpened`/`Saved`) need the worker to report back, which
 /// is wired in Task 006. `Quit` requests shutdown (the caller performs
-/// it). Requests for unbuilt phases emit `Error { code: "unsupported" }`.
+/// it). `PinLast` / `OpenLast` read the last-saved path from `state`
+/// (Task 4); with no prior save they emit
+/// `Error { code: "no-last-capture" }`. Requests for unbuilt phases emit
+/// `Error { code: "unsupported" }`.
 ///
 /// # Errors
 /// Propagates a [`Spawner::spawn`] failure (no event is emitted on
@@ -89,6 +153,7 @@ impl Spawner for CommandSpawner {
 pub fn dispatch(
     request: &Request,
     spawner: &dyn Spawner,
+    state: &DispatchState,
     sink: &mut impl FnMut(Event),
 ) -> eyre::Result<DispatchOutcome> {
     match request {
@@ -110,6 +175,33 @@ pub fn dispatch(
             sink(Event::EditorOpened);
             Ok(DispatchOutcome::Continue)
         }
+        Request::PinLast => {
+            if let Some(path) = state.last_saved.get() {
+                let argv = pin_argv(&path);
+                spawn_argv(spawner, &argv)?;
+                let id = state.pin_ids.next();
+                sink(Event::Pinned { id });
+            } else {
+                sink(Event::Error {
+                    code: "no-last-capture".to_string(),
+                    message: "no capture has been saved yet".to_string(),
+                });
+            }
+            Ok(DispatchOutcome::Continue)
+        }
+        Request::OpenLast => {
+            if let Some(path) = state.last_saved.get() {
+                let argv = open_argv(&path);
+                spawn_argv(spawner, &argv)?;
+                sink(Event::EditorOpened);
+            } else {
+                sink(Event::Error {
+                    code: "no-last-capture".to_string(),
+                    message: "no capture has been saved yet".to_string(),
+                });
+            }
+            Ok(DispatchOutcome::Continue)
+        }
         Request::Quit => Ok(DispatchOutcome::Shutdown),
         // ReportSaved is a worker-originated state update. The IPC
         // connection layer intercepts it to record the path in the
@@ -119,8 +211,8 @@ pub fn dispatch(
         // here — it is a silent no-op. See ADR-0023.
         Request::ReportSaved { .. } => Ok(DispatchOutcome::Continue),
         // Subscribe (handled by the connection layer in Task 004),
-        // OpenLast/PinLast/UploadLast (their phases), and any future
-        // variant: report unsupported rather than pretending to act.
+        // UploadLast (its phase), and any future variant: report
+        // unsupported rather than pretending to act.
         _ => {
             sink(Event::Error {
                 code: "unsupported".to_string(),
@@ -156,6 +248,16 @@ fn fullscreen_argv(monitor: Option<u32>) -> Vec<String> {
         argv.push(m.to_string());
     }
     argv
+}
+
+/// Build the `flintshot pin <path>` argv for [`Request::PinLast`].
+fn pin_argv(path: &std::path::Path) -> Vec<String> {
+    vec!["pin".to_string(), path.to_string_lossy().into_owned()]
+}
+
+/// Build the `flintshot open <path>` argv for [`Request::OpenLast`].
+fn open_argv(path: &std::path::Path) -> Vec<String> {
+    vec!["open".to_string(), path.to_string_lossy().into_owned()]
 }
 
 /// Hand an owned-string argv to [`Spawner::spawn`] (which takes `&[&str]`).
@@ -228,6 +330,7 @@ mod tests {
     #[test]
     fn capture_region_spawns_region_subcommand_and_emits_started() {
         let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
         let mut events = Vec::new();
         let outcome = dispatch(
             &Request::CaptureRegion {
@@ -235,6 +338,7 @@ mod tests {
                 delay_ms: 200,
             },
             &spawner,
+            &state,
             &mut |ev| events.push(ev),
         )
         .unwrap();
@@ -266,6 +370,7 @@ mod tests {
                 delay_ms: 0,
             },
             &spawner,
+            &DispatchState::new(),
             &mut |_| {},
         )
         .unwrap();
@@ -279,10 +384,12 @@ mod tests {
     #[test]
     fn capture_fullscreen_spawns_fullscreen_subcommand() {
         let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
         let mut events = Vec::new();
         dispatch(
             &Request::CaptureFullscreen { monitor: None },
             &spawner,
+            &state,
             &mut |ev| events.push(ev),
         )
         .unwrap();
@@ -296,6 +403,7 @@ mod tests {
         dispatch(
             &Request::CaptureFullscreen { monitor: Some(2) },
             &spawner,
+            &DispatchState::new(),
             &mut |_| {},
         )
         .unwrap();
@@ -313,7 +421,10 @@ mod tests {
     fn quit_signals_shutdown_without_spawning_or_emitting() {
         let spawner = RecordingSpawner::new();
         let mut events = Vec::new();
-        let outcome = dispatch(&Request::Quit, &spawner, &mut |ev| events.push(ev)).unwrap();
+        let outcome = dispatch(&Request::Quit, &spawner, &DispatchState::new(), &mut |ev| {
+            events.push(ev);
+        })
+        .unwrap();
         assert_eq!(outcome, DispatchOutcome::Shutdown);
         assert!(
             spawner.snapshot().is_empty(),
@@ -327,10 +438,10 @@ mod tests {
 
     #[test]
     fn unsupported_requests_emit_error_and_continue() {
+        // PinLast and OpenLast are now supported (Task 4); only the
+        // still-unbuilt variants remain here.
         let cases = [
             Request::Subscribe,
-            Request::OpenLast,
-            Request::PinLast,
             Request::UploadLast {
                 backend: "imgur".into(),
             },
@@ -338,7 +449,10 @@ mod tests {
         for request in cases {
             let spawner = RecordingSpawner::new();
             let mut events = Vec::new();
-            let outcome = dispatch(&request, &spawner, &mut |ev| events.push(ev)).unwrap();
+            let outcome = dispatch(&request, &spawner, &DispatchState::new(), &mut |ev| {
+                events.push(ev);
+            })
+            .unwrap();
             assert_eq!(
                 outcome,
                 DispatchOutcome::Continue,
@@ -365,6 +479,7 @@ mod tests {
                 delay_ms: 0,
             },
             &FailSpawner,
+            &DispatchState::new(),
             &mut |ev| events.push(ev),
         );
         assert!(result.is_err(), "spawn failure must propagate");
@@ -390,12 +505,143 @@ mod tests {
                 path: std::path::PathBuf::from("/tmp/x.png"),
             },
             &spawner,
+            &DispatchState::new(),
             &mut |ev| events.push(ev),
         )
         .unwrap();
         assert_eq!(outcome, DispatchOutcome::Continue);
         assert!(spawner.snapshot().is_empty(), "ReportSaved spawns nothing");
         assert!(events.is_empty(), "ReportSaved emits nothing from dispatch");
+    }
+
+    #[test]
+    fn pin_last_with_saved_path_spawns_pin_and_emits_pinned() {
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        state
+            .last_saved
+            .set(std::path::PathBuf::from("/tmp/shot.png"));
+        let mut events = Vec::new();
+        let outcome = dispatch(&Request::PinLast, &spawner, &state, &mut |ev| {
+            events.push(ev);
+        })
+        .unwrap();
+
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["pin".to_string(), "/tmp/shot.png".into()]],
+            "PinLast spawns `flintshot pin <last-saved>`"
+        );
+        assert_eq!(events, vec![Event::Pinned { id: 1 }]);
+    }
+
+    #[test]
+    fn pin_last_id_is_monotonic() {
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        state.last_saved.set(std::path::PathBuf::from("/tmp/a.png"));
+
+        let mut events1 = Vec::new();
+        dispatch(&Request::PinLast, &spawner, &state, &mut |ev| {
+            events1.push(ev);
+        })
+        .unwrap();
+        let mut events2 = Vec::new();
+        dispatch(&Request::PinLast, &spawner, &state, &mut |ev| {
+            events2.push(ev);
+        })
+        .unwrap();
+
+        assert_eq!(events1, vec![Event::Pinned { id: 1 }]);
+        assert_eq!(
+            events2,
+            vec![Event::Pinned { id: 2 }],
+            "second pin gets the next monotonic id"
+        );
+        assert_eq!(spawner.snapshot().len(), 2, "two pins spawned");
+    }
+
+    #[test]
+    fn pin_last_without_save_emits_error_and_does_not_spawn() {
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        let mut events = Vec::new();
+        let outcome = dispatch(&Request::PinLast, &spawner, &state, &mut |ev| {
+            events.push(ev);
+        })
+        .unwrap();
+
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(
+            spawner.snapshot().is_empty(),
+            "PinLast with no prior save must not spawn"
+        );
+        assert_eq!(events.len(), 1, "exactly one event");
+        match &events[0] {
+            Event::Error { code, .. } => assert_eq!(code, "no-last-capture"),
+            other => panic!("expected Error event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pin_last_spawn_failure_propagates_without_pinned() {
+        let state = DispatchState::new();
+        state.last_saved.set(std::path::PathBuf::from("/tmp/x.png"));
+        let mut events = Vec::new();
+        let result = dispatch(&Request::PinLast, &FailSpawner, &state, &mut |ev| {
+            events.push(ev);
+        });
+
+        assert!(result.is_err(), "spawn failure must propagate");
+        assert!(
+            events.is_empty(),
+            "no Pinned event when the pin worker failed to spawn"
+        );
+    }
+
+    #[test]
+    fn open_last_with_saved_path_spawns_open_and_emits_editor_opened() {
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        state
+            .last_saved
+            .set(std::path::PathBuf::from("/tmp/editor.png"));
+        let mut events = Vec::new();
+        let outcome = dispatch(&Request::OpenLast, &spawner, &state, &mut |ev| {
+            events.push(ev);
+        })
+        .unwrap();
+
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["open".to_string(), "/tmp/editor.png".into()]],
+            "OpenLast spawns `flintshot open <last-saved>`"
+        );
+        assert_eq!(events, vec![Event::EditorOpened]);
+    }
+
+    #[test]
+    fn open_last_without_save_emits_error_and_does_not_spawn() {
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        let mut events = Vec::new();
+        let outcome = dispatch(&Request::OpenLast, &spawner, &state, &mut |ev| {
+            events.push(ev);
+        })
+        .unwrap();
+
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(
+            spawner.snapshot().is_empty(),
+            "OpenLast with no prior save must not spawn"
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Error { code, .. } => assert_eq!(code, "no-last-capture"),
+            other => panic!("expected Error event, got {other:?}"),
+        }
     }
 
     #[test]

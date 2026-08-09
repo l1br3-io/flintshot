@@ -474,6 +474,18 @@ Categories used below:
   Phase 4 upload-from-last read it back. On receipt the daemon also
   broadcasts the previously-unused `Event::Saved { path }` to
   subscribers. See ADR-0023.
+- Daemon `PinLast` / `OpenLast` dispatch + monotonic pin ids (Phase 3
+  Task 004). `Request::PinLast` reads the last-saved path from the
+  daemon's state, spawns `flintshot pin <path>`, and emits
+  `Event::Pinned { id }` with a daemon-assigned monotonic id (via a new
+  `flintshot_app::worker::PinIdSource` counter). `Request::OpenLast`
+  spawns `flintshot open <path>` to re-edit the last-saved capture. With
+  no prior save, both emit `Event::Error { code: "no-last-capture" }`.
+  New `flintshot_app::worker::DispatchState` bundles the last-saved
+  handle + pin-id counter and is threaded through every dispatch entry
+  point (IPC `handle_connection`, tray `drain_tray_menu`, hotkey
+  `drain_hotkeys`). New `flintshot open <path>` CLI subcommand loads an
+  existing image into the editor (no capture).
 
 ### Changed
 

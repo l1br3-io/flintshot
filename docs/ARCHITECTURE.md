@@ -119,6 +119,7 @@ A single binary handles both roles; behavior is selected by subcommand:
 - `flintshot fullscreen [--monitor N]` — one-shot: capture full screen,
   open editor
 - `flintshot pin <path>` — open a pin window for an existing image
+- `flintshot open <path>` — open an existing image in the editor (no capture)
 - `flintshot upload <path> --backend=imgur` — upload and exit
 - `flintshot config` — print or edit config
 

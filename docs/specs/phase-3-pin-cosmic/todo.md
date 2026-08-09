@@ -16,7 +16,7 @@ project resumes from.
 
 ## Phase 3.B — Daemon last-saved + PinLast/OpenLast
 - [x] Task 3 — Worker result reporting (`Request::ReportSaved`) + daemon last-saved state → [`tasks/003-worker-report-saved.md`](tasks/003-worker-report-saved.md)
-- [ ] Task 4 — Daemon `PinLast` / `OpenLast` dispatch (spawn worker, emit `Event::Pinned`) → [`tasks/004-daemon-pin-last-open-last.md`](tasks/004-daemon-pin-last-open-last.md)
+- [x] Task 4 — Daemon `PinLast` / `OpenLast` dispatch (spawn worker, emit `Event::Pinned`) → [`tasks/004-daemon-pin-last-open-last.md`](tasks/004-daemon-pin-last-open-last.md)
 
 **Checkpoint C** — daemon responds to `PinLast`/`OpenLast` over IPC; `Event::Pinned { id }` broadcasts with monotonic ids.
 

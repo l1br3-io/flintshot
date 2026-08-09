@@ -194,12 +194,12 @@ type Listener = interprocess::local_socket::tokio::Listener;
 /// The tokio local-socket stream type.
 pub(crate) type Stream = interprocess::local_socket::tokio::Stream;
 
-/// The IPC server: owns the listener, the subscriber bus, and a
-/// shutdown signal.
+/// The IPC server: owns the listener, the subscriber bus, the
+/// last-saved + pin-id dispatch state, and a shutdown signal.
 pub struct IpcServer {
     listener: Listener,
     bus: SubscriberBus,
-    last_saved: LastSaved,
+    state: crate::worker::DispatchState,
     shutdown: Arc<Notify>,
 }
 
@@ -217,7 +217,11 @@ impl IpcServer {
     // path); this convenience is used by the integration tests.
     #[allow(dead_code)]
     pub fn bind(override_path: Option<&Path>) -> eyre::Result<Self> {
-        Self::bind_with_bus(override_path, SubscriberBus::new(), LastSaved::new())
+        Self::bind_with_bus(
+            override_path,
+            SubscriberBus::new(),
+            crate::worker::DispatchState::new(),
+        )
     }
 
     /// Like [`bind`](Self::bind) but uses an externally-provided
@@ -228,7 +232,7 @@ impl IpcServer {
     pub fn bind_with_bus(
         override_path: Option<&Path>,
         bus: SubscriberBus,
-        last_saved: LastSaved,
+        state: crate::worker::DispatchState,
     ) -> eyre::Result<Self> {
         let path = socket_path(override_path);
         let name = socket_name(&path)?;
@@ -241,7 +245,7 @@ impl IpcServer {
         Ok(Self {
             listener,
             bus,
-            last_saved,
+            state,
             shutdown: Arc::new(Notify::new()),
         })
     }
@@ -262,10 +266,10 @@ impl IpcServer {
     /// most recent worker save.
     //
     // Only the integration tests use this externally; the daemon's
-    // `handle_connection` updates via its own `last_saved` clone.
+    // `handle_connection` updates via its own state clone.
     #[allow(dead_code)]
     pub fn last_saved(&self) -> LastSaved {
-        self.last_saved.clone()
+        self.state.last_saved.clone()
     }
 
     /// The daemon-wide shutdown signal. `Request::Quit` (via
@@ -287,7 +291,7 @@ impl IpcServer {
     pub async fn serve(self) -> eyre::Result<()> {
         let shutdown = Arc::clone(&self.shutdown);
         let bus = self.bus.clone();
-        let last_saved = self.last_saved.clone();
+        let state = self.state.clone();
         let listener = self.listener;
         loop {
             tokio::select! {
@@ -305,10 +309,10 @@ impl IpcServer {
                         }
                     };
                     let bus = bus.clone();
-                    let last_saved = last_saved.clone();
+                    let state = state.clone();
                     let shutdown = Arc::clone(&shutdown);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, bus, last_saved, shutdown).await {
+                        if let Err(e) = handle_connection(stream, bus, state, shutdown).await {
                             tracing::debug!(error = %e, "IPC connection ended");
                         }
                     });
@@ -328,7 +332,7 @@ impl IpcServer {
 async fn handle_connection(
     mut stream: Stream,
     bus: SubscriberBus,
-    last_saved: LastSaved,
+    state: crate::worker::DispatchState,
     shutdown: Arc<Notify>,
 ) -> eyre::Result<()> {
     loop {
@@ -375,19 +379,24 @@ async fn handle_connection(
         // it never reaches the worker dispatch table. See ADR-0023.
         if let IpcRequest::ReportSaved { path } = &request {
             tracing::info!(path = %path.display(), "worker reported save");
-            last_saved.set(path.clone());
+            state.last_saved.set(path.clone());
             bus.broadcast(IpcEvent::Saved { path: path.clone() });
             continue;
         }
 
         // Everything else routes through the worker dispatch table:
         // capture requests spawn a `flintshot` child + broadcast
-        // CaptureStarted; Quit signals shutdown; unbuilt phases
-        // broadcast an `unsupported` Error.
-        let outcome =
-            crate::worker::dispatch(&request, &crate::worker::CommandSpawner, &mut |event| {
+        // CaptureStarted; PinLast/OpenLast read the last-saved state;
+        // Quit signals shutdown; unbuilt phases broadcast an
+        // `unsupported` Error.
+        let outcome = crate::worker::dispatch(
+            &request,
+            &crate::worker::CommandSpawner,
+            &state,
+            &mut |event| {
                 bus.broadcast(event);
-            })?;
+            },
+        )?;
         if matches!(outcome, crate::worker::DispatchOutcome::Shutdown) {
             tracing::info!("IPC Request::Quit received; signalling daemon shutdown");
             // Wake every waiter (the IPC accept loop AND the daemon's
