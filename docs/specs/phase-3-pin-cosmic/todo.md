@@ -33,6 +33,6 @@ project resumes from.
 **Checkpoint E** — COSMIC applet works end-to-end; popup shows live status and degrades gracefully when the daemon is absent.
 
 ## Phase 3.E — Hardening
-- [ ] Task 9 — Boundary test extension (reject cosmic/libcosmic/iced/slint) + CHANGELOG + ADR-0023 + TEST_MATRIX → [`tasks/009-hardening.md`](tasks/009-hardening.md)
+- [x] Task 9 — Boundary test extension (reject cosmic/libcosmic/iced/slint) + CHANGELOG + ADR-0023 + TEST_MATRIX → [`tasks/009-hardening.md`](tasks/009-hardening.md)
 
 **Checkpoint F** — Phase 3 exit criteria met; ready for review.

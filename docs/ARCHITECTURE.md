@@ -70,11 +70,17 @@ egui   = ["dep:flintshot-editor-egui"]
 **Consumers:** end users via the installed binary.
 
 ### `flintshot-cosmic` (bin)
-**Owns:** a separate binary that runs as a COSMIC panel applet, talks
-IPC to a running `flintshot daemon`, and surfaces the same actions as
-the tray menu.
+**Owns:** a separate binary that runs as a COSMIC panel applet. It is a
+pure IPC client — it connects to the daemon socket, sends `Request`s,
+and reads the live `Event` stream over a persistent `Subscribe`
+connection. The popup mirrors the tray's action set (capture, per-
+monitor capture, pin/open last, config, quit) plus a status line fed by
+the event stream, and degrades to a clear *"daemon not running"* state
+when the socket is absent.
 
-**Does not own:** capture, editor, anything beyond the popup UI.
+**Does not own:** capture, editor, anything beyond the popup UI. It
+depends on `flintshot-core` (types + `monitors()`) + `libcosmic` only —
+no `egui`, no `flintshot-app`, no `flintshot-editor-egui`.
 
 **Consumers:** COSMIC desktop users via the panel.
 
@@ -140,6 +146,7 @@ pub enum Request {
     OpenLast,
     PinLast,
     UploadLast { backend: String },
+    ReportSaved { path: PathBuf },   // worker → daemon: best-effort save report
     Quit,
     Subscribe,  // stream of events back to the client (for applet/tray)
 }
@@ -224,6 +231,7 @@ pub enum EditorOutcome {
     Saved(PathBuf),
     CopiedToClipboard,
     Uploaded(String),
+    Pinned,
     Cancelled,
 }
 ```

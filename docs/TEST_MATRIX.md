@@ -136,29 +136,77 @@ compositing decision.
 
 
 
-## Phase 3 — pin-to-desktop
+## Phase 3 — pin-to-desktop + COSMIC applet
 
-Subcommand: `flintshot pin <path>`, editor *Pin* button, `Request::PinLast` over IPC.
+Subcommands: `flintshot pin <path>`, `flintshot open <path>`, editor
+*Pin* button, `Request::PinLast` / `Request::OpenLast` over IPC, and
+`flintshot-cosmic` panel applet.
 
 A pin is a borderless always-on-top floating window showing a captured
-image; it persists as its own process (ADR-0023). All three entry points
-(CLI, editor button, daemon `PinLast`) converge on `EditorShell::run_pin`.
+image; each pin runs as its own worker process so a pin crash can't kill
+the editor or daemon (ADR-0019), and multiple pins coexist. All three
+pin entry points (CLI, editor button, daemon `PinLast`) converge on
+`EditorShell::run_pin`. The COSMIC applet is a pure IPC client (depends
+on `flintshot-core` + `libcosmic` only — no `egui`, no `flintshot-app`).
+
+### Phase 3.A — pin-to-desktop
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 | `flintshot pin <path>` opens borderless window              |    |    |    |    |    |    |    |    |    |
+| `flintshot pin <path> --at X,Y --size WxH` honours geometry  |    |    |    |    |    |    |    |    |    |
+| `flintshot pin <path> --opacity 0.7 --no-clipboard` override |    |    |    |    |    |    |    |    |    |
 | Pin window is always-on-top over ordinary windows           |    |    |    |    |    |    |    |    |    |
-| Pin draggable (left-drag moves the window)                  |    |    |    |    |    |    |    |    |    |
-| Pin closes on `Esc` and WM close button                     |    |    |    |    |    |    |    |    |    |
+| Pin draggable (left-drag anywhere moves the window)         |    |    |    |    |    |    |    |    |    |
+| Pin draggable across monitors (cross-monitor drag)          |    |    |    |    |    |    |    |    |    |
+| Pin closes on `Esc`                                         |    |    |    |    |    |    |    |    |    |
+| Pin closes on double-click                                  |    |    |    |    |    |    |    |    |    |
+| Hover-opacity: resting at `[pin] default-opacity`, opaque on hover | | | | | | | | | |
+| Hover-opacity: returns to resting when cursor leaves        |    |    |    |    |    |    |    |    |    |
+| Resize handle (bottom-right): drag resizes window           |    |    |    |    |    |    |    |    |    |
+| Resize is aspect-ratio locked (image scales, no crop/distort)|    |    |    |    |    |    |    |    |    |
+| Copy-on-close `[pin] copy_on_close = true`: image on clipboard on close | | | | | | | | | |
+| Copy-on-close `[pin] copy_on_close = false` (default): no copy | | | | | | | | | |
 | Pin persists after the editor exits                         |    |    |    |    |    |    |    |    |    |
 | Pin persists after the daemon exits                         |    |    |    |    |    |    |    |    |    |
-| Multiple pins coexist independently                         |    |    |    |    |    |    |    |    |    |
-| Editor *Pin* button: compose → cache file → pin spawns      |    |    |    |    |    |    |    |    |    |
+| Multiple pins coexist as independent windows                |    |    |    |    |    |    |    |    |    |
+| Editor *Pin* button: compose → cache file → pin spawns, editor closes | | | | | | | | | |
 | Editor *Pin* with active selection pins just the region     |    |    |    |    |    |    |    |    |    |
+| `flintshot open <path>` loads existing image into editor    |    |    |    |    |    |    |    |    |    |
 | `Request::PinLast` over IPC spawns a pin worker             |    |    |    |    |    |    |    |    |    |
+| `Request::OpenLast` over IPC spawns editor on last save     |    |    |    |    |    |    |    |    |    |
 | `PinLast` with no prior save → `Error { code: "no-last-capture" }` | | | | | | | | | |
 | `Event::Saved { path }` reaches IPC subscribers after editor save | | | | | | | | | |
-| `Event::Pinned { id }` reaches IPC subscribers after `PinLast` |  |    |    |    |    |    |    |    |    |
+| `Event::Pinned { id }` reaches IPC subscribers after `PinLast`; ids monotonic | | | | | | | | | |
+
+### Phase 3.B — COSMIC panel applet
+
+Built and exercised only on Linux (`flintshot-cosmic` is an opt-in
+crate outside `default-members`; macOS/Windows/standalone-editor cells
+are N/A). The applet is a pure IPC client — it sends `Request`s and
+reads the `Event` stream; it performs no capture and runs no editor.
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| `cargo build -p flintshot-cosmic` succeeds                  |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Applet appears as a COSMIC panel button                     |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Panel button opens popup with full action set               |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Popup *Capture region* sends `Request`, daemon spawns editor |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Popup *Capture fullscreen* sends `Request`, daemon spawns   |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Popup per-monitor submenu lists each monitor (from `monitors()`) | | | | | | N/A | N/A | N/A | N/A |
+| Per-monitor entry captures the right monitor                |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Popup *Pin last* sends `Request::PinLast`, pin window spawns |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Popup *Open last* sends `Request::OpenLast`, editor opens   |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Popup *Open config* opens `$EDITOR` on `config.toml`        |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Popup *Quit* sends `Request::Quit`, daemon exits cleanly    |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Event feed: status line updates (*Capturing… → Editor opened → Saved \<path\>*) | | | | | | N/A | N/A | N/A | N/A |
+| Event feed: `Event::Pinned { id }` shows *"Pinned #N"*      |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Event feed: `Event::Error` shows tinted-red error line      |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Daemon-absent: popup shows *"daemon not running"* + start hint |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Daemon-absent: daemon-dependent buttons disabled            |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Daemon-absent: *Open config* stays enabled (no daemon needed) |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Reconnect: daemon restart → popup re-subscribes within ~2 s |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| `Lagged` / stream error handled without panic               |    |    |    |    |    | N/A | N/A | N/A | N/A |
 
 ### Phase 3 known caveats
 
@@ -172,9 +220,21 @@ image; it persists as its own process (ADR-0023). All three entry points
 - **M1/M2 (macOS):** `with_always_on_top()` maps to
   `NSWindow.level = .floating`. Verify whether `.statusBar` is needed
   for the pin to float above a fullscreen app — record the result.
-- **Pin-cache dir:** files under `<cache_dir>/flintshot/pins/` are safe
-  to delete at any time (a pin reads its image into memory once and
-  holds no file handle). The OS may reap the cache dir independently.
+- **Pin-cache files:** temp files under the OS temp dir
+  (`flintshot-pin-<pid>-<n>.png`) are safe to delete at any time — a
+  pin reads its image into memory once and holds no file handle. The
+  editor→pin handoff writes the temp file, spawns the pin worker, and
+  the pin worker reads + holds the image; the temp file may be reaped
+  by the OS independently.
+- **COSMIC applet (L1–L5 only):** the applet does not auto-start the
+  daemon. If no daemon answers, the popup shows *"daemon not running —
+  start with `flintshot daemon`"* and disables daemon-dependent
+  buttons; the user starts the daemon manually (autostart/packaging is
+  post-1.0).
+- **COSMIC applet event feed:** the 2 s reconnect poll means a
+  daemon restart takes up to 2 s for the popup to notice and
+  re-subscribe. Events emitted while disconnected are not retroactively
+  fetched (the daemon doesn't buffer for absent subscribers).
 
 ## Phase 4 — upload
 
