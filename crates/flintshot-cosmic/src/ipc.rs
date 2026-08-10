@@ -49,10 +49,6 @@ type Stream = interprocess::local_socket::tokio::Stream;
 /// exactly that many payload bytes. Rejects lengths over
 /// [`MAX_FRAME_LEN`]. A short read (truncation / clean disconnect)
 /// surfaces as an error, never a panic.
-//
-// Used by `EventStream::next_event` (Task 8) and unit tests; dead-code
-// allowance covers the gap until Task 8 wires the event stream.
-#[allow(dead_code)]
 async fn read_frame<R>(r: &mut R) -> eyre::Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
@@ -109,10 +105,6 @@ where
 }
 
 /// Postcard-decode an [`Event`].
-//
-// Used by `EventStream::next_event` (Task 8); dead-code allowance
-// covers the gap until the event stream is wired.
-#[allow(dead_code)]
 fn decode_event(buf: &[u8]) -> eyre::Result<IpcEvent> {
     postcard::from_bytes(buf).map_err(|e| eyre::eyre!("postcard decode event: {e}"))
 }
@@ -153,9 +145,6 @@ async fn connect(override_path: Option<&Path>) -> eyre::Result<Stream> {
 /// Does this connect error mean "no daemon" (absent / refused / stale
 /// socket from a crashed daemon) vs a real fault? Mirrors
 /// `flintshot_app::ipc_client::is_no_daemon`.
-//
-// Used by `probe_daemon` (Task 8); dead-code allowance covers the gap.
-#[allow(dead_code)]
 fn is_no_daemon(error: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     matches!(
@@ -166,14 +155,48 @@ fn is_no_daemon(error: &std::io::Error) -> bool {
 
 // ── public client API ────────────────────────────────────────────────
 
+/// Map a daemon [`Event`] to a human-readable status string for the
+/// popup status line. Pure (no UI), so the mapping is unit-tested
+/// headless in this module's tests.
+///
+/// | Event variant                | Status string                 |
+/// | ---------------------------- | ----------------------------- |
+/// | `CaptureStarted`             | *"Capturing…"*                |
+/// | `EditorOpened`               | *"Editor opened"*             |
+/// | `Saved { path }`             | *"Saved \<basename\>"*        |
+/// | `Pinned { id }`              | *"Pinned #\<id\>"*            |
+/// | `Uploaded { url, .. }`       | *"Uploaded \<url\>"*          |
+/// | `Error { message, .. }`      | *"Error: \<message\>"*        |
+///
+/// The caller renders the result; an `"Error: …"` prefix is styled
+/// distinctly in the popup (see `app::popup_content`).
+///
+/// [`Event`]: flintshot_core::ipc::Event
+#[must_use]
+pub fn status_for_event(event: &IpcEvent) -> String {
+    match event {
+        IpcEvent::CaptureStarted => "Capturing…".to_string(),
+        IpcEvent::EditorOpened => "Editor opened".to_string(),
+        IpcEvent::Saved { path } => {
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            format!("Saved {name}")
+        }
+        IpcEvent::Pinned { id } => format!("Pinned #{id}"),
+        IpcEvent::Uploaded { url, .. } => format!("Uploaded {url}"),
+        IpcEvent::Error { message, .. } => format!("Error: {message}"),
+        // Future variants (non_exhaustive): render the debug form so
+        // the popup never blanks on an unknown event.
+        other => format!("{other:?}"),
+    }
+}
+
 /// Daemon reachability, as seen by a one-shot probe.
 ///
-/// Returned by [`probe_daemon`]; the popup (Task 7) shows
+/// Returned by [`probe_daemon`]; the popup shows
 /// [`DaemonState::NotRunning`] as a "daemon not running" status line.
-//
-// Consumed by Task 8's status line + `probe_daemon`; dead-code allowance
-// covers the gap until Task 8 wires the daemon-absent display.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DaemonState {
@@ -208,10 +231,6 @@ pub async fn send_request(override_path: Option<&Path>, request: &IpcRequest) ->
 /// it returns `Ok(None)` (stream lost), then reconnect.
 ///
 /// [`Event`]: flintshot_core::ipc::Event
-//
-// Consumed by Task 8's event-stream display; dead-code allowance
-// covers the gap.
-#[allow(dead_code)]
 pub struct EventStream {
     stream: Stream,
 }
@@ -233,9 +252,6 @@ impl EventStream {
     ///
     /// # Errors
     /// Postcard decode failure.
-    //
-    // Consumed by Task 8; dead-code allowance covers the gap.
-    #[allow(dead_code)]
     pub async fn next_event(&mut self) -> eyre::Result<Option<IpcEvent>> {
         let payload = match read_frame(&mut self.stream).await {
             Ok(p) => p,
@@ -256,9 +272,6 @@ impl EventStream {
 /// # Errors
 /// - Socket-name resolution / connect failure (no daemon).
 /// - `Subscribe` encode / framed write failure.
-//
-// Consumed by Task 8; dead-code allowance covers the gap.
-#[allow(dead_code)]
 pub async fn subscribe(override_path: Option<&Path>) -> eyre::Result<EventStream> {
     let mut stream = connect(override_path).await?;
     let bytes = encode_msg(&IpcRequest::Subscribe)?;
@@ -280,9 +293,6 @@ pub async fn subscribe(override_path: Option<&Path>) -> eyre::Result<EventStream
 /// hard fault also reports `NotRunning`, so a stale socket left behind
 /// by a crashed daemon degrades as "no daemon" rather than surfacing
 /// an error to the UI.
-//
-// Consumed by Task 8's status line; dead-code allowance covers the gap.
-#[allow(dead_code)]
 #[must_use]
 pub async fn probe_daemon(override_path: Option<&Path>) -> DaemonState {
     let path = socket_path(override_path);
@@ -580,5 +590,114 @@ mod tests {
         std::fs::write(&sock, b"stale").expect("create stale file");
         let state = probe_daemon(Some(&sock)).await;
         assert_eq!(state, DaemonState::NotRunning);
+    }
+
+    // ── status_for_event: Event → human status string (pure) ─────────
+
+    #[test]
+    fn status_for_capture_started() {
+        assert_eq!(status_for_event(&Event::CaptureStarted), "Capturing…");
+    }
+
+    #[test]
+    fn status_for_editor_opened() {
+        assert_eq!(status_for_event(&Event::EditorOpened), "Editor opened");
+    }
+
+    #[test]
+    fn status_for_saved_shows_basename() {
+        assert_eq!(
+            status_for_event(&Event::Saved {
+                path: PathBuf::from("/tmp/screenshot.png"),
+            }),
+            "Saved screenshot.png"
+        );
+    }
+
+    #[test]
+    fn status_for_pinned_shows_id() {
+        assert_eq!(status_for_event(&Event::Pinned { id: 42 }), "Pinned #42");
+    }
+
+    #[test]
+    fn status_for_uploaded_shows_url() {
+        assert_eq!(
+            status_for_event(&Event::Uploaded {
+                url: "https://imgur.com/abc".to_string(),
+                delete_handle: None,
+            }),
+            "Uploaded https://imgur.com/abc"
+        );
+    }
+
+    #[test]
+    fn status_for_error_shows_message() {
+        assert_eq!(
+            status_for_event(&Event::Error {
+                code: "capture-failed".to_string(),
+                message: "no display".to_string(),
+            }),
+            "Error: no display"
+        );
+    }
+
+    // ── reconnect cycle: stream drops → absent → re-probe → live ─────
+
+    /// The full reconnect cycle the applet's subscribe loop relies on:
+    /// no daemon → absent; start listener → live; drop listener →
+    /// absent; restart listener → live again. This proves a daemon
+    /// restart is detected without restarting the applet.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconnect_cycle_absent_then_live_then_absent_then_live() {
+        let (_dir, sock) = fresh_socket();
+        let timeout = std::time::Duration::from_secs(2);
+        let poll = std::time::Duration::from_millis(10);
+
+        // 1. No listener → absent.
+        assert_eq!(
+            probe_daemon(Some(&sock)).await,
+            DaemonState::NotRunning,
+            "no listener → absent"
+        );
+
+        // 2. Start listener → re-probe succeeds → live.
+        let listener1 = bind_listener(&sock);
+        wait_for_state(Some(&sock), DaemonState::Running, timeout, poll)
+            .await
+            .expect("listener started → live");
+
+        // 3. Drop listener → absent again (stale socket reports NotRunning).
+        drop(listener1);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        wait_for_state(Some(&sock), DaemonState::NotRunning, timeout, poll)
+            .await
+            .expect("listener dropped → absent");
+
+        // 4. Restart listener (overwrite stale socket) → reconnected → live.
+        let _listener2 = bind_listener(&sock);
+        wait_for_state(Some(&sock), DaemonState::Running, timeout, poll)
+            .await
+            .expect("listener restarted → live");
+    }
+
+    /// Helper: poll `probe_daemon` until `want` is seen or `deadline`
+    /// elapses. Used by the reconnect-cycle test to absorb OS lag.
+    async fn wait_for_state(
+        sock: Option<&Path>,
+        want: DaemonState,
+        deadline: std::time::Duration,
+        poll: std::time::Duration,
+    ) -> Result<(), &'static str> {
+        tokio::time::timeout(deadline, async {
+            loop {
+                if probe_daemon(sock).await == want {
+                    return;
+                }
+                tokio::time::sleep(poll).await;
+            }
+        })
+        .await
+        .map_err(|_| "timed out waiting for daemon state")
     }
 }
