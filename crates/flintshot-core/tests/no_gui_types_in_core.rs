@@ -2,12 +2,14 @@
 //! public API or its source. See `docs/ARCHITECTURE.md` §Coding conventions.
 //!
 //! This test greps its own crate's `src/` for forbidden imports — GUI
-//! toolkits (egui/eframe/iced/libcosmic/slint/gdk/gtk) **and** the
+//! toolkits (egui/eframe/iced/cosmic/libcosmic/slint/gdk/gtk) **and** the
 //! Phase 2 transport/system crates (`interprocess`, `global_hotkey`,
-//! `tray_icon`, `notify`) — and fails if any are found. The IPC schema
-//! (`flintshot-core::ipc`) may use only `postcard`/`serde`/std types;
-//! the transport/server implementations live in `flintshot-app`. It
-//! runs without compiling the toolkit crates — pure source scan.
+//! `tray_icon`, `notify`) — and fails if any are found. The `libcosmic`
+//! crate is imported as `cosmic` in Rust source, so both prefixes are
+//! listed. The IPC schema (`flintshot-core::ipc`) may use only
+//! `postcard`/`serde`/std types; the transport/server implementations
+//! live in `flintshot-app`. It runs without compiling the toolkit
+//! crates — pure source scan.
 
 use std::path::PathBuf;
 
@@ -15,6 +17,7 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
     "use egui",
     "use eframe",
     "use iced",
+    "use cosmic",
     "use libcosmic",
     "use slint",
     "use gdk",
