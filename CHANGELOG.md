@@ -517,6 +517,17 @@ Categories used below:
   (`action_for(&MenuMessage) -> Action`, unit-tested headless) and sends
   the matching `Request` via the Task 6 IPC client. The live event
   stream + daemon-absent status line is Task 8.
+- COSMIC applet live event stream + daemon-absent state (Phase 3 Task
+  008). The popup now shows a live status line (*Idle* / *Capturing…* /
+  *Editor opened* / *Saved \<basename\>* / *Pinned #N* /
+  *Uploaded \<url\>* / *Error: \<message\>*, tinted red) driven by a
+  persistent `Subscribe` connection. A background `Subscription`
+  runs the reconnect loop: probe → subscribe → read events, with a 2 s
+  re-probe on stream loss or daemon absence. When the daemon is down,
+  the popup shows *"daemon not running — start with `flintshot
+  daemon`"* and disables daemon-dependent buttons (*Open config* stays
+  enabled). New pure `ipc::status_for_event(&Event) -> String` maps
+  each event variant to its status text (unit-tested headless).
 
 ### Changed
 
