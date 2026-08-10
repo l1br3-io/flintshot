@@ -26,7 +26,7 @@ project resumes from.
 **Checkpoint D** — pin works from all three entry points (CLI, daemon, editor). Pin-to-desktop feature-complete and independently shippable.
 
 ## Phase 3.D — COSMIC applet
-- [ ] Task 6 — COSMIC IPC client (framing + Request + Subscribe + daemon-absent) → [`tasks/006-cosmic-ipc-client.md`](tasks/006-cosmic-ipc-client.md)
+- [x] Task 6 — COSMIC IPC client (framing + Request + Subscribe + daemon-absent) → [`tasks/006-cosmic-ipc-client.md`](tasks/006-cosmic-ipc-client.md)
 - [ ] Task 7 — COSMIC applet shell + popup menu (actions, monitor submenu, config/quit) → [`tasks/007-cosmic-applet-popup.md`](tasks/007-cosmic-applet-popup.md)
 - [ ] Task 8 — COSMIC event stream + daemon-absent state (Subscribe display, status line) → [`tasks/008-cosmic-event-stream.md`](tasks/008-cosmic-event-stream.md)
 

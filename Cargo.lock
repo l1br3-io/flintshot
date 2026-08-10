@@ -2306,8 +2306,15 @@ dependencies = [
 name = "flintshot-cosmic"
 version = "0.0.0"
 dependencies = [
+ "color-eyre",
  "flintshot-core",
+ "interprocess",
  "libcosmic",
+ "postcard",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
