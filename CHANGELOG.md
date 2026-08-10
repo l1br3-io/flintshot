@@ -496,6 +496,27 @@ Categories used below:
   the daemon / future callers can distinguish it. Compose / temp-write
   failures close the editor with an error; spawn failures keep the
   editor usable (Save / Copy still work) so the user can fall back.
+- COSMIC applet IPC client (Phase 3 Task 006). New
+  `flintshot-cosmic::ipc` module: length-prefixed postcard framing
+  (duplicated ~30 LOC from `flintshot-app::ipc_server` per ADR-0010),
+  `send_request` (one-shot connect-send-disconnect), `subscribe`
+  (long-lived `EventStream`), and `probe_daemon` (`DaemonState` enum
+  for running/not-running). Headless-testable against a hand-rolled
+  in-process listener (no `flintshot-app` dep). The applet is a pure
+  IPC client: depends on `flintshot-core` + `libcosmic` +
+  `interprocess`/`postcard`/`tokio` only — no `egui`, no `flintshot-app`.
+- Real COSMIC panel applet replacing the stub (Phase 3 Task 007).
+  `flintshot-cosmic` is now a `cosmic::applet::run` entry driven by a
+  `cosmic::Application` impl (`flintshot_cosmic::app::App`). The panel
+  button opens a popup mirroring the tray menu item-for-item: *Capture
+  region*, *Capture fullscreen*, per-monitor entries (from
+  `flintshot_core::monitors()`), *Pin last*, *Open last*, *Open config*
+  (shells out to `$EDITOR` via `flintshot_core::config_path()`, ~10 LOC
+  mirror of the daemon's `open_config_file`), and *Quit*. Each action
+  resolves through a pure `flintshot_cosmic::menu` dispatch
+  (`action_for(&MenuMessage) -> Action`, unit-tested headless) and sends
+  the matching `Request` via the Task 6 IPC client. The live event
+  stream + daemon-absent status line is Task 8.
 
 ### Changed
 

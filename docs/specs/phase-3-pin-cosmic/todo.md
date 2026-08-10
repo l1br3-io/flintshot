@@ -27,7 +27,7 @@ project resumes from.
 
 ## Phase 3.D — COSMIC applet
 - [x] Task 6 — COSMIC IPC client (framing + Request + Subscribe + daemon-absent) → [`tasks/006-cosmic-ipc-client.md`](tasks/006-cosmic-ipc-client.md)
-- [ ] Task 7 — COSMIC applet shell + popup menu (actions, monitor submenu, config/quit) → [`tasks/007-cosmic-applet-popup.md`](tasks/007-cosmic-applet-popup.md)
+- [x] Task 7 — COSMIC applet shell + popup menu (actions, monitor submenu, config/quit) → [`tasks/007-cosmic-applet-popup.md`](tasks/007-cosmic-applet-popup.md)
 - [ ] Task 8 — COSMIC event stream + daemon-absent state (Subscribe display, status line) → [`tasks/008-cosmic-event-stream.md`](tasks/008-cosmic-event-stream.md)
 
 **Checkpoint E** — COSMIC applet works end-to-end; popup shows live status and degrades gracefully when the daemon is absent.

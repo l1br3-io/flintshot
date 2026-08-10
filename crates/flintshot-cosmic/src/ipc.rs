@@ -49,6 +49,10 @@ type Stream = interprocess::local_socket::tokio::Stream;
 /// exactly that many payload bytes. Rejects lengths over
 /// [`MAX_FRAME_LEN`]. A short read (truncation / clean disconnect)
 /// surfaces as an error, never a panic.
+//
+// Used by `EventStream::next_event` (Task 8) and unit tests; dead-code
+// allowance covers the gap until Task 8 wires the event stream.
+#[allow(dead_code)]
 async fn read_frame<R>(r: &mut R) -> eyre::Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
@@ -105,8 +109,10 @@ where
 }
 
 /// Postcard-decode an [`Event`].
-///
-/// [`Event`]: flintshot_core::ipc::Event
+//
+// Used by `EventStream::next_event` (Task 8); dead-code allowance
+// covers the gap until the event stream is wired.
+#[allow(dead_code)]
 fn decode_event(buf: &[u8]) -> eyre::Result<IpcEvent> {
     postcard::from_bytes(buf).map_err(|e| eyre::eyre!("postcard decode event: {e}"))
 }
@@ -147,6 +153,9 @@ async fn connect(override_path: Option<&Path>) -> eyre::Result<Stream> {
 /// Does this connect error mean "no daemon" (absent / refused / stale
 /// socket from a crashed daemon) vs a real fault? Mirrors
 /// `flintshot_app::ipc_client::is_no_daemon`.
+//
+// Used by `probe_daemon` (Task 8); dead-code allowance covers the gap.
+#[allow(dead_code)]
 fn is_no_daemon(error: &std::io::Error) -> bool {
     use std::io::ErrorKind;
     matches!(
@@ -161,6 +170,10 @@ fn is_no_daemon(error: &std::io::Error) -> bool {
 ///
 /// Returned by [`probe_daemon`]; the popup (Task 7) shows
 /// [`DaemonState::NotRunning`] as a "daemon not running" status line.
+//
+// Consumed by Task 8's status line + `probe_daemon`; dead-code allowance
+// covers the gap until Task 8 wires the daemon-absent display.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DaemonState {
@@ -183,12 +196,6 @@ pub enum DaemonState {
 /// - Socket-name resolution failure.
 /// - Connect failure (the daemon isn't running).
 /// - Postcard encode / framed write failure.
-//
-// Only the unit tests and Task 7's popup actions consume this; the
-// smoke probe in `main` exercises `subscribe`/`probe_daemon` instead.
-// Allow is per-item (not module-wide) so genuinely dead code still
-// trips the warning once Task 7 lands.
-#[allow(dead_code)]
 pub async fn send_request(override_path: Option<&Path>, request: &IpcRequest) -> eyre::Result<()> {
     let mut stream = connect(override_path).await?;
     let bytes = encode_msg(request)?;
@@ -201,6 +208,10 @@ pub async fn send_request(override_path: Option<&Path>, request: &IpcRequest) ->
 /// it returns `Ok(None)` (stream lost), then reconnect.
 ///
 /// [`Event`]: flintshot_core::ipc::Event
+//
+// Consumed by Task 8's event-stream display; dead-code allowance
+// covers the gap.
+#[allow(dead_code)]
 pub struct EventStream {
     stream: Stream,
 }
@@ -222,6 +233,9 @@ impl EventStream {
     ///
     /// # Errors
     /// Postcard decode failure.
+    //
+    // Consumed by Task 8; dead-code allowance covers the gap.
+    #[allow(dead_code)]
     pub async fn next_event(&mut self) -> eyre::Result<Option<IpcEvent>> {
         let payload = match read_frame(&mut self.stream).await {
             Ok(p) => p,
@@ -242,6 +256,9 @@ impl EventStream {
 /// # Errors
 /// - Socket-name resolution / connect failure (no daemon).
 /// - `Subscribe` encode / framed write failure.
+//
+// Consumed by Task 8; dead-code allowance covers the gap.
+#[allow(dead_code)]
 pub async fn subscribe(override_path: Option<&Path>) -> eyre::Result<EventStream> {
     let mut stream = connect(override_path).await?;
     let bytes = encode_msg(&IpcRequest::Subscribe)?;
@@ -263,6 +280,9 @@ pub async fn subscribe(override_path: Option<&Path>) -> eyre::Result<EventStream
 /// hard fault also reports `NotRunning`, so a stale socket left behind
 /// by a crashed daemon degrades as "no daemon" rather than surfacing
 /// an error to the UI.
+//
+// Consumed by Task 8's status line; dead-code allowance covers the gap.
+#[allow(dead_code)]
 #[must_use]
 pub async fn probe_daemon(override_path: Option<&Path>) -> DaemonState {
     let path = socket_path(override_path);
