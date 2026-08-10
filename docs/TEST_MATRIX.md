@@ -136,19 +136,45 @@ compositing decision.
 
 
 
-## Phase 3 — pin-to-desktop + COSMIC applet
+## Phase 3 — pin-to-desktop
 
-Subcommand: `flintshot pin`
+Subcommand: `flintshot pin <path>`, editor *Pin* button, `Request::PinLast` over IPC.
+
+A pin is a borderless always-on-top floating window showing a captured
+image; it persists as its own process (ADR-0023). All three entry points
+(CLI, editor button, daemon `PinLast`) converge on `EditorShell::run_pin`.
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| `flintshot pin <path>` opens borderless always-on-top win  |    |    |    |    |    |    |    |    |    |
-| Pin draggable, resizable                                    |    |    |    |    |    |    |    |    |    |
+| `flintshot pin <path>` opens borderless window              |    |    |    |    |    |    |    |    |    |
+| Pin window is always-on-top over ordinary windows           |    |    |    |    |    |    |    |    |    |
+| Pin draggable (left-drag moves the window)                  |    |    |    |    |    |    |    |    |    |
+| Pin closes on `Esc` and WM close button                     |    |    |    |    |    |    |    |    |    |
+| Pin persists after the editor exits                         |    |    |    |    |    |    |    |    |    |
+| Pin persists after the daemon exits                         |    |    |    |    |    |    |    |    |    |
 | Multiple pins coexist independently                         |    |    |    |    |    |    |    |    |    |
-| "Pin" button from editor works                              |    |    |    |    |    |    |    |    |    |
-| COSMIC applet appears in panel (L5 only)                    | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
-| Applet popup buttons fire IPC commands to daemon            | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
-| Applet localizes (English baseline)                         | N/A | N/A | N/A | N/A |    | N/A | N/A | N/A | N/A |
+| Editor *Pin* button: compose → cache file → pin spawns      |    |    |    |    |    |    |    |    |    |
+| Editor *Pin* with active selection pins just the region     |    |    |    |    |    |    |    |    |    |
+| `Request::PinLast` over IPC spawns a pin worker             |    |    |    |    |    |    |    |    |    |
+| `PinLast` with no prior save → `Error { code: "no-last-capture" }` | | | | | | | | | |
+| `Event::Saved { path }` reaches IPC subscribers after editor save | | | | | | | | | |
+| `Event::Pinned { id }` reaches IPC subscribers after `PinLast` |  |    |    |    |    |    |    |    |    |
+
+### Phase 3 known caveats
+
+- **L2–L5 (Wayland):** always-on-top is compositor-dependent.
+  `with_always_on_top()` maps to a winit hint that X11/DWM/macOS honour
+  but Wayland compositors may ignore (there is no Wayland protocol for
+  "always on top" outside layer-shell, which a borderless top-level
+  window doesn't use). The pin still opens and is draggable; it just
+  may not float above other windows. A layer-shell-based pin is the
+  real fix, deferred to a future effort.
+- **M1/M2 (macOS):** `with_always_on_top()` maps to
+  `NSWindow.level = .floating`. Verify whether `.statusBar` is needed
+  for the pin to float above a fullscreen app — record the result.
+- **Pin-cache dir:** files under `<cache_dir>/flintshot/pins/` are safe
+  to delete at any time (a pin reads its image into memory once and
+  holds no file handle). The OS may reap the cache dir independently.
 
 ## Phase 4 — upload
 

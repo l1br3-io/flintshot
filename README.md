@@ -72,6 +72,14 @@ otherwise; `--standalone` forces the in-process path.
 > `flintshot fullscreen`. See
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §Cross-platform concerns.
 
+> **Pin always-on-top (Wayland):** the pin window's always-on-top hint
+> is honoured on X11, macOS, and Windows, but Wayland has no
+> always-on-top protocol for ordinary top-level windows — some
+> compositors ignore it. The pin still opens and is draggable; it just
+> may not float above other windows. A layer-shell-based pin is the real
+> fix, deferred to a future effort. See
+> [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md) §Phase 3 known caveats.
+
 ### Development
 
 For contributors. The `justfile` wraps the common loop; see
@@ -90,19 +98,19 @@ Dev shortcuts exist for capture subcommands too — e.g.
 
 ### What works right now
 
-- ✅ Capture fullscreen/region (via xcap)
-- ✅ Open editor window
-- ✅ Config file at `~/.config/flintshot/config.toml`
+- Capture fullscreen/region (via xcap)
+- Editor window with annotation tools (rectangle, arrow, text, blur, ellipse, line, marker, pencil, number)
+- Save to file / copy to clipboard / pin to desktop
+- Config file at `~/.config/flintshot/config.toml`
+- Daemon with tray, hotkeys, and IPC server
+- Pin-to-desktop (`flintshot pin`, editor Pin button, `Request::PinLast`)
 
-### Coming soon (Phase 1)
+### Coming next (Phase 3b / 4)
 
-- ⏳ Annotation tools (rectangle, arrow, text, blur)
-- ⏳ Save to file (native dialog)
-- ⏳ Copy to clipboard
-- ⏳ Undo/redo
+- COSMIC panel applet
+- Upload backends (Imgur, …)
 
-See the [Phase 1 spec](docs/specs/phase-1-capture-editor/spec.md), or
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone index.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone index.
 
 ## Documentation
 

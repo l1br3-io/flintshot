@@ -443,6 +443,36 @@ pub fn config_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("flintshot").join("config.toml"))
 }
 
+/// Resolve the pin-cache directory: `<cache_dir>/flintshot/pins/`.
+///
+/// The editor writes composed pin images here before spawning
+/// `flintshot pin <path>`; the daemon may reap stale entries on start.
+/// Returns `None` when `dirs::cache_dir()` returns `None` (platforms
+/// without a cache convention) — callers fall back to
+/// `std::env::temp_dir().join("flintshot-pins")`.
+///
+/// Opportunistic-cleanup contract: files here are safe to delete at any
+/// time (a pin keeps no handle open after `image::open` reads it into
+/// memory). The OS may reap the cache dir independently; the daemon's
+/// own cleanup is best-effort.
+#[must_use]
+pub fn pin_cache_dir() -> Option<PathBuf> {
+    pin_cache_dir_in(dirs::cache_dir().as_deref())
+}
+
+/// Pure, testable seam for [`pin_cache_dir`]: given a base cache dir (or
+/// `None`), return `<base>/flintshot/pins`. Mirrors
+/// `ipc::default_unix_socket_in`'s shape — keeps the platform `dirs`
+/// lookup out of the composition logic so the path shape is unit-tested
+/// without setting env vars.
+///
+/// Returns `None` when `base` is `None` (matching [`pin_cache_dir`]'s
+/// contract for platforms without a cache convention).
+#[must_use]
+pub fn pin_cache_dir_in(base: Option<&Path>) -> Option<PathBuf> {
+    Some(base?.join("flintshot").join("pins"))
+}
+
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
@@ -737,5 +767,32 @@ include-cursor = true  # hide cursor when capturing presentations
             matches!(err, FlintshotError::Config { .. }),
             "expected Config error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn pin_cache_dir_in_joins_flintshot_pins_under_base() {
+        let path =
+            pin_cache_dir_in(Some(Path::new("/home/user/.cache"))).expect("Some base → Some path");
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/.cache/flintshot/pins"),
+            "pin cache dir must be <base>/flintshot/pins"
+        );
+    }
+
+    #[test]
+    fn pin_cache_dir_in_none_returns_none() {
+        assert!(
+            pin_cache_dir_in(None).is_none(),
+            "no base cache dir → no pin cache dir (caller falls back to temp)"
+        );
+    }
+
+    #[test]
+    fn pin_cache_dir_in_does_not_require_base_to_exist() {
+        // A nonexistent base is still joined structurally — existence is
+        // the caller's concern (the editor creates the dir on write).
+        let path = pin_cache_dir_in(Some(Path::new("/nonexistent/cache"))).unwrap();
+        assert_eq!(path, PathBuf::from("/nonexistent/cache/flintshot/pins"));
     }
 }
