@@ -15,6 +15,24 @@ path = "src/main.rs"
 
 [dependencies]
 flintshot-core = { workspace = true }
+color-eyre = { workspace = true }
+interprocess = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+# Minimal tokio feature set: the applet is a pure IPC client, not a
+# full async app. `rt-multi-thread` drives the runtime + multi-thread
+# tests; `macros` for `#[tokio::test]`; `io-util` for framed
+# `read_exact`/`write_all`; `net` for the IO driver (local sockets via
+# interprocess); `time` for connect timeouts. libcosmic pulls its own
+# tokio features on top of this floor.
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "io-util",
+    "net",
+    "time",
+] }
 # libcosmic is heavy (cmake, fontconfig, xkbcommon) and is NOT published to
 # crates.io — pop-os ships it via git only. We track `master` (the integration
 # branch pop-os's own applets use); release tags like `v0.12` bit-rot quickly
@@ -24,3 +42,6 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic.git", branch = "master"
     "wayland",
     "multi-window",
 ] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
