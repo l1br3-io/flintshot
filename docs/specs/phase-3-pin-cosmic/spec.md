@@ -1,6 +1,7 @@
 ---
-status: draft
+status: shipped
 started: 2026-08-09
+shipped: 2026-08-11
 ---
 
 # Spec — Phase 3: Pin-to-desktop + COSMIC Applet
