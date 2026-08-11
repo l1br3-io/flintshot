@@ -6,9 +6,9 @@ status-flipped in place when shipped). For the narrative "why", see
 [`VISION.md`](VISION.md); for decision rationale, see
 [`adrs/`](adrs/).
 
-**CURRENT MILESTONE: Phase 3b — COSMIC panel applet** (the pin-to-desktop
-primitive shipped in Phase 3; see
-[`specs/phase-3-pin-to-desktop/`](specs/phase-3-pin-to-desktop/)).
+**CURRENT MILESTONE: Phase 4 — Upload** (the pin-to-desktop primitive
+and COSMIC panel applet both shipped in Phase 3; see
+[`specs/phase-3-pin-cosmic/`](specs/phase-3-pin-cosmic/)).
 
 ## Milestones
 
@@ -19,8 +19,8 @@ primitive shipped in Phase 3; see
 | Phase 2 — Daemon, tray, hotkeys, IPC           | Shipped       |
 | Phase 2b — Annotation tools, magnifier, polish | Shipped       |
 | Phase 3 — Pin-to-desktop                       | Shipped       |
-| Phase 3b — COSMIC panel applet                 | **Next**      |
-| Phase 4 — Upload                               | Planned       |
+| Phase 3b — COSMIC panel applet                 | Shipped       |
+| Phase 4 — Upload                               | **Next**      |
 | Phase 5 — Live overlay (Flameshot-style)       | Planned       |
 | Phase 6 — Wayland global hotkeys via `ashpd`   | Planned       |
 
