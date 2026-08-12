@@ -1,6 +1,6 @@
 # Todo — Phase 4: Upload
 
-- [ ] 001: Rework upload trait types + add keyring to core
+- [x] 001: Rework upload trait types + add keyring to core
 - [ ] 002: Add `[upload]` config section
 - [ ] 003: Extend IPC schema (`Event::UploadStarted`, `Request::ReportUploaded`)
 - [ ] 004: ImgurBackend impl + workspace deps
