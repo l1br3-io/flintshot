@@ -528,8 +528,29 @@ Categories used below:
   daemon`"* and disables daemon-dependent buttons (*Open config* stays
   enabled). New pure `ipc::status_for_event(&Event) -> String` maps
   each event variant to its status text (unit-tested headless).
+- `flintshot-app::upload` module (Phase 4 Task 004) with the first
+  concrete `UploadBackend` impl: `ImgurBackend`. POSTs multipart form
+  data to `https://api.imgur.com/3/image`; supports anonymous (zero-
+  config) and Client-ID authenticated (`Authorization: Client-ID <id>`
+  from `keyring`) modes. HTTP-status mapping: 2xx → `UploadOutcome`,
+  401/403 → `UploadError::Auth`, 429 + other non-2xx →
+  `UploadError::Backend`, transport failure → `UploadError::Transport`.
+  `resolve_backend("imgur")` returns an `Arc<dyn UploadBackend>` from
+  the registry; unknown ids → `UploadError::UnknownBackend`. Response
+  mapping tested via `mockito` (no real network). New workspace deps:
+  `reqwest` (rustls-tls, multipart, json), `mockito` (dev-dep);
+  `keyring` added to `flintshot-app`.
+- `UploadOutcome::new(url, delete_handle)` constructor (Phase 4 Task
+  004). Required because `UploadOutcome` is `#[non_exhaustive]`, so
+  external crates cannot use struct-literal construction.
 
 ### Changed
+
+- `UploadBackend` trait methods now return `Pin<Box<dyn Future + Send>>`
+  instead of `impl Future` (Phase 4 Task 004). The `-> impl Future`
+  return type made the trait not dyn-compatible, but the registry and
+  daemon need `Arc<dyn UploadBackend>`. This is the standard boxed-
+  async pattern; `Send + Sync + 'static` shape preserved.
 
 - Planning docs reorganized to the canonical OpenCode harness v0.5.0+
   layout. Root `SPEC.md`, `tasks/plan.md`, `tasks/todo.md`, and
