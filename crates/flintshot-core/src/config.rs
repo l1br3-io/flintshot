@@ -39,6 +39,9 @@ pub struct Config {
     /// Pin-to-desktop window defaults (Phase 3; see [`PinConfig`]).
     #[serde(default)]
     pub pin: PinConfig,
+    /// Upload defaults (Phase 4; see [`UploadConfig`]).
+    #[serde(default)]
+    pub upload: UploadConfig,
 }
 
 /// Editor defaults: persist the user's last-used color, stroke width,
@@ -190,6 +193,32 @@ fn default_pin_position() -> String {
     "center".into()
 }
 
+/// Upload defaults (Phase 4). Mirrors the `[upload]` config section.
+/// `default_backend` is the backend id used when `--backend` is not
+/// passed on the CLI (`"imgur"` for Phase 4; `#[non_exhaustive]`-shaped
+/// for future backends).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub struct UploadConfig {
+    /// Backend id to use when `--backend` is not given (`"imgur"`,
+    /// `"0x0"`, etc.).
+    #[serde(default = "default_upload_backend")]
+    pub default_backend: String,
+}
+
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            default_backend: default_upload_backend(),
+        }
+    }
+}
+
+fn default_upload_backend() -> String {
+    "imgur".into()
+}
+
 fn default_color() -> Color {
     Color::RED
 }
@@ -324,6 +353,7 @@ impl Config {
         ensure_table(&mut doc, "capture");
         ensure_table(&mut doc, "hotkeys");
         ensure_table(&mut doc, "pin");
+        ensure_table(&mut doc, "upload");
 
         if let Some(ui) = doc.get_mut("ui").and_then(|i| i.as_table_mut()) {
             set_value(
@@ -396,6 +426,13 @@ impl Config {
                 pin,
                 "default-position",
                 toml_edit::Value::from(self.pin.default_position.as_str()),
+            );
+        }
+        if let Some(upload) = doc.get_mut("upload").and_then(|i| i.as_table_mut()) {
+            set_value(
+                upload,
+                "default-backend",
+                toml_edit::Value::from(self.upload.default_backend.as_str()),
             );
         }
 
@@ -794,5 +831,76 @@ include-cursor = true  # hide cursor when capturing presentations
         // the caller's concern (the editor creates the dir on write).
         let path = pin_cache_dir_in(Some(Path::new("/nonexistent/cache"))).unwrap();
         assert_eq!(path, PathBuf::from("/nonexistent/cache/flintshot/pins"));
+    }
+
+    #[test]
+    fn missing_upload_section_uses_defaults() {
+        let cfg = Config::load_from(&{
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            fs::write(&path, "[ui]\ndefault-color = \"#000000\"\n").unwrap();
+            path
+        })
+        .unwrap();
+        assert_eq!(cfg.upload.default_backend, "imgur");
+        let d = UploadConfig::default();
+        assert_eq!(d.default_backend, "imgur");
+    }
+
+    #[test]
+    fn custom_upload_config_loads_from_toml() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[upload]\ndefault-backend = \"0x0\"\n").unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.upload.default_backend, "0x0");
+    }
+
+    #[test]
+    fn upload_fields_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.upload.default_backend = "imgur".into();
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("[upload]"),
+            "[upload] section missing:\n{written}"
+        );
+        assert!(
+            written.contains("default-backend = \"imgur\""),
+            "default-backend not persisted:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.upload.default_backend, "imgur");
+    }
+
+    #[test]
+    fn upload_section_preserves_existing_comments() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let existing = "\
+# upload config
+[upload]
+# which backend to use
+default-backend = \"imgur\"
+";
+        fs::write(&path, existing).unwrap();
+
+        Config::default().save_to(&path).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("# upload config"),
+            "upload comment lost:\n{written}"
+        );
+        assert!(
+            written.contains("# which backend to use"),
+            "upload field comment lost:\n{written}"
+        );
     }
 }
