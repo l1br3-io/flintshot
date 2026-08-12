@@ -32,8 +32,10 @@ color-eyre = { workspace = true }
 global-hotkey = { workspace = true }
 image = { workspace = true }
 interprocess = { workspace = true }
+keyring = { workspace = true }
 notify = { workspace = true }
 postcard = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 single-instance = { workspace = true }
 tokio = { workspace = true }
@@ -49,4 +51,5 @@ tray-icon = { workspace = true, optional = true }
 gtk = { workspace = true, optional = true }
 
 [dev-dependencies]
+mockito = { workspace = true }
 tempfile = { workspace = true }

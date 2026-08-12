@@ -14,6 +14,7 @@ mod ipc_server;
 mod single;
 #[cfg(feature = "tray")]
 mod tray;
+mod upload;
 mod worker;
 
 use clap::Parser;

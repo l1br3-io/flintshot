@@ -7,6 +7,7 @@
 //! Phase 4.
 
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 
 /// Supported image MIME types for upload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +61,17 @@ pub struct UploadOutcome {
     pub delete_handle: Option<String>,
 }
 
+impl UploadOutcome {
+    /// Construct a new upload outcome.
+    ///
+    /// Required because [`UploadOutcome`] is `#[non_exhaustive]`, so
+    /// external crates cannot use struct-literal syntax.
+    #[must_use]
+    pub fn new(url: String, delete_handle: Option<String>) -> Self {
+        Self { url, delete_handle }
+    }
+}
+
 /// Errors returned by upload backends.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -88,8 +100,10 @@ pub enum UploadError {
 
 /// Trait implemented by each upload provider (Imgur, 0x0, SFTP, ...).
 ///
-/// Backends are `Send + Sync` so they can live behind an `Arc<dyn>` in
-/// the daemon. Phase 4 ships `ImgurBackend`.
+/// Backends are `Send + Sync` so they can live behind an `Arc<dyn
+/// UploadBackend>` in the daemon. The async methods return boxed futures
+/// (not `impl Future`) so the trait stays dyn-compatible. Phase 4 ships
+/// `ImgurBackend`.
 pub trait UploadBackend: Send + Sync {
     /// Stable machine identifier (`"imgur"`). Used in CLI flags and config.
     fn id(&self) -> &'static str;
@@ -101,12 +115,12 @@ pub trait UploadBackend: Send + Sync {
     ///
     /// # Errors
     /// See [`UploadError`] variants.
-    fn upload(
-        &self,
-        image_bytes: &[u8],
+    fn upload<'a>(
+        &'a self,
+        image_bytes: &'a [u8],
         mime: ImageMime,
-        ctx: &UploadContext<'_>,
-    ) -> impl std::future::Future<Output = Result<UploadOutcome, UploadError>> + Send;
+        ctx: &'a UploadContext<'a>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<UploadOutcome, UploadError>> + Send + 'a>>;
 
     /// Delete a previously-uploaded resource, if the backend supports it.
     ///
@@ -115,11 +129,11 @@ pub trait UploadBackend: Send + Sync {
     ///
     /// # Errors
     /// See [`UploadError`] variants.
-    fn delete(
-        &self,
-        _handle: &str,
-    ) -> impl std::future::Future<Output = Result<(), UploadError>> + Send {
-        async { Ok(()) }
+    fn delete<'a>(
+        &'a self,
+        _handle: &'a str,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), UploadError>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
     }
 }
 

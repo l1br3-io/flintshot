@@ -3,7 +3,7 @@
 - [x] 001: Rework upload trait types + add keyring to core
 - [x] 002: Add `[upload]` config section
 - [x] 003: Extend IPC schema (`Event::UploadStarted`, `Request::ReportUploaded`)
-- [ ] 004: ImgurBackend impl + workspace deps
+- [x] 004: ImgurBackend impl + workspace deps
 - [ ] 005: `flintshot upload` CLI body
 - [ ] 006: `flintshot auth imgur` subcommand
 - [ ] 007: Daemon `UploadLast` dispatch + `Event::UploadStarted`
