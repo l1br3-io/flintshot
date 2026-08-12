@@ -74,6 +74,19 @@ pub enum Request {
         /// Backend id, e.g. `"imgur"` (matches [`crate::upload::UploadBackend::id`]).
         backend: String,
     },
+    /// Worker → daemon upload-result report (Phase 4). A worker that
+    /// completed an upload sends the resulting URL + delete-handle back
+    /// so the daemon can broadcast [`Event::Uploaded`] to subscribers.
+    /// Sent best-effort: silently dropped when no daemon answers (a
+    /// standalone worker has no one to report to). Parallels
+    /// [`Request::ReportSaved`].
+    ReportUploaded {
+        /// Resulting public URL of the uploaded image.
+        url: String,
+        /// Backend-specific delete handle when the backend supports
+        /// deletion, otherwise `None`.
+        delete_handle: Option<String>,
+    },
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -111,6 +124,12 @@ pub enum Event {
     Pinned {
         /// Opaque id the pin window is tracked under.
         id: u64,
+    },
+    /// An upload was initiated (worker spawned). Emitted optimistically
+    /// on `UploadLast` dispatch (Phase 4). Mirrors `CaptureStarted`.
+    UploadStarted {
+        /// Backend id, e.g. `"imgur"`.
+        backend: String,
     },
     /// A capture was uploaded (Phase 4).
     Uploaded {
@@ -204,6 +223,14 @@ mod tests {
             Request::UploadLast {
                 backend: "imgur".into(),
             },
+            Request::ReportUploaded {
+                url: "https://imgur.com/abc".into(),
+                delete_handle: Some("delhash".into()),
+            },
+            Request::ReportUploaded {
+                url: "https://imgur.com/xyz".into(),
+                delete_handle: None,
+            },
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");
@@ -225,6 +252,9 @@ mod tests {
                 message: "nope".into(),
             },
             Event::Pinned { id: 42 },
+            Event::UploadStarted {
+                backend: "imgur".into(),
+            },
             Event::Uploaded {
                 url: "https://i/x".into(),
                 delete_handle: None,
