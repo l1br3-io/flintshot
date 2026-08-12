@@ -203,16 +203,18 @@ pub fn dispatch(
             Ok(DispatchOutcome::Continue)
         }
         Request::Quit => Ok(DispatchOutcome::Shutdown),
-        // ReportSaved is a worker-originated state update. The IPC
-        // connection layer intercepts it to record the path in the
-        // daemon's last-saved state (it owns that state; dispatch does
-        // not). This defensive arm ensures dispatch never reports
-        // ReportSaved as "unsupported" if a future refactor routes it
-        // here — it is a silent no-op. See ADR-0023.
-        Request::ReportSaved { .. } => Ok(DispatchOutcome::Continue),
+        // ReportSaved / ReportUploaded are worker-originated state
+        // updates. The IPC connection layer intercepts them (it owns the
+        // subscriber bus + daemon state; dispatch does not). These
+        // defensive arms ensure dispatch never reports them as
+        // "unsupported" if a future refactor routes them here — they are
+        // silent no-ops. See ADR-0023.
+        Request::ReportSaved { .. } | Request::ReportUploaded { .. } => {
+            Ok(DispatchOutcome::Continue)
+        }
         // Subscribe (handled by the connection layer in Task 004),
-        // UploadLast (its phase), and any future variant: report
-        // unsupported rather than pretending to act.
+        // and any future variant: report unsupported rather than
+        // pretending to act.
         _ => {
             sink(Event::Error {
                 code: "unsupported".to_string(),
@@ -279,6 +281,7 @@ fn variant_name(request: &Request) -> &'static str {
         Request::Quit => "quit",
         Request::Subscribe => "subscribe",
         Request::ReportSaved { .. } => "report-saved",
+        Request::ReportUploaded { .. } => "report-uploaded",
         Request::OpenLast => "open-last",
         Request::PinLast => "pin-last",
         Request::UploadLast { .. } => "upload-last",
@@ -515,6 +518,31 @@ mod tests {
     }
 
     #[test]
+    fn report_uploaded_is_a_no_op_in_dispatch() {
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        let outcome = dispatch(
+            &Request::ReportUploaded {
+                url: "https://imgur.com/abc".into(),
+                delete_handle: Some("delhash".into()),
+            },
+            &spawner,
+            &DispatchState::new(),
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(
+            spawner.snapshot().is_empty(),
+            "ReportUploaded spawns nothing"
+        );
+        assert!(
+            events.is_empty(),
+            "ReportUploaded emits nothing from dispatch"
+        );
+    }
+
+    #[test]
     fn pin_last_with_saved_path_spawns_pin_and_emits_pinned() {
         let spawner = RecordingSpawner::new();
         let state = DispatchState::new();
@@ -676,6 +704,13 @@ mod tests {
                     backend: "imgur".into(),
                 },
                 "upload-last",
+            ),
+            (
+                Request::ReportUploaded {
+                    url: "https://x".into(),
+                    delete_handle: None,
+                },
+                "report-uploaded",
             ),
         ];
         for (request, expected) in cases {
