@@ -1,9 +1,10 @@
 //! Pluggable upload backends.
 //!
-//! The [`UploadBackend`] trait is defined in Phase 0 (see ADR-0004) but
-//! the first concrete implementation (`ImgurBackend`) ships in Phase 4.
-//! Credentials, progress, and deletion are first-class so we don't have
-//! to rewrite the trait when the second backend arrives.
+//! The [`UploadBackend`] trait is defined in Phase 0 (see ADR-0004). The
+//! first concrete implementation (`ImgurBackend`) ships in Phase 4.
+//! Credentials are a direct `keyring::Entry` reference (not a trait
+//! object — see ADR-0024); deletion is on the trait but unused in
+//! Phase 4.
 
 use serde::{Deserialize, Serialize};
 
@@ -31,36 +32,21 @@ impl ImageMime {
     }
 }
 
-/// Per-upload runtime context: where credentials live, what filename to
-/// suggest, and a channel for reporting progress.
+/// Per-upload runtime context: where credentials live and what filename
+/// to suggest.
 ///
-/// Phase 0 defines the shape; Phase 4 wires real `keyring::Entry` and
-/// `tokio::sync::watch::Sender`. Until then the fields use stub types
-/// so the trait compiles without pulling those deps into core.
+/// `credentials` is a direct `Option<&keyring::Entry>` reference —
+/// `None` for anonymous mode (no keychain lookup), `Some(entry)` when
+/// the caller resolved a credential for this backend. `keyring` is a
+/// core dep because it appears as a parameter type here; it's not a GUI
+/// toolkit (it's a secrets handle), so `no_gui_types_in_core.rs` stays
+/// green. See ADR-0024.
 pub struct UploadContext<'a> {
-    /// Opaque credential-store handle. Phase 4 replaces this with
-    /// `&'a keyring::Entry`.
-    pub credentials: CredentialHandle<'a>,
-    /// Optional filename hint for the upload.
+    /// OS keychain entry the backend reads credentials from. `None`
+    /// for anonymous mode.
+    pub credentials: Option<&'a keyring::Entry>,
+    /// Optional filename hint sent to the backend.
     pub filename: Option<&'a str>,
-    /// Progress reporter in `[0.0, 1.0]`. Phase 4 wires a `watch::Sender`.
-    pub progress: ProgressSink<'a>,
-}
-
-/// Placeholder for a `keyring::Entry` reference. Phase 4 swaps in the
-/// real type; for Phase 0 it carries a backend identifier string only.
-#[derive(Debug, Clone, Copy)]
-pub struct CredentialHandle<'a> {
-    /// Backend identifier this entry belongs to (`"imgur"`, etc.).
-    pub backend: &'a str,
-}
-
-/// Placeholder for a progress channel. Phase 4 replaces this with a
-/// `&'a mut tokio::sync::watch::Sender<f32>`.
-#[derive(Debug)]
-pub struct ProgressSink<'a> {
-    /// Last reported progress fraction in `[0.0, 1.0]`.
-    pub last: &'a mut f32,
 }
 
 /// Successful upload result.
@@ -129,12 +115,37 @@ pub trait UploadBackend: Send + Sync {
     ///
     /// # Errors
     /// See [`UploadError`] variants.
-    // NOTE: `path` is unused in Phase 0 (no impls); kept on the signature
-    // so future implementors have a clear contract without a revision.
     fn delete(
         &self,
         _handle: &str,
     ) -> impl std::future::Future<Output = Result<(), UploadError>> + Send {
         async { Ok(()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_context_anonymous_has_no_credentials() {
+        let ctx = UploadContext {
+            credentials: None,
+            filename: Some("shot.png"),
+        };
+        assert!(ctx.credentials.is_none());
+        assert_eq!(ctx.filename, Some("shot.png"));
+    }
+
+    #[test]
+    fn upload_context_accepts_keyring_entry_reference() {
+        let entry = keyring::Entry::new("flintshot", "imgur:client-id")
+            .expect("Entry::new creates a handle without touching the keychain");
+        let ctx = UploadContext {
+            credentials: Some(&entry),
+            filename: None,
+        };
+        assert!(ctx.credentials.is_some());
+        assert!(ctx.filename.is_none());
     }
 }

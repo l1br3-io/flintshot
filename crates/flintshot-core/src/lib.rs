@@ -3,7 +3,8 @@
 //! Owns geometry types, the [`editor::EditorState`] model and its
 //! [`input::dispatch_input`] state machine, the [`render::Canvas`] and
 //! [`shell::EditorShell`] traits that UI toolkits implement, the
-//! [`upload::UploadBackend`] trait for pluggable upload providers,
+//! [`upload::UploadBackend`] trait for pluggable upload providers
+//! (with `keyring::Entry` as the credential handle — see ADR-0024),
 //! screen capture via [`capture`], and the user-facing
 //! [`config::Config`] schema. No GUI toolkit types appear in this
 //! crate's public API.
