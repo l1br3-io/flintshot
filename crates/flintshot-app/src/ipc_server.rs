@@ -384,6 +384,20 @@ async fn handle_connection(
             continue;
         }
 
+        // ReportUploaded: a worker reports the URL + delete-handle of a
+        // completed upload. Broadcast Event::Uploaded to subscribers so
+        // the tray / COSMIC applet / IPC scripts learn the result. This
+        // is a relay, not a spawn — it never reaches the worker dispatch
+        // table. Parallels ReportSaved above (extends ADR-0023).
+        if let IpcRequest::ReportUploaded { url, delete_handle } = &request {
+            tracing::info!(%url, "worker reported upload");
+            bus.broadcast(IpcEvent::Uploaded {
+                url: url.clone(),
+                delete_handle: delete_handle.clone(),
+            });
+            continue;
+        }
+
         // Everything else routes through the worker dispatch table:
         // capture requests spawn a `flintshot` child + broadcast
         // CaptureStarted; PinLast/OpenLast read the last-saved state;
@@ -799,6 +813,66 @@ mod tests {
             "last-saved state was not updated to the reported path"
         );
 
+        server_task.abort();
+    }
+
+    /// A worker sends `Request::ReportUploaded`; a subscriber that
+    /// connected earlier must receive `Event::Uploaded` with the same
+    /// URL and delete-handle. `#[ignore]` (needs a real local socket).
+    /// Run with: `cargo test -p flintshot-app -- --ignored report_uploaded`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a real local socket (no display); run explicitly"]
+    async fn integration_report_uploaded_broadcasts_to_subscribers() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let n = UNIQUE.fetch_add(1, Ordering::Relaxed);
+        let sock = dir.path().join(format!("flintshot-uploaded-{n}.sock"));
+
+        let server = IpcServer::bind(Some(&sock)).unwrap();
+        let server_task = tokio::spawn(async move { server.serve().await });
+
+        // Connect a subscriber and send Subscribe.
+        let name = socket_name(&sock).unwrap();
+        let mut sub = <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name)
+            .await
+            .unwrap();
+        write_frame(&mut sub, &encode_msg(&Request::Subscribe).unwrap())
+            .await
+            .unwrap();
+
+        let url = "https://imgur.com/abc123".to_string();
+        let delete_handle = Some("delete-hash-xyz".to_string());
+
+        // The server must register the subscriber before the report
+        // arrives. Retry send_request + read until the event lands —
+        // sidesteps the inherent subscribe/report race.
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let _ = send_request(
+                    Some(&sock),
+                    &Request::ReportUploaded {
+                        url: url.clone(),
+                        delete_handle: delete_handle.clone(),
+                    },
+                )
+                .await;
+                if let Ok(Ok(payload)) =
+                    tokio::time::timeout(std::time::Duration::from_millis(80), read_frame(&mut sub))
+                        .await
+                {
+                    return payload;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for Event::Uploaded");
+
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert_eq!(decoded, Event::Uploaded { url, delete_handle });
+
+        drop(sub);
         server_task.abort();
     }
 }

@@ -14,7 +14,9 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
 use flintshot_core::ipc::Request;
-use flintshot_core::{capture_fullscreen, Config, ImageMime, Point, Rect, UploadContext};
+use flintshot_core::{
+    capture_fullscreen, Config, ImageMime, Point, Rect, UploadContext, UploadOutcome,
+};
 use image::ImageFormat;
 
 /// Cross-platform screenshot capture and annotation.
@@ -386,6 +388,46 @@ fn report_saved_to_daemon_at(
     }
 }
 
+/// Report an upload result back to a running daemon so it can broadcast
+/// `Event::Uploaded` to subscribers (tray, COSMIC applet, IPC scripts).
+/// Best-effort: a missing daemon is a silent no-op (the worker may be
+/// standalone). Extends ADR-0023's worker-reports-back pattern.
+fn report_uploaded_to_daemon(url: &str, delete_handle: Option<&str>) {
+    report_uploaded_to_daemon_at(None, url, delete_handle);
+}
+
+/// Testable seam for [`report_uploaded_to_daemon`]: report against an
+/// explicit socket path. `NoDaemon` (absent socket / refused connect) is
+/// a silent no-op; transport errors are logged at `warn` and swallowed
+/// so a report failure never breaks a successful upload. Mirrors
+/// [`report_saved_to_daemon_at`].
+fn report_uploaded_to_daemon_at(
+    override_path: Option<&std::path::Path>,
+    url: &str,
+    delete_handle: Option<&str>,
+) {
+    match crate::ipc_client::delegate_to(
+        override_path,
+        &Request::ReportUploaded {
+            url: url.to_string(),
+            delete_handle: delete_handle.map(str::to_string),
+        },
+    ) {
+        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {
+            tracing::debug!(%url, "reported upload to daemon");
+        }
+        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {
+            tracing::debug!("no daemon running; skipping upload report");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not report upload to the daemon; ignoring"
+            );
+        }
+    }
+}
+
 /// `flintshot config` — Phase 1 Task 3.
 ///
 /// Loads the user's config (falling back to defaults if absent) and
@@ -610,10 +652,11 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
 /// non-zero on any failure.
 pub fn run_upload(args: &UploadArgs) -> Result<()> {
     match run_upload_core(args) {
-        Ok(url) => {
-            println!("{url}");
-            copy_url_to_clipboard(&url);
-            fire_upload_notification(true, &url);
+        Ok(outcome) => {
+            println!("{}", outcome.url);
+            copy_url_to_clipboard(&outcome.url);
+            fire_upload_notification(true, &outcome.url);
+            report_uploaded_to_daemon(&outcome.url, outcome.delete_handle.as_deref());
             Ok(())
         }
         Err(e) => {
@@ -624,10 +667,10 @@ pub fn run_upload(args: &UploadArgs) -> Result<()> {
     }
 }
 
-/// Core upload logic — returns the URL on success. Extracted so
-/// [`run_upload`] can layer on the side effects (stdout / clipboard /
-/// notification) uniformly.
-fn run_upload_core(args: &UploadArgs) -> Result<String> {
+/// Core upload logic — returns the full [`UploadOutcome`] on success.
+/// Extracted so [`run_upload`] can layer on the side effects (stdout /
+/// clipboard / notification / daemon report) uniformly.
+fn run_upload_core(args: &UploadArgs) -> Result<UploadOutcome> {
     if !args.path.exists() {
         return Err(color_eyre::eyre::eyre!(
             "no such file: {}",
@@ -672,7 +715,7 @@ fn run_upload_core(args: &UploadArgs) -> Result<String> {
         .block_on(backend.upload(&bytes, mime, &ctx))
         .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
 
-    Ok(outcome.url)
+    Ok(outcome)
 }
 
 /// Resolve the backend id: CLI `--backend` wins, then config
@@ -918,6 +961,20 @@ mod tests {
     }
 
     // ── Upload helpers ───────────────────────────────────────────
+
+    /// A standalone worker (no daemon) must not error when it tries to
+    /// report an upload — the absent socket yields `NoDaemon`, which the
+    /// helper swallows. Reaching the end of the call = success.
+    #[test]
+    fn report_uploaded_to_daemon_is_silent_when_no_daemon() {
+        report_uploaded_to_daemon_at(
+            Some(std::path::Path::new(
+                "/this/does/not/exist/flintshot-test-report.sock",
+            )),
+            "https://imgur.com/abc123",
+            Some("delete-hash-xyz"),
+        );
+    }
 
     #[test]
     fn resolve_backend_id_prefers_cli_override() {
