@@ -6,7 +6,7 @@
 - [x] 004: ImgurBackend impl + workspace deps
 - [x] 005: `flintshot upload` CLI body
 - [x] 006: `flintshot auth imgur` subcommand
-- [ ] 007: Daemon `UploadLast` dispatch + `Event::UploadStarted`
+- [x] 007: Daemon `UploadLast` dispatch + `Event::UploadStarted`
 - [ ] 008: Worker→daemon upload result reporting
 - [ ] 009: Editor Upload button
 - [ ] 010: Docs (ADRs, CHANGELOG, TEST_MATRIX)

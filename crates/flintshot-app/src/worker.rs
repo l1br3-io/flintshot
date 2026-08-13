@@ -140,7 +140,9 @@ impl Spawner for CommandSpawner {
 /// is wired in Task 006. `Quit` requests shutdown (the caller performs
 /// it). `PinLast` / `OpenLast` read the last-saved path from `state`
 /// (Task 4); with no prior save they emit
-/// `Error { code: "no-last-capture" }`. Requests for unbuilt phases emit
+/// `Error { code: "no-last-capture" }`. `UploadLast` follows the same
+/// last-saved pattern and emits `UploadStarted` optimistically before
+/// spawn (Task 007). Requests for unbuilt phases emit
 /// `Error { code: "unsupported" }`.
 ///
 /// # Errors
@@ -202,6 +204,21 @@ pub fn dispatch(
             }
             Ok(DispatchOutcome::Continue)
         }
+        Request::UploadLast { backend } => {
+            if let Some(path) = state.last_saved.get() {
+                let argv = upload_argv(&path, backend);
+                sink(Event::UploadStarted {
+                    backend: backend.clone(),
+                });
+                spawn_argv(spawner, &argv)?;
+            } else {
+                sink(Event::Error {
+                    code: "no-last-capture".to_string(),
+                    message: "no capture has been saved yet".to_string(),
+                });
+            }
+            Ok(DispatchOutcome::Continue)
+        }
         Request::Quit => Ok(DispatchOutcome::Shutdown),
         // ReportSaved / ReportUploaded are worker-originated state
         // updates. The IPC connection layer intercepts them (it owns the
@@ -248,6 +265,26 @@ fn fullscreen_argv(monitor: Option<u32>) -> Vec<String> {
     if let Some(m) = monitor {
         argv.push("--monitor".into());
         argv.push(m.to_string());
+    }
+    argv
+}
+
+/// Built-in default backend id. When `Request::UploadLast`'s `backend`
+/// equals this, `--backend` is omitted from the worker argv — the worker
+/// resolves the same id from its own config. Tracks
+/// [`flintshot_core::UploadConfig`]'s default (`"imgur"`); kept in sync
+/// by the `default-backend = "imgur"` serialization round-trip test in
+/// `config.rs`.
+const DEFAULT_BACKEND: &str = "imgur";
+
+/// Build the `flintshot upload <path> [--backend <backend>]` argv for
+/// [`Request::UploadLast`]. Omits `--backend` when `backend` is the
+/// built-in default (the worker picks it up from its own config).
+fn upload_argv(path: &std::path::Path, backend: &str) -> Vec<String> {
+    let mut argv = vec!["upload".to_string(), path.to_string_lossy().into_owned()];
+    if backend != DEFAULT_BACKEND {
+        argv.push("--backend".into());
+        argv.push(backend.to_string());
     }
     argv
 }
@@ -441,14 +478,9 @@ mod tests {
 
     #[test]
     fn unsupported_requests_emit_error_and_continue() {
-        // PinLast and OpenLast are now supported (Task 4); only the
-        // still-unbuilt variants remain here.
-        let cases = [
-            Request::Subscribe,
-            Request::UploadLast {
-                backend: "imgur".into(),
-            },
-        ];
+        // PinLast, OpenLast (Task 4), and UploadLast (Task 007) are now
+        // supported; only the still-unbuilt variants remain here.
+        let cases = [Request::Subscribe];
         for request in cases {
             let spawner = RecordingSpawner::new();
             let mut events = Vec::new();
@@ -670,6 +702,127 @@ mod tests {
             Event::Error { code, .. } => assert_eq!(code, "no-last-capture"),
             other => panic!("expected Error event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn upload_last_with_saved_path_spawns_upload_and_emits_started() {
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        state
+            .last_saved
+            .set(std::path::PathBuf::from("/tmp/shot.png"));
+        let mut events = Vec::new();
+        let outcome = dispatch(
+            &Request::UploadLast {
+                backend: "imgur".into(),
+            },
+            &spawner,
+            &state,
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["upload".to_string(), "/tmp/shot.png".into()]],
+            "UploadLast spawns `flintshot upload <last-saved>` with no \
+             --backend when backend is the config default"
+        );
+        assert_eq!(
+            events,
+            vec![Event::UploadStarted {
+                backend: "imgur".into()
+            }],
+            "UploadStarted emitted optimistically (mirrors CaptureStarted)"
+        );
+    }
+
+    #[test]
+    fn upload_last_with_non_default_backend_passes_backend_flag() {
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        state
+            .last_saved
+            .set(std::path::PathBuf::from("/tmp/shot.png"));
+        let mut events = Vec::new();
+        dispatch(
+            &Request::UploadLast {
+                backend: "0x0".into(),
+            },
+            &spawner,
+            &state,
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec![
+                "upload".to_string(),
+                "/tmp/shot.png".into(),
+                "--backend".into(),
+                "0x0".into()
+            ]],
+            "non-default backend must be passed as --backend"
+        );
+        assert_eq!(
+            events,
+            vec![Event::UploadStarted {
+                backend: "0x0".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn upload_last_without_save_emits_error_and_does_not_spawn() {
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        let mut events = Vec::new();
+        let outcome = dispatch(
+            &Request::UploadLast {
+                backend: "imgur".into(),
+            },
+            &spawner,
+            &state,
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(
+            spawner.snapshot().is_empty(),
+            "UploadLast with no prior save must not spawn"
+        );
+        assert_eq!(events.len(), 1, "exactly one event");
+        match &events[0] {
+            Event::Error { code, .. } => assert_eq!(code, "no-last-capture"),
+            other => panic!("expected Error event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upload_last_spawn_failure_propagates_after_upload_started() {
+        let state = DispatchState::new();
+        state.last_saved.set(std::path::PathBuf::from("/tmp/x.png"));
+        let mut events = Vec::new();
+        let result = dispatch(
+            &Request::UploadLast {
+                backend: "imgur".into(),
+            },
+            &FailSpawner,
+            &state,
+            &mut |ev| events.push(ev),
+        );
+
+        assert!(result.is_err(), "spawn failure must propagate");
+        assert_eq!(
+            events,
+            vec![Event::UploadStarted {
+                backend: "imgur".into()
+            }],
+            "UploadStarted emitted on receipt before spawn; no further event on failure"
+        );
     }
 
     #[test]
