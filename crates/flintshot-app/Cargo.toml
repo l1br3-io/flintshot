@@ -38,6 +38,7 @@ notify = { workspace = true }
 notify-rust = { workspace = true }
 postcard = { workspace = true }
 reqwest = { workspace = true }
+rpassword = { workspace = true }
 serde = { workspace = true }
 single-instance = { workspace = true }
 tokio = { workspace = true }

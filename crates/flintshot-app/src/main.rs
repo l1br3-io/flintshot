@@ -35,6 +35,7 @@ fn main() -> Result<()> {
         Some(Command::Pin(args)) => cli::run_pin(&args),
         Some(Command::Open(args)) => cli::run_open(&args),
         Some(Command::Upload(args)) => cli::run_upload(&args),
+        Some(Command::Auth(args)) => cli::run_auth(&args),
         None => Ok(()),
     }
 }

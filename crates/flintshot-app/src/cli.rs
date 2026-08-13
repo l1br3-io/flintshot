@@ -49,6 +49,8 @@ pub enum Command {
     Open(OpenArgs),
     /// Upload an image to a backend and print the resulting URL. [Phase 4]
     Upload(UploadArgs),
+    /// Set or clear credentials for an upload backend. [Phase 4]
+    Auth(AuthArgs),
 }
 
 /// Arguments for `flintshot daemon`.
@@ -140,6 +142,16 @@ pub struct UploadArgs {
     /// Upload backend to use (`imgur`, ...). Defaults to config's `default_backend`.
     #[arg(long, value_name = "NAME")]
     pub backend: Option<String>,
+}
+
+/// Arguments for `flintshot auth`.
+#[derive(Debug, Args)]
+pub struct AuthArgs {
+    /// Backend to configure (`imgur`). Only `imgur` is supported in Phase 4.
+    pub backend: String,
+    /// Remove the stored credential instead of setting one.
+    #[arg(long)]
+    pub clear: bool,
 }
 
 /// Arguments for `flintshot open`.
@@ -719,6 +731,83 @@ fn fire_upload_notification(success: bool, message: &str) {
     }
 }
 
+/// `flintshot auth` — Phase 4.
+///
+/// Sets or clears the Imgur Client-ID in the OS keychain. This is the
+/// only credential-entry path: no config-file field exists (secrets-
+/// stay-out-of-config boundary). The credential is never written to
+/// config, logs, or stdout — only to the keychain. All user-facing
+/// messages go to stderr.
+pub fn run_auth(args: &AuthArgs) -> Result<()> {
+    validate_auth_backend(&args.backend)?;
+
+    let entry_name = credential_entry_name(&args.backend);
+    let entry = keyring::Entry::new("flintshot", &entry_name)
+        .map_err(|e| color_eyre::eyre::eyre!("accessing keyring: {e}"))?;
+
+    if args.clear {
+        clear_credential(&entry)
+    } else {
+        set_credential(&entry)
+    }
+}
+
+/// Validate that the backend supports credential storage. Phase 4
+/// supports only `imgur`.
+fn validate_auth_backend(backend: &str) -> Result<()> {
+    if backend == "imgur" {
+        Ok(())
+    } else {
+        Err(color_eyre::eyre::eyre!(
+            "unsupported auth backend `{backend}` (Phase 4 supports only `imgur`)"
+        ))
+    }
+}
+
+/// Prompt for and store the Client-ID in the keychain.
+fn set_credential(entry: &keyring::Entry) -> Result<()> {
+    let client_id = read_client_id()?;
+    entry
+        .set_password(&client_id)
+        .map_err(|e| color_eyre::eyre::eyre!("storing Client-ID in keyring: {e}"))?;
+    eprintln!("Imgur Client-ID stored in keychain.");
+    Ok(())
+}
+
+/// Remove the Client-ID from the keychain. Clearing an absent entry is
+/// a no-op (exit 0).
+fn clear_credential(entry: &keyring::Entry) -> Result<()> {
+    match entry.delete_credential() {
+        Ok(()) => {
+            eprintln!("Imgur Client-ID removed from keychain.");
+            Ok(())
+        }
+        Err(keyring::Error::NoEntry) => {
+            eprintln!("No Imgur Client-ID stored.");
+            Ok(())
+        }
+        Err(e) => Err(color_eyre::eyre::eyre!("clearing keyring entry: {e}")),
+    }
+}
+
+/// Read the Client-ID: interactive hidden-input prompt when stdin is a
+/// TTY, or `IMGUR_CLIENT_ID` env var when it is not (non-interactive
+/// fallback for piped / CI environments).
+fn read_client_id() -> Result<String> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        rpassword::prompt_password("Imgur Client-ID: ")
+            .map_err(|e| color_eyre::eyre::eyre!("reading Client-ID: {e}"))
+    } else {
+        std::env::var("IMGUR_CLIENT_ID").map_err(|_| {
+            color_eyre::eyre::eyre!(
+                "stdin is not a TTY and IMGUR_CLIENT_ID is not set; \
+                 run interactively or set the env var"
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::float_cmp, reason = "exact pixel coords, no arithmetic error")]
 mod tests {
@@ -875,5 +964,51 @@ mod tests {
             backend: None,
         };
         assert!(run_upload(&args).is_err());
+    }
+
+    // ── Auth helpers ──────────────────────────────────────────────
+
+    #[test]
+    fn validate_auth_backend_accepts_imgur() {
+        assert!(validate_auth_backend("imgur").is_ok());
+    }
+
+    #[test]
+    fn validate_auth_backend_rejects_unknown() {
+        assert!(validate_auth_backend("0x0").is_err());
+        assert!(validate_auth_backend("").is_err());
+    }
+
+    #[test]
+    fn run_auth_rejects_unknown_backend() {
+        let args = AuthArgs {
+            backend: "nope".to_string(),
+            clear: false,
+        };
+        assert!(run_auth(&args).is_err());
+    }
+
+    #[test]
+    fn auth_args_parses_imgur_without_clear() {
+        let cli = Cli::parse_from(["flintshot", "auth", "imgur"]);
+        match cli.command {
+            Some(Command::Auth(args)) => {
+                assert_eq!(args.backend, "imgur");
+                assert!(!args.clear);
+            }
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_args_parses_clear_flag() {
+        let cli = Cli::parse_from(["flintshot", "auth", "imgur", "--clear"]);
+        match cli.command {
+            Some(Command::Auth(args)) => {
+                assert_eq!(args.backend, "imgur");
+                assert!(args.clear);
+            }
+            other => panic!("expected Auth, got {other:?}"),
+        }
     }
 }
