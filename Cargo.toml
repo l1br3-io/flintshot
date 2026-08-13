@@ -42,6 +42,7 @@ postcard = { version = "1", features = ["alloc"] }
 # for HTTPS + multipart + json. See ADR-0026 (Task 010).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json"] }
 rfd = "0.17"
+rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 single-instance = "0.3"
 tempfile = "3"
