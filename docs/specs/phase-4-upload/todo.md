@@ -4,7 +4,7 @@
 - [x] 002: Add `[upload]` config section
 - [x] 003: Extend IPC schema (`Event::UploadStarted`, `Request::ReportUploaded`)
 - [x] 004: ImgurBackend impl + workspace deps
-- [ ] 005: `flintshot upload` CLI body
+- [x] 005: `flintshot upload` CLI body
 - [ ] 006: `flintshot auth imgur` subcommand
 - [ ] 007: Daemon `UploadLast` dispatch + `Event::UploadStarted`
 - [ ] 008: Worker→daemon upload result reporting
