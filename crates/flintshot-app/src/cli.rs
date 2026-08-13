@@ -14,7 +14,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
 use flintshot_core::ipc::Request;
-use flintshot_core::{capture_fullscreen, Config, Point, Rect};
+use flintshot_core::{capture_fullscreen, Config, ImageMime, Point, Rect, UploadContext};
 use image::ImageFormat;
 
 /// Cross-platform screenshot capture and annotation.
@@ -590,21 +590,133 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
 }
 
 /// `flintshot upload` — Phase 4.
+///
+/// Loads the image, sniffs its format, resolves the backend, runs the
+/// upload on a tokio runtime, then prints the URL to stdout (last line,
+/// machine-parseable), copies it to the clipboard, and fires a desktop
+/// notification. Diagnostics go to stderr (via `color_eyre`); exit is
+/// non-zero on any failure.
 pub fn run_upload(args: &UploadArgs) -> Result<()> {
-    let backend = args.backend.as_deref().unwrap_or("(config default)");
-    tracing::info!(
-        path = %args.path.display(),
-        backend,
-        "upload subcommand: not implemented yet (Phase 4)"
-    );
+    match run_upload_core(args) {
+        Ok(url) => {
+            println!("{url}");
+            copy_url_to_clipboard(&url);
+            fire_upload_notification(true, &url);
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            fire_upload_notification(false, &msg);
+            Err(e)
+        }
+    }
+}
+
+/// Core upload logic — returns the URL on success. Extracted so
+/// [`run_upload`] can layer on the side effects (stdout / clipboard /
+/// notification) uniformly.
+fn run_upload_core(args: &UploadArgs) -> Result<String> {
     if !args.path.exists() {
         return Err(color_eyre::eyre::eyre!(
             "no such file: {}",
             args.path.display()
-        ))
-        .with_context(|| format!("validating upload source: {}", args.path.display()));
+        ));
     }
-    Ok(())
+
+    let bytes =
+        std::fs::read(&args.path).with_context(|| format!("reading {}", args.path.display()))?;
+
+    let mime = sniff_mime(&bytes)?;
+
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load config; using built-in defaults");
+            Config::default()
+        }
+    };
+    let backend_id =
+        resolve_backend_id(args.backend.as_deref(), &cfg.upload.default_backend).to_string();
+
+    let backend = crate::upload::resolve_backend(&backend_id)
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
+        .with_context(|| format!("resolving upload backend `{backend_id}`"))?;
+
+    let entry_name = credential_entry_name(&backend_id);
+    let entry = keyring::Entry::new("flintshot", &entry_name).ok();
+
+    let filename = args.path.file_name().and_then(|n| n.to_str());
+    let ctx = UploadContext {
+        credentials: entry.as_ref(),
+        filename,
+    };
+
+    tracing::info!(path = %args.path.display(), %backend_id, "starting upload");
+
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| color_eyre::eyre::eyre!("creating tokio runtime: {e}"))?;
+
+    let outcome = runtime
+        .block_on(backend.upload(&bytes, mime, &ctx))
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
+
+    Ok(outcome.url)
+}
+
+/// Resolve the backend id: CLI `--backend` wins, then config
+/// `default-backend`, then the built-in `"imgur"`.
+fn resolve_backend_id<'a>(cli_override: Option<&'a str>, config_default: &'a str) -> &'a str {
+    cli_override.unwrap_or(config_default)
+}
+
+/// Sniff the image format from raw bytes and map to [`ImageMime`].
+fn sniff_mime(bytes: &[u8]) -> Result<ImageMime> {
+    let format = image::guess_format(bytes)
+        .map_err(|e| color_eyre::eyre::eyre!("detecting image format: {e}"))?;
+    match format {
+        ImageFormat::Png => Ok(ImageMime::Png),
+        ImageFormat::Jpeg => Ok(ImageMime::Jpeg),
+        ImageFormat::WebP => Ok(ImageMime::Webp),
+        other => Err(color_eyre::eyre::eyre!(
+            "unsupported image format: {other:?}"
+        )),
+    }
+}
+
+/// Construct the keyring entry name for a backend's Client-ID.
+fn credential_entry_name(backend_id: &str) -> String {
+    format!("{backend_id}:client-id")
+}
+
+/// Best-effort copy of the URL to the system clipboard.
+fn copy_url_to_clipboard(url: &str) {
+    match arboard::Clipboard::new() {
+        Ok(mut cb) => {
+            if let Err(e) = cb.set_text(url.to_string()) {
+                tracing::warn!(error = %e, "could not copy URL to clipboard");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not access clipboard"),
+    }
+}
+
+/// Best-effort desktop notification. `success` controls the message
+/// template: `"Uploaded to <msg>"` on success, `"Upload failed: <msg>"`
+/// on error.
+fn fire_upload_notification(success: bool, message: &str) {
+    let body = if success {
+        format!("Uploaded to {message}")
+    } else {
+        format!("Upload failed: {message}")
+    };
+    if let Err(e) = notify_rust::Notification::new()
+        .appname("flintshot")
+        .summary("flintshot upload")
+        .body(&body)
+        .show()
+    {
+        tracing::warn!(error = %e, "could not show desktop notification");
+    }
 }
 
 #[cfg(test)]
@@ -714,5 +826,54 @@ mod tests {
             )),
             std::path::Path::new("/tmp/flintshot-saved.png"),
         );
+    }
+
+    // ── Upload helpers ───────────────────────────────────────────
+
+    #[test]
+    fn resolve_backend_id_prefers_cli_override() {
+        assert_eq!(resolve_backend_id(Some("custom"), "imgur"), "custom");
+    }
+
+    #[test]
+    fn resolve_backend_id_uses_config_when_no_override() {
+        assert_eq!(resolve_backend_id(None, "0x0"), "0x0");
+    }
+
+    #[test]
+    fn resolve_backend_id_defaults_to_imgur_unchanged() {
+        assert_eq!(resolve_backend_id(None, "imgur"), "imgur");
+    }
+
+    #[test]
+    fn sniff_mime_detects_png() {
+        let header = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        assert_eq!(sniff_mime(&header).unwrap(), ImageMime::Png);
+    }
+
+    #[test]
+    fn sniff_mime_detects_jpeg() {
+        let header = [0xFF, 0xD8, 0xFF, 0xE0];
+        assert_eq!(sniff_mime(&header).unwrap(), ImageMime::Jpeg);
+    }
+
+    #[test]
+    fn sniff_mime_rejects_unknown_format() {
+        assert!(sniff_mime(b"hello world not an image").is_err());
+    }
+
+    #[test]
+    fn credential_entry_name_includes_backend_id() {
+        assert_eq!(credential_entry_name("imgur"), "imgur:client-id");
+        assert_eq!(credential_entry_name("0x0"), "0x0:client-id");
+    }
+
+    #[test]
+    fn run_upload_nonexistent_file_errors() {
+        let args = UploadArgs {
+            path: PathBuf::from("/nonexistent/path/does-not-exist.png"),
+            backend: None,
+        };
+        assert!(run_upload(&args).is_err());
     }
 }

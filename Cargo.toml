@@ -35,6 +35,7 @@ interprocess = { version = "2", features = ["tokio"] }
 keyring = { version = "3", features = ["crypto-rust"] }
 mockito = "1"
 notify = "8"
+notify-rust = "4"
 postcard = { version = "1", features = ["alloc"] }
 # rustls-tls (not native-tls) avoids a libssl-dev build-time system dep —
 # CI installs xcap's native libs but not OpenSSL. Functionally identical
