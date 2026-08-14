@@ -8,5 +8,5 @@
 - [x] 006: `flintshot auth imgur` subcommand
 - [x] 007: Daemon `UploadLast` dispatch + `Event::UploadStarted`
 - [x] 008: Worker→daemon upload result reporting
-- [ ] 009: Editor Upload button
+- [x] 009: Editor Upload button
 - [ ] 010: Docs (ADRs, CHANGELOG, TEST_MATRIX)
