@@ -528,6 +528,20 @@ Categories used below:
   daemon`"* and disables daemon-dependent buttons (*Open config* stays
   enabled). New pure `ipc::status_for_event(&Event) -> String` maps
   each event variant to its status text (unit-tested headless).
+#### Phase 4 — upload
+
+- `[upload]` config section (Phase 4 Task 002). New
+  `flintshot-core::config::UploadConfig` (`default-backend`, built-in
+  default `"imgur"`), re-exported from `flintshot-core` and wired into
+  `Config::load` / `Config::save` with the same comment-preserving
+  merge as `[pin]`; a missing section falls back to defaults. No
+  per-backend sub-tables — credentials live in the OS keychain, never
+  in config.
+- IPC schema upload variants (Phase 4 Task 003):
+  `Event::UploadStarted { backend }` (optimistic dispatch signal,
+  mirrors `CaptureStarted`) and `Request::ReportUploaded { url,
+  delete_handle }` (worker → daemon result report, parallels
+  `ReportSaved`). Postcard round-trip tests extended for both.
 - `flintshot-app::upload` module (Phase 4 Task 004) with the first
   concrete `UploadBackend` impl: `ImgurBackend`. POSTs multipart form
   data to `https://api.imgur.com/3/image`; supports anonymous (zero-
@@ -543,6 +557,51 @@ Categories used below:
 - `UploadOutcome::new(url, delete_handle)` constructor (Phase 4 Task
   004). Required because `UploadOutcome` is `#[non_exhaustive]`, so
   external crates cannot use struct-literal construction.
+- `flintshot upload <path>` CLI body (Phase 4 Task 005) — replaces the
+  Phase 0 stub. Loads the file (clear `no such file` error), sniffs
+  the format via `image::guess_format` (PNG / JPEG / WebP sent as-is;
+  no re-encode, no `--mime` flag), resolves the backend from
+  `--backend` over `[upload] default-backend` over the built-in
+  `"imgur"`, reads the Client-ID from the keyring entry `flintshot` /
+  `imgur:client-id` when present (a failed keychain read falls back to
+  anonymous with a log line), runs the backend on a fresh tokio
+  runtime, prints the URL to stdout as the last line
+  (machine-parseable; diagnostics to stderr), copies the URL to the
+  clipboard (`arboard`), fires a desktop notification (`notify-rust`)
+  on success and on failure, reports the result to the daemon
+  best-effort, and exits non-zero on any failure.
+- `flintshot auth imgur [--clear]` subcommand (Phase 4 Task 006) —
+  the only credential-entry path. Prompts for the Imgur Client-ID with
+  hidden input (`rpassword`) when stdin is a TTY, or reads
+  `IMGUR_CLIENT_ID` otherwise; stores it in the OS keychain
+  (`flintshot` service, `imgur:client-id` entry) — never in
+  `config.toml`, logs, or stdout. `--clear` removes the entry;
+  clearing an absent entry is a no-op with exit 0.
+- Daemon `Request::UploadLast` dispatch (Phase 4 Task 007) — replaces
+  the `unsupported` stub. Resolves the `ReportSaved`-fed last-saved
+  path, spawns `flintshot upload <path> [--backend <id>]` as a worker
+  process (`--backend` omitted when it equals the built-in default),
+  and emits `Event::UploadStarted { backend }` optimistically before
+  the spawn (mirrors `CaptureStarted`). With no prior save it emits
+  `Event::Error { code: "no-last-capture" }` and does not spawn
+  (mirrors `PinLast` / `OpenLast`).
+- Worker → daemon upload-result reporting (Phase 4 Task 008). On
+  success `run_upload` sends `Request::ReportUploaded { url,
+  delete_handle }` through the same `delegate_to` path as
+  `ReportSaved` — best-effort and silent when no daemon answers. The
+  IPC server intercepts it in `handle_connection` and broadcasts
+  `Event::Uploaded` to every subscriber. See ADR-0025.
+- Editor *Upload* button (Phase 4 Task 009). A "☁ Upload" button in
+  the egui toolbar composes the final image (selection-aware, like
+  Pin), writes it to a temp PNG (`flintshot-upload-<pid>-<n>.png`,
+  left on disk for the OS temp reaper; a reaper thread waits on the
+  child so it doesn't zombie), spawns `flintshot upload <tmpfile>` as
+  a detached worker, and closes the editor with
+  `EditorOutcome::Uploaded(String::new())` — the outcome signals
+  initiation; the real URL reaches subscribers via the worker's
+  `ReportUploaded`, not the editor. Compose / write failures close the
+  editor with the error; a spawn failure keeps the editor open so
+  Save / Copy still work.
 
 ### Changed
 
@@ -694,6 +753,14 @@ Categories used below:
 
 ### Notes
 
+- **Phase 4 deviations from the spec draft** (documented in
+  ADR-0025 and `docs/TEST_MATRIX.md` Phase 4 caveats): upload
+  *failures* do not reach daemon subscribers (the sketched
+  `Event::Error { code: "upload-failed" }` broadcast was dropped; the
+  worker owns failure UX — notification, stderr, non-zero exit), and
+  no tray / COSMIC-applet *Upload last* menu item shipped —
+  `Request::UploadLast` is reachable over IPC from scripts and custom
+  clients.
 - **Phase 1 (Capture + Editor Window) shipped 2026-07-28.** All
   checkpoints A–F complete; exit criteria in
   `docs/specs/phase-1-capture-editor/spec.md` met. Spec status flipped

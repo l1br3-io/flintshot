@@ -9,4 +9,4 @@
 - [x] 007: Daemon `UploadLast` dispatch + `Event::UploadStarted`
 - [x] 008: Worker→daemon upload result reporting
 - [x] 009: Editor Upload button
-- [ ] 010: Docs (ADRs, CHANGELOG, TEST_MATRIX)
+- [x] 010: Docs (ADRs, CHANGELOG, TEST_MATRIX)

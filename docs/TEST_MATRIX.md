@@ -238,16 +238,48 @@ reads the `Event` stream; it performs no capture and runs no editor.
 
 ## Phase 4 — upload
 
-Subcommand: `flintshot upload`
+Subcommands: `flintshot upload <path>`, `flintshot auth imgur`, editor
+*Upload* button, `Request::UploadLast` over IPC. Every entry point
+converges on the same `flintshot upload` worker process (ADR-0019);
+`ImgurBackend` is the only backend — anonymous by default, Client-ID
+authenticated via keychain opt-in (ADR-0024, ADR-0025, ADR-0026).
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| Imgur OAuth flow stores creds in OS keychain                |    |    |    |    |    |    |    |    |    |
-| Upload from editor surfaces progress via IPC to tray        |    |    |    |    |    |    |    |    |    |
-| URL copied to clipboard on success                          |    |    |    |    |    |    |    |    |    |
-| Notification fires on success                               |    |    |    |    |    |    |    |    |    |
-| Failure surfaces in UI with retry                           |    |    |    |    |    |    |    |    |    |
-| Delete from tray using stored delete-hash                   |    |    |    |    |    |    |    |    |    |
+| Editor *Upload*: compose → temp PNG → worker spawns, editor closes | | | | | | | | | |
+| Editor *Upload* with active selection uploads just the region | | | | | | | | | |
+| Upload success: URL is stdout's last line (`flintshot upload x.png \| tail -1`) | | | | | | | | | |
+| Upload success: URL on the clipboard immediately             |    |    |    |    |    |    |    |    |    |
+| Upload success: "Uploaded to \<url\>" desktop notification   |    |    |    |    |    |    |    |    |    |
+| Upload success: `Event::Uploaded` reaches IPC subscribers (applet: "Uploaded \<url\>") | | | | | | | | | |
+| Anonymous upload succeeds zero-config (no keyring entry)     |    |    |    |    |    |    |    |    |    |
+| Authenticated: `flintshot auth imgur` set → uploads send Client-ID (rate-limit lift) | | | | | | | | | |
+| `flintshot upload /nonexistent` → clear stderr error, non-zero exit | | | | | | | | | |
+| Network failure mid-upload → stderr error, "Upload failed: …" notification, non-zero exit, no hang | | | | | | | | | |
+| Anonymous rate limit (429) → clear backend error, non-zero exit | | | | | | | | | |
+| `Request::UploadLast` over IPC spawns upload worker + emits `Event::UploadStarted` | | | | | | | | | |
+| `UploadLast` with no prior save → `Error { code: "no-last-capture" }` | | | | | | | | | |
+| `flintshot auth imgur` set: hidden prompt, keychain entry stored, confirmation on stderr | | | | | | | | | |
+| `flintshot auth imgur` re-set overwrites the stored Client-ID |    |    |    |    |    |    |    |    |    |
+| `flintshot auth imgur --clear`: entry removed; uploads revert to anonymous (log confirms) | | | | | | | | | |
+| `flintshot auth imgur --clear` with no entry → "No Imgur Client-ID stored.", exit 0 | | | | | | | | | |
+| Keychain unlock prompt handled (macOS keychain / Windows credential manager / Linux Secret Service) | | | | | | | | | |
+
+### Phase 4 known caveats
+
+- **No tray / COSMIC-applet *Upload last* menu item shipped.**
+  `Request::UploadLast` is reachable over IPC (scripts / custom
+  clients); the spec draft's applet/tray button is a follow-up.
+- **Upload failures don't reach daemon subscribers.** The worker owns
+  failure UX (notification + stderr + non-zero exit); subscribers see
+  `UploadStarted` with no matching `Uploaded`. See ADR-0025.
+- **Anonymous rate limit is per-IP** (~50 uploads/hr), so manually
+  hitting a real 429 is impractical; the mapping is covered headless
+  by the mockito test (`rate_limit_maps_to_backend_error`), and a
+  mock server can stand in for the manual cell.
+- **The editor's `EditorOutcome::Uploaded` carries an empty
+  placeholder URL** — the outcome signals "upload initiated"; the real
+  URL arrives via the worker's daemon report, not the editor.
 
 ## Phase 5 — live overlay
 

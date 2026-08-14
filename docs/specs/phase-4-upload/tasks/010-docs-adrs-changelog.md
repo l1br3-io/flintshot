@@ -25,18 +25,18 @@ ImgurBackend, `flintshot upload` CLI, `flintshot auth imgur`, daemon
 daemon `UploadLast` dispatch, `flintshot auth imgur` (set / clear).
 
 **Acceptance criteria:**
-- [ ] ADR-0024, ADR-0025, ADR-0026 created in `docs/adrs/` (Context ·
+- [x] ADR-0024, ADR-0025, ADR-0026 created in `docs/adrs/` (Context ·
       Decision · Consequences format)
-- [ ] CHANGELOG `[Unreleased]` section updated with all upload
+- [x] CHANGELOG `[Unreleased]` section updated with all upload
       features
-- [ ] `docs/TEST_MATRIX.md` rows added for all upload entry points
-- [ ] All doc comments on public types are present and accurate
+- [x] `docs/TEST_MATRIX.md` rows added for all upload entry points
+- [x] All doc comments on public types are present and accurate
 
 **Verification:**
-- [ ] `cargo test --doc -p flintshot-core -p flintshot-editor-egui`
+- [x] `cargo test --doc -p flintshot-core -p flintshot-editor-egui`
       (doc examples still build)
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo fmt --all --check`
 
 **Dependencies:** All prior tasks (documents the completed work)
 

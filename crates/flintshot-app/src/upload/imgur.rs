@@ -18,9 +18,6 @@
 //!
 //! [`UploadBackend`]: flintshot_core::UploadBackend
 
-// Dead code until run_upload wires it up in Task 005.
-#![allow(dead_code)]
-
 use std::future::Future;
 use std::pin::Pin;
 
