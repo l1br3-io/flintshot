@@ -130,6 +130,8 @@ enum ToolbarAction {
     Copy,
     /// Pin button clicked — compose, write temp PNG, spawn pin worker.
     Pin,
+    /// Upload button clicked — compose, write temp PNG, spawn upload worker.
+    Upload,
 }
 
 impl EditorApp {
@@ -700,6 +702,9 @@ impl App for EditorApp {
                     if ui.button("📌 Pin").clicked() {
                         action = ToolbarAction::Pin;
                     }
+                    if ui.button("☁ Upload").clicked() {
+                        action = ToolbarAction::Upload;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.small("Drag to draw · Ctrl+Z undo · Esc cancel");
                     });
@@ -770,6 +775,7 @@ impl App for EditorApp {
             ToolbarAction::Save => self.handle_save(ui.ctx()),
             ToolbarAction::Copy => self.handle_copy(ui.ctx()),
             ToolbarAction::Pin => self.handle_pin(ui.ctx()),
+            ToolbarAction::Upload => self.handle_upload(ui.ctx()),
             ToolbarAction::None => {}
         }
     }
@@ -864,6 +870,54 @@ impl EditorApp {
                 tracing::error!(
                     error = %err,
                     "pin compose/write failed; closing editor session"
+                );
+                self.publish_outcome(Err(err));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Upload button handler: compose the final image (selection-aware,
+    /// like Pin), write it to a temp PNG, spawn `flintshot upload <tmp>`
+    /// as a detached worker (resolving the binary via `current_exe`),
+    /// then publish `Uploaded` and close the editor.
+    ///
+    /// The URL is **not** available synchronously: the spawned worker
+    /// performs the HTTP request and reports the result back to the
+    /// daemon (Task 008), which fans it out as `Event::Uploaded`. The
+    /// editor publishes `Uploaded(String::new())` — an empty placeholder
+    /// — purely to signal "upload was initiated" so the shell closes
+    /// cleanly. Subscribers see the real URL asynchronously via the
+    /// daemon event stream.
+    ///
+    /// ## Error policy
+    ///
+    /// Identical to [`handle_pin`](Self::handle_pin): a compose or
+    /// temp-write failure is terminal (publish `Err`, close); a spawn
+    /// failure is recoverable (log at `error`, leave the window open so
+    /// Save / Copy still work).
+    fn handle_upload(&self, ctx: &Context) {
+        match compose_and_write_upload(&self.state) {
+            Ok(path) => match spawn_upload_worker(&path) {
+                Ok(()) => {
+                    tracing::info!(
+                        path = %path.display(),
+                        "upload initiated; spawned upload worker"
+                    );
+                    self.publish_outcome(Ok(EditorOutcome::Uploaded(String::new())));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "could not spawn upload worker; editor stays open"
+                    );
+                }
+            },
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "upload compose/write failed; closing editor session"
                 );
                 self.publish_outcome(Err(err));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1058,6 +1112,98 @@ fn spawn_pin_worker(path: &std::path::Path) -> flintshot_core::Result<()> {
     Ok(())
 }
 
+/// Compose the image to upload, honouring an active `Tool::Select`
+/// selection exactly like [`compose_pin_image`]: a non-degenerate
+/// selection uploads just the selected region; otherwise the whole
+/// composed image is uploaded. Pure / non-mutating.
+fn compose_upload_image(state: &EditorState) -> image::RgbaImage {
+    // Same 1.0-px threshold and `Rect::normalized` call as the Pin /
+    // Copy paths, so "what the user sees outlined" is "what gets
+    // uploaded".
+    match state.selection.map(Rect::normalized) {
+        Some(n) if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 => {
+            compose_final_region(state, n)
+        }
+        _ => compose_final(state),
+    }
+}
+
+/// Compose the upload image and write it to a temp PNG. Returns the
+/// path the spawned `flintshot upload` worker should read. The file is
+/// left on disk — the upload worker opens it once at startup; the OS
+/// temp reaper handles stale files.
+///
+/// Factored out of [`EditorApp::handle_upload`](EditorApp::handle_upload)
+/// so the compose + write path is headless-testable without a display,
+/// network, or the binary.
+///
+/// # Errors
+/// Surfaces [`FlintshotError::Image`] if PNG encoding or the filesystem
+/// write fails.
+fn compose_and_write_upload(state: &EditorState) -> flintshot_core::Result<std::path::PathBuf> {
+    let img = compose_upload_image(state);
+    write_upload_tempfile(&img)
+}
+
+/// Write `img` to a PNG under the OS temp dir with a recognizable,
+/// unique name `flintshot-upload-<pid>-<n>.png` and leave it on disk
+/// for the upload worker to read. `<pid>` separates concurrent editor
+/// sessions; a process-local counter (`<n>`) disambiguates repeated
+/// upload clicks within one session. The file is never reaped by us —
+/// the OS temp reaper handles stale files. (Write-then-spawn ordering
+/// guarantees the worker always reads a complete file.)
+///
+/// # Errors
+/// Surfaces [`FlintshotError::Image`] on PNG encode failure.
+fn write_upload_tempfile(img: &image::RgbaImage) -> flintshot_core::Result<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let path = std::env::temp_dir().join(format!("flintshot-upload-{pid}-{n}.png"));
+    img.save_with_format(&path, image::ImageFormat::Png)
+        .map_err(FlintshotError::from)?;
+    Ok(path)
+}
+
+/// Spawn `flintshot upload <path>` as a detached child of the current
+/// binary (resolved via [`std::env::current_exe`], mirroring
+/// [`spawn_pin_worker`]). stdin / stdout are null'd so worker output
+/// can't interleave with the editor's; stderr is inherited so tracing
+/// logs survive for debugging. A lightweight reaper thread waits on the
+/// child so it doesn't linger as a zombie.
+///
+/// # Errors
+/// Surfaces [`FlintshotError::Shell`] if the binary can't be resolved,
+/// the child can't be spawned, or the reaper thread can't start.
+fn spawn_upload_worker(path: &std::path::Path) -> flintshot_core::Result<()> {
+    let exe = std::env::current_exe().map_err(|e| FlintshotError::Shell {
+        detail: format!("resolving current_exe for upload: {e}"),
+    })?;
+    let mut child = std::process::Command::new(&exe)
+        .arg("upload")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| FlintshotError::Shell {
+            detail: format!(
+                "spawning upload worker {} upload {}: {e}",
+                exe.display(),
+                path.display()
+            ),
+        })?;
+    let _reaper = std::thread::Builder::new()
+        .name("flintshot-upload-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .map_err(|e| FlintshotError::Shell {
+            detail: format!("spawning upload reaper thread: {e}"),
+        })?;
+    Ok(())
+}
+
 /// Convert an `eframe::Error` into a [`FlintshotError::Shell`].
 ///
 /// Free-standing so the shell module can call it without re-stating
@@ -1163,6 +1309,43 @@ mod tests {
             decoded.to_rgba8().dimensions(),
             (4, 3),
             "selection crops the pinned image"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The compose + write path that `handle_upload` runs must yield a
+    /// file whose bytes decode as a valid PNG at the source dimensions.
+    /// Headless half of Task 009's verification (the spawn itself needs
+    /// the binary + network + daemon and is `#[ignore]`'d by nature).
+    #[test]
+    fn compose_and_write_upload_writes_decodable_png() {
+        let state = blank_state(8, 6);
+        let path = compose_and_write_upload(&state).expect("compose + write succeeds");
+        let bytes = std::fs::read(&path).expect("temp file is readable");
+        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .expect("written bytes decode as PNG");
+        assert_eq!(
+            decoded.to_rgba8().dimensions(),
+            (8, 6),
+            "decoded size matches source"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A selection-active upload must emit just the selected region
+    /// (parity with the Pin selection handling).
+    #[test]
+    fn compose_and_write_upload_honours_selection() {
+        let mut state = blank_state(10, 10);
+        state.selection = Some(Rect::from_xywh(2.0, 3.0, 4.0, 3.0));
+        let path = compose_and_write_upload(&state).expect("compose + write succeeds");
+        let bytes = std::fs::read(&path).expect("temp file is readable");
+        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .expect("written bytes decode as PNG");
+        assert_eq!(
+            decoded.to_rgba8().dimensions(),
+            (4, 3),
+            "selection crops the uploaded image"
         );
         let _ = std::fs::remove_file(&path);
     }
