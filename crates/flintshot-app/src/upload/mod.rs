@@ -5,12 +5,6 @@
 //! ships [`ImgurBackend`] (see [`imgur`]); the registry is the single
 //! place to add a new provider.
 
-// Items in this module are not yet called from main — `run_upload`
-// (Task 005) and the daemon (Task 007) wire them up. Tests exercise
-// the full surface, so this only silences the non-test binary's dead-
-// code analysis until the next task lands.
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use flintshot_core::{UploadBackend, UploadError};

@@ -15,7 +15,11 @@ pub enum EditorOutcome {
     Saved(PathBuf),
     /// User copied the result to the clipboard.
     CopiedToClipboard,
-    /// User uploaded and got back a URL.
+    /// An upload was initiated: the editor spawned a `flintshot
+    /// upload` worker and closed. The string is a placeholder (empty)
+    /// — the editor exits before the upload completes, so the real URL
+    /// is not known here; subscribers receive it via the worker's
+    /// `Request::ReportUploaded` report to the daemon.
     Uploaded(String),
     /// User pinned the result to the desktop (a `flintshot pin` window
     /// was spawned from the editor). The pin worker reads the image

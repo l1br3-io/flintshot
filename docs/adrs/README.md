@@ -33,3 +33,6 @@ Format: **Context · Decision · Consequences**.
 | ADR-0021 | [Text-tool customization data model + Phase 2 multiline pulled forward](ADR-0021-text-tool-customization-data-model.md) |
 | ADR-0022 | [Shared Marker/Pencil freehand path: Catmull-Rom in core + per-pixel-once polyline compositing](ADR-0022-shared-freehand-catmull-rom.md) |
 | ADR-0023 | [Worker save reporting (`Request::ReportSaved`) + daemon last-saved state](ADR-0023-worker-report-saved.md) |
+| ADR-0024 | [Upload trait rework: direct `keyring::Entry` credentials, no progress sink](ADR-0024-upload-trait-rework.md) |
+| ADR-0025 | [Worker upload-result reporting (`Request::ReportUploaded`)](ADR-0025-worker-reports-upload-result.md) |
+| ADR-0026 | [`reqwest` for upload HTTP](ADR-0026-reqwest-for-http.md) |
