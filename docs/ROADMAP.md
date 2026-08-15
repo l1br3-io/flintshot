@@ -6,9 +6,10 @@ status-flipped in place when shipped). For the narrative "why", see
 [`VISION.md`](VISION.md); for decision rationale, see
 [`adrs/`](adrs/).
 
-**CURRENT MILESTONE: Phase 4 — Upload** (the pin-to-desktop primitive
-and COSMIC panel applet both shipped in Phase 3; see
-[`specs/phase-3-pin-cosmic/`](specs/phase-3-pin-cosmic/)).
+**CURRENT MILESTONE: Phase 5 — Live overlay** (upload shipped
+2026-08-15; see [`specs/phase-4-upload/`](specs/phase-4-upload/)).
+With Phase 4 landed, the `1.0.0` clock starts: tag once we have 30
+days of dogfooding (earliest 2026-09-14).
 
 ## Milestones
 
@@ -20,15 +21,16 @@ and COSMIC panel applet both shipped in Phase 3; see
 | Phase 2b — Annotation tools, magnifier, polish | Shipped       |
 | Phase 3 — Pin-to-desktop                       | Shipped       |
 | Phase 3b — COSMIC panel applet                 | Shipped       |
-| Phase 4 — Upload                               | **Next**      |
-| Phase 5 — Live overlay (Flameshot-style)       | Planned       |
+| Phase 4 — Upload                               | Shipped       |
+| Phase 5 — Live overlay (Flameshot-style)       | **Next**      |
 | Phase 6 — Wayland global hotkeys via `ashpd`   | Planned       |
 
 ## Versioning
 
 - `0.x.y` throughout development; no API stability guarantees.
 - `1.0.0` once Phase 4 (upload) lands and we have at least 30 days of
-  dogfooding.
+  dogfooding. Phase 4 shipped 2026-08-15; earliest `1.0.0` is
+  2026-09-14, gated on no P1 regressions during dogfooding.
 - Post-1.0 semver: breaking crate API / user-visible behavior changes
   bump minor; fixes bump patch.
 
