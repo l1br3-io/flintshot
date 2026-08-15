@@ -1,18 +1,25 @@
 # Test Matrix
 
-Manual cross-platform verification grid. Used before each phase exit and
-before any tagged release. CI covers `fmt`, `clippy`, `cargo test`, and
-the MSRV build; **this file covers everything CI can't** — actual
-displays, compositors, and permissions.
+Manual cross-platform verification guide. CI covers `fmt`, `clippy`,
+`cargo test`, and the MSRV build; **this file covers everything CI
+can't** — actual displays, compositors, permissions, keychains, and
+network paths.
+
+Each phase has three parts:
+
+1. **Test setup** — what you need before testing that phase.
+2. **Test script** — ordered, step-by-step with exact commands and the
+   expected output you should see. Run top-to-bottom in one session.
+3. **Matrix** — the recording grid. Paste your result into each cell.
 
 Phase ownership: this matrix is live as of Phase 1. Rows are added as
 features land. Mark each cell with the date and commit hash when
 verified, or open an issue and link it in the cell.
 
-Legend:
+## Legend
 
 - **PASS** — verified working
-- **PARTIAL** — works with caveats (note them)
+- **PARTIAL** — works with caveats (note them in the cell)
 - **FAIL** — broken; link the issue
 - **N/A** — doesn't apply on this platform
 - **(blank)** — not yet tested
@@ -34,14 +41,202 @@ Legend:
 Add a row when you start testing on something new. Don't delete rows
 when a platform is dropped — mark **DEPRECATED** and the date.
 
+> **Focus on your own platform first.** You don't need all nine filled
+> to ship — one fully-verified platform per phase is the minimum bar.
+> Leave others blank for contributors to pick up.
+
+## Getting started
+
+### Build a release binary
+
+All manual testing uses a release build (faster startup, closer to what
+users run):
+
+```sh
+cargo build --release
+```
+
+The binary lands at `./target/release/flintshot`. Either copy it onto
+`$PATH` or invoke it by path. The examples below assume it's on
+`$PATH` as `flintshot`; substitute `./target/release/flintshot` if not.
+
+To run from source without copying:
+
+```sh
+cargo run --release -- <subcommand> [args]
+```
+
+### Configuration
+
+flintshot reads its config from (in priority order):
+
+| Platform | Path                                                    |
+| -------- | ------------------------------------------------------- |
+| Linux    | `~/.config/flintshot/config.toml`                       |
+| macOS    | `~/Library/Application Support/flintshot/config.toml`   |
+| Windows  | `%APPDATA%\flintshot\config.toml`                       |
+
+If the file doesn't exist, defaults apply. Print the resolved config
+(the merged defaults + your overrides) with:
+
+```sh
+flintshot config
+```
+
+Key defaults you'll be testing against:
+
+| Section    | Key                     | Default                     |
+| ---------- | ----------------------- | --------------------------- |
+| `[hotkeys]`| `region`                | `Ctrl+Shift+PrintScreen`    |
+| `[hotkeys]`| `fullscreen`            | `Ctrl+Alt+PrintScreen`      |
+| `[pin]`    | `default-opacity`       | `1.0`                       |
+| `[pin]`    | `copy-on-close`         | `false`                     |
+
+### Credentials (Phase 4 only)
+
+Upload testing needs an Imgur API Client-ID for the authenticated path.
+Get one (free, no app review needed):
+
+1. Go to <https://api.imgur.com/oauth2/addclient>.
+2. Choose **OAuth 2 authorization without a callback URL**.
+3. Copy the **Client-ID** (not the secret).
+
+Store it before testing the authenticated rows:
+
+```sh
+flintshot auth imgur          # prompts "Imgur Client-ID: " (hidden input)
+# or, non-interactive:
+IMGUR_CLIENT_ID=xxxx cargo run --release -- auth imgur
+```
+
+The anonymous path needs no credentials at all.
+
+### Logging
+
+When something fails, re-run with verbose logging to capture diagnostics
+for the issue template:
+
+```sh
+RUST_LOG=flintshot=debug,tokio=warn flintshot <command>
+```
+
+### What goes where
+
+flintshot is a daemon + worker-process architecture (ADR-0019). For
+testing it helps to know which process owns which UX:
+
+| You invoked…                    | Process that runs it            | Notifies?       |
+| ------------------------------- | ------------------------------- | --------------- |
+| `flintshot region`/`fullscreen` | daemon spawns a worker          | tracing log     |
+| `flintshot daemon`              | the daemon itself               | —               |
+| `flintshot pin <path>`          | standalone pin worker           | —               |
+| `flintshot upload <path>`       | standalone upload worker        | desktop notify  |
+| `flintshot auth imgur`          | inline in the CLI process       | —               |
+
+**Only upload fires a desktop notification.** Save, copy, and pin use
+`tracing` log lines only (no toast), so keep a terminal open to watch
+for `RUST_LOG=flintshot=info` confirms.
+
+---
+
 ## Phase 1 — capture + editor window
 
-Subcommand: `flintshot region`, `flintshot fullscreen`
+### Test setup
+
+```sh
+cargo build --release
+cargo test --workspace --all-targets          # all green before manual
+cargo test -p flintshot-core --test capture -- --ignored smoke_can_grab_primary
+```
+
+The smoke test grabs the primary monitor. On Wayland it may pop an
+`xdg-desktop-portal` permission dialog; on macOS it may prompt for
+Screen Recording permission. Both are expected on first run.
+
+### Test script
+
+Run in order. Each step lists the **command**, the **expected** result,
+and the **matrix row** it satisfies.
+
+**1. Build + gate (rows 1–3).**
+
+```sh
+cargo build --release
+cargo test --workspace --all-targets
+cargo test -p flintshot-core --test capture -- --ignored smoke_can_grab_primary
+```
+
+Expected: all pass. The smoke test asserts `img.width() > 0 &&
+img.height() > 0`. On macOS without permission it prints
+`SKIP: capture permission denied (…)` and exits 0 — that's a soft-skip,
+not a failure.
+
+**2. Help surface (row 4).**
+
+```sh
+flintshot --help
+```
+
+Expected: lists `daemon`, `region`, `fullscreen`, `config`, `pin`,
+`open`, `upload`, `auth` subcommands.
+
+**3. Region capture → editor (rows 5–8).**
+
+```sh
+flintshot region
+```
+
+Expected: editor window opens with the screen capture as its
+background. On Wayland the first capture per session may show a portal
+prompt (expected, not a bug). On macOS the first run triggers a Screen
+Recording permission prompt.
+
+**4. Annotation tools (rows 9–13).**
+
+In the editor, with each tool selected from the toolbar:
+
+| Tool      | Toolbar label | Action                              | Expected                       |
+| --------- | ------------- | ----------------------------------- | ------------------------------ |
+| Rectangle | `▭ Rectangle` | drag a box                          | filled rectangle at cursor     |
+| Arrow     | `→ Arrow`     | drag                                | line with arrowhead at end     |
+| Text      | `T Text`      | click, type, `Enter`                | readable glyphs render         |
+| Blur      | `░ Blur`      | drag over text (try `Gaussian`/`Pixelate`) | uniform blur, no seams   |
+| Select    | `⬚ Select`    | drag, then `✂ Crop to selection`    | canvas crops to the rect       |
+
+**5. Persistence (rows 14–15).**
+
+Change the color picker and the `Width` slider. Close the editor,
+re-open (`flintshot region` again), confirm both persisted:
+
+```sh
+flintshot config | grep -A2 '\[ui\]'
+```
+
+Expected: the `[ui]` section reflects your last pick.
+
+**6. Save / copy / undo (rows 16–19).**
+
+| Shortcut  | Expected                                       |
+| --------- | ---------------------------------------------- |
+| `Ctrl+S`  | native file dialog (`rfd`); saved PNG decodes  |
+| `Ctrl+C`  | image on clipboard (paste into an image app)   |
+| `Ctrl+Z`  | last annotation removed                        |
+| `Ctrl+Y`  | removed annotation restored                    |
+| `Esc`     | editor closes, no save                         |
+
+**7. HiDPI / performance (rows 20–22).**
+
+On a HiDPI or fractional-scale display, capture and zoom into the saved
+PNG — it should be sharp, not blurry. Time cold start to editor-open;
+target under 200 ms on commodity hardware. Check the release binary
+size: `ls -lh ./target/release/flintshot` — target under 25 MB.
+
+### Matrix
 
 | Behavior                                                | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 | `cargo build` succeeds                                  |    |    |    |    |    |    |    |    |    |
-| `cargo test --workspace --all-targets` passes         |    |    |    |    |    |    |    |    |    |
+| `cargo test --workspace --all-targets` passes           |    |    |    |    |    |    |    |    |    |
 | `cargo test -p flintshot-core --test capture -- --ignored smoke_can_grab_primary` returns a non-empty image |    |    |    |    |    |    |    |    |    |
 | `flintshot --help` lists all subcommands                |    |    |    |    |    |    |    |    |    |
 | Single-monitor capture, no portal prompt                |    |    |    |    |    |    |    |    |    |
@@ -73,11 +268,105 @@ Subcommand: `flintshot region`, `flintshot fullscreen`
   window opens to a black image; verify the detection-and-guide path
   fires.
 
+---
+
 ## Phase 2 — daemon, tray, hotkeys, IPC
 
-Subcommand: `flintshot daemon` (and `flintshot daemon --replace`).
-Annotation tools (Ellipse/Line/Marker/Pencil/Number/Magnifier) are
-deferred to `phase-2b` and tested there.
+### Test setup
+
+```sh
+cargo build --release --features tray
+flintshot daemon &        # background it; you'll kill it at the end
+```
+
+If your desktop has no SNI host (StatusNotifierItem), the tray icon
+won't appear but the daemon should still bind IPC + hotkeys.
+
+### Test script
+
+**1. Build + single-instance (rows 1–4).**
+
+```sh
+cargo build --release --features tray
+flintshot daemon &            # tray icon "flintshot" appears
+flintshot daemon              # expected: non-zero exit, stderr:
+#   another flintshot daemon is already running
+#   (single-instance lock "flintshot-daemon" held)
+flintshot daemon --replace    # old daemon quits, new one takes over
+```
+
+**2. Tray menu (rows 5–8).**
+
+Click the tray icon. Expected menu items (exact labels):
+
+- `Capture region` → spawns editor
+- `Capture fullscreen` → spawns editor on primary monitor
+- `Fullscreen on monitor →` submenu → one entry per monitor, formatted
+  `"<index> · <name>"` (or `"<index> · <name> (primary)"`)
+- `Open config` → opens `$EDITOR` on `config.toml`
+- `Quit` → daemon exits cleanly
+
+**3. Tray resilience (row 9).**
+
+Kill any SNI host (or test on a desktop without one). The daemon should
+stay alive and log a tray-unavailable warning.
+
+**4. Global hotkeys (rows 10–12).**
+
+Press the defaults (X11/macOS/Windows only — Wayland has no global
+hotkey support, see caveat):
+
+- `Ctrl+Shift+PrintScreen` → region capture
+- `Ctrl+Alt+PrintScreen` → fullscreen capture
+
+On Wayland, confirm the hotkey does **not** fire (expected) and that
+the compositor-keybind workaround is the documented path.
+
+**5. Hot-reload (row 13).**
+
+Edit `config.toml`, change `[hotkeys] region` to something new (e.g.
+`"Ctrl+Shift+P"`), save. Without restarting the daemon, press the new
+chord — it should capture.
+
+**6. IPC subscribe (row 14).**
+
+In a second terminal, subscribe to the event stream:
+
+```sh
+flintshot daemon   # already running; the CLI delegates…
+```
+
+Actually, the IPC is postcard-framed binary on the socket at
+`$XDG_RUNTIME_DIR/flintshot.sock` (Linux). There's no built-in
+`subscribe` CLI subcommand; the COSMIC applet (Phase 3.B) is the
+subscriber to verify against. Trigger a capture and watch the applet's
+event feed for `CaptureStarted → EditorOpened → Saved <path>`.
+
+**7. Delegation vs standalone (rows 15–17).**
+
+```sh
+# with daemon running — CLI delegates:
+flintshot region
+# with daemon stopped — CLI runs standalone:
+flintshot daemon --replace  # then Ctrl-C to stop it
+flintshot region
+# force standalone even with a daemon up:
+flintshot region --standalone
+```
+
+Expected: all three open the editor; only the delegated path
+centralises events for subscribers.
+
+**8. Clean shutdown (row 18).**
+
+```sh
+kill %1          # or Ctrl-C the backgrounded daemon
+```
+
+Expected: clean exit, socket file at
+`$XDG_RUNTIME_DIR/flintshot.sock` is reclaimed.
+
+### Matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
@@ -100,16 +389,59 @@ deferred to `phase-2b` and tested there.
 | `flintshot region --standalone` forces in-process capture   |    |    |    |    |    |    |    |    |    |
 | Ctrl-C → clean daemon shutdown (socket reclaimed)           |    |    |    |    |    |    |    |    |    |
 
+---
 
 ## Phase 2b — annotation tools + magnifier
 
-Exercised via `flintshot region` → editor. All five tools route through
-`flintshot-core::render::render()`, so the saved/copied PNG matches the
-live editor (WYSIWYG per ADR-0015). The magnifier is toolkit-owned
-(egui-only; no core abstraction, per ARCHITECTURE.md §What stays
-toolkit-specific) and reads `EditorState::image` directly. See
-ADR-0022 for the Marker/Pencil freehand smoothing + per-pixel-once
-compositing decision.
+### Test setup
+
+```sh
+cargo build --release
+flintshot region
+```
+
+All five tools route through `flintshot-core::render::render()`, so the
+saved/copied PNG matches the live editor (WYSIWYG per ADR-0015). The
+magnifier is toolkit-owned (egui-only; no core abstraction, per
+ARCHITECTURE.md §What stays toolkit-specific) and reads
+`EditorState::image` directly. See ADR-0022 for the Marker/Pencil
+freehand smoothing + per-pixel-once compositing decision.
+
+### Test script
+
+For each tool: select it from the toolbar, draw on the canvas, then
+**save (`Ctrl+S`) and re-open the PNG** to verify WYSIWYG (last row).
+
+| Tool     | Label        | Steps                                          | Expected                                          |
+| -------- | ------------ | ---------------------------------------------- | ------------------------------------------------- |
+| Ellipse  | `◯ Ellipse`  | drag preview → release → `Ctrl+Z` → click inside | outline ellipse; undo removes; click re-selects   |
+| Line     | `／ Line`    | drag → release → click near the line           | thin line; click-near selects (tolerance-based)   |
+| Marker   | `🖍 Marker`  | drag over text                                 | translucent highlight; text visible through stroke |
+| Pencil   | `✏ Pencil`   | draw a freehand squiggle                       | smooth opaque curve (Catmull-Rom), no jaggies     |
+| Number   | `# Number`   | click 3× in different spots → `Ctrl+Z`         | `1`, `2`, `3` bubbles; undo decrements to `2`     |
+
+**Magnifier** (hold-trigger, toolkit-owned):
+
+1. Hold `Space` — a 4× inset magnifier appears centred on the cursor.
+2. Release — it hides.
+3. Set `[ui] magnifier-always-on = true` in config, restart editor —
+   the magnifier stays up while drawing (no hold needed).
+4. Set `[ui] magnifier-modifier = "Alt"` — now `Alt` is the hold key.
+
+**WYSIWYG verification (final row):**
+
+```sh
+flintshot region
+# draw annotations with several tools
+# Ctrl+S → save to /tmp/wysiwyg.png
+# Esc to close
+flintshot open /tmp/wysiwyg.png
+```
+
+Re-open the saved PNG: every annotation should rasterize identically to
+what you saw live.
+
+### Matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
@@ -134,13 +466,17 @@ compositing decision.
 - **Magnifier zoom is fixed at 4×** (config controls only the trigger,
   not the zoom factor). A future config knob could expose it.
 
-
+---
 
 ## Phase 3 — pin-to-desktop + COSMIC applet
 
-Subcommands: `flintshot pin <path>`, `flintshot open <path>`, editor
-*Pin* button, `Request::PinLast` / `Request::OpenLast` over IPC, and
-`flintshot-cosmic` panel applet.
+### Test setup
+
+```sh
+cargo build --release
+flintshot region           # capture something, Ctrl+S → /tmp/shot.png
+flintshot daemon &         # needed for PinLast/OpenLast IPC rows
+```
 
 A pin is a borderless always-on-top floating window showing a captured
 image; each pin runs as its own worker process so a pin crash can't kill
@@ -149,7 +485,91 @@ pin entry points (CLI, editor button, daemon `PinLast`) converge on
 `EditorShell::run_pin`. The COSMIC applet is a pure IPC client (depends
 on `flintshot-core` + `libcosmic` only — no `egui`, no `flintshot-app`).
 
-### Phase 3.A — pin-to-desktop
+### Phase 3.A — pin-to-desktop test script
+
+**1. Basic pin (rows 1–3).**
+
+```sh
+flintshot pin /tmp/shot.png
+flintshot pin /tmp/shot.png --at 100,100 --size 400x300
+flintshot pin /tmp/shot.png --opacity 0.7 --no-clipboard
+```
+
+Expected: borderless window opens at the given position/size; the
+opacity override dims it; `--no-clipboard` suppresses close-copy.
+
+**2. Window behavior (rows 4–8).**
+
+- The pin floats above ordinary windows (always-on-top).
+- Left-drag anywhere inside → moves the window.
+- Drag across a second monitor → window follows.
+- `Esc` → closes.
+- Double-click → closes.
+
+**3. Hover-opacity (rows 9–10).**
+
+With `[pin] default-opacity = 0.5`: the pin rests dimmed; moving the
+cursor over it makes it fully opaque; leaving returns it to 0.5.
+
+**4. Resize (rows 11–12).**
+
+Drag the bottom-right resize handle. The image scales — aspect ratio
+locked, no crop or distortion.
+
+**5. Copy-on-close (rows 13–14).**
+
+```sh
+# default: no copy
+flintshot pin /tmp/shot.png          # close it → paste in an image app → nothing
+# opt in:
+# (set [pin] copy-on-close = true in config, or:)
+flintshot pin /tmp/shot.png --no-clipboard  # --no-clipboard overrides even if config says true
+```
+
+To test `copy-on-close = true`: set it in config, pin, close, then paste
+into an image app — the pinned image should be on the clipboard.
+
+**6. Persistence + multiplicity (rows 15–17).**
+
+```sh
+flintshot pin /tmp/shot.png &
+flintshot pin /tmp/shot.png &
+flintshot pin /tmp/shot.png &
+```
+
+Close the editor and the daemon — all three pins stay open as
+independent windows.
+
+**7. Editor pin button (rows 18–19).**
+
+```sh
+flintshot region
+# draw a selection box with ⬚ Select
+# click 📌 Pin
+```
+
+Expected: the editor composes the final image to a temp file
+(`flintshot-pin-<pid>-<n>.png` under the OS temp dir), spawns a pin
+worker, and closes. With an active selection, only the selected region
+is pinned.
+
+**8. `open` + IPC commands (rows 20–25).**
+
+```sh
+flintshot open /tmp/shot.png        # loads existing image into editor
+# via the daemon (PinLast / OpenLast) — exercised through the tray or
+# COSMIC applet, or via a raw IPC client. PinLast with no prior save
+# returns: Event::Error { code: "no-last-capture",
+#   message: "no capture has been saved yet" }
+```
+
+**9. Events (rows 26–27).**
+
+After an editor save, subscribers see
+`Event::Saved { path: "<path>" }`. After `PinLast`, they see
+`Event::Pinned { id: <N> }` — ids are monotonic per daemon session.
+
+### Phase 3.A matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
@@ -185,6 +605,29 @@ Built and exercised only on Linux (`flintshot-cosmic` is an opt-in
 crate outside `default-members`; macOS/Windows/standalone-editor cells
 are N/A). The applet is a pure IPC client — it sends `Request`s and
 reads the `Event` stream; it performs no capture and runs no editor.
+
+#### Test setup
+
+```sh
+cargo build --release -p flintshot-cosmic
+flintshot daemon &
+# launch the COSMIC applet (via your panel / cosmic-panel)
+```
+
+#### Test script
+
+Click the panel button → popup opens with: *Capture region*,
+*Capture fullscreen*, *Fullscreen on monitor* submenu, *Pin last*,
+*Open last*, *Open config*, *Quit*. Trigger each and confirm the daemon
+acts. Watch the event-feed status line update through
+*Capturing… → Editor opened → Saved \<path\>*.
+
+For the daemon-absent path: stop the daemon, open the popup — it shows
+*"daemon not running — start with `flintshot daemon`"*, daemon-dependent
+buttons grey out, and *Open config* stays enabled. Restart the daemon;
+the popup re-subscribes within ~2 s.
+
+### Phase 3.B matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
@@ -236,13 +679,120 @@ reads the `Event` stream; it performs no capture and runs no editor.
   re-subscribe. Events emitted while disconnected are not retroactively
   fetched (the daemon doesn't buffer for absent subscribers).
 
+---
+
 ## Phase 4 — upload
 
-Subcommands: `flintshot upload <path>`, `flintshot auth imgur`, editor
-*Upload* button, `Request::UploadLast` over IPC. Every entry point
-converges on the same `flintshot upload` worker process (ADR-0019);
-`ImgurBackend` is the only backend — anonymous by default, Client-ID
-authenticated via keychain opt-in (ADR-0024, ADR-0025, ADR-0026).
+### Test setup
+
+```sh
+cargo build --release
+flintshot region           # capture, Ctrl+S → /tmp/shot.png (your test image)
+flintshot auth imgur       # optional: store a Client-ID for authenticated rows
+# (see "Credentials" in Getting Started above)
+```
+
+Every entry point converges on the same `flintshot upload` worker
+process (ADR-0019); `ImgurBackend` is the only backend — anonymous by
+default, Client-ID authenticated via keychain opt-in (ADR-0024,
+ADR-0025, ADR-0026).
+
+### Test script
+
+**1. Anonymous upload — the happy path (rows 3–6).**
+
+```sh
+flintshot upload /tmp/shot.png
+```
+
+Expected output:
+
+- **stdout:** the Imgur URL on its own line (e.g.
+  `https://imgur.com/xxxxxxx`). This is the *only* stdout line — pipe
+  with `| tail -1` to extract it.
+- **clipboard:** the URL is copied immediately (paste into a browser to
+  confirm).
+- **desktop notification:** summary `flintshot upload`, body
+  `Uploaded to <url>`.
+- **IPC event:** if a daemon is running with subscribers, they see
+  `Event::Uploaded { url, delete-handle }`. The COSMIC applet feed shows
+  `Uploaded <url>`.
+
+```sh
+flintshot upload /tmp/shot.png | tail -1    # just the URL
+```
+
+**2. Editor Upload button (rows 1–2).**
+
+```sh
+flintshot region
+# (optional) draw a selection box with ⬚ Select
+# click ☁ Upload
+```
+
+Expected: editor composes the image to a temp file
+(`flintshot-upload-<pid>-<n>.png`), spawns the upload worker, then
+closes. With an active selection, only the selected region is uploaded.
+The URL arrives via the worker's notification + clipboard — not in the
+editor (see caveat: `EditorOutcome::Uploaded` carries an empty
+placeholder).
+
+**3. Authenticated upload (row 8).**
+
+```sh
+flintshot auth imgur          # enter your Client-ID at the hidden prompt
+flintshot upload /tmp/shot.png
+```
+
+Expected: same UX as anonymous, but the request carries a `Client-ID`
+header (raises the rate limit). Confirm in the daemon log
+(`RUST_LOG=flintshot=debug`) that the upload used the stored credential.
+
+**4. Auth lifecycle (rows 14–17).**
+
+```sh
+flintshot auth imgur            # set: stderr → "Imgur Client-ID stored in keychain."
+flintshot auth imgur            # re-set: overwrites; same confirmation
+flintshot auth imgur --clear    # stderr → "Imgur Client-ID removed from keychain."
+flintshot auth imgur --clear    # no entry: stderr → "No Imgur Client-ID stored." exit 0
+```
+
+Each step should trigger the platform keychain unlock prompt (macOS
+keychain, Windows Credential Manager, Linux Secret Service / GNOME
+Keyring).
+
+**5. Error paths (rows 9–11).**
+
+```sh
+flintshot upload /nonexistent.png
+# expected: stderr error, non-zero exit, no stdout URL
+
+# network failure: disconnect Wi-Fi / block imgur.com, then:
+flintshot upload /tmp/shot.png
+# expected: stderr error, notification body "Upload failed: …",
+#   non-zero exit, no hang
+```
+
+Anonymous rate limit (429) is per-IP (~50/hr), so hitting a real 429 is
+impractical manually. The mapping is covered headless by the mockito
+test `rate_limit_maps_to_backend_error`; a local mock server can stand
+in if you want to exercise the manual cell.
+
+**6. UploadLast over IPC (rows 12–13).**
+
+With a daemon running and a prior save:
+
+```sh
+# trigger Request::UploadLast via the COSMIC applet or a raw IPC client
+```
+
+Expected: upload worker spawns, subscribers see
+`Event::UploadStarted { backend: "imgur" }` immediately, then
+`Event::Uploaded { url, delete-handle }` on success. With no prior
+save, the daemon replies `Event::Error { code: "no-last-capture",
+message: "no capture has been saved yet" }`.
+
+### Matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
@@ -281,7 +831,12 @@ authenticated via keychain opt-in (ADR-0024, ADR-0025, ADR-0026).
   placeholder URL** — the outcome signals "upload initiated"; the real
   URL arrives via the worker's daemon report, not the editor.
 
+---
+
 ## Phase 5 — live overlay
+
+> **Not yet implemented.** Rows are forward-looking; do not test until
+> the phase ships.
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
@@ -292,18 +847,23 @@ authenticated via keychain opt-in (ADR-0024, ADR-0025, ADR-0026).
 
 ## Phase 6 — Wayland global hotkeys via portal
 
+> **Not yet implemented.** Rows are forward-looking.
+
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 | `ashpd` portal prompts on first bind                        | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 | Hotkey fires capture after bind                             | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 | Graceful fallback when portal unsupported                   | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 
+---
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).
 2. `cargo build --release` (or the binary you're validating).
-3. Perform the behavior exactly as documented. No creative
-   interpretation; if the spec is ambiguous, file an issue and link it.
+3. Follow the **Test script** for that phase — it lists the exact
+   command and the expected output. If what you see doesn't match, it's
+   a FAIL; file an issue (below).
 4. Paste the result into the cell: `PASS <commit> <YYYY-MM-DD>` or
    `FAIL <commit> <YYYY-MM-DD> #issue`.
 5. Commit the table update separately from code changes — `chore:
@@ -319,7 +879,7 @@ If a cell turns **FAIL**, open an issue using this template:
 - Behavior: <copy the row label>
 - Commit: <hash>
 - Repro: <exact steps>
-- Expected: <from the row label>
+- Expected: <from the Test script>
 - Actual: <what happened>
 - Logs: RUST_LOG=flintshot=debug,tokio=warn cargo run -- … output
 ```

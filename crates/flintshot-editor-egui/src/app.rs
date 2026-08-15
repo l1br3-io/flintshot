@@ -20,15 +20,13 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    compose_final, compose_final_region,
-    render::render,
-    text::{FontFamily, FontStyle, FontWeight, TextAlign, TextOutline},
-    BlurCache, Color, Config, DispatchOutcome, EditorOutcome, EditorState, FlintshotError,
-    InputEvent, Key, Modifiers, Point, Rect, Tool,
+    compose_final, compose_final_region, render::render, BlurCache, Config, DispatchOutcome,
+    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, Point, Rect, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
+use crate::toolbar::{self, ToolbarAction};
 
 /// Outcome slot shared between the shell (which lives after
 /// `eframe::run_native` returns) and the [`EditorApp`] (which is
@@ -112,32 +110,13 @@ pub(crate) struct EditorApp {
     magnifier_key: egui::Key,
 }
 
-/// Which toolbar button the user clicked this frame (if any).
-///
-/// Collected inside the toolbar closure so the action can be handled
-/// outside it, avoiding the borrow conflict between `&mut self.state`
-/// (captured by the toolbar widgets) and `&self.outcome` (needed by
-/// `publish_outcome`). Same shape as the existing render-error
-/// pattern: closure returns data, control flow lives outside.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum ToolbarAction {
-    /// No button clicked.
-    #[default]
-    None,
-    /// Save button clicked — open file dialog.
-    Save,
-    /// Copy button clicked — write to clipboard.
-    Copy,
-    /// Pin button clicked — compose, write temp PNG, spawn pin worker.
-    Pin,
-    /// Upload button clicked — compose, write temp PNG, spawn upload worker.
-    Upload,
-}
-
 impl EditorApp {
     /// Construct the app. The canvas captures a clone of the
     /// [`Context`] for texture loading outside the per-frame `ui` call.
     pub(crate) fn new(state: EditorState, ctx: &Context, outcome: OutcomeSlot) -> Self {
+        // One-time theme application: the graphite + ember styling
+        // (see `crate::theme`) persists for the window's lifetime.
+        crate::theme::apply(ctx);
         let img_dims = state.image.dimensions();
         // Magnifier config is read once at construction (filesystem
         // read per-frame would be wasteful, and the trigger key /
@@ -217,68 +196,6 @@ impl EditorApp {
                 error = %e,
                 "could not save config; UI defaults not persisted this session"
             );
-        }
-    }
-
-    /// Text-tool-only toolbar controls. Text gets its own colour picker
-    /// decoupled from the drawing-tools `state.color` (so e.g. red
-    /// arrows and white labels coexist without re-picking on every tool
-    /// switch) plus the font-size slider. Phase D appends the family /
-    /// weight / style / align / outline / background controls here.
-    ///
-    /// Associated (not `&mut self`) so the call site can borrow
-    /// `&mut self.state` without conflicting with the toolbar closure's
-    /// other `self.state` field captures.
-    fn draw_text_controls(state: &mut EditorState, ui: &mut egui::Ui) {
-        ui.separator();
-        // Dedicated text colour (decoupled from the drawing-tools colour).
-        let mut rgb = [state.text_color.r, state.text_color.g, state.text_color.b];
-        ui.color_edit_button_srgb(&mut rgb);
-        if rgb != [state.text_color.r, state.text_color.g, state.text_color.b] {
-            state.text_color = Color::rgb(rgb[0], rgb[1], rgb[2]);
-        }
-        ui.add(egui::Slider::new(&mut state.font_size, 8.0..=72.0).text("Font"));
-
-        // Family / weight / style / alignment (Phase D).
-        ui.separator();
-        ui.selectable_value(&mut state.font_family, FontFamily::SansSerif, "Sans");
-        ui.selectable_value(&mut state.font_family, FontFamily::Monospace, "Mono");
-        ui.selectable_value(&mut state.font_weight, FontWeight::Normal, "Regular");
-        ui.selectable_value(&mut state.font_weight, FontWeight::Bold, "Bold");
-        ui.selectable_value(&mut state.font_style, FontStyle::Normal, "AA");
-        ui.selectable_value(&mut state.font_style, FontStyle::Italic, "It");
-        ui.selectable_value(&mut state.text_align, TextAlign::Left, "⬅");
-        ui.selectable_value(&mut state.text_align, TextAlign::Center, "↔");
-        ui.selectable_value(&mut state.text_align, TextAlign::Right, "➡");
-
-        // Background highlight toggle + colour.
-        ui.separator();
-        let mut bg_on = state.text_background.is_some();
-        ui.checkbox(&mut bg_on, "BG");
-        if bg_on {
-            let cur = state.text_background.unwrap_or(Color::rgb(255, 235, 0));
-            let mut brgb = [cur.r, cur.g, cur.b];
-            ui.color_edit_button_srgb(&mut brgb);
-            state.text_background = Some(Color::rgb(brgb[0], brgb[1], brgb[2]));
-        } else {
-            state.text_background = None;
-        }
-
-        // Outline toggle + colour + width.
-        let mut ol_on = state.text_outline.is_some();
-        ui.checkbox(&mut ol_on, "Outline");
-        if ol_on {
-            let mut o = state.text_outline.unwrap_or(TextOutline {
-                color: Color::rgb(0, 0, 0),
-                width: 2.0,
-            });
-            let mut orgb = [o.color.r, o.color.g, o.color.b];
-            ui.color_edit_button_srgb(&mut orgb);
-            o.color = Color::rgb(orgb[0], orgb[1], orgb[2]);
-            ui.add(egui::Slider::new(&mut o.width, 1.0..=8.0).text("OL"));
-            state.text_outline = Some(o);
-        } else {
-            state.text_outline = None;
         }
     }
 
@@ -540,6 +457,25 @@ impl App for EditorApp {
             }
         }
 
+        // Single-key tool selection: unmodified S R E A L M P T B N
+        // switch tools (advertised in the rail tooltips). Guarded on
+        // the *event's own* modifiers so Ctrl+S / Ctrl+Shift+Z chords
+        // keep their dispatcher meanings; text-editing mode returned
+        // early above, so typed letters can't switch tools mid-draft.
+        if let Some(tool) = ctx.input(|i| {
+            i.raw.events.iter().rev().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers: m,
+                    ..
+                } if m.is_none() => tool_for_key(*key),
+                _ => None,
+            })
+        }) {
+            self.state.tool = tool;
+        }
+
         // Pointer dispatch: translate egui's screen-logical coords to
         // canvas-physical and feed the state machine. `canvas_rect` is
         // cached by the previous frame's `ui()`; on the first frame
@@ -606,112 +542,13 @@ impl App for EditorApp {
         }
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "egui immediate-mode toolbar is declaratively verbose; the panel/show closure captures many disjoint `&mut self.state` fields that a split-out helper would just re-borrow wholesale"
-    )]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Toolbar. Must come before CentralPanel so egui reserves the
-        // horizontal strip at the top. Phase 1 Task 8 shipped the tool
-        // selector; Task 9 adds Save / Copy buttons; Task 15 adds
-        // color/stroke pickers. (egui 0.35 unified
-        // `TopBottomPanel::top` and `SidePanel::left/right` into
-        // `Panel::{top,bottom,left,right}`.)
-        //
-        // The closure collects a `ToolbarAction` rather than acting
-        // inline so the action handler can borrow `&self.outcome` and
-        // `&self.state` cleanly outside the closure (the closure body
-        // already captures `&mut self.state.tool`).
-        let action = egui::Panel::top("editor_toolbar")
-            .show(ui, |ui| {
-                let mut action = ToolbarAction::None;
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.state.tool, Tool::Select, "⬚ Select");
-                    ui.selectable_value(&mut self.state.tool, Tool::Rect, "▭ Rectangle");
-                    ui.selectable_value(&mut self.state.tool, Tool::Ellipse, "◯ Ellipse");
-                    ui.selectable_value(&mut self.state.tool, Tool::Arrow, "→ Arrow");
-                    ui.selectable_value(&mut self.state.tool, Tool::Line, "／ Line");
-                    ui.selectable_value(&mut self.state.tool, Tool::Marker, "🖍 Marker");
-                    ui.selectable_value(&mut self.state.tool, Tool::Pencil, "✏ Pencil");
-                    ui.selectable_value(&mut self.state.tool, Tool::Text, "T Text");
-                    ui.selectable_value(&mut self.state.tool, Tool::Blur, "░ Blur");
-                    ui.selectable_value(&mut self.state.tool, Tool::Number, "# Number");
-                    if self.state.tool == Tool::Blur {
-                        ui.separator();
-                        ui.label("Kind:");
-                        ui.selectable_value(
-                            &mut self.state.blur_kind,
-                            flintshot_core::BlurKind::Gaussian,
-                            "Gaussian",
-                        );
-                        ui.selectable_value(
-                            &mut self.state.blur_kind,
-                            flintshot_core::BlurKind::Pixelate,
-                            "Pixelate",
-                        );
-                    }
-                    // Color + stroke-width pickers (Task 15). Apply to
-                    // all drawing tools (Rect / Arrow / Marker / Pencil
-                    // / Text). Color uses egui's sRGB editor; the three
-                    // u8 channels map directly to flintshot_core::Color.
-                    ui.separator();
-                    let mut rgb = [self.state.color.r, self.state.color.g, self.state.color.b];
-                    ui.color_edit_button_srgb(&mut rgb);
-                    if rgb != [self.state.color.r, self.state.color.g, self.state.color.b] {
-                        self.state.color = Color::rgb(rgb[0], rgb[1], rgb[2]);
-                    }
-                    ui.add(
-                        egui::Slider::new(&mut self.state.stroke_width, 1.0..=20.0).text("Width"),
-                    );
-                    // Text-tool-only controls live in a helper so the
-                    // toolbar stays under clippy's line budget as text
-                    // customisation grows (Phase D adds family / weight
-                    // / style / align / outline / background).
-                    if self.state.tool == Tool::Text {
-                        Self::draw_text_controls(&mut self.state, ui);
-                    }
-                    // Select-tool: offer crop when a non-degenerate
-                    // selection is active. Enter also confirms (the
-                    // dispatcher handles that); the button is for
-                    // pointer-driven users.
-                    if self.state.tool == Tool::Select {
-                        if let Some(sel) = self.state.selection {
-                            let n = sel.normalized();
-                            if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 {
-                                ui.separator();
-                                if ui.button("✂ Crop to selection (↵)").clicked() {
-                                    self.state.confirm_selection();
-                                }
-                            }
-                        }
-                    }
-                    ui.separator();
-                    ui.label(format!("{} annotations", self.state.anns.len()));
-                    ui.separator();
-                    if ui.button("💾 Save").clicked() {
-                        action = ToolbarAction::Save;
-                    }
-                    let copy_label = if self.copied {
-                        "✓ Copied!"
-                    } else {
-                        "📋 Copy"
-                    };
-                    if ui.button(copy_label).clicked() {
-                        action = ToolbarAction::Copy;
-                    }
-                    if ui.button("📌 Pin").clicked() {
-                        action = ToolbarAction::Pin;
-                    }
-                    if ui.button("☁ Upload").clicked() {
-                        action = ToolbarAction::Upload;
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.small("Drag to draw · Ctrl+Z undo · Esc cancel");
-                    });
-                });
-                action
-            })
-            .inner;
+        // horizontal strip at the top. The rail + bay layout, chips,
+        // swatches, and popups live in `crate::toolbar`; the plain
+        // call (no closure) keeps the borrow of `&mut self.state`
+        // disjoint from `self.copied`.
+        let action = toolbar::show(ui, &mut self.state, self.copied);
 
         // Invalidate the bg texture cache and resize the window when
         // the image dimensions change (crop replaces state.image with
@@ -765,7 +602,7 @@ impl App for EditorApp {
         // loupe over the caret.
         self.paint_magnifier_if_active(ui.ctx(), ui.painter());
 
-        // Handle toolbar button clicks outside the toolbar closure so
+        // Handle toolbar actions outside the toolbar drawing code so
         // we can borrow `&self.outcome` cleanly. Each handler runs the
         // corresponding output pipeline (save / copy) and either
         // publishes the matching `EditorOutcome` + closes the window,
@@ -776,6 +613,27 @@ impl App for EditorApp {
             ToolbarAction::Copy => self.handle_copy(ui.ctx()),
             ToolbarAction::Pin => self.handle_pin(ui.ctx()),
             ToolbarAction::Upload => self.handle_upload(ui.ctx()),
+            // Undo / Redo replay the same dispatch a Ctrl+Z / Ctrl+Y
+            // keypress would produce (the dispatcher owns all state
+            // mutation); their outcomes are always `Continue`.
+            ToolbarAction::Undo => {
+                let _ = self.state.dispatch_input(&InputEvent::Key {
+                    key: Key::Char('z'),
+                    modifiers: Modifiers {
+                        ctrl: true,
+                        ..Modifiers::default()
+                    },
+                });
+            }
+            ToolbarAction::Redo => {
+                let _ = self.state.dispatch_input(&InputEvent::Key {
+                    key: Key::Char('y'),
+                    modifiers: Modifiers {
+                        ctrl: true,
+                        ..Modifiers::default()
+                    },
+                });
+            }
             ToolbarAction::None => {}
         }
     }
@@ -1264,6 +1122,26 @@ fn parse_magnifier_key(name: &str) -> egui::Key {
     }
 }
 
+/// Map a single-key tool shortcut to its [`Tool`]. Only unmodified
+/// presses reach this fn (see the guard in `logic`); the chords over
+/// the same letters (Ctrl+S save, Ctrl+C copy, Ctrl+Z/Y history) are
+/// handled by the core dispatcher and never collide.
+fn tool_for_key(key: egui::Key) -> Option<Tool> {
+    match key {
+        egui::Key::S => Some(Tool::Select),
+        egui::Key::R => Some(Tool::Rect),
+        egui::Key::E => Some(Tool::Ellipse),
+        egui::Key::A => Some(Tool::Arrow),
+        egui::Key::L => Some(Tool::Line),
+        egui::Key::M => Some(Tool::Marker),
+        egui::Key::P => Some(Tool::Pencil),
+        egui::Key::T => Some(Tool::Text),
+        egui::Key::B => Some(Tool::Blur),
+        egui::Key::N => Some(Tool::Number),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1274,6 +1152,39 @@ mod tests {
         let img = image::RgbaImage::from_raw(w, h, vec![255; (w as usize) * (h as usize) * 4])
             .expect("raw buffer matches w*h*4");
         EditorState::new(img)
+    }
+
+    /// Every tool shortcut maps, and no two letters collapse onto the
+    /// same tool (the rail tooltips advertise these letters).
+    #[test]
+    fn tool_shortcuts_are_complete_and_injective() {
+        let pairs = [
+            (egui::Key::S, Tool::Select),
+            (egui::Key::R, Tool::Rect),
+            (egui::Key::E, Tool::Ellipse),
+            (egui::Key::A, Tool::Arrow),
+            (egui::Key::L, Tool::Line),
+            (egui::Key::M, Tool::Marker),
+            (egui::Key::P, Tool::Pencil),
+            (egui::Key::T, Tool::Text),
+            (egui::Key::B, Tool::Blur),
+            (egui::Key::N, Tool::Number),
+        ];
+        for (key, tool) in pairs {
+            assert_eq!(tool_for_key(key), Some(tool));
+        }
+        // Keys that must never switch tools: chords are handled by the
+        // dispatcher, and unrelated letters fall through.
+        for key in [
+            egui::Key::C,
+            egui::Key::Z,
+            egui::Key::Y,
+            egui::Key::Escape,
+            egui::Key::Space,
+            egui::Key::Enter,
+        ] {
+            assert_eq!(tool_for_key(key), None, "{key:?} must not select a tool");
+        }
     }
 
     /// The compose + write path that `handle_pin` runs must yield a

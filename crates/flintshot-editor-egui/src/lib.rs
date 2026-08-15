@@ -14,6 +14,9 @@
 //!   copy-on-close).
 //! - [`shell`] — the public `EguiShell` (`impl EditorShell`) that
 //!   owns the eframe lifecycle and the outcome slot.
+//! - `theme` (private) — the graphite + ember token set and `Visuals`
+//!   applied to every editor window.
+//! - `toolbar` (private) — the rail + bay toolbar drawn by `app`.
 //!
 //! Phase 1 Task 4 filled in the background-blit path (canvas module);
 //! Task 5 added the eframe shell (app + shell modules) with the
@@ -32,6 +35,8 @@ mod canvas;
 mod magnifier;
 mod pin;
 mod shell;
+mod theme;
+mod toolbar;
 
 pub use canvas::{EguiCanvas, EguiTexture};
 pub use magnifier::{sample_zoomed_region, Magnifier};
