@@ -20,6 +20,19 @@ Categories used below:
 
 ### Added
 
+- Phase 5 overlay selection chrome: the live overlay now layers
+  Flameshot-style selection affordances over the dispatcher's
+  selection — a dim mask over everything outside the active region
+  (the whole screen until one is drawn), 8 grab handles (corners +
+  edge midpoints) with per-direction resize cursors, move-by-drag
+  inside the region (clamped to the screen), a live `W × H` size
+  badge that flips below the region near the top screen edge, and
+  the pixel-zoom magnifier shown on hover (no modifier hold in the
+  overlay). Handle/move gestures run while the Select tool is active
+  and mutate the selection through pure, unit-tested geometry
+  helpers; fresh region drags keep flowing through the unchanged
+  dispatcher. Annotation tools are untouched — presses with a
+  drawing tool active draw, they never grab the region.
 - Phase 5 overlay shell MVP: `flintshot region --overlay` /
   `fullscreen --overlay` (and `interaction-mode = "overlay"`) now open
   the real thing — a fullscreen, undecorated eframe viewport showing
