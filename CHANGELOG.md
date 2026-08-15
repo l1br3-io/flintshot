@@ -20,6 +20,22 @@ Categories used below:
 
 ### Added
 
+- Phase 5 floating overlay toolbar: once a selection exists, a
+  compact two-row toolbar floats beside it — the ten tool chips and
+  undo/redo (row 1, reusing the editor toolbar's chips and glyph
+  language verbatim) and the accept row (✓ accept / ✕ cancel, the
+  Save / Pin / Upload outputs, and the ember Copy primary; row 2).
+  It anchors below the selection's bottom-left, flips above it when
+  the space below runs out, and clamps into the viewport (pure,
+  unit-tested placement math); it hides during fresh region drags
+  and follows the region through resize/move gestures. Toolbar
+  presses are swallowed before selection chrome or dispatcher
+  dispatch (it floats inside the overlay panel), the hover cursor
+  and magnifier stand down over it, and a tool-chip click mid-text
+  draft commits the draft first. Copy is Enter-equivalent (Enter =
+  Copy per the spec); the Save / Pin / Upload pipelines land later
+  in Phase 5 — their buttons are present and their clicks log a
+  notice until then.
 - Phase 5 overlay selection chrome: the live overlay now layers
   Flameshot-style selection affordances over the dispatcher's
   selection — a dim mask over everything outside the active region
