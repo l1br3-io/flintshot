@@ -20,6 +20,22 @@ Categories used below:
 
 ### Added
 
+- Editor toolbar redesign: two-row "rail + bay" layout in
+  `flintshot-editor-egui`. The rail holds the ten tool chips,
+  undo/redo, and the output actions (Save, Pin, Upload, and the
+  ember-filled Copy primary with sheet→check "Copied" feedback); the
+  bay shows only the controls the active tool uses (swatches +
+  custom color popup, stroke presets + width slider, text typography
+  popover, blur-kind segmented control, select dims + crop) plus a
+  per-tool hint. All icons are painter-drawn vector glyphs (see
+  ADR-0027) — no emoji, no icon-font dependency. New private modules
+  `theme` (graphite + ember token set and `Visuals`) and `toolbar`.
+- Single-key tool shortcuts in the editor: unmodified
+  `S R E A L M P T B N` select Select/Rectangle/Ellipse/Arrow/Line/
+  Marker/Pencil/Text/Blur/Number. Modifier chords (Ctrl+S etc.) keep
+  their dispatcher meanings; text-editing mode is exempt.
+- Undo/Redo toolbar buttons (previously keyboard-only) — they replay
+  the same Ctrl+Z / Ctrl+Y dispatch the keypresses produce.
 - Workspace scaffolding with four crates: `flintshot-app` (bin, default),
   `flintshot-core` (lib), `flintshot-editor-egui` (lib),
   `flintshot-cosmic` (bin, opt-in).
@@ -605,6 +621,12 @@ Categories used below:
 
 ### Changed
 
+- Editor toolbar reorganized from a single overflowing row into the
+  two-row rail + bay layout (see Added above). The always-visible
+  color/stroke pickers now appear only for tools that use them; the
+  annotation counter and the static "Drag to draw · Ctrl+Z undo ·
+  Esc cancel" hint row are removed (replaced by per-tool hints); the
+  emoji-labeled buttons are replaced by painter-drawn glyph chips.
 - `UploadBackend` trait methods now return `Pin<Box<dyn Future + Send>>`
   instead of `impl Future` (Phase 4 Task 004). The `-> impl Future`
   return type made the trait not dyn-compatible, but the registry and

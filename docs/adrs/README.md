@@ -36,3 +36,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0024 | [Upload trait rework: direct `keyring::Entry` credentials, no progress sink](ADR-0024-upload-trait-rework.md) |
 | ADR-0025 | [Worker upload-result reporting (`Request::ReportUploaded`)](ADR-0025-worker-reports-upload-result.md) |
 | ADR-0026 | [`reqwest` for upload HTTP](ADR-0026-reqwest-for-http.md) |
+| ADR-0027 | [Painter-drawn toolbar glyphs over icon fonts or emoji](ADR-0027-painter-drawn-toolbar-glyphs.md) |
