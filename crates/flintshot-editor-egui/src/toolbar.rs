@@ -5,6 +5,10 @@
 //! ember Copy primary. **Bay** (bottom, per-tool): only the controls
 //! the active tool can use, plus a contextual hint on the right.
 //!
+//! The chips, glyphs, and `ToolSpec` table are shared with the Phase
+//! 5 overlay's floating toolbar (plan decision 4: reuse the chips,
+//! new layout only) — hence `pub(crate)` on the primitives below.
+//!
 //! All icons are painter-drawn vector glyphs (see
 //! `docs/adrs/ADR-0027-painter-drawn-toolbar-glyphs.md`): they share
 //! the 2px stroke language of the annotations themselves, render
@@ -52,18 +56,21 @@ pub(crate) enum ToolbarAction {
 type Glyph = fn(&egui::Painter, egui::Rect, Color32);
 
 /// One rail tool chip: variant, display name, hotkey hint, glyph.
-struct ToolSpec {
+/// Shared with the overlay's floating rail (plan decision 4).
+pub(crate) struct ToolSpec {
     /// Tool selected on click.
-    tool: Tool,
+    pub(crate) tool: Tool,
     /// Human name (tooltip).
-    name: &'static str,
+    pub(crate) name: &'static str,
     /// Single-key shortcut (tooltip + doc).
-    key: &'static str,
+    pub(crate) key: &'static str,
     /// Painter glyph.
-    glyph: Glyph,
+    pub(crate) glyph: Glyph,
 }
 
-const TOOLS: &[ToolSpec] = &[
+/// The ten tool chips in rail order. Shared with the overlay's
+/// floating rail.
+pub(crate) const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         tool: Tool::Select,
         name: "Select",
@@ -409,7 +416,7 @@ fn dims_label(rect: flintshot_core::Rect) -> String {
 /// when selected. The selected glyph flips to ink, reading as a
 /// spark cut out of the panel — the toolbar's only color besides
 /// the Copy primary.
-fn chip(
+pub(crate) fn chip(
     ui: &mut egui::Ui,
     id: egui::Id,
     tooltip: &str,
@@ -450,8 +457,9 @@ fn chip(
 
 /// The ember Copy primary: wider chip with a glyph + label. The
 /// glyph morphs to a checkmark once a copy has succeeded this
-/// session, pairing with the "Copied" label.
-fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
+/// session, pairing with the "Copied" label. Shared with the
+/// overlay's accept row.
+pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
     let label = if copied { "Copied" } else { "Copy" };
     let galley =
         ui.painter()
@@ -690,13 +698,13 @@ fn g_number(p: &egui::Painter, r: egui::Rect, c: Color32) {
 }
 
 /// Arc over the top + a barb diving down-and-out at the left end.
-fn g_undo(p: &egui::Painter, r: egui::Rect, c: Color32) {
+pub(crate) fn g_undo(p: &egui::Painter, r: egui::Rect, c: Color32) {
     arc_over_top(p, r, c);
     arrowhead(p, pt(r, -5.5, 0.0), Vec2::new(-0.35, 0.94), c);
 }
 
 /// Mirror of undo: barb at the right end.
-fn g_redo(p: &egui::Painter, r: egui::Rect, c: Color32) {
+pub(crate) fn g_redo(p: &egui::Painter, r: egui::Rect, c: Color32) {
     arc_over_top(p, r, c);
     arrowhead(p, pt(r, 5.5, 0.0), Vec2::new(0.35, 0.94), c);
 }
@@ -718,7 +726,7 @@ fn arc_over_top(p: &egui::Painter, r: egui::Rect, c: Color32) {
 }
 
 /// Arrow descending into a tray (download-to-disk).
-fn g_save(p: &egui::Painter, r: egui::Rect, c: Color32) {
+pub(crate) fn g_save(p: &egui::Painter, r: egui::Rect, c: Color32) {
     seg(p, r, (-6.0, 6.0), (6.0, 6.0), c, 2.0);
     seg(p, r, (-6.0, 6.0), (-6.0, 2.0), c, 2.0);
     seg(p, r, (6.0, 6.0), (6.0, 2.0), c, 2.0);
@@ -727,7 +735,7 @@ fn g_save(p: &egui::Painter, r: egui::Rect, c: Color32) {
 }
 
 /// Arrow rising out of a tray.
-fn g_upload(p: &egui::Painter, r: egui::Rect, c: Color32) {
+pub(crate) fn g_upload(p: &egui::Painter, r: egui::Rect, c: Color32) {
     seg(p, r, (-6.0, -6.0), (6.0, -6.0), c, 2.0);
     seg(p, r, (-6.0, -6.0), (-6.0, -2.0), c, 2.0);
     seg(p, r, (6.0, -6.0), (6.0, -2.0), c, 2.0);
@@ -736,7 +744,7 @@ fn g_upload(p: &egui::Painter, r: egui::Rect, c: Color32) {
 }
 
 /// Tilted pushpin: filled head + needle.
-fn g_pin(p: &egui::Painter, r: egui::Rect, c: Color32) {
+pub(crate) fn g_pin(p: &egui::Painter, r: egui::Rect, c: Color32) {
     p.circle(pt(r, 4.0, -4.0), 3.0, c, Stroke::NONE);
     seg(p, r, (1.8, -1.8), (-6.0, 6.0), c, 2.0);
 }
@@ -757,12 +765,19 @@ fn g_copy(p: &egui::Painter, r: egui::Rect, c: Color32) {
     ));
 }
 
-/// Bold check for the post-copy state.
-fn g_check(p: &egui::Painter, r: egui::Rect, c: Color32) {
+/// Bold check for the post-copy state and the overlay's accept
+/// action.
+pub(crate) fn g_check(p: &egui::Painter, r: egui::Rect, c: Color32) {
     p.add(egui::Shape::line(
         vec![pt(r, -6.0, -1.0), pt(r, -2.0, 3.0), pt(r, 7.0, -6.0)],
         Stroke::new(2.5, c),
     ));
+}
+
+/// Bold ✕ for the overlay's cancel action.
+pub(crate) fn g_x(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    seg(p, r, (-5.0, -5.0), (5.0, 5.0), c, 2.5);
+    seg(p, r, (5.0, -5.0), (-5.0, 5.0), c, 2.5);
 }
 
 fn g_plus(p: &egui::Painter, r: egui::Rect, c: Color32) {

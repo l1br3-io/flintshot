@@ -52,16 +52,33 @@
 //! The Enter→Copy output pipeline lands in Task 006; until then an
 //! accepted close publishes `Cancelled` with a notice (the same
 //! placeholder pattern Task 001 used for the missing shell).
+//!
+//! ## Floating toolbar (Task 004)
+//!
+//! A compact rail + accept row in a foreground `egui::Area` anchored
+//! to the selection — below its bottom-left, flipped above when the
+//! space below is short, clamped into the viewport (plan decision
+//! 4). Row 1 reuses the editor toolbar's ten tool chips plus
+//! undo / redo; row 2 holds ✓ accept, ✕ cancel, Save / Pin / Upload,
+//! and the ember Copy primary (Copy is Enter-equivalent: the spec
+//! pins Enter = Copy). The toolbar shows only while a usable
+//! selection exists and no fresh region drag runs, and swallows
+//! pointer presses before chrome interception so chip clicks never
+//! reach the dispatcher; the hover cursor and magnifier stand down
+//! over it. Output pipelines behind the Save / Pin / Upload chips
+//! land in Task 006 — their clicks log a notice until then.
 
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    render::render, BlurCache, EditorOutcome, EditorState, InputEvent, Key, Point, Rect, Tool,
+    render::render, BlurCache, EditorOutcome, EditorState, InputEvent, Key, Modifiers, Point, Rect,
+    Tool,
 };
 
 use crate::app::{dispatch_text_input, tool_for_key, translate_modifiers, OutcomeSlot};
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
+use crate::toolbar::{self, ToolbarAction, TOOLS};
 
 /// Window title + WM class for the overlay viewport. Distinct from
 /// the editor and pin windows so WMs / compositors can route it.
@@ -161,6 +178,11 @@ const BADGE_GAP: f32 = 6.0;
 /// Badge font size, logical px. Monospace so live width changes
 /// don't jitter the label horizontally.
 const BADGE_FONT_SIZE: f32 = 12.0;
+
+/// Gap between the selection edge and the floating toolbar, logical
+/// px. Matches the badge's offset so the two chrome elements share a
+/// rhythm.
+const TOOLBAR_GAP: f32 = 6.0;
 
 /// One of the 8 selection grab points: 4 corners + 4 edge midpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,6 +397,153 @@ pub(crate) fn cursor_for_handle(handle: Handle) -> egui::CursorIcon {
     }
 }
 
+/// Where the floating toolbar's top-left anchors against the
+/// (logical-space) selection: below its bottom-left when there's
+/// panel room, flipped above the top edge otherwise, then clamped
+/// horizontally into the panel. `size` is the toolbar's last
+/// *measured* size — the flip/clamp decision runs one frame behind
+/// the layout, which is invisible in practice (egui keeps an area
+/// invisible for its first, sizing frame). A zero/stale seed simply
+/// yields the unclamped below-left placement.
+///
+/// When neither side fits (a near-full-height selection), the
+/// toolbar pins to the panel top — overlapping the region beats
+/// sliding off-screen.
+#[must_use]
+pub(crate) fn toolbar_anchor(sel: egui::Rect, panel: egui::Rect, size: egui::Vec2) -> egui::Pos2 {
+    let below_y = sel.max.y + TOOLBAR_GAP;
+    let above_y = sel.min.y - TOOLBAR_GAP - size.y;
+    let y = if below_y + size.y <= panel.max.y {
+        below_y
+    } else if above_y >= panel.min.y {
+        above_y
+    } else {
+        panel.min.y
+    };
+    let x = sel
+        .min
+        .x
+        .clamp(panel.min.x, (panel.max.x - size.x).max(panel.min.x));
+    egui::pos2(x, y)
+}
+
+/// The floating toolbar's compact rail row: the ten shared tool
+/// chips plus undo / redo (plan decision 4 — the editor rail's
+/// chips and glyph language, new layout only). Tool clicks switch
+/// `state.tool` directly, the same editor-rail semantics; history
+/// clicks return as actions for the caller to replay.
+fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction {
+    let mut action = ToolbarAction::None;
+    for spec in TOOLS {
+        let selected = state.tool == spec.tool;
+        let tooltip = format!("{} · {}", spec.name, spec.key);
+        let resp = toolbar::chip(
+            ui,
+            egui::Id::new(("overlay_tool", spec.key)),
+            tooltip.as_str(),
+            selected,
+            spec.glyph,
+        );
+        if resp.clicked() {
+            state.tool = spec.tool;
+        }
+    }
+    ui.separator();
+    if toolbar::chip(
+        ui,
+        egui::Id::new("overlay_undo"),
+        "Undo · Ctrl+Z",
+        false,
+        toolbar::g_undo,
+    )
+    .clicked()
+    {
+        action = ToolbarAction::Undo;
+    }
+    if toolbar::chip(
+        ui,
+        egui::Id::new("overlay_redo"),
+        "Redo · Ctrl+Y",
+        false,
+        toolbar::g_redo,
+    )
+    .clicked()
+    {
+        action = ToolbarAction::Redo;
+    }
+    action
+}
+
+/// The floating toolbar's accept row: ✓ accept (Enter semantics) and
+/// ✕ cancel (Esc semantics) lead, then the Save / Pin / Upload
+/// outputs and the ember Copy primary. Copy is Enter-equivalent
+/// (spec: Enter = Copy); the Save / Pin / Upload pipelines land in
+/// Task 006.
+fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>) {
+    let mut action = ToolbarAction::None;
+    let mut close = None;
+    if toolbar::chip(
+        ui,
+        egui::Id::new("overlay_accept"),
+        "Accept · Enter",
+        false,
+        toolbar::g_check,
+    )
+    .clicked()
+    {
+        close = Some(OverlayClose::Accept);
+    }
+    if toolbar::chip(
+        ui,
+        egui::Id::new("overlay_cancel"),
+        "Cancel · Esc",
+        false,
+        toolbar::g_x,
+    )
+    .clicked()
+    {
+        close = Some(OverlayClose::Cancel);
+    }
+    ui.separator();
+    if toolbar::chip(
+        ui,
+        egui::Id::new("overlay_save"),
+        "Save · Ctrl+S",
+        false,
+        toolbar::g_save,
+    )
+    .clicked()
+    {
+        action = ToolbarAction::Save;
+    }
+    if toolbar::chip(
+        ui,
+        egui::Id::new("overlay_pin"),
+        "Pin to desktop",
+        false,
+        toolbar::g_pin,
+    )
+    .clicked()
+    {
+        action = ToolbarAction::Pin;
+    }
+    if toolbar::chip(
+        ui,
+        egui::Id::new("overlay_upload"),
+        "Upload",
+        false,
+        toolbar::g_upload,
+    )
+    .clicked()
+    {
+        action = ToolbarAction::Upload;
+    }
+    if toolbar::copy_chip(ui, false).clicked() {
+        action = ToolbarAction::Copy;
+    }
+    (action, close)
+}
+
 /// The eframe app for the fullscreen overlay session.
 ///
 /// Constructed by [`crate::shell::EguiShell::run_overlay`] with the
@@ -412,6 +581,18 @@ pub(crate) struct OverlayApp {
     /// spec — no modifier hold). Reused verbatim from the editor
     /// window; reads `state.image` directly.
     magnifier: Magnifier,
+    /// Screen-logical rect of the floating toolbar's last drawn
+    /// frame, cached by `ui()` so the next frame's `logic()` can
+    /// swallow presses that land on it (it floats *inside* the
+    /// overlay panel, so the `panel.contains` guard alone would let
+    /// toolbar clicks start drags / dispatch `PointerDown`s). `None`
+    /// whenever the toolbar is hidden.
+    toolbar_rect: Option<egui::Rect>,
+    /// Last measured toolbar size, fed to [`toolbar_anchor`] for the
+    /// flip/clamp decision. Seeded zero (the anchor fn tolerates it);
+    /// one frame behind the layout, which is invisible in practice
+    /// because egui keeps a new area hidden for its sizing frame.
+    toolbar_size: egui::Vec2,
     /// Outcome slot shared with the shell. X-close (Alt+F4, WM kill)
     /// leaves it `None`, which the shell reads as `Ok(Cancelled)`.
     outcome: OutcomeSlot,
@@ -433,6 +614,10 @@ impl OverlayApp {
     /// Flameshot user expects).
     pub(crate) fn new(mut state: EditorState, ctx: &Context, outcome: OutcomeSlot) -> Self {
         state.tool = Tool::Select;
+        // Same one-time theme application as `EditorApp::new`: the
+        // floating toolbar reuses the editor's chips, so its
+        // separators, tooltips, and spacing must read identically.
+        crate::theme::apply(ctx);
         Self {
             state,
             canvas: EguiCanvas::new(ctx.clone()),
@@ -442,6 +627,8 @@ impl OverlayApp {
             drag_active: false,
             gesture: Gesture::None,
             magnifier: Magnifier::new(),
+            toolbar_rect: None,
+            toolbar_size: egui::Vec2::ZERO,
             outcome,
         }
     }
@@ -506,7 +693,15 @@ impl OverlayApp {
         );
         let hit_radius = HANDLE_HIT_LOGICAL * ppp;
 
-        let pointer_event = if primary_pressed && panel.contains(pos) {
+        // Toolbar presses are button clicks, not canvas interaction:
+        // the floating toolbar floats *inside* the panel rect, so it
+        // needs its own guard or a chip click would also start a
+        // drag / dispatch a `PointerDown`. Only the *press* is
+        // swallowed — a canvas-started drag or gesture that wanders
+        // over the toolbar keeps running (and its release lands).
+        let over_toolbar = self.toolbar_rect.is_some_and(|r| r.contains(pos));
+
+        let pointer_event = if primary_pressed && panel.contains(pos) && !over_toolbar {
             self.drag_active = true;
             match gesture_for_press(self.state.selection, at, self.state.tool, hit_radius) {
                 Some(gesture) => {
@@ -556,8 +751,9 @@ impl OverlayApp {
         // Cursor shape: reflects the active gesture while dragging,
         // otherwise the hover target. Select-only outside gestures —
         // annotation tools keep the default cursor, matching the
-        // editor window.
-        if panel.contains(pos) {
+        // editor window. Over the toolbar the default arrow wins:
+        // buttons are not selection affordances.
+        if panel.contains(pos) && !over_toolbar {
             let icon = match self.gesture {
                 Gesture::Resize { handle } => Some(cursor_for_handle(handle)),
                 Gesture::Move { .. } => Some(egui::CursorIcon::Move),
@@ -589,11 +785,147 @@ impl OverlayApp {
         }
         Some(egui::CursorIcon::Crosshair)
     }
+
+    /// Draw the floating toolbar anchored to the selection (Task 004)
+    /// and act on its clicks. Visible only while a usable selection
+    /// exists and no fresh dispatcher-driven region drag is in
+    /// progress — the same guard as the handles — and follows the
+    /// live region through resize / move gestures. The area's rect is
+    /// cached for the next frame's press / cursor / magnifier guards.
+    ///
+    /// Layout (plan decision 4: compact rail + accept row, reused
+    /// chips, new layout only): row 1 is the ten tool chips plus
+    /// undo / redo; row 2 is ✓ accept (Enter semantics), ✕ cancel
+    /// (Esc semantics), Save / Pin / Upload, and the ember Copy
+    /// primary. Copy is Enter-equivalent (spec: Enter = Copy).
+    fn show_toolbar(
+        &mut self,
+        ctx: &Context,
+        panel_rect: egui::Rect,
+        sel_logical: Option<egui::Rect>,
+    ) {
+        let fresh_drag = self.drag_active && self.gesture.is_none();
+        let Some(sel) = sel_logical.filter(|_| !fresh_drag) else {
+            self.toolbar_rect = None;
+            return;
+        };
+        let anchor = toolbar_anchor(sel, panel_rect, self.toolbar_size);
+        let mut action = ToolbarAction::None;
+        let mut close: Option<OverlayClose> = None;
+        let area = egui::Area::new(egui::Id::new("overlay_toolbar"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(anchor)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(crate::theme::GRAPHITE_900)
+                    .inner_margin(egui::Margin::symmetric(8, 5))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .stroke(egui::Stroke::new(1.0, crate::theme::GRAPHITE_500))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            action = overlay_rail_row(ui, &mut self.state);
+                        });
+                        ui.horizontal(|ui| {
+                            let (row_action, row_close) = overlay_accept_row(ui);
+                            if action == ToolbarAction::None {
+                                action = row_action;
+                            }
+                            close = row_close;
+                        });
+                    });
+            });
+        self.toolbar_rect = Some(area.response.rect);
+        self.toolbar_size = area.response.rect.size();
+
+        if let Some(close) = close {
+            self.perform_close(ctx, close);
+            return;
+        }
+        self.apply_toolbar_action(ctx, action);
+    }
+
+    /// Act on a floating-toolbar action. History chips replay the
+    /// same dispatches a Ctrl+Z / Ctrl+Y keypress would produce (the
+    /// editor window's rail handlers, verbatim); Copy is
+    /// Enter-equivalent (the same accept close Enter triggers); the
+    /// Save / Pin / Upload pipelines land in Task 006, so their
+    /// clicks log a notice for now (the Task 002 accept placeholder
+    /// pattern).
+    fn apply_toolbar_action(&mut self, ctx: &Context, action: ToolbarAction) {
+        match action {
+            ToolbarAction::Copy => self.perform_close(ctx, OverlayClose::Accept),
+            ToolbarAction::Undo => {
+                let _ = self.state.dispatch_input(&InputEvent::Key {
+                    key: Key::Char('z'),
+                    modifiers: Modifiers {
+                        ctrl: true,
+                        ..Modifiers::default()
+                    },
+                });
+            }
+            ToolbarAction::Redo => {
+                let _ = self.state.dispatch_input(&InputEvent::Key {
+                    key: Key::Char('y'),
+                    modifiers: Modifiers {
+                        ctrl: true,
+                        ..Modifiers::default()
+                    },
+                });
+            }
+            ToolbarAction::Save => {
+                tracing::info!("overlay Save output lands in Phase 5 Task 006");
+            }
+            ToolbarAction::Pin => {
+                tracing::info!("overlay Pin output lands in Phase 5 Task 006");
+            }
+            ToolbarAction::Upload => {
+                tracing::info!("overlay Upload output lands in Phase 5 Task 006");
+            }
+            ToolbarAction::None => {}
+        }
+    }
+
+    /// Magnifier on hover (overlay UX: no modifier hold, per the
+    /// spec). Suppressed during text editing, same as the editor
+    /// window's loupe, and over the floating toolbar — the loupe
+    /// would cover the buttons the user is aiming at.
+    fn paint_magnifier(&mut self, ctx: &Context, painter: &egui::Painter, panel_rect: egui::Rect) {
+        if self.state.is_editing_text() {
+            return;
+        }
+        let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else {
+            return;
+        };
+        let over_toolbar = self.toolbar_rect.is_some_and(|r| r.contains(pos));
+        if !panel_rect.contains(pos) || over_toolbar {
+            return;
+        }
+        let ppp = ctx.pixels_per_point();
+        let cursor_phys = to_canvas_physical(pos, panel_rect, ppp);
+        self.magnifier.show(
+            painter,
+            ctx,
+            &self.state.image,
+            cursor_phys,
+            panel_rect,
+            ppp,
+        );
+    }
 }
 
 impl App for OverlayApp {
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         let modifiers = translate_modifiers(ctx.input(|i| i.modifiers));
+
+        // If the user switched tools via the floating toolbar while a
+        // text draft was active, commit the draft before anything
+        // else. The toolbar sets `state.tool` directly (bypassing
+        // the dispatcher), so the modal text-editing guard below
+        // would otherwise trap the user in text mode forever.
+        // Mirrors `EditorApp::logic`'s guard.
+        if self.state.is_editing_text() && self.state.tool != Tool::Text {
+            self.state.commit_text_draft();
+        }
 
         // Text-editing modal mode: while a Text draft is active, Esc
         // cancels the *draft* and Enter commits it (dispatcher-owned)
@@ -775,24 +1107,16 @@ impl App for OverlayApp {
             painter.galley(rect.min, galley, egui::Color32::WHITE);
         }
 
+        // Floating toolbar (Task 004), drawn before the magnifier so
+        // this frame's rect already steers the loupe away from it.
+        // Foreground order keeps it above the chrome regardless.
+        let sel_logical =
+            sel_phys.map(|s| egui::Rect::from_two_pos(to_logical(s.min), to_logical(s.max)));
+        self.show_toolbar(&ctx, panel_rect, sel_logical);
+
         // Magnifier on hover (overlay UX: no modifier hold, per the
-        // spec). Suppressed during text editing, same as the editor
-        // window's loupe.
-        if !self.state.is_editing_text() {
-            if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
-                if panel_rect.contains(pos) {
-                    let cursor_phys = to_canvas_physical(pos, panel_rect, ppp);
-                    self.magnifier.show(
-                        &painter,
-                        &ctx,
-                        &self.state.image,
-                        cursor_phys,
-                        panel_rect,
-                        ppp,
-                    );
-                }
-            }
-        }
+        // spec), steered away from the floating toolbar.
+        self.paint_magnifier(&ctx, &painter, panel_rect);
     }
 }
 
@@ -1181,6 +1505,74 @@ mod tests {
         assert_eq!(
             cursor_for_handle(Handle::W),
             egui::CursorIcon::ResizeHorizontal
+        );
+    }
+
+    // --- Floating toolbar (Task 004) ---
+
+    /// A 1920×1080 logical panel — the shared fixture for the anchor
+    /// tests.
+    fn panel() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0))
+    }
+
+    /// The measured toolbar size used by the anchor tests (two chip
+    /// rows + margins — close to the real rail + accept row).
+    fn toolbar_size() -> egui::Vec2 {
+        egui::vec2(400.0, 72.0)
+    }
+
+    #[test]
+    fn toolbar_anchor_sits_below_left_with_room() {
+        let sel = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(300.0, 200.0));
+        assert_eq!(
+            toolbar_anchor(sel, panel(), toolbar_size()),
+            egui::pos2(100.0, 300.0 + TOOLBAR_GAP),
+            "below the bottom edge, left-aligned, one gap out"
+        );
+    }
+
+    #[test]
+    fn toolbar_anchor_flips_above_without_room_below() {
+        // Selection hugging the bottom edge: below doesn't fit, so
+        // the toolbar sits above the top edge.
+        let sel = egui::Rect::from_min_size(egui::pos2(100.0, 900.0), egui::vec2(300.0, 170.0));
+        assert_eq!(
+            toolbar_anchor(sel, panel(), toolbar_size()),
+            egui::pos2(100.0, 900.0 - TOOLBAR_GAP - 72.0),
+            "flipped above, bottom one gap above the selection top"
+        );
+    }
+
+    #[test]
+    fn toolbar_anchor_clamps_x_at_the_right_edge() {
+        let sel = egui::Rect::from_min_size(egui::pos2(1800.0, 100.0), egui::vec2(100.0, 200.0));
+        assert_eq!(
+            toolbar_anchor(sel, panel(), toolbar_size()),
+            egui::pos2(1920.0 - 400.0, 300.0 + TOOLBAR_GAP),
+            "a 400px toolbar at the right edge must slide left to stay on screen"
+        );
+    }
+
+    #[test]
+    fn toolbar_anchor_pins_to_top_when_neither_side_fits() {
+        // Full-height selection: no room below or above — pin to the
+        // panel top (overlapping the region) rather than off-screen.
+        let sel = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        assert_eq!(
+            toolbar_anchor(sel, panel(), toolbar_size()),
+            egui::pos2(0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn toolbar_anchor_tolerates_zero_size_seed() {
+        // First-ever frame has no measured size; placement must still
+        // be the (correct) below-left default, not NaN or inverted.
+        let sel = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(300.0, 200.0));
+        assert_eq!(
+            toolbar_anchor(sel, panel(), egui::Vec2::ZERO),
+            egui::pos2(100.0, 300.0 + TOOLBAR_GAP)
         );
     }
 
