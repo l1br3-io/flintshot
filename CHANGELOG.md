@@ -20,6 +20,18 @@ Categories used below:
 
 ### Added
 
+- Phase 5 overlay annotation confinement: all ten tools now draw
+  inside the selection in the live overlay, Flameshot-style.
+  Annotation-tool presses dispatch only when they land inside the
+  usable region (a press outside is swallowed whole — its drags and
+  release never reach the dispatcher; the Select tool always flows
+  for fresh region drags and handle/move gestures), and annotation
+  rendering is clipped to the region, so strokes dragged past the
+  edge stop painting exactly where the region-cropped output cuts.
+  Tool semantics are byte-identical to the editor window — the
+  overlay sends the dispatcher the same event sequences, pinned by a
+  ten-tools parity test (text/number/blur/marker included); the
+  editor window itself never sets a clip and is unchanged.
 - Phase 5 floating overlay toolbar: once a selection exists, a
   compact two-row toolbar floats beside it — the ten tool chips and
   undo/redo (row 1, reusing the editor toolbar's chips and glyph
