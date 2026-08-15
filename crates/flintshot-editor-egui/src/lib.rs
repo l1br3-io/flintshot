@@ -9,6 +9,9 @@
 //!   drives the per-frame render loop.
 //! - [`magnifier`] — the toolkit-owned pixel-zoom inset widget (no
 //!   core abstraction; reads `EditorState::image` directly).
+//! - [`overlay`] (private) — the internal `OverlayApp` (`impl
+//!   eframe::App`) for the Phase 5 fullscreen frozen-capture shell;
+//!   entered via [`EguiShell::run_overlay`].
 //! - [`pin`] — the internal `PinApp` (`impl eframe::App`) for the
 //!   Phase 3 pin-to-desktop window (drag / hover-opacity / resize /
 //!   copy-on-close).
@@ -33,6 +36,7 @@
 mod app;
 mod canvas;
 mod magnifier;
+mod overlay;
 mod pin;
 mod shell;
 mod theme;
