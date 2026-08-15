@@ -409,9 +409,8 @@ fn capture_and_dispatch(
 
 /// Resolve the interaction mode for a fresh capture (CLI flag >
 /// `[ui] interaction-mode`; platform fallback lands in Task 007), log
-/// the decision, and open the matching shell. The overlay shell
-/// itself lands in Phase 5 Task 002; until then a resolved `overlay`
-/// opens the editor with a notice rather than refusing the capture.
+/// the decision, and open the matching shell: the Phase 5 fullscreen
+/// overlay or the Phase 1 editor window.
 fn run_capture_shell(
     img: image::RgbaImage,
     mode: &str,
@@ -433,13 +432,10 @@ fn run_capture_shell(
         source = source.as_str(),
         "{mode} capture interaction mode resolved"
     );
-    if resolved == InteractionMode::Overlay {
-        tracing::warn!(
-            "overlay mode resolved; the overlay shell lands in Phase 5 Task 002 \
-             — opening the editor window for now"
-        );
+    match resolved {
+        InteractionMode::Overlay => run_overlay_with_config(img, mode, &cfg),
+        InteractionMode::Editor => run_editor_with_config(img, mode, &cfg),
     }
-    run_editor_with_config(img, mode, &cfg)
 }
 
 /// Hand the captured image to the egui editor and log the outcome.
@@ -466,20 +462,60 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
 /// interaction-mode resolution path loads config once and shares it).
 #[cfg(feature = "egui")]
 fn run_editor_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Result<()> {
-    use flintshot_core::{EditorOutcome, EditorShell, EditorState};
+    use flintshot_core::EditorShell;
 
-    // Apply persisted UI defaults (color / stroke / font) before opening
-    // the editor (Task 15).
-    let mut state = EditorState::new(img);
-    state.color = cfg.ui.default_color;
-    state.text_color = cfg.ui.default_text_color;
-    state.stroke_width = cfg.ui.default_stroke_width;
-    state.font_size = cfg.ui.default_font_size;
+    let state = state_from_config(img, cfg);
 
     let outcome = flintshot_editor_egui::EguiShell::new()
         .run_editor(state)
         .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
         .with_context(|| format!("running editor for {mode} capture"))?;
+
+    report_editor_outcome(outcome);
+    Ok(())
+}
+
+/// Run the Phase 5 fullscreen frozen-capture overlay over an
+/// already-loaded config (mirror of [`run_editor_with_config`]).
+///
+/// The overlay opens with `Tool::Select` (forced inside
+/// `OverlayApp`), so the first drag draws a region selection;
+/// `Esc` cancels, `Enter` accepts (the accept output pipeline —
+/// copy — lands in Phase 5 Task 006).
+#[cfg(feature = "egui")]
+fn run_overlay_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Result<()> {
+    let state = state_from_config(img, cfg);
+
+    let outcome = flintshot_editor_egui::EguiShell::new()
+        .run_overlay(state)
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
+        .with_context(|| format!("running overlay for {mode} capture"))?;
+
+    report_editor_outcome(outcome);
+    Ok(())
+}
+
+/// Build an [`EditorState`] for a fresh capture with the persisted
+/// `[ui]` defaults (color / stroke / font) applied (Task 15).
+/// Shared by the editor-window and overlay shell paths so both
+/// sessions start from the same persisted tool settings.
+#[cfg(feature = "egui")]
+fn state_from_config(img: image::RgbaImage, cfg: &Config) -> flintshot_core::EditorState {
+    let mut state = flintshot_core::EditorState::new(img);
+    state.color = cfg.ui.default_color;
+    state.text_color = cfg.ui.default_text_color;
+    state.stroke_width = cfg.ui.default_stroke_width;
+    state.font_size = cfg.ui.default_font_size;
+    state
+}
+
+/// Log a finished editor / overlay session's outcome and report a
+/// save back to the daemon (see [`report_saved_to_daemon`]).
+/// Shared by the editor-window and overlay paths so their outcome
+/// handling can't drift apart.
+#[cfg(feature = "egui")]
+fn report_editor_outcome(outcome: flintshot_core::EditorOutcome) {
+    use flintshot_core::EditorOutcome;
 
     // `EditorOutcome` is `#[non_exhaustive]`; the wildcard arm is
     // mandatory from outside `flintshot-core` and covers future
@@ -507,7 +543,6 @@ fn run_editor_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Re
         }
         _ => tracing::warn!(?outcome, "editor returned unhandled outcome"),
     }
-    Ok(())
 }
 
 /// Headless-build fallback: editor is unavailable without the `egui`
@@ -517,6 +552,16 @@ fn run_editor_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Re
 fn run_editor_with_config(_img: image::RgbaImage, _mode: &str, _cfg: &Config) -> Result<()> {
     Err(color_eyre::eyre::eyre!(
         "editor not built; pass --out PATH to capture headlessly \
+         (this binary was compiled without the `egui` feature)"
+    ))
+}
+
+/// Headless-build fallback for the overlay (see
+/// [`run_editor_with_config`]'s note).
+#[cfg(not(feature = "egui"))]
+fn run_overlay_with_config(_img: image::RgbaImage, _mode: &str, _cfg: &Config) -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "overlay not built; pass --out PATH to capture headlessly \
          (this binary was compiled without the `egui` feature)"
     ))
 }
@@ -1347,5 +1392,31 @@ mod tests {
             ),
             "an explicit mode flag must not delegate to the daemon"
         );
+    }
+
+    // ── Phase 5 Task 002: shell state construction ────────────────
+
+    /// Both shells (editor window + overlay) start from the same
+    /// persisted `[ui]` defaults — the factored builder must map
+    /// every field.
+    #[cfg(feature = "egui")]
+    #[test]
+    fn state_from_config_applies_ui_defaults() {
+        use flintshot_core::{Color, EditorState, Tool};
+        let mut cfg = Config::default();
+        cfg.ui.default_color = Color::rgb(1, 2, 3);
+        cfg.ui.default_text_color = Color::rgb(4, 5, 6);
+        cfg.ui.default_stroke_width = 7.0;
+        cfg.ui.default_font_size = 21.0;
+        let img = image::RgbaImage::from_raw(2, 2, vec![255; 16]).expect("2×2×4 bytes");
+        let state: EditorState = state_from_config(img, &cfg);
+        assert_eq!(state.color, Color::rgb(1, 2, 3));
+        assert_eq!(state.text_color, Color::rgb(4, 5, 6));
+        assert_eq!(state.stroke_width, 7.0);
+        assert_eq!(state.font_size, 21.0);
+        // Untouched baseline: the tool default stays core's choice
+        // here — the overlay forces Select inside `OverlayApp::new`,
+        // not in the shared builder.
+        assert_eq!(state.tool, Tool::Rect);
     }
 }

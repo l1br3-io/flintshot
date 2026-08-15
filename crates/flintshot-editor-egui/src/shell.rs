@@ -9,6 +9,7 @@ use eframe::{AppCreator, NativeOptions};
 use flintshot_core::{EditorOutcome, EditorShell, EditorState, PinConfig, Rect};
 
 use crate::app::{eframe_err_to_flintshot, EditorApp, OutcomeSlot};
+use crate::overlay::{OverlayApp, OVERLAY_TITLE};
 use crate::pin::PinApp;
 
 /// Window title shown in the titlebar and used as the WM class hint.
@@ -74,6 +75,25 @@ impl EditorShell for EguiShell {
     }
 }
 
+impl EguiShell {
+    /// Open the Phase 5 fullscreen frozen-capture overlay and block
+    /// until the user closes it (`Esc` cancel / `Enter` accept),
+    /// returning the outcome the session produced.
+    ///
+    /// A **concrete method**, not an [`EditorShell`] trait addition —
+    /// the spec's §Boundaries explicitly allows the shell to grow
+    /// overlay entries this way (mirroring how `run_pin`'s config
+    /// rides the shell). The overlay is a flintshot-editor-egui
+    /// feature, not a cross-toolkit contract.
+    ///
+    /// # Errors
+    /// Surfaces [`crate::FlintshotError`] for window-system or
+    /// render failures.
+    pub fn run_overlay(&self, state: EditorState) -> flintshot_core::Result<EditorOutcome> {
+        run_overlay_blocking(state)
+    }
+}
+
 /// Block on eframe's native event loop, returning the outcome the
 /// editor produced before the window closed.
 ///
@@ -121,6 +141,38 @@ fn run_editor_blocking(state: EditorState) -> flintshot_core::Result<EditorOutco
     // The window closed. If Esc / Save / render-error set the
     // outcome, honour it (propagating any `Err(_)` via `?`);
     // otherwise (X button, Alt+F4, kill) default to Cancelled.
+    let resolved = outcome
+        .borrow_mut()
+        .take()
+        .unwrap_or(Ok(EditorOutcome::Cancelled));
+    resolved
+}
+
+/// Open the fullscreen frozen-capture overlay and block until the
+/// user closes it.
+///
+/// Mirrors [`run_editor_blocking`]'s single-threaded lifecycle: the
+/// [`OutcomeSlot`] is shared between this function and the
+/// [`OverlayApp`] running on the same thread; a close without a
+/// published outcome (WM kill, Alt+F4) defaults to
+/// `Ok(EditorOutcome::Cancelled)`.
+fn run_overlay_blocking(state: EditorState) -> flintshot_core::Result<EditorOutcome> {
+    let options = NativeOptions {
+        viewport: crate::overlay::overlay_viewport(),
+        ..Default::default()
+    };
+
+    let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+    let outcome_for_app = Rc::clone(&outcome);
+
+    let app_creator: AppCreator<'_> = Box::new(move |cc| {
+        let app = OverlayApp::new(state, &cc.egui_ctx, outcome_for_app);
+        Ok(Box::new(app))
+    });
+
+    eframe::run_native(OVERLAY_TITLE, options, app_creator)
+        .map_err(|e| eframe_err_to_flintshot(&e))?;
+
     let resolved = outcome
         .borrow_mut()
         .take()

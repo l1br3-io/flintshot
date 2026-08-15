@@ -199,80 +199,6 @@ impl EditorApp {
         }
     }
 
-    /// Drain egui text-input events while in text-editing mode.
-    ///
-    /// egui reports typed characters via `Event::Text(String)` (which
-    /// may carry several chars for fast typing or IME composition);
-    /// `Backspace` / `Enter` arrive as `Event::Key`. We translate each
-    /// to the toolkit-agnostic [`InputEvent`] and feed it to the
-    /// dispatcher, which mutates the in-flight draft. The dispatcher's
-    /// outcomes for text events are always `Continue` (no save / copy
-    /// / cancel-editor mid-edit — Esc cancels the *draft* only), so we
-    /// don't need to branch on the outcome here.
-    fn dispatch_text_input(&mut self, ctx: &Context, modifiers: Modifiers) {
-        let events: Vec<egui::Event> = ctx.input(|i| i.raw.events.clone());
-        for event in events {
-            match event {
-                egui::Event::Text(text) => {
-                    for ch in text.chars() {
-                        self.state.dispatch_input(&InputEvent::TextInput(ch));
-                    }
-                }
-                egui::Event::Key {
-                    key: egui::Key::Backspace,
-                    pressed: true,
-                    ..
-                } => {
-                    self.state.dispatch_input(&InputEvent::Key {
-                        key: Key::Backspace,
-                        modifiers,
-                    });
-                }
-                egui::Event::Key {
-                    key: egui::Key::Enter,
-                    pressed: true,
-                    ..
-                } => {
-                    self.state.dispatch_input(&InputEvent::Key {
-                        key: Key::Enter,
-                        modifiers,
-                    });
-                }
-                egui::Event::Key {
-                    key: egui::Key::Escape,
-                    pressed: true,
-                    ..
-                } => {
-                    self.state.dispatch_input(&InputEvent::Key {
-                        key: Key::Escape,
-                        modifiers,
-                    });
-                }
-                egui::Event::Key {
-                    key, pressed: true, ..
-                } => {
-                    // Arrow / Home / End feed the text cursor; the
-                    // dispatcher's text-editing branch moves the
-                    // insertion point when a draft is active.
-                    let mapped = match key {
-                        egui::Key::ArrowLeft => Some(Key::ArrowLeft),
-                        egui::Key::ArrowRight => Some(Key::ArrowRight),
-                        egui::Key::ArrowUp => Some(Key::ArrowUp),
-                        egui::Key::ArrowDown => Some(Key::ArrowDown),
-                        egui::Key::Home => Some(Key::Home),
-                        egui::Key::End => Some(Key::End),
-                        _ => None,
-                    };
-                    if let Some(k) = mapped {
-                        self.state
-                            .dispatch_input(&InputEvent::Key { key: k, modifiers });
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// Detect image-dimension changes (crop) and respond by
     /// invalidating the bg texture cache and resizing the window.
     ///
@@ -392,7 +318,7 @@ impl App for EditorApp {
         // here so we don't steal an `s` keystroke for the Save shortcut
         // while the user is typing.
         if self.state.is_editing_text() {
-            self.dispatch_text_input(ctx, modifiers);
+            dispatch_text_input(&mut self.state, ctx, modifiers);
             return;
         }
 
@@ -1072,6 +998,81 @@ pub(crate) fn eframe_err_to_flintshot(err: &eframe::Error) -> FlintshotError {
     }
 }
 
+/// Drain egui text-input events into the dispatcher while a text
+/// draft is active (shared by the editor window and the Phase 5
+/// overlay — plan decision 5's factored translation helper).
+///
+/// egui reports typed characters via `Event::Text(String)` (which
+/// may carry several chars for fast typing or IME composition);
+/// `Backspace` / `Enter` arrive as `Event::Key`. Each is translated
+/// to the toolkit-agnostic [`InputEvent`] and fed to the dispatcher,
+/// which mutates the in-flight draft. The dispatcher's outcomes for
+/// text events are always `Continue` (no save / copy / cancel-editor
+/// mid-edit — Esc cancels the *draft* only), so there is no outcome
+/// branching here.
+pub(crate) fn dispatch_text_input(state: &mut EditorState, ctx: &Context, modifiers: Modifiers) {
+    let events: Vec<egui::Event> = ctx.input(|i| i.raw.events.clone());
+    for event in events {
+        match event {
+            egui::Event::Text(text) => {
+                for ch in text.chars() {
+                    state.dispatch_input(&InputEvent::TextInput(ch));
+                }
+            }
+            egui::Event::Key {
+                key: egui::Key::Backspace,
+                pressed: true,
+                ..
+            } => {
+                state.dispatch_input(&InputEvent::Key {
+                    key: Key::Backspace,
+                    modifiers,
+                });
+            }
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                pressed: true,
+                ..
+            } => {
+                state.dispatch_input(&InputEvent::Key {
+                    key: Key::Enter,
+                    modifiers,
+                });
+            }
+            egui::Event::Key {
+                key: egui::Key::Escape,
+                pressed: true,
+                ..
+            } => {
+                state.dispatch_input(&InputEvent::Key {
+                    key: Key::Escape,
+                    modifiers,
+                });
+            }
+            egui::Event::Key {
+                key, pressed: true, ..
+            } => {
+                // Arrow / Home / End feed the text cursor; the
+                // dispatcher's text-editing branch moves the
+                // insertion point when a draft is active.
+                let mapped = match key {
+                    egui::Key::ArrowLeft => Some(Key::ArrowLeft),
+                    egui::Key::ArrowRight => Some(Key::ArrowRight),
+                    egui::Key::ArrowUp => Some(Key::ArrowUp),
+                    egui::Key::ArrowDown => Some(Key::ArrowDown),
+                    egui::Key::Home => Some(Key::Home),
+                    egui::Key::End => Some(Key::End),
+                    _ => None,
+                };
+                if let Some(k) = mapped {
+                    state.dispatch_input(&InputEvent::Key { key: k, modifiers });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Translate egui's modifier state to the toolkit-agnostic
 /// [`Modifiers`] at the event boundary.
 ///
@@ -1087,7 +1088,10 @@ pub(crate) fn eframe_err_to_flintshot(err: &eframe::Error) -> FlintshotError {
 /// `egui::Modifiers::alt` and `:shift` map 1:1. `egui::Modifiers::
 /// mac_cmd` is always `false` off macOS, so it maps cleanly onto
 /// `Modifiers::super_key` without a platform `cfg!`.
-fn translate_modifiers(egui_mods: egui::Modifiers) -> Modifiers {
+///
+/// Shared by the editor window and the Phase 5 overlay (plan
+/// decision 5's factored translation helper).
+pub(crate) fn translate_modifiers(egui_mods: egui::Modifiers) -> Modifiers {
     Modifiers {
         ctrl: egui_mods.command,
         shift: egui_mods.shift,
@@ -1126,7 +1130,10 @@ fn parse_magnifier_key(name: &str) -> egui::Key {
 /// presses reach this fn (see the guard in `logic`); the chords over
 /// the same letters (Ctrl+S save, Ctrl+C copy, Ctrl+Z/Y history) are
 /// handled by the core dispatcher and never collide.
-fn tool_for_key(key: egui::Key) -> Option<Tool> {
+///
+/// Shared by the editor window and the Phase 5 overlay (plan
+/// decision 5's factored translation helper).
+pub(crate) fn tool_for_key(key: egui::Key) -> Option<Tool> {
     match key {
         egui::Key::S => Some(Tool::Select),
         egui::Key::R => Some(Tool::Rect),

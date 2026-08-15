@@ -20,6 +20,22 @@ Categories used below:
 
 ### Added
 
+- Phase 5 overlay shell MVP: `flintshot region --overlay` /
+  `fullscreen --overlay` (and `interaction-mode = "overlay"`) now open
+  the real thing — a fullscreen, undecorated eframe viewport showing
+  the frozen capture, rendered through the shared `render()` path.
+  The overlay opens with the Select tool (first drag draws a region
+  selection), drives the unchanged `EditorState` dispatcher for all
+  input (single-key tool switching and Ctrl+Z/Y work; the
+  egui→dispatcher translation helpers are factored out of the editor
+  window for reuse — no second dispatcher), and closes on `Esc`
+  (cancel, clean exit) or `Enter` (accept; the Enter→Copy output
+  pipeline lands later in Phase 5 — until then an accepted close
+  publishes `Cancelled` with a notice). New
+  `EguiShell::run_overlay(state)` concrete entry (not a trait
+  addition), plus shared `state_from_config` / outcome reporting in
+  the CLI so both shells start from the same persisted `[ui]`
+  defaults.
 - `[ui] interaction-mode` config key (`"editor"` default | `"overlay"`,
   Phase 5 groundwork): selects how a fresh capture is presented. Stored
   as a free-form string like `magnifier-modifier`, so unknown values
@@ -30,9 +46,7 @@ Categories used below:
   resolved once in `capture_and_dispatch` and logged with its source.
   An explicit flag runs the capture in this process (the daemon IPC
   request cannot carry it). Daemon-spawned workers keep picking the
-  mode from their own config. The overlay shell itself lands later in
-  Phase 5; a resolved `overlay` currently opens the editor with a
-  notice.
+  mode from their own config.
 
 - Editor toolbar redesign: two-row "rail + bay" layout in
   `flintshot-editor-egui`. The rail holds the ten tool chips,
