@@ -91,6 +91,110 @@ pub struct OutputArgs {
     pub standalone: bool,
 }
 
+/// Per-invocation interaction-mode override flags (Phase 5). Mutually
+/// exclusive; when neither is passed, `[ui] interaction-mode` decides.
+/// An explicit flag also skips daemon delegation: the IPC request
+/// cannot carry it, and the daemon's worker re-resolves the mode from
+/// its own config — delegating would silently drop the user's flag.
+#[derive(Debug, Args)]
+pub struct InteractionArgs {
+    /// Open the fullscreen frozen-capture overlay instead of the
+    /// editor window. Overrides `[ui] interaction-mode`.
+    #[arg(long, conflicts_with = "editor")]
+    pub overlay: bool,
+    /// Open the editor window even when `[ui] interaction-mode` is
+    /// `"overlay"`.
+    #[arg(long, conflicts_with = "overlay")]
+    pub editor: bool,
+}
+
+impl InteractionArgs {
+    /// Map the parsed flags to a mode override, if any. With neither
+    /// flag set (the common case) the config value decides.
+    fn mode_override(&self) -> Option<InteractionMode> {
+        match (self.overlay, self.editor) {
+            (false, false) => None,
+            // clap rejects both flags together; the arm order is just
+            // defensive totality.
+            (true, _) => Some(InteractionMode::Overlay),
+            (false, true) => Some(InteractionMode::Editor),
+        }
+    }
+}
+
+/// How a fresh capture is presented for annotation (Phase 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionMode {
+    /// Separate editor window (Phase 1 behaviour; the default).
+    Editor,
+    /// Fullscreen frozen-capture overlay.
+    Overlay,
+}
+
+impl InteractionMode {
+    /// Kebab-case name matching the `[ui] interaction-mode` config
+    /// value and the CLI flag names.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Editor => "editor",
+            Self::Overlay => "overlay",
+        }
+    }
+
+    /// Parse a `[ui] interaction-mode` config value. Unknown values
+    /// fall back to `Editor` with a warning — same policy as
+    /// `magnifier-modifier` (config keeps the raw string, so a typo
+    /// neither bricks loading nor gets rewritten by a save).
+    fn from_config(value: &str) -> Self {
+        match value {
+            "editor" => Self::Editor,
+            "overlay" => Self::Overlay,
+            other => {
+                tracing::warn!(
+                    value = other,
+                    "unknown interaction-mode; falling back to \"editor\""
+                );
+                Self::Editor
+            }
+        }
+    }
+}
+
+/// Where a resolved [`InteractionMode`] came from, for the decision
+/// log emitted per capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionSource {
+    /// Explicit `--overlay` / `--editor` CLI flag.
+    Flag,
+    /// `[ui] interaction-mode` config value.
+    Config,
+}
+
+impl InteractionSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "cli-flag",
+            Self::Config => "config",
+        }
+    }
+}
+
+/// Resolve the interaction mode for a capture: CLI flag >
+/// `[ui] interaction-mode` config value. (Platform fallback —
+/// Wayland → editor — joins the chain in Phase 5 Task 007.)
+fn resolve_interaction_mode(
+    cli_flag: Option<InteractionMode>,
+    config_value: &str,
+) -> (InteractionMode, InteractionSource) {
+    match cli_flag {
+        Some(mode) => (mode, InteractionSource::Flag),
+        None => (
+            InteractionMode::from_config(config_value),
+            InteractionSource::Config,
+        ),
+    }
+}
+
 /// Arguments for `flintshot region`.
 #[derive(Debug, Args)]
 pub struct RegionArgs {
@@ -101,6 +205,8 @@ pub struct RegionArgs {
     #[arg(long, default_value_t = 0, value_name = "MILLIS")]
     pub delay_ms: u32,
     #[command(flatten)]
+    pub interaction: InteractionArgs,
+    #[command(flatten)]
     pub output: OutputArgs,
 }
 
@@ -110,6 +216,8 @@ pub struct FullscreenArgs {
     /// Index of the monitor to capture (0-based). Defaults to the active monitor.
     #[arg(long, value_name = "N")]
     pub monitor: Option<u32>,
+    #[command(flatten)]
+    pub interaction: InteractionArgs,
     #[command(flatten)]
     pub output: OutputArgs,
 }
@@ -182,6 +290,7 @@ pub fn run_daemon(args: &DaemonArgs) -> Result<()> {
 /// and the daemon's worker opens the editor. Otherwise the in-process
 /// Phase 1 capture+editor path runs (or a PNG is written with `--out`).
 pub fn run_region(args: &RegionArgs) -> Result<()> {
+    let interaction = args.interaction.mode_override();
     if delegate_to_daemon(
         &Request::CaptureRegion {
             monitor: args.monitor,
@@ -189,6 +298,7 @@ pub fn run_region(args: &RegionArgs) -> Result<()> {
         },
         &args.output,
         "region",
+        interaction,
     ) {
         return Ok(());
     }
@@ -196,22 +306,24 @@ pub fn run_region(args: &RegionArgs) -> Result<()> {
         tracing::debug!(delay_ms = args.delay_ms, "sleeping before capture");
         std::thread::sleep(Duration::from_millis(u64::from(args.delay_ms)));
     }
-    capture_and_dispatch(args.monitor, "region", &args.output)
+    capture_and_dispatch(args.monitor, "region", &args.output, interaction)
 }
 
 /// `flintshot fullscreen` — Phase 1 capture+editor, with Phase 2
 /// detect-and-delegate. See [`run_region`].
 pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
+    let interaction = args.interaction.mode_override();
     if delegate_to_daemon(
         &Request::CaptureFullscreen {
             monitor: args.monitor,
         },
         &args.output,
         "fullscreen",
+        interaction,
     ) {
         return Ok(());
     }
-    capture_and_dispatch(args.monitor, "fullscreen", &args.output)
+    capture_and_dispatch(args.monitor, "fullscreen", &args.output, interaction)
 }
 
 /// `flintshot open <path>` — Phase 3. Load an existing image from disk
@@ -232,12 +344,26 @@ pub fn run_open(args: &OpenArgs) -> Result<()> {
 
 /// Try to hand a capture `request` to a running daemon. Returns `true`
 /// if delegated (the caller should exit). Skipped when `--standalone` is
-/// set or when `--out` is given (the PNG-write path is headless and must
-/// run in-process; the daemon's worker would open an editor instead).
+/// set, when `--out` is given (the PNG-write path is headless and must
+/// run in-process; the daemon's worker would open an editor instead),
+/// or when an explicit `--overlay`/`--editor` flag is set (the IPC
+/// request cannot carry it, so honoring the flag means running here).
 /// A delegation failure falls back to standalone with a warning rather
 /// than failing the whole capture.
-fn delegate_to_daemon(request: &Request, output: &OutputArgs, mode: &str) -> bool {
+fn delegate_to_daemon(
+    request: &Request,
+    output: &OutputArgs,
+    mode: &str,
+    interaction: Option<InteractionMode>,
+) -> bool {
     if output.standalone || output.out.is_some() {
+        return false;
+    }
+    if interaction.is_some() {
+        tracing::debug!(
+            "{mode}: explicit interaction-mode flag; running standalone \
+             (the daemon worker would re-resolve the mode from config)"
+        );
         return false;
     }
     match crate::ipc_client::try_delegate(request) {
@@ -257,9 +383,16 @@ fn delegate_to_daemon(request: &Request, output: &OutputArgs, mode: &str) -> boo
 }
 
 /// Capture a monitor and either write a PNG (`--out`) or open the
-/// editor (no `--out`). Shared by [`run_region`] / [`run_fullscreen`];
-/// `mode` is just the log label ("region" / "fullscreen").
-fn capture_and_dispatch(monitor: Option<u32>, mode: &str, output: &OutputArgs) -> Result<()> {
+/// interaction shell (no `--out`). Shared by [`run_region`] /
+/// [`run_fullscreen`]; `mode` is just the log label ("region" /
+/// "fullscreen"). `interaction` is the resolved CLI-flag override, if
+/// any — the config value joins in [`run_capture_shell`].
+fn capture_and_dispatch(
+    monitor: Option<u32>,
+    mode: &str,
+    output: &OutputArgs,
+    interaction: Option<InteractionMode>,
+) -> Result<()> {
     let img = capture_fullscreen(monitor)
         .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
         .with_context(|| format!("capturing {mode} on monitor {monitor:?}"))?;
@@ -269,39 +402,79 @@ fn capture_and_dispatch(monitor: Option<u32>, mode: &str, output: &OutputArgs) -
             write_png(&img, path)?;
             tracing::info!(path = %path.display(), "{mode} capture saved");
         }
-        None => run_editor_for_capture(img, mode)?,
+        None => run_capture_shell(img, mode, interaction)?,
     }
     Ok(())
+}
+
+/// Resolve the interaction mode for a fresh capture (CLI flag >
+/// `[ui] interaction-mode`; platform fallback lands in Task 007), log
+/// the decision, and open the matching shell. The overlay shell
+/// itself lands in Phase 5 Task 002; until then a resolved `overlay`
+/// opens the editor with a notice rather than refusing the capture.
+fn run_capture_shell(
+    img: image::RgbaImage,
+    mode: &str,
+    interaction: Option<InteractionMode>,
+) -> Result<()> {
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not load config; using built-in defaults"
+            );
+            Config::default()
+        }
+    };
+    let (resolved, source) = resolve_interaction_mode(interaction, &cfg.ui.interaction_mode);
+    tracing::info!(
+        interaction = resolved.as_str(),
+        source = source.as_str(),
+        "{mode} capture interaction mode resolved"
+    );
+    if resolved == InteractionMode::Overlay {
+        tracing::warn!(
+            "overlay mode resolved; the overlay shell lands in Phase 5 Task 002 \
+             — opening the editor window for now"
+        );
+    }
+    run_editor_with_config(img, mode, &cfg)
 }
 
 /// Hand the captured image to the egui editor and log the outcome.
 /// Returns `Ok(())` regardless of which `EditorOutcome` the user picked
 /// (saved / copied / cancelled); only shell or render failures bubble
-/// up as `Err`.
+/// up as `Err`. Loads config (lossily) for the UI defaults — callers
+/// that already hold a config use [`run_editor_with_config`].
 #[cfg(feature = "egui")]
 fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
-    use flintshot_core::{Config, EditorOutcome, EditorShell, EditorState};
-
-    // Apply persisted UI defaults (color / stroke / font) before opening
-    // the editor (Task 15). A load failure is non-fatal — fall back to
-    // EditorState::new's hardcoded defaults and let the editor proceed.
-    let state = match Config::load() {
-        Ok(cfg) => {
-            let mut s = EditorState::new(img);
-            s.color = cfg.ui.default_color;
-            s.text_color = cfg.ui.default_text_color;
-            s.stroke_width = cfg.ui.default_stroke_width;
-            s.font_size = cfg.ui.default_font_size;
-            s
-        }
+    let cfg = match Config::load() {
+        Ok(cfg) => cfg,
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "could not load config; opening editor with built-in defaults"
             );
-            EditorState::new(img)
+            Config::default()
         }
     };
+    run_editor_with_config(img, mode, &cfg)
+}
+
+/// [`run_editor_for_capture`] over an already-loaded config (the
+/// interaction-mode resolution path loads config once and shares it).
+#[cfg(feature = "egui")]
+fn run_editor_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Result<()> {
+    use flintshot_core::{EditorOutcome, EditorShell, EditorState};
+
+    // Apply persisted UI defaults (color / stroke / font) before opening
+    // the editor (Task 15).
+    let mut state = EditorState::new(img);
+    state.color = cfg.ui.default_color;
+    state.text_color = cfg.ui.default_text_color;
+    state.stroke_width = cfg.ui.default_stroke_width;
+    state.font_size = cfg.ui.default_font_size;
 
     let outcome = flintshot_editor_egui::EguiShell::new()
         .run_editor(state)
@@ -339,9 +512,9 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
 
 /// Headless-build fallback: editor is unavailable without the `egui`
 /// feature. The image argument is accepted (and dropped) purely so the
-/// call site in [`capture_and_dispatch`] is uniform across feature sets.
+/// call site in [`run_capture_shell`] is uniform across feature sets.
 #[cfg(not(feature = "egui"))]
-fn run_editor_for_capture(_img: image::RgbaImage, _mode: &str) -> Result<()> {
+fn run_editor_with_config(_img: image::RgbaImage, _mode: &str, _cfg: &Config) -> Result<()> {
     Err(color_eyre::eyre::eyre!(
         "editor not built; pass --out PATH to capture headlessly \
          (this binary was compiled without the `egui` feature)"
@@ -1067,5 +1240,112 @@ mod tests {
             }
             other => panic!("expected Auth, got {other:?}"),
         }
+    }
+
+    // ── Interaction mode (Phase 5 Task 001) ──────────────────────
+
+    #[test]
+    fn resolve_interaction_mode_flag_wins_over_config() {
+        assert_eq!(
+            resolve_interaction_mode(Some(InteractionMode::Editor), "overlay"),
+            (InteractionMode::Editor, InteractionSource::Flag)
+        );
+        assert_eq!(
+            resolve_interaction_mode(Some(InteractionMode::Overlay), "editor"),
+            (InteractionMode::Overlay, InteractionSource::Flag)
+        );
+    }
+
+    #[test]
+    fn resolve_interaction_mode_uses_config_when_no_flag() {
+        assert_eq!(
+            resolve_interaction_mode(None, "editor"),
+            (InteractionMode::Editor, InteractionSource::Config)
+        );
+        assert_eq!(
+            resolve_interaction_mode(None, "overlay"),
+            (InteractionMode::Overlay, InteractionSource::Config)
+        );
+    }
+
+    #[test]
+    fn resolve_interaction_mode_unknown_config_falls_back_to_editor() {
+        assert_eq!(
+            resolve_interaction_mode(None, "hologram"),
+            (InteractionMode::Editor, InteractionSource::Config)
+        );
+    }
+
+    #[test]
+    fn region_parses_overlay_flag() {
+        let cli = Cli::parse_from(["flintshot", "region", "--overlay"]);
+        match cli.command {
+            Some(Command::Region(args)) => {
+                assert!(args.interaction.overlay);
+                assert!(!args.interaction.editor);
+                assert_eq!(
+                    args.interaction.mode_override(),
+                    Some(InteractionMode::Overlay)
+                );
+            }
+            other => panic!("expected Region, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fullscreen_parses_editor_flag() {
+        let cli = Cli::parse_from(["flintshot", "fullscreen", "--editor"]);
+        match cli.command {
+            Some(Command::Fullscreen(args)) => {
+                assert_eq!(
+                    args.interaction.mode_override(),
+                    Some(InteractionMode::Editor)
+                );
+            }
+            other => panic!("expected Fullscreen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interaction_flags_default_to_no_override() {
+        let cli = Cli::parse_from(["flintshot", "region"]);
+        match cli.command {
+            Some(Command::Region(args)) => {
+                assert_eq!(args.interaction.mode_override(), None);
+            }
+            other => panic!("expected Region, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overlay_and_editor_flags_are_mutually_exclusive() {
+        let err = Cli::try_parse_from(["flintshot", "region", "--overlay", "--editor"]);
+        assert!(
+            err.is_err(),
+            "--overlay and --editor together must be rejected"
+        );
+    }
+
+    #[test]
+    fn explicit_mode_flag_skips_daemon_delegation() {
+        // An explicit mode flag cannot ride the IPC request (the
+        // daemon's worker re-resolves from its own config), so the
+        // flag must force the standalone path before any socket IO.
+        let output = OutputArgs {
+            out: None,
+            standalone: false,
+        };
+        assert!(
+            !delegate_to_daemon(
+                &Request::CaptureRegion {
+                    monitor: None,
+                    delay_ms: 0
+                },
+                &output,
+                "region",
+                Some(InteractionMode::Overlay),
+            ),
+            "an explicit mode flag must not delegate to the daemon"
+        );
     }
 }

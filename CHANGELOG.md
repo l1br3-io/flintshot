@@ -20,6 +20,20 @@ Categories used below:
 
 ### Added
 
+- `[ui] interaction-mode` config key (`"editor"` default | `"overlay"`,
+  Phase 5 groundwork): selects how a fresh capture is presented. Stored
+  as a free-form string like `magnifier-modifier`, so unknown values
+  warn and fall back to `"editor"` without breaking config loading.
+- `--overlay` / `--editor` flags on `flintshot region` and `flintshot
+  fullscreen` (mutually exclusive): per-invocation override of
+  `[ui] interaction-mode`. Mode resolution is CLI flag > config value,
+  resolved once in `capture_and_dispatch` and logged with its source.
+  An explicit flag runs the capture in this process (the daemon IPC
+  request cannot carry it). Daemon-spawned workers keep picking the
+  mode from their own config. The overlay shell itself lands later in
+  Phase 5; a resolved `overlay` currently opens the editor with a
+  notice.
+
 - Editor toolbar redesign: two-row "rail + bay" layout in
   `flintshot-editor-egui`. The rail holds the ten tool chips,
   undo/redo, and the output actions (Save, Pin, Upload, and the
