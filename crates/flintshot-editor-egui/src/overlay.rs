@@ -67,6 +67,28 @@
 //! reach the dispatcher; the hover cursor and magnifier stand down
 //! over it. Output pipelines behind the Save / Pin / Upload chips
 //! land in Task 006 — their clicks log a notice until then.
+//!
+//! ## Annotation confinement (Task 005)
+//!
+//! All ten tools draw *inside* the region through the unchanged
+//! dispatcher — no second input path. Two shell-level rules produce
+//! the Flameshot behaviour:
+//!
+//! - **Input gating** (`annotation_press_allowed`): with an
+//!   annotation tool active, a primary press dispatches only when it
+//!   lands inside the usable selection; elsewhere it is swallowed
+//!   whole (no `drag_active`, so its drags / release never reach the
+//!   dispatcher either). `Tool::Select` always flows — the dispatcher
+//!   owns fresh region drags and the chrome owns the gestures. Drags
+//!   that start inside and wander outside keep dispatching raw
+//!   positions, so tool semantics stay byte-identical to the editor
+//!   window.
+//! - **Render clipping** (`EguiCanvas::set_clip`): the shared
+//!   `render()` pass runs with the canvas clipped to the region, so a
+//!   stroke dragged past the edge simply stops painting there — the
+//!   same cut the region-cropped output applies, keeping WYSIWYG. The
+//!   background blit is exempt so the frozen screen outside the
+//!   region stays visible under the dim mask.
 
 use eframe::App;
 use egui::Context;
@@ -355,6 +377,21 @@ pub(crate) fn gesture_for_press(
         });
     }
     None
+}
+
+/// Whether a primary press may start drawing at `at`: annotations
+/// are confined to the usable selection (Flameshot semantics — the
+/// region defines both what is visible and what ships in the output,
+/// so anything drawn outside it would be invisible-overflow).
+/// `Tool::Select` presses always flow: the dispatcher owns fresh
+/// selection drags and the chrome owns the Task 003 gestures, so
+/// Select must keep working outside (and without) a region.
+#[must_use]
+pub(crate) fn annotation_press_allowed(tool: Tool, sel: Option<Rect>, at: Point) -> bool {
+    if tool == Tool::Select {
+        return true;
+    }
+    usable_selection(sel).is_some_and(|s| s.contains(at))
 }
 
 /// Badge label for a selection: `"{w} × {h}"` in whole physical px.
@@ -702,13 +739,22 @@ impl OverlayApp {
         let over_toolbar = self.toolbar_rect.is_some_and(|r| r.contains(pos));
 
         let pointer_event = if primary_pressed && panel.contains(pos) && !over_toolbar {
-            self.drag_active = true;
             match gesture_for_press(self.state.selection, at, self.state.tool, hit_radius) {
                 Some(gesture) => {
+                    self.drag_active = true;
                     self.gesture = gesture;
                     None
                 }
-                None => Some(InputEvent::PointerDown { pos: at }),
+                None if annotation_press_allowed(self.state.tool, self.state.selection, at) => {
+                    self.drag_active = true;
+                    Some(InputEvent::PointerDown { pos: at })
+                }
+                // Annotation-tool press outside the region (Task 005):
+                // swallow it whole. `drag_active` stays false, so the
+                // drags and release of this press never reach the
+                // dispatcher either — nothing is drawn on the dimmed
+                // area, matching what the clipped render would show.
+                None => None,
             }
         } else if primary_released && self.drag_active {
             self.drag_active = false;
@@ -1003,6 +1049,14 @@ impl App for OverlayApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Annotation confinement (Task 005): clip the shared render
+        // pass's annotation draws to the usable region. Strokes may
+        // still be dragged past the edge (the dispatcher sees raw
+        // positions, keeping tool semantics byte-identical to the
+        // editor window) — the edge just stops painting, exactly
+        // where the region-cropped output will cut too.
+        let sel_phys = usable_selection(self.state.selection);
+        self.canvas.set_clip(sel_phys);
         // Frame::NONE: no margin and no panel background — the frozen
         // capture must land at exact screen position (0, 0) so
         // canvas-physical px == screen physical px == image px.
@@ -1017,6 +1071,9 @@ impl App for OverlayApp {
                     &mut self.blur_cache,
                 )
             });
+        // The clip is a per-frame render concern; clear it so any
+        // draw outside this pairing (none today) can't inherit it.
+        self.canvas.set_clip(None);
         self.overlay_rect = Some(panel.response.rect);
         if let Err(err) = panel.inner {
             tracing::error!(error = %err, "overlay render failed; closing overlay session");
@@ -1028,12 +1085,12 @@ impl App for OverlayApp {
         // Selection chrome (Task 003), painted over the shared render
         // output in screen-logical space. Order: mask → handles →
         // badge → magnifier, so later elements stay legible over the
-        // dimmed area.
+        // dimmed area. `sel_phys` was computed before the render pass
+        // (it also drives the annotation clip).
         let panel_rect = panel.response.rect;
         let painter = ui.painter().clone();
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
-        let sel_phys = usable_selection(self.state.selection);
         let to_logical =
             |p: Point| egui::pos2(panel_rect.min.x + p.x / ppp, panel_rect.min.y + p.y / ppp);
 
@@ -1574,6 +1631,199 @@ mod tests {
             toolbar_anchor(sel, panel(), egui::Vec2::ZERO),
             egui::pos2(100.0, 300.0 + TOOLBAR_GAP)
         );
+    }
+
+    // --- Annotation confinement (Task 005) ---
+
+    #[test]
+    fn annotation_press_allowed_inside_selection() {
+        assert!(
+            annotation_press_allowed(Tool::Rect, Some(sel()), Point::new(150.0, 150.0)),
+            "interior press with a draw tool must dispatch"
+        );
+        // Edges are inclusive (Rect::contains contract).
+        assert!(
+            annotation_press_allowed(Tool::Rect, Some(sel()), Point::new(100.0, 100.0)),
+            "boundary press counts as inside"
+        );
+    }
+
+    #[test]
+    fn annotation_press_denied_outside_selection() {
+        assert!(
+            !annotation_press_allowed(Tool::Rect, Some(sel()), Point::new(50.0, 50.0)),
+            "a press outside the region must not start an annotation"
+        );
+        assert!(
+            !annotation_press_allowed(Tool::Arrow, Some(sel()), Point::new(350.0, 250.0)),
+            "just past the far corner is still outside"
+        );
+    }
+
+    #[test]
+    fn annotation_press_denied_without_usable_selection() {
+        assert!(
+            !annotation_press_allowed(Tool::Marker, None, Point::new(150.0, 150.0)),
+            "no selection yet → nothing to draw on"
+        );
+        assert!(
+            !annotation_press_allowed(
+                Tool::Marker,
+                Some(Rect::from_xywh(10.0, 10.0, 0.5, 0.5)),
+                Point::new(10.0, 10.0)
+            ),
+            "degenerate selection counts as absent"
+        );
+    }
+
+    #[test]
+    fn select_presses_always_flow() {
+        assert!(
+            annotation_press_allowed(Tool::Select, None, Point::new(0.0, 0.0)),
+            "Select must keep working before any selection exists"
+        );
+        assert!(
+            annotation_press_allowed(Tool::Select, Some(sel()), Point::new(50.0, 50.0)),
+            "a Select press outside the region starts a fresh selection drag"
+        );
+    }
+
+    // --- Ten-tools parity (Task 005) ---
+    //
+    // Drives `EditorState` with the exact event sequences the overlay
+    // emits (the same mapping `EditorApp::logic` produces) and asserts
+    // each tool commits exactly one annotation of the right kind
+    // inside the region. This is the plan's "verify text / number /
+    // blur / marker parity with editor window" check — the dispatcher
+    // is shared, so pinning the sequence shape pins parity.
+
+    /// A fresh state with `sel()` as the region and `tool` active.
+    fn state_with_region(tool: Tool) -> EditorState {
+        let mut s = blank_state(1920, 1080);
+        s.selection = Some(sel());
+        s.tool = tool;
+        s
+    }
+
+    fn press(s: &mut EditorState, at: Point) {
+        let _ = s.dispatch_input(&InputEvent::PointerDown { pos: at });
+    }
+
+    fn drag(s: &mut EditorState, at: Point) {
+        let _ = s.dispatch_input(&InputEvent::PointerDrag { pos: at });
+    }
+
+    fn release(s: &mut EditorState) {
+        let _ = s.dispatch_input(&InputEvent::PointerUp);
+    }
+
+    fn enter(s: &mut EditorState) {
+        let _ = s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    /// Which annotation kind `ann` is, for assert messages.
+    fn kind_of(ann: &flintshot_core::Annotation) -> &'static str {
+        match ann {
+            flintshot_core::Annotation::Rect { .. } => "rect",
+            flintshot_core::Annotation::Ellipse { .. } => "ellipse",
+            flintshot_core::Annotation::Line { .. } => "line",
+            flintshot_core::Annotation::Arrow { .. } => "arrow",
+            flintshot_core::Annotation::Marker { .. } => "marker",
+            flintshot_core::Annotation::Pencil { .. } => "pencil",
+            flintshot_core::Annotation::Text { .. } => "text",
+            flintshot_core::Annotation::Blur { .. } => "blur",
+            flintshot_core::Annotation::Number { .. } => "number",
+            _ => "other",
+        }
+    }
+
+    #[test]
+    fn all_ten_tools_commit_inside_the_region_via_the_overlay_sequence() {
+        let cases: &[(Tool, &str)] = &[
+            (Tool::Rect, "rect"),
+            (Tool::Ellipse, "ellipse"),
+            (Tool::Line, "line"),
+            (Tool::Arrow, "arrow"),
+            (Tool::Marker, "marker"),
+            (Tool::Pencil, "pencil"),
+            (Tool::Text, "text"),
+            (Tool::Blur, "blur"),
+            (Tool::Number, "number"),
+        ];
+        for &(tool, want) in cases {
+            let mut s = state_with_region(tool);
+            match tool {
+                // Freehand strokes need >1 point to commit.
+                Tool::Marker | Tool::Pencil => {
+                    press(&mut s, Point::new(120.0, 120.0));
+                    drag(&mut s, Point::new(150.0, 130.0));
+                    drag(&mut s, Point::new(200.0, 170.0));
+                    release(&mut s);
+                }
+                // Click-to-place: commits on the press itself.
+                Tool::Number => press(&mut s, Point::new(150.0, 150.0)),
+                // Place caret, type, commit with Enter (the overlay's
+                // Enter-before-dispatch close guard routes Enter to the
+                // draft while editing).
+                Tool::Text => {
+                    press(&mut s, Point::new(150.0, 150.0));
+                    let _ = s.dispatch_input(&InputEvent::TextInput('h'));
+                    let _ = s.dispatch_input(&InputEvent::TextInput('i'));
+                    enter(&mut s);
+                }
+                // Drag-out tools.
+                _ => {
+                    press(&mut s, Point::new(120.0, 120.0));
+                    drag(&mut s, Point::new(180.0, 160.0));
+                    release(&mut s);
+                }
+            }
+            assert_eq!(s.anns.len(), 1, "{want} must commit exactly one annotation");
+            assert_eq!(
+                kind_of(&s.anns[0]),
+                want,
+                "committed kind must match the tool"
+            );
+        }
+    }
+
+    #[test]
+    fn select_tool_updates_region_and_commits_nothing() {
+        let mut s = state_with_region(Tool::Select);
+        press(&mut s, Point::new(120.0, 120.0));
+        drag(&mut s, Point::new(180.0, 160.0));
+        release(&mut s);
+        assert!(
+            s.anns.is_empty(),
+            "Select manipulates the region, never the annotation list"
+        );
+        assert_eq!(
+            s.selection,
+            Some(Rect::new(
+                Point::new(120.0, 120.0),
+                Point::new(180.0, 160.0)
+            )),
+            "a fresh drag replaces the region"
+        );
+    }
+
+    #[test]
+    fn text_tool_parity_commits_typed_content() {
+        let mut s = state_with_region(Tool::Text);
+        press(&mut s, Point::new(150.0, 150.0));
+        let _ = s.dispatch_input(&InputEvent::TextInput('h'));
+        let _ = s.dispatch_input(&InputEvent::TextInput('i'));
+        enter(&mut s);
+        match &s.anns[0] {
+            flintshot_core::Annotation::Text { text, pos, .. } => {
+                assert_eq!(text, "hi", "typed characters must land in the draft");
+                assert_eq!(*pos, Point::new(150.0, 150.0), "anchor is the press point");
+            }
+            other => panic!("expected a Text annotation, got {}", kind_of(other)),
+        }
     }
 
     /// 1920×1080 image-bounds fixture for the move-clamp tests.

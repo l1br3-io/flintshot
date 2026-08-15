@@ -38,6 +38,10 @@ pub struct EguiCanvas {
     /// than the window's — otherwise the toolbar covers the top of
     /// the image and any annotation drawn in the topmost rows.
     origin: egui::Pos2,
+    /// Optional annotation clip in screen-logical px, set via
+    /// [`set_clip`](Self::set_clip). Constrains every draw except
+    /// the background blit (Phase 5 overlay's region confinement).
+    clip: Option<egui::Rect>,
 }
 
 impl EguiCanvas {
@@ -50,6 +54,7 @@ impl EguiCanvas {
             ctx,
             painter: None,
             origin: egui::Pos2::ZERO,
+            clip: None,
         }
     }
 
@@ -61,9 +66,36 @@ impl EguiCanvas {
         self.painter = Some(painter.clone());
     }
 
+    /// Constrain subsequent **annotation** draws to `clip`
+    /// (canvas-physical px, normalized like every other canvas-space
+    /// rect); `None` clears the constraint (the default).
+    ///
+    /// The Phase 5 overlay clips to the active selection so strokes
+    /// dragged past the region edge stop painting there (Flameshot
+    /// confinement). The background blit
+    /// ([`draw_image`](Self::draw_image)) deliberately ignores the
+    /// clip — the frozen screen outside the region must stay visible
+    /// under the overlay's dim mask. The editor window never sets a
+    /// clip, so its rendering is byte-identical to pre-Phase 5.
+    pub fn set_clip(&mut self, clip: Option<Rect>) {
+        self.clip = clip.map(|r| to_egui_rect(r.normalized(), self.ppp(), self.origin));
+    }
+
     /// Physical-to-logical pixel conversion factor for the bound context.
     fn ppp(&self) -> f32 {
         self.ctx.pixels_per_point()
+    }
+
+    /// The painter annotation draws go through: the bound painter,
+    /// clip-constrained when [`set_clip`](Self::set_clip) is active.
+    /// `with_clip_rect` intersects with the panel clip, so an
+    /// over-wide clip can't escape the canvas.
+    fn clip_painter(&self) -> Option<egui::Painter> {
+        let painter = self.painter.as_ref()?;
+        Some(match self.clip {
+            Some(clip) => painter.with_clip_rect(clip),
+            None => painter.clone(),
+        })
     }
 }
 
@@ -149,9 +181,6 @@ impl Canvas for EguiCanvas {
         reason = "dest.min components are non-negative physical px within image bounds"
     )]
     fn draw_image_region(&mut self, img: &image::RgbaImage, dest: Rect) {
-        let Some(painter) = &self.painter else {
-            return;
-        };
         // A 0×0 source image creates a zero-dimension wgpu texture,
         // which panics inside `Device::create_texture` with
         // "Dimension X is zero". The core blur render path guards
@@ -161,6 +190,9 @@ impl Canvas for EguiCanvas {
         if img.width() == 0 || img.height() == 0 {
             return;
         }
+        let Some(painter) = self.clip_painter() else {
+            return;
+        };
         let ppp = self.ppp();
         // Upload the raw pixels to a uniquely-named texture so multiple
         // blur annotations in the same frame don't clobber each other
@@ -182,7 +214,7 @@ impl Canvas for EguiCanvas {
     }
 
     fn draw_rect_outline(&mut self, rect: Rect, stroke: &Stroke) {
-        let Some(painter) = &self.painter else {
+        let Some(painter) = self.clip_painter() else {
             return;
         };
         let ppp = self.ppp();
@@ -198,7 +230,7 @@ impl Canvas for EguiCanvas {
     }
 
     fn draw_rect_filled(&mut self, rect: Rect, color: Color) {
-        let Some(painter) = &self.painter else {
+        let Some(painter) = self.clip_painter() else {
             return;
         };
         painter.rect_filled(
@@ -209,7 +241,7 @@ impl Canvas for EguiCanvas {
     }
 
     fn draw_ellipse(&mut self, rect: Rect, stroke: &Stroke, fill: Option<Color>) {
-        let Some(painter) = &self.painter else {
+        let Some(painter) = self.clip_painter() else {
             return;
         };
         let ppp = self.ppp();
@@ -224,7 +256,7 @@ impl Canvas for EguiCanvas {
     }
 
     fn draw_line(&mut self, a: Point, b: Point, stroke: &Stroke) {
-        let Some(painter) = &self.painter else {
+        let Some(painter) = self.clip_painter() else {
             return;
         };
         let ppp = self.ppp();
@@ -238,7 +270,7 @@ impl Canvas for EguiCanvas {
     }
 
     fn draw_polyline(&mut self, points: &[Point], stroke: &Stroke) {
-        let Some(painter) = &self.painter else {
+        let Some(painter) = self.clip_painter() else {
             return;
         };
         let ppp = self.ppp();
@@ -260,7 +292,7 @@ impl Canvas for EguiCanvas {
     }
 
     fn draw_arrow(&mut self, a: Point, b: Point, stroke: &Stroke, head_size: f32) {
-        let Some(painter) = &self.painter else {
+        let Some(painter) = self.clip_painter() else {
             return;
         };
         let ppp = self.ppp();
@@ -279,7 +311,7 @@ impl Canvas for EguiCanvas {
     }
 
     fn draw_text(&mut self, pos: Point, text: &str, style: &TextStyle) {
-        let Some(painter) = &self.painter else {
+        let Some(painter) = self.clip_painter() else {
             return;
         };
         let ppp = self.ppp();
@@ -435,6 +467,130 @@ mod tests {
             Rect::from_xywh(0.0, 0.0, 50.0, 50.0),
             &Stroke::new(Color::RED, 2.0),
             None,
+        );
+    }
+
+    // --- Annotation clipping (Phase 5 Task 005) ---
+    //
+    // The overlay confines annotation draws to the selection region;
+    // egui records the clip with every shape, so the tests assert the
+    // `ClippedShape::clip_rect` each draw lands with. A default
+    // context runs at ppp 1.0 and the debug painter's clip starts at
+    // (0, 0), so canvas-physical == screen-logical in these fixtures.
+
+    /// A canvas bound to a 400×300 painter at (0, 0), ppp 1.0 — the
+    /// shared fixture for the clip tests.
+    fn bound_canvas() -> (egui::Context, egui::Painter, EguiCanvas) {
+        let ctx = egui::Context::default();
+        let clip_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        let painter = egui::Painter::new(ctx.clone(), egui::LayerId::debug(), clip_rect);
+        let mut canvas = EguiCanvas::new(ctx.clone());
+        canvas.bind_painter(&painter);
+        (ctx, painter, canvas)
+    }
+
+    /// The clip rects recorded alongside every shape drawn so far.
+    fn recorded_clips(painter: &egui::Painter) -> Vec<egui::Rect> {
+        let mut clips = Vec::new();
+        painter.for_each_shape(|cs| clips.push(cs.clip_rect));
+        clips
+    }
+
+    #[test]
+    fn set_clip_constrains_annotation_draws() {
+        let (_ctx, painter, mut canvas) = bound_canvas();
+        canvas.set_clip(Some(Rect::from_xywh(50.0, 50.0, 100.0, 100.0)));
+        canvas.draw_line(
+            Point::new(0.0, 0.0),
+            Point::new(300.0, 300.0),
+            &Stroke::new(Color::RED, 2.0),
+        );
+        canvas.draw_rect_filled(
+            Rect::from_xywh(0.0, 0.0, 400.0, 300.0),
+            Color::rgb(0, 0, 255),
+        );
+        assert_eq!(
+            recorded_clips(&painter),
+            vec![
+                egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(100.0, 100.0)),
+                egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(100.0, 100.0)),
+            ],
+            "every annotation draw must record the set clip"
+        );
+    }
+
+    #[test]
+    fn background_blit_ignores_clip() {
+        let (_ctx, painter, mut canvas) = bound_canvas();
+        let img = image::RgbaImage::from_raw(8, 8, vec![255; 8 * 8 * 4]).expect("w*h*4 buffer");
+        let tex = canvas.upload_image(&img).expect("upload succeeds");
+        canvas.set_clip(Some(Rect::from_xywh(50.0, 50.0, 100.0, 100.0)));
+        canvas.draw_image(&tex, Rect::from_xywh(0.0, 0.0, 400.0, 300.0));
+        assert_eq!(
+            recorded_clips(&painter),
+            vec![egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(400.0, 300.0)
+            )],
+            "the background blit must stay unclipped so the frozen screen outside the region stays visible"
+        );
+    }
+
+    #[test]
+    fn blur_region_blit_honors_clip() {
+        let (_ctx, painter, mut canvas) = bound_canvas();
+        let img = image::RgbaImage::from_raw(8, 8, vec![255; 8 * 8 * 4]).expect("w*h*4 buffer");
+        canvas.set_clip(Some(Rect::from_xywh(10.0, 10.0, 50.0, 50.0)));
+        canvas.draw_image_region(&img, Rect::from_xywh(10.0, 10.0, 8.0, 8.0));
+        assert_eq!(
+            recorded_clips(&painter),
+            vec![egui::Rect::from_min_size(
+                egui::pos2(10.0, 10.0),
+                egui::vec2(50.0, 50.0)
+            )],
+            "blur pixels must not paint outside the region"
+        );
+    }
+
+    #[test]
+    fn clearing_clip_restores_panel_clipping() {
+        let (_ctx, painter, mut canvas) = bound_canvas();
+        canvas.set_clip(Some(Rect::from_xywh(50.0, 50.0, 100.0, 100.0)));
+        canvas.set_clip(None);
+        canvas.draw_line(
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 10.0),
+            &Stroke::new(Color::RED, 2.0),
+        );
+        assert_eq!(
+            recorded_clips(&painter),
+            vec![egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(400.0, 300.0)
+            )],
+            "no clip set → shapes record the panel clip"
+        );
+    }
+
+    #[test]
+    fn set_clip_normalizes_flipped_rect() {
+        let (_ctx, painter, mut canvas) = bound_canvas();
+        canvas.set_clip(Some(Rect::new(
+            Point::new(150.0, 150.0),
+            Point::new(50.0, 50.0),
+        )));
+        canvas.draw_line(
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 10.0),
+            &Stroke::new(Color::RED, 2.0),
+        );
+        assert_eq!(
+            recorded_clips(&painter),
+            vec![egui::Rect::from_min_size(
+                egui::pos2(50.0, 50.0),
+                egui::vec2(100.0, 100.0)
+            )],
+            "a flipped clip rect must normalize before recording"
         );
     }
 }
