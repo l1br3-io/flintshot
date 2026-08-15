@@ -1,6 +1,7 @@
 ---
-status: active
+status: shipped
 started: 2026-08-11
+shipped: 2026-08-15
 ---
 
 # Spec — Phase 4: Upload
