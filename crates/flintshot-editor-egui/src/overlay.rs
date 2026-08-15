@@ -32,6 +32,23 @@
 //! - `Esc` closes as `Cancelled` (clean cancel: no file, no
 //!   clipboard write, no worker).
 //!
+//! ## Selection chrome (Task 003)
+//!
+//! The overlay layers Flameshot selection semantics over the
+//! dispatcher's selection geometry: a dim mask outside the active
+//! region, 8 grab handles, move-by-drag inside the region, a live
+//! `W × H` badge, and the magnifier on hover. The dispatcher keeps
+//! owning *fresh* selection drags; handle and interior presses with
+//! `Tool::Select` active are intercepted by the shell and run as
+//! [`Gesture`]s that mutate `EditorState::selection` (a `pub` field)
+//! through the pure helpers in this module. This is the effort's one
+//! documented, tested exception to "all mutation flows through
+//! `dispatch_input`": the dispatcher's selection transitions model
+//! fresh anchor-to-corner drags only — they have no concept of grab
+//! points — and extending `InputEvent` for chrome-only gestures
+//! would leak overlay semantics into every shell (spec §Success
+//! criteria allows exactly this shape of exception).
+//!
 //! The Enter→Copy output pipeline lands in Task 006; until then an
 //! accepted close publishes `Cancelled` with a notice (the same
 //! placeholder pattern Task 001 used for the missing shell).
@@ -39,11 +56,12 @@
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    render::render, BlurCache, EditorOutcome, EditorState, InputEvent, Key, Point, Tool,
+    render::render, BlurCache, EditorOutcome, EditorState, InputEvent, Key, Point, Rect, Tool,
 };
 
 use crate::app::{dispatch_text_input, tool_for_key, translate_modifiers, OutcomeSlot};
 use crate::canvas::{EguiCanvas, EguiTexture};
+use crate::magnifier::Magnifier;
 
 /// Window title + WM class for the overlay viewport. Distinct from
 /// the editor and pin windows so WMs / compositors can route it.
@@ -108,6 +126,255 @@ pub(crate) fn to_canvas_physical(pos: egui::Pos2, panel: egui::Rect, ppp: f32) -
     Point::new(local.x * ppp, local.y * ppp)
 }
 
+// --- Selection chrome (Task 003) ---
+//
+// Pure geometry + decision helpers backing the overlay's Flameshot
+// selection semantics. All are headless-testable; egui value types
+// (`Pos2`, `Align2`, `CursorIcon`) appear only as inert data, never
+// via a live context. Canvas-space helpers operate in the same
+// physical-px space `EditorState` uses; DPI-dependent sizes (handle
+// edge, hit radius) are parameters the caller scales by
+// `pixels_per_point` so affordances stay logical-px sized.
+
+// physical-px space `EditorState` uses; DPI-dependent sizes (handle
+// edge, hit radius) are parameters the caller scales by
+// `pixels_per_point` so affordances stay logical-px sized.
+
+/// Dim-mask alpha over the area outside the active region. ~50%
+/// matches Flameshot's shade: dark enough to read the undimmed
+/// region as "selected", light enough that unselected content stays
+/// recognizable for a fresh drag.
+const MASK_ALPHA: u8 = 128;
+
+/// Handle square edge, logical px (scaled by `ppp` into physical).
+/// 10 px matches Flameshot's grab squares: big enough to hit, small
+/// enough to stay out of the annotated content.
+const HANDLE_EDGE_LOGICAL: f32 = 10.0;
+
+/// Handle hit radius, logical px — slightly larger than half the
+/// square so near-misses still grab (Fitts-ish forgiveness).
+const HANDLE_HIT_LOGICAL: f32 = 12.0;
+
+/// Gap between the selection edge and the W×H badge, logical px.
+const BADGE_GAP: f32 = 6.0;
+
+/// Badge font size, logical px. Monospace so live width changes
+/// don't jitter the label horizontally.
+const BADGE_FONT_SIZE: f32 = 12.0;
+
+/// One of the 8 selection grab points: 4 corners + 4 edge midpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Handle {
+    /// Top-left corner.
+    Nw,
+    /// Top edge midpoint.
+    N,
+    /// Top-right corner.
+    Ne,
+    /// Right edge midpoint.
+    E,
+    /// Bottom-right corner.
+    Se,
+    /// Bottom edge midpoint.
+    S,
+    /// Bottom-left corner.
+    Sw,
+    /// Left edge midpoint.
+    W,
+}
+
+/// The 8 handles in [`Handle`] declaration order — the order
+/// [`handle_centers`] returns centers in, so `zip` pairs them.
+pub(crate) const ALL_HANDLES: [Handle; 8] = [
+    Handle::Nw,
+    Handle::N,
+    Handle::Ne,
+    Handle::E,
+    Handle::Se,
+    Handle::S,
+    Handle::Sw,
+    Handle::W,
+];
+
+/// Filter a raw `state.selection` down to the form the chrome cares
+/// about: `Some(normalized)` only when the rect is non-degenerate
+/// (both normalized dimensions ≥ 1 px, matching the render path's
+/// selection-outline guard and `EditorState::crop`'s no-op bound).
+#[must_use]
+pub(crate) fn usable_selection(sel: Option<Rect>) -> Option<Rect> {
+    sel.map(Rect::normalized)
+        .filter(|n| n.width() >= 1.0 && n.height() >= 1.0)
+}
+
+/// Centers of the 8 grab handles for a selection, in [`ALL_HANDLES`]
+/// order. `sel` is normalized first so an in-flight un-normalized
+/// drag still lands handles at the visual corners.
+#[must_use]
+pub(crate) fn handle_centers(sel: Rect) -> [Point; 8] {
+    let r = sel.normalized();
+    let mid_x = r.min.x.midpoint(r.max.x);
+    let mid_y = r.min.y.midpoint(r.max.y);
+    [
+        Point::new(r.min.x, r.min.y), // Nw
+        Point::new(mid_x, r.min.y),   // N
+        Point::new(r.max.x, r.min.y), // Ne
+        Point::new(r.max.x, mid_y),   // E
+        Point::new(r.max.x, r.max.y), // Se
+        Point::new(mid_x, r.max.y),   // S
+        Point::new(r.min.x, r.max.y), // Sw
+        Point::new(r.min.x, mid_y),   // W
+    ]
+}
+
+/// The handle whose center is nearest `at`, if within `radius`
+/// (physical px — callers pass `HANDLE_HIT_LOGICAL * ppp`).
+/// Nearest-wins resolves overlaps on tiny selections.
+#[must_use]
+pub(crate) fn handle_at(sel: Rect, at: Point, radius: f32) -> Option<Handle> {
+    let centers = handle_centers(sel);
+    let mut best: Option<(f32, Handle)> = None;
+    for (handle, center) in std::iter::zip(ALL_HANDLES, centers) {
+        let dx = at.x - center.x;
+        let dy = at.y - center.y;
+        let dist_sq = dx * dx + dy * dy;
+        if dist_sq <= radius * radius && best.is_none_or(|(best_sq, _)| dist_sq < best_sq) {
+            best = Some((dist_sq, handle));
+        }
+    }
+    best.map(|(_, handle)| handle)
+}
+
+/// Resize `sel` so the grabbed corner/edge follows `at` while the
+/// opposite corner(s) stay anchored. The result is intentionally
+/// un-normalized during the drag (mirroring
+/// `EditorState::update_selection`); normalize on release.
+#[must_use]
+pub(crate) fn resize_from(handle: Handle, sel: Rect, at: Point) -> Rect {
+    let mut r = sel;
+    match handle {
+        Handle::Nw => r.min = at,
+        Handle::Se => r.max = at,
+        Handle::Ne => {
+            r.min.y = at.y;
+            r.max.x = at.x;
+        }
+        Handle::Sw => {
+            r.min.x = at.x;
+            r.max.y = at.y;
+        }
+        Handle::N => r.min.y = at.y,
+        Handle::S => r.max.y = at.y,
+        Handle::E => r.max.x = at.x,
+        Handle::W => r.min.x = at.x,
+    }
+    r
+}
+
+/// Translate `sel` so the grab point follows `at` (`offset` = grab
+/// position − `sel.min`, captured at press), clamped so the region
+/// stays inside `bounds` on both axes.
+#[must_use]
+pub(crate) fn moved_rect(sel: Rect, at: Point, offset: Point, bounds: Rect) -> Rect {
+    let (w, h) = (sel.width(), sel.height());
+    let max_min_x = (bounds.max.x - w).max(bounds.min.x);
+    let max_min_y = (bounds.max.y - h).max(bounds.min.y);
+    let min_x = (at.x - offset.x).clamp(bounds.min.x, max_min_x);
+    let min_y = (at.y - offset.y).clamp(bounds.min.y, max_min_y);
+    Rect::from_xywh(min_x, min_y, w, h)
+}
+
+/// An overlay-owned selection manipulation in progress. Presses with
+/// `Tool::Select` active resolve to one of the gesture variants
+/// *before* dispatcher dispatch (see `gesture_for_press`); while a
+/// gesture is active, pointer drags mutate `state.selection` via the
+/// pure helpers above instead of dispatching `PointerDrag`s.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Gesture {
+    /// No manipulation in progress — pointer events flow to the
+    /// dispatcher normally.
+    None,
+    /// Drag inside the region moves it; `offset` = press position −
+    /// selection `min`, preserved so the grab point tracks the cursor.
+    Move {
+        /// Press position minus selection top-left, physical px.
+        offset: Point,
+    },
+    /// Drag on a grab handle resizes the region around the opposite
+    /// corner(s).
+    Resize {
+        /// Which handle was grabbed.
+        handle: Handle,
+    },
+}
+
+/// Decide what a primary press inside the overlay does when a usable
+/// selection exists: grabs a handle (`Resize`), grabs the interior
+/// (`Move`), or returns `None` to fall through to the dispatcher
+/// (fresh selection / annotation). Interception is Select-tool-only:
+/// with an annotation tool active, presses must draw, not manipulate
+/// the region.
+#[must_use]
+pub(crate) fn gesture_for_press(
+    sel: Option<Rect>,
+    at: Point,
+    tool: Tool,
+    hit_radius: f32,
+) -> Option<Gesture> {
+    if tool != Tool::Select {
+        return None;
+    }
+    let sel = usable_selection(sel)?;
+    if let Some(handle) = handle_at(sel, at, hit_radius) {
+        return Some(Gesture::Resize { handle });
+    }
+    if sel.contains(at) {
+        return Some(Gesture::Move {
+            offset: Point::new(at.x - sel.min.x, at.y - sel.min.y),
+        });
+    }
+    None
+}
+
+/// Badge label for a selection: `"{w} × {h}"` in whole physical px.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "selection dims are screen-sized; the rounded value fits i32 with room to spare"
+)]
+pub(crate) fn badge_text(w: f32, h: f32) -> String {
+    format!("{} × {}", w.round() as i32, h.round() as i32)
+}
+
+/// Where the W×H badge anchors against the (logical-space)
+/// selection: above its top-left when there's panel room, flipped
+/// below the bottom edge otherwise. Returns the anchor point plus
+/// the `Align2` that places the badge relative to it.
+#[must_use]
+pub(crate) fn badge_anchor(sel: egui::Rect, panel: egui::Rect) -> (egui::Pos2, egui::Align2) {
+    if sel.min.y - BADGE_GAP >= panel.min.y {
+        (
+            egui::pos2(sel.min.x, sel.min.y - BADGE_GAP),
+            egui::Align2::LEFT_BOTTOM,
+        )
+    } else {
+        (
+            egui::pos2(sel.min.x, sel.max.y + BADGE_GAP),
+            egui::Align2::LEFT_TOP,
+        )
+    }
+}
+
+/// Cursor icon for hovering / dragging a handle.
+#[must_use]
+pub(crate) fn cursor_for_handle(handle: Handle) -> egui::CursorIcon {
+    match handle {
+        Handle::Nw | Handle::Se => egui::CursorIcon::ResizeNwSe,
+        Handle::Ne | Handle::Sw => egui::CursorIcon::ResizeNeSw,
+        Handle::N | Handle::S => egui::CursorIcon::ResizeVertical,
+        Handle::E | Handle::W => egui::CursorIcon::ResizeHorizontal,
+    }
+}
+
 /// The eframe app for the fullscreen overlay session.
 ///
 /// Constructed by [`crate::shell::EguiShell::run_overlay`] with the
@@ -134,9 +401,28 @@ pub(crate) struct OverlayApp {
     /// overlay panel. Gates drag/up dispatch (same guard as
     /// `EditorApp::canvas_drag_active`).
     drag_active: bool,
+    /// Overlay-owned selection manipulation in progress (Task 003's
+    /// documented exception to all-mutation-through-dispatch: the
+    /// dispatcher's selection transitions model fresh
+    /// anchor-to-corner drags only and have no grab points). While a
+    /// gesture is active, drags mutate `state.selection` through the
+    /// pure chrome helpers instead of dispatching pointer events.
+    gesture: Gesture,
+    /// Pixel-zoom magnifier (hover-triggered in the overlay, per the
+    /// spec — no modifier hold). Reused verbatim from the editor
+    /// window; reads `state.image` directly.
+    magnifier: Magnifier,
     /// Outcome slot shared with the shell. X-close (Alt+F4, WM kill)
     /// leaves it `None`, which the shell reads as `Ok(Cancelled)`.
     outcome: OutcomeSlot,
+}
+
+impl Gesture {
+    /// Whether no gesture is active (`Gesture` has no `None` variant
+    /// to keep the field non-optional and the match arms total).
+    fn is_none(self) -> bool {
+        matches!(self, Gesture::None)
+    }
 }
 
 impl OverlayApp {
@@ -154,6 +440,8 @@ impl OverlayApp {
             blur_cache: BlurCache::new(),
             overlay_rect: None,
             drag_active: false,
+            gesture: Gesture::None,
+            magnifier: Magnifier::new(),
             outcome,
         }
     }
@@ -175,6 +463,131 @@ impl OverlayApp {
             }
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Pointer dispatch plus the Task 003 chrome interaction: gesture
+    /// interception, gesture-driven selection mutation, and the hover
+    /// cursor shape. Split out of `logic()` so each concern stays
+    /// readable; runs only when a cached panel rect exists.
+    fn pointer_and_chrome(&mut self, ctx: &Context, panel: egui::Rect) {
+        let ppp = ctx.pixels_per_point();
+        let (pointer, primary_pressed, primary_down, primary_released) = ctx.input(|i| {
+            (
+                i.pointer.latest_pos(),
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.primary_released(),
+            )
+        });
+        let Some(pos) = pointer else {
+            return;
+        };
+        let at = to_canvas_physical(pos, panel, ppp);
+
+        // Chrome interception (Task 003): with Select active and a
+        // usable region present, a press on a handle or inside the
+        // region starts an overlay-owned gesture instead of a
+        // dispatcher `PointerDown` (which would restart the selection
+        // from a point — `begin_selection`). While the gesture runs,
+        // drags mutate `state.selection` directly (the documented
+        // exception; see `OverlayApp::gesture`) and release
+        // normalizes, mirroring the dispatcher's `finish_selection`.
+        let image_bounds = {
+            let (w, h) = self.state.image.dimensions();
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "image dims ≤ 2^24 are exact in f32"
+            )]
+            Rect::from_xywh(0.0, 0.0, w as f32, h as f32)
+        };
+        let clamped = Point::new(
+            at.x.clamp(image_bounds.min.x, image_bounds.max.x),
+            at.y.clamp(image_bounds.min.y, image_bounds.max.y),
+        );
+        let hit_radius = HANDLE_HIT_LOGICAL * ppp;
+
+        let pointer_event = if primary_pressed && panel.contains(pos) {
+            self.drag_active = true;
+            match gesture_for_press(self.state.selection, at, self.state.tool, hit_radius) {
+                Some(gesture) => {
+                    self.gesture = gesture;
+                    None
+                }
+                None => Some(InputEvent::PointerDown { pos: at }),
+            }
+        } else if primary_released && self.drag_active {
+            self.drag_active = false;
+            if self.gesture.is_none() {
+                Some(InputEvent::PointerUp)
+            } else {
+                // Normalize the dragged rect so `min` is top-left —
+                // the same contract the dispatcher's release path
+                // (`finish_selection`) upholds for fresh drags.
+                self.state.selection = self.state.selection.map(Rect::normalized);
+                self.gesture = Gesture::None;
+                None
+            }
+        } else if primary_down && self.drag_active {
+            match self.gesture {
+                Gesture::None => Some(InputEvent::PointerDrag { pos: at }),
+                Gesture::Move { offset } => {
+                    if let Some(sel) = usable_selection(self.state.selection) {
+                        self.state.selection = Some(moved_rect(sel, clamped, offset, image_bounds));
+                    }
+                    None
+                }
+                Gesture::Resize { handle } => {
+                    if let Some(sel) = usable_selection(self.state.selection) {
+                        self.state.selection = Some(resize_from(handle, sel, clamped));
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // Pointer events always return `Continue` today; future
+        // pointer-side outcomes (Task 006+) surface as a compile
+        // error here rather than silently dropping.
+        if let Some(event) = pointer_event {
+            let _ = self.state.dispatch_input(&event);
+        }
+
+        // Cursor shape: reflects the active gesture while dragging,
+        // otherwise the hover target. Select-only outside gestures —
+        // annotation tools keep the default cursor, matching the
+        // editor window.
+        if panel.contains(pos) {
+            let icon = match self.gesture {
+                Gesture::Resize { handle } => Some(cursor_for_handle(handle)),
+                Gesture::Move { .. } => Some(egui::CursorIcon::Move),
+                Gesture::None => self.hover_cursor(at, hit_radius),
+            };
+            if let Some(icon) = icon {
+                ctx.set_cursor_icon(icon);
+            }
+        }
+    }
+
+    /// Cursor icon for the current hover position when no gesture is
+    /// active: a per-handle resize cursor over a handle, `Move`
+    /// inside the region, `Crosshair` elsewhere while the Select tool
+    /// is active. `None` leaves the default cursor (annotation
+    /// tools).
+    fn hover_cursor(&self, at: Point, hit_radius: f32) -> Option<egui::CursorIcon> {
+        if self.state.tool != Tool::Select {
+            return None;
+        }
+        let sel = usable_selection(self.state.selection);
+        if let Some(sel) = sel {
+            if let Some(handle) = handle_at(sel, at, hit_radius) {
+                return Some(cursor_for_handle(handle));
+            }
+            if sel.contains(at) {
+                return Some(egui::CursorIcon::Move);
+            }
+        }
+        Some(egui::CursorIcon::Crosshair)
     }
 }
 
@@ -249,42 +662,11 @@ impl App for OverlayApp {
             self.state.tool = tool;
         }
 
-        // Pointer dispatch, gated on the cached panel rect (the
-        // first frame has none — the screenshot isn't visible yet,
-        // so no drag can start).
-        let Some(panel) = self.overlay_rect else {
-            return;
-        };
-        let ppp = ctx.pixels_per_point();
-        let (pointer, primary_pressed, primary_down, primary_released) = ctx.input(|i| {
-            (
-                i.pointer.latest_pos(),
-                i.pointer.primary_pressed(),
-                i.pointer.primary_down(),
-                i.pointer.primary_released(),
-            )
-        });
-        let Some(pos) = pointer else {
-            return;
-        };
-        let at = to_canvas_physical(pos, panel, ppp);
-
-        let pointer_event = if primary_pressed && panel.contains(pos) {
-            self.drag_active = true;
-            Some(InputEvent::PointerDown { pos: at })
-        } else if primary_released && self.drag_active {
-            self.drag_active = false;
-            Some(InputEvent::PointerUp)
-        } else if primary_down && self.drag_active {
-            Some(InputEvent::PointerDrag { pos: at })
-        } else {
-            None
-        };
-        // Pointer events always return `Continue` today; future
-        // pointer-side outcomes (Task 006+) surface as a compile
-        // error here rather than silently dropping.
-        if let Some(event) = pointer_event {
-            let _ = self.state.dispatch_input(&event);
+        // Pointer dispatch + selection-chrome interaction, gated on
+        // the cached panel rect (the first frame has none — the
+        // screenshot isn't visible yet, so no drag can start).
+        if let Some(panel) = self.overlay_rect {
+            self.pointer_and_chrome(ctx, panel);
         }
     }
 
@@ -308,6 +690,108 @@ impl App for OverlayApp {
             tracing::error!(error = %err, "overlay render failed; closing overlay session");
             *self.outcome.borrow_mut() = Some(Err(err));
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        // Selection chrome (Task 003), painted over the shared render
+        // output in screen-logical space. Order: mask → handles →
+        // badge → magnifier, so later elements stay legible over the
+        // dimmed area.
+        let panel_rect = panel.response.rect;
+        let painter = ui.painter().clone();
+        let ctx = ui.ctx().clone();
+        let ppp = ctx.pixels_per_point();
+        let sel_phys = usable_selection(self.state.selection);
+        let to_logical =
+            |p: Point| egui::pos2(panel_rect.min.x + p.x / ppp, panel_rect.min.y + p.y / ppp);
+
+        // Dim mask: four rects framing the region (the full panel
+        // when nothing is selected — everything is "unselected").
+        let mask = egui::Color32::from_black_alpha(MASK_ALPHA);
+        if let Some(s) = sel_phys {
+            let min = to_logical(s.min);
+            let max = to_logical(s.max);
+            let panel_max = panel_rect.max;
+            let panel_min = panel_rect.min;
+            let top = egui::Rect::from_two_pos(panel_min, egui::pos2(panel_max.x, min.y));
+            let bottom = egui::Rect::from_two_pos(egui::pos2(panel_min.x, max.y), panel_max);
+            let left =
+                egui::Rect::from_two_pos(egui::pos2(panel_min.x, min.y), egui::pos2(min.x, max.y));
+            let right =
+                egui::Rect::from_two_pos(egui::pos2(max.x, min.y), egui::pos2(panel_max.x, max.y));
+            for band in [top, bottom, left, right] {
+                painter.rect_filled(band, egui::CornerRadius::ZERO, mask);
+            }
+        } else {
+            painter.rect_filled(panel_rect, egui::CornerRadius::ZERO, mask);
+        }
+
+        // Grab handles: visible only while they're actually
+        // interactive — Select tool active and no fresh
+        // dispatcher-driven selection drag in progress (during a
+        // fresh drag the midpoint handles would jitter as the rect
+        // grows; Flameshot hides them until release too).
+        if self.state.tool == Tool::Select && !(self.drag_active && self.gesture.is_none()) {
+            if let Some(s) = sel_phys {
+                let edge = HANDLE_EDGE_LOGICAL;
+                for center in handle_centers(s) {
+                    let rect =
+                        egui::Rect::from_center_size(to_logical(center), egui::vec2(edge, edge));
+                    painter.rect_filled(rect, egui::CornerRadius::same(2), egui::Color32::WHITE);
+                    painter.rect_stroke(
+                        rect,
+                        egui::CornerRadius::same(2),
+                        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(200)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+        }
+
+        // Live W×H badge (whole physical px), clamped into the panel.
+        if let Some(s) = sel_phys {
+            let sel_logical = egui::Rect::from_two_pos(to_logical(s.min), to_logical(s.max));
+            let text = badge_text(s.width(), s.height());
+            let galley = painter.layout_no_wrap(
+                text,
+                egui::FontId::monospace(BADGE_FONT_SIZE),
+                egui::Color32::WHITE,
+            );
+            let (anchor, align) = badge_anchor(sel_logical, panel_rect);
+            let mut rect = align.anchor_size(anchor, galley.size());
+            rect.min.x = rect.min.x.clamp(
+                panel_rect.min.x,
+                (panel_rect.max.x - rect.width()).max(panel_rect.min.x),
+            );
+            rect.min.y = rect.min.y.clamp(
+                panel_rect.min.y,
+                (panel_rect.max.y - rect.height()).max(panel_rect.min.y),
+            );
+            painter.rect_filled(
+                rect.expand(4.0),
+                egui::CornerRadius::same(3),
+                egui::Color32::from_black_alpha(200),
+            );
+            painter.galley(rect.min, galley, egui::Color32::WHITE);
+        }
+
+        // Magnifier on hover (overlay UX: no modifier hold, per the
+        // spec). Suppressed during text editing, same as the editor
+        // window's loupe.
+        if !self.state.is_editing_text() {
+            if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                if panel_rect.contains(pos) {
+                    let cursor_phys = to_canvas_physical(pos, panel_rect, ppp);
+                    self.magnifier.show(
+                        &painter,
+                        &ctx,
+                        &self.state.image,
+                        cursor_phys,
+                        panel_rect,
+                        ppp,
+                    );
+                }
+            }
         }
     }
 }
@@ -405,5 +889,303 @@ mod tests {
         let panel = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
         let p = to_canvas_physical(egui::pos2(960.0, 540.0), panel, 1.0);
         assert_eq!(p, Point::new(960.0, 540.0));
+    }
+
+    // --- Selection chrome (Task 003) ---
+
+    /// A 200×100 selection at (100, 100) — the shared fixture for the
+    /// chrome geometry tests.
+    fn sel() -> Rect {
+        Rect::from_xywh(100.0, 100.0, 200.0, 100.0)
+    }
+
+    #[test]
+    fn usable_selection_drops_none_and_degenerate() {
+        assert_eq!(usable_selection(None), None, "no selection");
+        assert_eq!(
+            usable_selection(Some(Rect::from_xywh(10.0, 10.0, 0.5, 50.0))),
+            None,
+            "sub-1px width is degenerate"
+        );
+        assert_eq!(
+            usable_selection(Some(Rect::from_xywh(10.0, 10.0, 50.0, 0.0))),
+            None,
+            "zero height is degenerate"
+        );
+    }
+
+    #[test]
+    fn usable_selection_normalizes() {
+        // Flipped corners (drag up-left): min/max swap.
+        assert_eq!(
+            usable_selection(Some(Rect::new(
+                Point::new(300.0, 200.0),
+                Point::new(100.0, 100.0)
+            ))),
+            Some(Rect::from_xywh(100.0, 100.0, 200.0, 100.0))
+        );
+    }
+
+    #[test]
+    fn handle_centers_hit_corners_and_midpoints() {
+        let centers = handle_centers(sel());
+        let expected = [
+            Point::new(100.0, 100.0), // Nw
+            Point::new(200.0, 100.0), // N
+            Point::new(300.0, 100.0), // Ne
+            Point::new(300.0, 150.0), // E
+            Point::new(300.0, 200.0), // Se
+            Point::new(200.0, 200.0), // S
+            Point::new(100.0, 200.0), // Sw
+            Point::new(100.0, 150.0), // W
+        ];
+        for (i, (got, want)) in centers.iter().zip(&expected).enumerate() {
+            assert_eq!(got, want, "handle {i} center");
+        }
+    }
+
+    #[test]
+    fn handle_at_finds_nearest_within_radius() {
+        let s = sel();
+        assert_eq!(
+            handle_at(s, Point::new(100.0, 100.0), 10.0),
+            Some(Handle::Nw)
+        );
+        // A few px off the corner still grabs it.
+        assert_eq!(
+            handle_at(s, Point::new(106.0, 106.0), 10.0),
+            Some(Handle::Nw)
+        );
+        assert_eq!(
+            handle_at(s, Point::new(300.0, 200.0), 10.0),
+            Some(Handle::Se)
+        );
+        // Interior point is near no handle.
+        assert_eq!(handle_at(s, Point::new(200.0, 150.0), 10.0), None);
+        // Well outside the radius.
+        assert_eq!(handle_at(s, Point::new(120.0, 120.0), 8.0), None);
+    }
+
+    #[test]
+    fn handle_at_picks_nearest_on_tiny_selection() {
+        // 4×4 selection: all 8 handles overlap; the query point at
+        // (12, 10) must pick the closest (Ne at (12, 10)... on a
+        // 8..12 rect: Nw (8,8), N (10,8), Ne (12,8), E (12,10),
+        // Se (12,12), S (10,12), Sw (8,12), W (8,10). (12,10) ties
+        // E exactly — assert E.
+        let s = Rect::from_xywh(8.0, 8.0, 4.0, 4.0);
+        assert_eq!(handle_at(s, Point::new(12.0, 10.0), 20.0), Some(Handle::E));
+    }
+
+    #[test]
+    fn handle_at_normalizes_flipped_rect() {
+        let flipped = Rect::new(Point::new(300.0, 200.0), Point::new(100.0, 100.0));
+        assert_eq!(
+            handle_at(flipped, Point::new(100.0, 100.0), 10.0),
+            Some(Handle::Nw),
+            "flipped drag rect still hit-tests at visual corners"
+        );
+    }
+
+    #[test]
+    fn resize_from_corner_drags_anchor_opposite() {
+        let s = sel();
+        // Grabbing Nw and dragging to (50, 60): Se stays anchored.
+        assert_eq!(
+            resize_from(Handle::Nw, s, Point::new(50.0, 60.0)),
+            Rect::new(Point::new(50.0, 60.0), Point::new(300.0, 200.0))
+        );
+        // Se: Nw stays anchored.
+        assert_eq!(
+            resize_from(Handle::Se, s, Point::new(340.0, 260.0)),
+            Rect::new(Point::new(100.0, 100.0), Point::new(340.0, 260.0))
+        );
+        // Ne: only the top-right follows; bottom-left anchored.
+        assert_eq!(
+            resize_from(Handle::Ne, s, Point::new(350.0, 70.0)),
+            Rect::new(Point::new(100.0, 70.0), Point::new(350.0, 200.0))
+        );
+        // Sw: bottom-left follows; top-right anchored.
+        assert_eq!(
+            resize_from(Handle::Sw, s, Point::new(80.0, 240.0)),
+            Rect::new(Point::new(80.0, 100.0), Point::new(300.0, 240.0))
+        );
+    }
+
+    #[test]
+    fn resize_from_edges_move_one_axis() {
+        let s = sel();
+        // N: only min.y follows.
+        assert_eq!(
+            resize_from(Handle::N, s, Point::new(999.0, 80.0)),
+            Rect::new(Point::new(100.0, 80.0), Point::new(300.0, 200.0)),
+            "N drag must ignore the x coordinate"
+        );
+        assert_eq!(
+            resize_from(Handle::S, s, Point::new(999.0, 260.0)),
+            Rect::new(Point::new(100.0, 100.0), Point::new(300.0, 260.0)),
+            "S drag must ignore the x coordinate"
+        );
+        assert_eq!(
+            resize_from(Handle::W, s, Point::new(60.0, 999.0)),
+            Rect::new(Point::new(60.0, 100.0), Point::new(300.0, 200.0)),
+            "W drag must ignore the y coordinate"
+        );
+        assert_eq!(
+            resize_from(Handle::E, s, Point::new(350.0, 999.0)),
+            Rect::new(Point::new(100.0, 100.0), Point::new(350.0, 200.0)),
+            "E drag must ignore the y coordinate"
+        );
+    }
+
+    #[test]
+    fn moved_rect_translates_preserving_size() {
+        let s = sel();
+        let moved = moved_rect(
+            s,
+            Point::new(200.0, 200.0),
+            Point::new(10.0, 20.0),
+            image_bounds(),
+        );
+        assert_eq!(moved, Rect::from_xywh(190.0, 180.0, 200.0, 100.0));
+    }
+
+    #[test]
+    fn moved_rect_clamps_to_bounds() {
+        let s = sel();
+        let bounds = image_bounds();
+        // Dragging past the top-left corner clamps at (0, 0).
+        assert_eq!(
+            moved_rect(s, Point::new(0.0, 0.0), Point::new(50.0, 50.0), bounds),
+            Rect::from_xywh(0.0, 0.0, 200.0, 100.0),
+            "region must not leave the screen at the top-left"
+        );
+        // Dragging past the bottom-right clamps so max == bounds.max.
+        let moved = moved_rect(s, Point::new(1900.0, 1000.0), Point::new(0.0, 0.0), bounds);
+        assert_eq!(moved.max, Point::new(1920.0, 1080.0));
+        assert_eq!(
+            (moved.width(), moved.height()),
+            (200.0, 100.0),
+            "clamping must preserve size"
+        );
+    }
+
+    #[test]
+    fn gesture_for_press_grabs_handle_first() {
+        assert_eq!(
+            gesture_for_press(Some(sel()), Point::new(100.0, 100.0), Tool::Select, 10.0),
+            Some(Gesture::Resize { handle: Handle::Nw }),
+            "a press on a handle resizes, even though it's inside the rect too"
+        );
+    }
+
+    #[test]
+    fn gesture_for_press_inside_is_move_with_offset() {
+        assert_eq!(
+            gesture_for_press(Some(sel()), Point::new(150.0, 140.0), Tool::Select, 10.0),
+            Some(Gesture::Move {
+                offset: Point::new(50.0, 40.0)
+            }),
+            "interior press grabs at cursor minus selection origin"
+        );
+    }
+
+    #[test]
+    fn gesture_for_press_outside_falls_through() {
+        assert_eq!(
+            gesture_for_press(Some(sel()), Point::new(50.0, 50.0), Tool::Select, 10.0),
+            None,
+            "exterior press starts a fresh selection via the dispatcher"
+        );
+    }
+
+    #[test]
+    fn gesture_for_press_ignores_non_select_tools() {
+        assert_eq!(
+            gesture_for_press(Some(sel()), Point::new(150.0, 140.0), Tool::Rect, 10.0),
+            None,
+            "annotation tools must draw through the dispatcher, not move the region"
+        );
+        assert_eq!(
+            gesture_for_press(Some(sel()), Point::new(100.0, 100.0), Tool::Arrow, 10.0),
+            None,
+            "even a handle press must not grab when a drawing tool is active"
+        );
+    }
+
+    #[test]
+    fn gesture_for_press_without_selection_falls_through() {
+        assert_eq!(
+            gesture_for_press(None, Point::new(150.0, 140.0), Tool::Select, 10.0),
+            None
+        );
+        // Degenerate selections are treated as absent.
+        assert_eq!(
+            gesture_for_press(
+                Some(Rect::from_xywh(10.0, 10.0, 0.5, 0.5)),
+                Point::new(10.0, 10.0),
+                Tool::Select,
+                10.0
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn badge_text_rounds_to_whole_pixels() {
+        assert_eq!(badge_text(800.0, 600.0), "800 × 600");
+        assert_eq!(badge_text(123.6, 45.4), "124 × 45");
+    }
+
+    #[test]
+    fn badge_anchor_sits_above_when_there_is_room() {
+        let panel = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        let sel_l = egui::Rect::from_min_size(egui::pos2(100.0, 200.0), egui::vec2(300.0, 200.0));
+        let (anchor, align) = badge_anchor(sel_l, panel);
+        assert_eq!(anchor, egui::pos2(100.0, 200.0 - BADGE_GAP));
+        assert_eq!(
+            align,
+            egui::Align2::LEFT_BOTTOM,
+            "badge bottom sits at the gap offset"
+        );
+    }
+
+    #[test]
+    fn badge_anchor_flips_below_at_panel_top() {
+        let panel = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1920.0, 1080.0));
+        // Selection hugging the top edge: no room above.
+        let sel_l = egui::Rect::from_min_size(egui::pos2(100.0, 4.0), egui::vec2(300.0, 200.0));
+        let (anchor, align) = badge_anchor(sel_l, panel);
+        assert_eq!(anchor, egui::pos2(100.0, 204.0 + BADGE_GAP));
+        assert_eq!(align, egui::Align2::LEFT_TOP);
+    }
+
+    #[test]
+    fn cursor_for_handle_maps_directions() {
+        assert_eq!(cursor_for_handle(Handle::Nw), egui::CursorIcon::ResizeNwSe);
+        assert_eq!(cursor_for_handle(Handle::Se), egui::CursorIcon::ResizeNwSe);
+        assert_eq!(cursor_for_handle(Handle::Ne), egui::CursorIcon::ResizeNeSw);
+        assert_eq!(cursor_for_handle(Handle::Sw), egui::CursorIcon::ResizeNeSw);
+        assert_eq!(
+            cursor_for_handle(Handle::N),
+            egui::CursorIcon::ResizeVertical
+        );
+        assert_eq!(
+            cursor_for_handle(Handle::S),
+            egui::CursorIcon::ResizeVertical
+        );
+        assert_eq!(
+            cursor_for_handle(Handle::E),
+            egui::CursorIcon::ResizeHorizontal
+        );
+        assert_eq!(
+            cursor_for_handle(Handle::W),
+            egui::CursorIcon::ResizeHorizontal
+        );
+    }
+
+    /// 1920×1080 image-bounds fixture for the move-clamp tests.
+    fn image_bounds() -> Rect {
+        Rect::from_xywh(0.0, 0.0, 1920.0, 1080.0)
     }
 }
