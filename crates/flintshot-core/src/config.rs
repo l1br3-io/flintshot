@@ -73,6 +73,15 @@ pub struct UiConfig {
     /// hold required). Useful for pixel-precise drawing workflows.
     #[serde(default)]
     pub magnifier_always_on: bool,
+    /// How a fresh capture is presented for annotation: `"editor"`
+    /// (separate editor window; default) or `"overlay"` (fullscreen
+    /// frozen-capture overlay, Phase 5). Stored as a free-form string
+    /// like `magnifier-modifier`: the consuming shell parses it and
+    /// falls back to `"editor"` with a `tracing::warn!` on unknown
+    /// values, so a typo never bricks config loading and the user's
+    /// value survives re-saves.
+    #[serde(default = "default_interaction_mode")]
+    pub interaction_mode: String,
 }
 
 impl Default for UiConfig {
@@ -84,6 +93,7 @@ impl Default for UiConfig {
             default_font_size: default_font_size(),
             magnifier_modifier: default_magnifier_modifier(),
             magnifier_always_on: false,
+            interaction_mode: default_interaction_mode(),
         }
     }
 }
@@ -239,6 +249,10 @@ fn default_magnifier_modifier() -> String {
     "Space".into()
 }
 
+fn default_interaction_mode() -> String {
+    "editor".into()
+}
+
 fn default_include_cursor() -> bool {
     true
 }
@@ -385,6 +399,11 @@ impl Config {
                 ui,
                 "magnifier-always-on",
                 toml_edit::Value::from(self.ui.magnifier_always_on),
+            );
+            set_value(
+                ui,
+                "interaction-mode",
+                toml_edit::Value::from(self.ui.interaction_mode.as_str()),
             );
         }
         if let Some(cap) = doc.get_mut("capture").and_then(|i| i.as_table_mut()) {
@@ -791,6 +810,59 @@ include-cursor = true  # hide cursor when capturing presentations
         let back = Config::load_from(&path).unwrap();
         assert_eq!(back.ui.magnifier_modifier, "Alt");
         assert!(back.ui.magnifier_always_on);
+    }
+
+    #[test]
+    fn interaction_mode_defaults_to_editor_when_absent() {
+        let cfg = Config::load_from(&{
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            fs::write(&path, "[ui]\ndefault-color = \"#000000\"\n").unwrap();
+            path
+        })
+        .unwrap();
+        assert_eq!(cfg.ui.interaction_mode, "editor");
+        let d = UiConfig::default();
+        assert_eq!(d.interaction_mode, "editor");
+    }
+
+    #[test]
+    fn interaction_mode_roundtrips_overlay() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.ui.interaction_mode = "overlay".into();
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("interaction-mode = \"overlay\""),
+            "interaction-mode not persisted:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.ui.interaction_mode, "overlay");
+    }
+
+    #[test]
+    fn interaction_mode_unknown_value_loads_verbatim() {
+        // String storage (same policy as magnifier-modifier): an
+        // unknown value must neither break loading nor be rewritten
+        // by a save — the consuming shell warns + falls back instead.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[ui]\ninteraction-mode = \"hologram\"\n").unwrap();
+
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.ui.interaction_mode, "hologram");
+
+        cfg.save_to(&path).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("interaction-mode = \"hologram\""),
+            "save must preserve the user's (unknown) value verbatim:\n{written}"
+        );
     }
 
     #[test]
