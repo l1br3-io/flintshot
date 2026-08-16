@@ -32,6 +32,26 @@
 //! - `Esc` closes as `Cancelled` (clean cancel: no file, no
 //!   clipboard write, no worker).
 //!
+//! ## Output flows (Task 006, plan decision 6)
+//!
+//! **Enter = Copy** (also the ✓ / Copy chips and `Ctrl+C`, which the
+//! dispatcher recognizes and hands back as a `Copy` outcome): the
+//! region is composed selection-aware onto the clipboard and the
+//! overlay closes, publishing `CopiedToClipboard`. Save (`rfd`
+//! dialog), Pin and Upload (temp PNG + detached workers) reuse the
+//! editor window's pipelines with its error policy verbatim — only
+//! Save differs in *crop semantics*, composing selection-aware
+//! because in the overlay the region is what ships (the editor
+//! window's full-image Save contract is untouched).
+//!
+//! The X11 clipboard is **owner-based**: the process that set the
+//! selection must stay alive or the data dies with it. The editor
+//! window solves this by staying open after a copy; the overlay must
+//! *close* on accept, so instead the `arboard::Clipboard` handle is
+//! handed to the shell before close and the process lingers
+//! invisibly past window close holding it (see
+//! `run_overlay_blocking`).
+//!
 //! ## Selection chrome (Task 003)
 //!
 //! The overlay layers Flameshot selection semantics over the
@@ -49,10 +69,6 @@
 //! would leak overlay semantics into every shell (spec §Success
 //! criteria allows exactly this shape of exception).
 //!
-//! The Enter→Copy output pipeline lands in Task 006; until then an
-//! accepted close publishes `Cancelled` with a notice (the same
-//! placeholder pattern Task 001 used for the missing shell).
-//!
 //! ## Floating toolbar (Task 004)
 //!
 //! A compact rail + accept row in a foreground `egui::Area` anchored
@@ -65,8 +81,8 @@
 //! selection exists and no fresh region drag runs, and swallows
 //! pointer presses before chrome interception so chip clicks never
 //! reach the dispatcher; the hover cursor and magnifier stand down
-//! over it. Output pipelines behind the Save / Pin / Upload chips
-//! land in Task 006 — their clicks log a notice until then.
+//! over it. The output chips run the Task 006 pipelines described
+//! above.
 //!
 //! ## Annotation confinement (Task 005)
 //!
@@ -93,11 +109,15 @@
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    render::render, BlurCache, EditorOutcome, EditorState, InputEvent, Key, Modifiers, Point, Rect,
-    Tool,
+    render::render, BlurCache, DispatchOutcome, EditorOutcome, EditorState, InputEvent, Key,
+    Modifiers, Point, Rect, Tool,
 };
 
-use crate::app::{dispatch_text_input, tool_for_key, translate_modifiers, OutcomeSlot};
+use crate::app::{
+    compose_and_write_pin, compose_and_write_upload, copy_to_clipboard, dispatch_text_input,
+    save_region_to_disk, spawn_pin_worker, spawn_upload_worker, tool_for_key, translate_modifiers,
+    ClipboardSlot, OutcomeSlot,
+};
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
 use crate::toolbar::{self, ToolbarAction, TOOLS};
@@ -113,9 +133,9 @@ pub(crate) enum OverlayClose {
     /// `Esc`: cancel — publish `EditorOutcome::Cancelled`, no side
     /// effects.
     Cancel,
-    /// `Enter`: accept. The accept side effect (the copy pipeline)
-    /// lands in Task 006; until then this closes with `Cancelled`
-    /// plus a notice.
+    /// `Enter` / ✓ / Copy chip / `Ctrl+C`: accept — copy the region
+    /// to the clipboard, publish `CopiedToClipboard`, close (the
+    /// Task 006 Enter=Copy pipeline).
     Accept,
 }
 
@@ -514,8 +534,8 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
 /// The floating toolbar's accept row: ✓ accept (Enter semantics) and
 /// ✕ cancel (Esc semantics) lead, then the Save / Pin / Upload
 /// outputs and the ember Copy primary. Copy is Enter-equivalent
-/// (spec: Enter = Copy); the Save / Pin / Upload pipelines land in
-/// Task 006.
+/// (spec: Enter = Copy); the output chips' pipelines are the Task
+/// 006 flows described in the module docs.
 fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>) {
     let mut action = ToolbarAction::None;
     let mut close = None;
@@ -630,6 +650,15 @@ pub(crate) struct OverlayApp {
     /// one frame behind the layout, which is invisible in practice
     /// because egui keeps a new area hidden for its sizing frame.
     toolbar_size: egui::Vec2,
+    /// Clipboard handle kept alive after a copy. The overlay closes
+    /// on accept (unlike the editor window, which stays open), so on
+    /// success the handle is handed to [`Self::clipboard_out`] — the
+    /// shell holds it through the post-close linger, satisfying the
+    /// X11 owner-clipboard rule (plan decision 6).
+    clipboard: Option<arboard::Clipboard>,
+    /// Shell-side receiver for the clipboard handle (see
+    /// [`Self::clipboard`]).
+    clipboard_out: ClipboardSlot,
     /// Outcome slot shared with the shell. X-close (Alt+F4, WM kill)
     /// leaves it `None`, which the shell reads as `Ok(Cancelled)`.
     outcome: OutcomeSlot,
@@ -649,7 +678,12 @@ impl OverlayApp {
     /// editor window's `Tool::Rect` default would instead commit a
     /// rectangle annotation on the first drag, which is not what a
     /// Flameshot user expects).
-    pub(crate) fn new(mut state: EditorState, ctx: &Context, outcome: OutcomeSlot) -> Self {
+    pub(crate) fn new(
+        mut state: EditorState,
+        ctx: &Context,
+        outcome: OutcomeSlot,
+        clipboard_out: ClipboardSlot,
+    ) -> Self {
         state.tool = Tool::Select;
         // Same one-time theme application as `EditorApp::new`: the
         // floating toolbar reuses the editor's chips, so its
@@ -666,27 +700,145 @@ impl OverlayApp {
             magnifier: Magnifier::new(),
             toolbar_rect: None,
             toolbar_size: egui::Vec2::ZERO,
+            clipboard: None,
+            clipboard_out,
             outcome,
         }
     }
 
     /// Publish the outcome for a close decision and tear the window
-    /// down. Accept currently publishes `Cancelled` — the Enter→Copy
-    /// pipeline lands in Task 006 (see the module docs).
-    fn perform_close(&self, ctx: &Context, close: OverlayClose) {
+    /// down. `Esc` publishes `Cancelled` (no side effects, Task
+    /// 002); accept routes through the Enter=Copy pipeline (Task
+    /// 006, plan decision 6).
+    fn perform_close(&mut self, ctx: &Context, close: OverlayClose) {
         match close {
             OverlayClose::Cancel => {
                 tracing::info!("overlay cancelled; no output");
                 *self.outcome.borrow_mut() = Some(Ok(EditorOutcome::Cancelled));
             }
             OverlayClose::Accept => {
-                tracing::info!(
-                    "overlay accepted; the Enter→Copy output flow lands in Phase 5 Task 006"
-                );
-                *self.outcome.borrow_mut() = Some(Ok(EditorOutcome::Cancelled));
+                self.accept_as_copy(ctx);
+                return;
             }
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// The accept pipeline (Enter / ✓ chip / Copy chip / `Ctrl+C`):
+    /// compose the region selection-aware onto the clipboard,
+    /// publish `CopiedToClipboard`, close. A clipboard failure
+    /// publishes `Err` and closes — the editor window's copy-failure
+    /// policy.
+    ///
+    /// The overlay closes immediately (Flameshot Enter semantics);
+    /// the X11 owner-clipboard problem is solved by handing the
+    /// `arboard::Clipboard` handle to the shell's slot — the process
+    /// lingers past window close holding it (see
+    /// `run_overlay_blocking`).
+    fn accept_as_copy(&mut self, ctx: &Context) {
+        match copy_to_clipboard(&self.state, &mut self.clipboard) {
+            Ok(()) => {
+                tracing::info!("overlay accepted; region copied to clipboard");
+                if let Some(handle) = self.clipboard.take() {
+                    *self.clipboard_out.borrow_mut() = Some(handle);
+                }
+                *self.outcome.borrow_mut() = Some(Ok(EditorOutcome::CopiedToClipboard));
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "overlay copy failed; closing overlay session");
+                *self.outcome.borrow_mut() = Some(Err(err));
+            }
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Save chip / `Ctrl+S` handler: `rfd` dialog over a
+    /// selection-aware compose (the region is what ships — Task
+    /// 005's model), publish `Saved(path)` and close on success.
+    /// Dialog-cancel keeps the overlay open; a write failure
+    /// publishes `Err` and closes (the editor window's policy).
+    fn handle_save(&mut self, ctx: &Context) {
+        match save_region_to_disk(&self.state) {
+            Ok(Some(path)) => {
+                tracing::info!(path = %path.display(), "overlay saved");
+                *self.outcome.borrow_mut() = Some(Ok(EditorOutcome::Saved(path)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Ok(None) => {
+                tracing::debug!("save dialog cancelled; staying in overlay");
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "save failed; closing overlay session");
+                *self.outcome.borrow_mut() = Some(Err(err));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Pin chip handler: temp PNG + detached `flintshot pin` worker
+    /// (the editor window's path verbatim — both helpers are already
+    /// selection-aware), publish `Pinned` and close. A **spawn**
+    /// failure is recoverable: log at `error` and leave the overlay
+    /// open so Save / Copy still work; a compose/write failure is
+    /// terminal (publish `Err`, close).
+    fn handle_pin(&mut self, ctx: &Context) {
+        match compose_and_write_pin(&self.state) {
+            Ok(path) => match spawn_pin_worker(&path) {
+                Ok(()) => {
+                    tracing::info!(path = %path.display(), "pinned image; spawned pin worker");
+                    *self.outcome.borrow_mut() = Some(Ok(EditorOutcome::Pinned));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "could not spawn pin worker; overlay stays open"
+                    );
+                }
+            },
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "pin compose/write failed; closing overlay session"
+                );
+                *self.outcome.borrow_mut() = Some(Err(err));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Upload chip handler: temp PNG + detached `flintshot upload`
+    /// worker (the editor window's path verbatim), publish
+    /// `Uploaded(String::new())` — the URL placeholder; the real one
+    /// arrives asynchronously via the daemon event stream — and
+    /// close. Error policy mirrors [`Self::handle_pin`].
+    fn handle_upload(&mut self, ctx: &Context) {
+        match compose_and_write_upload(&self.state) {
+            Ok(path) => match spawn_upload_worker(&path) {
+                Ok(()) => {
+                    tracing::info!(
+                        path = %path.display(),
+                        "upload initiated; spawned upload worker"
+                    );
+                    *self.outcome.borrow_mut() = Some(Ok(EditorOutcome::Uploaded(String::new())));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "could not spawn upload worker; overlay stays open"
+                    );
+                }
+            },
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "upload compose/write failed; closing overlay session"
+                );
+                *self.outcome.borrow_mut() = Some(Err(err));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
     }
 
     /// Pointer dispatch plus the Task 003 chrome interaction: gesture
@@ -893,10 +1045,9 @@ impl OverlayApp {
     /// Act on a floating-toolbar action. History chips replay the
     /// same dispatches a Ctrl+Z / Ctrl+Y keypress would produce (the
     /// editor window's rail handlers, verbatim); Copy is
-    /// Enter-equivalent (the same accept close Enter triggers); the
-    /// Save / Pin / Upload pipelines land in Task 006, so their
-    /// clicks log a notice for now (the Task 002 accept placeholder
-    /// pattern).
+    /// Enter-equivalent (the same accept-copy pipeline Enter
+    /// triggers); Save / Pin / Upload run their output pipelines
+    /// (Task 006) — the editor window's handlers' overlay twins.
     fn apply_toolbar_action(&mut self, ctx: &Context, action: ToolbarAction) {
         match action {
             ToolbarAction::Copy => self.perform_close(ctx, OverlayClose::Accept),
@@ -918,15 +1069,9 @@ impl OverlayApp {
                     },
                 });
             }
-            ToolbarAction::Save => {
-                tracing::info!("overlay Save output lands in Phase 5 Task 006");
-            }
-            ToolbarAction::Pin => {
-                tracing::info!("overlay Pin output lands in Phase 5 Task 006");
-            }
-            ToolbarAction::Upload => {
-                tracing::info!("overlay Upload output lands in Phase 5 Task 006");
-            }
+            ToolbarAction::Save => self.handle_save(ctx),
+            ToolbarAction::Pin => self.handle_pin(ctx),
+            ToolbarAction::Upload => self.handle_upload(ctx),
             ToolbarAction::None => {}
         }
     }
@@ -997,10 +1142,12 @@ impl App for OverlayApp {
             return;
         }
 
-        // History chords through the dispatcher (Ctrl+Z undo,
-        // Ctrl+Shift+Z / Ctrl+Y redo). Ctrl+S / Ctrl+C join when
-        // their output pipelines land (Task 006) — wiring the chords
-        // without the pipelines would silently no-op them.
+        // History + output chords through the dispatcher (Ctrl+Z
+        // undo, Ctrl+Shift+Z / Ctrl+Y redo, Ctrl+S save, Ctrl+C
+        // copy). The dispatcher is the single chord recognizer — the
+        // shell reacts to the returned outcome exactly as
+        // `EditorApp::logic` does; unmodified letters return
+        // `Continue` and fall through to tool selection below.
         let key_event = ctx.input(|i| {
             if i.key_pressed(egui::Key::Z) {
                 Some(InputEvent::Key {
@@ -1012,15 +1159,40 @@ impl App for OverlayApp {
                     key: Key::Char('y'),
                     modifiers,
                 })
+            } else if i.key_pressed(egui::Key::S) {
+                Some(InputEvent::Key {
+                    key: Key::Char('s'),
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::C) {
+                Some(InputEvent::Key {
+                    key: Key::Char('c'),
+                    modifiers,
+                })
             } else {
                 None
             }
         });
         if let Some(event) = key_event {
-            // Undo / redo chords always return `Continue`; the
-            // binding is exhaustive-checked by the compiler against
-            // future outcome variants when Task 006 extends this.
-            let _ = self.state.dispatch_input(&event);
+            // Ctrl+Z / Ctrl+Y (and plain letters) always return
+            // `Continue`; only the Ctrl+S / Ctrl+C chords map to
+            // shell-side pipelines, short-circuiting the rest of the
+            // frame (a Ctrl+S mid-drag pre-empts the pointer-up that
+            // follows — the editor window's ordering). The wildcard
+            // no-op is required (`DispatchOutcome` is
+            // `#[non_exhaustive]`) and covers `Cancel` / `Continue`
+            // / future variants.
+            match self.state.dispatch_input(&event) {
+                DispatchOutcome::Save => {
+                    self.handle_save(ctx);
+                    return;
+                }
+                DispatchOutcome::Copy => {
+                    self.accept_as_copy(ctx);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         // Single-key tool selection (unmodified S R E A L M P T B N),
@@ -1198,6 +1370,7 @@ mod tests {
         let app = OverlayApp::new(
             blank_state(8, 8),
             &egui::Context::default(),
+            Rc::new(RefCell::new(None)),
             Rc::new(RefCell::new(None)),
         );
         assert_eq!(
@@ -1829,5 +2002,51 @@ mod tests {
     /// 1920×1080 image-bounds fixture for the move-clamp tests.
     fn image_bounds() -> Rect {
         Rect::from_xywh(0.0, 0.0, 1920.0, 1080.0)
+    }
+
+    // --- Output chords (Task 006) ---
+    //
+    // The overlay routes Ctrl+S / Ctrl+C through the dispatcher and
+    // reacts to the returned outcome. These tests pin the event
+    // sequences the new key branch emits, so wiring the chords can't
+    // regress single-key tool selection or accidentally trigger an
+    // output.
+
+    fn key(s: &mut EditorState, ch: char, ctrl: bool) -> flintshot_core::DispatchOutcome {
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Char(ch),
+            modifiers: Modifiers {
+                ctrl,
+                ..Modifiers::default()
+            },
+        })
+    }
+
+    #[test]
+    fn ctrl_chords_dispatch_to_save_and_copy() {
+        assert_eq!(
+            key(&mut blank_state(8, 8), 's', true),
+            flintshot_core::DispatchOutcome::Save,
+            "Ctrl+S must ask the shell to save"
+        );
+        assert_eq!(
+            key(&mut blank_state(8, 8), 'c', true),
+            flintshot_core::DispatchOutcome::Copy,
+            "Ctrl+C must ask the shell to copy"
+        );
+    }
+
+    #[test]
+    fn plain_letters_produce_no_output_outcome() {
+        // The same letters flow through the key branch unmodified too
+        // (the tool-switch path consumes them afterwards); the
+        // dispatcher must never read them as output chords.
+        for ch in ['s', 'c', 'z', 'y'] {
+            assert_eq!(
+                key(&mut blank_state(8, 8), ch, false),
+                flintshot_core::DispatchOutcome::Continue,
+                "unmodified {ch} must not trigger an output"
+            );
+        }
     }
 }

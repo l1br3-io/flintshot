@@ -41,6 +41,19 @@ use crate::toolbar::{self, ToolbarAction};
 /// as `Ok(EditorOutcome::Cancelled)` at the read site.
 pub(crate) type OutcomeSlot = Rc<RefCell<Option<flintshot_core::Result<EditorOutcome>>>>;
 
+/// Slot for the `arboard::Clipboard` handle a copy leaves behind,
+/// shared between [`OverlayApp`] (which produces it on accept) and
+/// `run_overlay_blocking` (which holds it through the post-close
+/// linger). Same single-threaded rationale as [`OutcomeSlot`]: the
+/// X11 selection owner must outlive the app (eframe drops the app
+/// when the window closes), so the handle is handed to the shell
+/// before close and kept alive there.
+///
+/// The editor window needs no such slot: its copy keeps the window
+/// (and therefore the app) open, so `EditorApp::clipboard` holds the
+/// selection until the user closes the window themselves.
+pub(crate) type ClipboardSlot = Rc<RefCell<Option<arboard::Clipboard>>>;
+
 /// The eframe app: owns editor state + canvas + cached background
 /// handle, runs `render()` each frame, and translates `Esc` (and any
 /// future shortcut) into an [`EditorOutcome`] that the shell reads
@@ -710,31 +723,81 @@ impl EditorApp {
     }
 }
 
-/// Compose the final image and write it to a user-chosen PNG path.
+/// Prompt for a PNG save path via `rfd`. Blocks on the native modal
+/// — the eframe event loop is already blocking, and the dialog is
+/// what the user is interacting with anyway. `None` when the user
+/// cancels.
+fn prompt_png_path() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("PNG image", &["png"])
+        .set_file_name("flintshot.png")
+        .save_file()
+}
+
+/// Compose the full image and write it to a user-chosen PNG path
+/// (the editor window's Save contract since Phase 1 — selection
+/// output is Copy/Pin/Upload's job there).
 ///
-/// Blocks on `rfd::FileDialog::save_file()` — the eframe event loop
-/// is already blocking, and the native modal is what the user is
-/// interacting with anyway, so there's no UI hitch. Returns
-/// `Ok(None)` when the user cancels the dialog (no file written, no
-/// error); callers should keep the editor open in that case.
+/// Returns `Ok(None)` when the user cancels the dialog (no file
+/// written, no error); callers should keep the editor open in that
+/// case.
 ///
 /// # Errors
 /// Surfaces [`FlintshotError::Image`] if PNG encoding or the
-/// filesystem write fails, or [`FlintshotError::Shell`] if `arboard`
-/// clipboard creation fails (it shouldn't — arboard isn't used here —
-/// but the variant is kept for symmetry with `copy_to_clipboard`).
+/// filesystem write fails.
 fn save_to_disk(state: &EditorState) -> flintshot_core::Result<Option<std::path::PathBuf>> {
-    let path = rfd::FileDialog::new()
-        .add_filter("PNG image", &["png"])
-        .set_file_name("flintshot.png")
-        .save_file();
-    let Some(path) = path else {
+    let Some(path) = prompt_png_path() else {
         return Ok(None);
     };
-    let img = compose_final(state);
-    img.save_with_format(&path, image::ImageFormat::Png)
+    compose_final(state)
+        .save_with_format(&path, image::ImageFormat::Png)
         .map_err(FlintshotError::from)?;
     Ok(Some(path))
+}
+
+/// The overlay's Save (Phase 5 Task 006): like [`save_to_disk`] but
+/// **selection-aware** — the overlay's model is "the region defines
+/// what ships in the output" (Task 005), so a usable selection
+/// saves just the region; without one it saves the full composed
+/// frame (the `Ctrl+S`-before-any-drag case).
+///
+/// Returns `Ok(None)` when the user cancels the dialog.
+///
+/// # Errors
+/// Surfaces [`FlintshotError::Image`] if PNG encoding or the
+/// filesystem write fails.
+pub(crate) fn save_region_to_disk(
+    state: &EditorState,
+) -> flintshot_core::Result<Option<std::path::PathBuf>> {
+    let Some(path) = prompt_png_path() else {
+        return Ok(None);
+    };
+    compose_selection_aware(state)
+        .save_with_format(&path, image::ImageFormat::Png)
+        .map_err(FlintshotError::from)?;
+    Ok(Some(path))
+}
+
+/// Compose the final image honouring an active `Tool::Select`
+/// selection: a non-degenerate selection emits just the selected
+/// region (`compose_final_region`); otherwise the whole composed
+/// image (`compose_final`). Pure / non-mutating.
+///
+/// The single selection-aware compose for every region-defining
+/// output (Copy / Pin / Upload / the Phase 5 overlay's Save), so
+/// "what the user sees outlined" is "what ships", in one place.
+/// The editor window's `Ctrl+S` / Save button deliberately does
+/// **not** use this — its Phase 1 contract saves the full image.
+pub(crate) fn compose_selection_aware(state: &EditorState) -> image::RgbaImage {
+    // The 1.0-px threshold matches the render path's selection-rect
+    // guard (`render::render`) and `EditorState::crop`'s degenerate
+    // no-op; a degenerate selection counts as absent.
+    match state.selection.map(Rect::normalized) {
+        Some(n) if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 => {
+            compose_final_region(state, n)
+        }
+        _ => compose_final(state),
+    }
 }
 
 /// Compose the final image and place it on the system clipboard.
@@ -758,21 +821,13 @@ fn save_to_disk(state: &EditorState) -> flintshot_core::Result<Option<std::path:
 /// Surfaces [`FlintshotError::Shell`] for clipboard-creation or
 /// clipboard-set failures (clipboard occupied by another process,
 /// clipboard daemon unavailable on Linux, etc.).
-fn copy_to_clipboard(
+pub(crate) fn copy_to_clipboard(
     state: &EditorState,
     slot: &mut Option<arboard::Clipboard>,
 ) -> flintshot_core::Result<()> {
     // Selection-aware output: crop the composed image to the active
-    // selection rect when one is present and non-degenerate. The
-    // 1.0-px threshold matches the render path's selection-rect guard
-    // (`render::render`) and `EditorState::crop`'s degenerate no-op,
-    // so "what the user sees outlined" is exactly "what gets copied".
-    let img = match state.selection.map(Rect::normalized) {
-        Some(n) if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 => {
-            compose_final_region(state, n)
-        }
-        _ => compose_final(state),
-    };
+    // selection rect when one is present and non-degenerate.
+    let img = compose_selection_aware(state);
     // Reuse the existing Clipboard handle, or create one if this is
     // the first copy this session.
     let mut clipboard = match slot.take() {
@@ -801,25 +856,11 @@ fn copy_to_clipboard(
     Ok(())
 }
 
-/// Compose the image to pin, honouring an active `Tool::Select`
-/// selection exactly like [`copy_to_clipboard`]: a non-degenerate
-/// selection pins just the selected region; otherwise the whole
-/// composed image is pinned. Pure / non-mutating.
-fn compose_pin_image(state: &EditorState) -> image::RgbaImage {
-    // Same 1.0-px threshold and `Rect::normalized` call as the Copy
-    // path, so "what the user sees outlined" is "what gets pinned".
-    match state.selection.map(Rect::normalized) {
-        Some(n) if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 => {
-            compose_final_region(state, n)
-        }
-        _ => compose_final(state),
-    }
-}
-
-/// Compose the pin image and write it to a temp PNG. Returns the path
-/// the spawned `flintshot pin` worker should read. The file is **left
-/// on disk** — the pin worker opens it once at startup; we never reap
-/// it ourselves (the OS temp reaper handles stale files).
+/// Compose the pin image (selection-aware via
+/// [`compose_selection_aware`]) and write it to a temp PNG. Returns
+/// the path the spawned `flintshot pin` worker should read. The file
+/// is **left on disk** — the pin worker opens it once at startup; we
+/// never reap it ourselves (the OS temp reaper handles stale files).
 ///
 /// Factored out of [`EditorApp::handle_pin`](EditorApp::handle_pin) so
 /// the compose + write path is headless-testable without a display or
@@ -828,9 +869,10 @@ fn compose_pin_image(state: &EditorState) -> image::RgbaImage {
 /// # Errors
 /// Surfaces [`FlintshotError::Image`] if PNG encoding or the
 /// filesystem write fails.
-fn compose_and_write_pin(state: &EditorState) -> flintshot_core::Result<std::path::PathBuf> {
-    let img = compose_pin_image(state);
-    write_pin_tempfile(&img)
+pub(crate) fn compose_and_write_pin(
+    state: &EditorState,
+) -> flintshot_core::Result<std::path::PathBuf> {
+    write_pin_tempfile(&compose_selection_aware(state))
 }
 
 /// Write `img` to a PNG under the OS temp dir with a recognizable,
@@ -868,7 +910,7 @@ fn write_pin_tempfile(img: &image::RgbaImage) -> flintshot_core::Result<std::pat
 /// # Errors
 /// Surfaces [`FlintshotError::Shell`] if the binary can't be resolved,
 /// the child can't be spawned, or the reaper thread can't start.
-fn spawn_pin_worker(path: &std::path::Path) -> flintshot_core::Result<()> {
+pub(crate) fn spawn_pin_worker(path: &std::path::Path) -> flintshot_core::Result<()> {
     let exe = std::env::current_exe().map_err(|e| FlintshotError::Shell {
         detail: format!("resolving current_exe for pin: {e}"),
     })?;
@@ -896,26 +938,11 @@ fn spawn_pin_worker(path: &std::path::Path) -> flintshot_core::Result<()> {
     Ok(())
 }
 
-/// Compose the image to upload, honouring an active `Tool::Select`
-/// selection exactly like [`compose_pin_image`]: a non-degenerate
-/// selection uploads just the selected region; otherwise the whole
-/// composed image is uploaded. Pure / non-mutating.
-fn compose_upload_image(state: &EditorState) -> image::RgbaImage {
-    // Same 1.0-px threshold and `Rect::normalized` call as the Pin /
-    // Copy paths, so "what the user sees outlined" is "what gets
-    // uploaded".
-    match state.selection.map(Rect::normalized) {
-        Some(n) if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 => {
-            compose_final_region(state, n)
-        }
-        _ => compose_final(state),
-    }
-}
-
-/// Compose the upload image and write it to a temp PNG. Returns the
-/// path the spawned `flintshot upload` worker should read. The file is
-/// left on disk — the upload worker opens it once at startup; the OS
-/// temp reaper handles stale files.
+/// Compose the upload image (selection-aware via
+/// [`compose_selection_aware`]) and write it to a temp PNG. Returns
+/// the path the spawned `flintshot upload` worker should read. The
+/// file is left on disk — the upload worker opens it once at startup;
+/// the OS temp reaper handles stale files.
 ///
 /// Factored out of [`EditorApp::handle_upload`](EditorApp::handle_upload)
 /// so the compose + write path is headless-testable without a display,
@@ -924,9 +951,10 @@ fn compose_upload_image(state: &EditorState) -> image::RgbaImage {
 /// # Errors
 /// Surfaces [`FlintshotError::Image`] if PNG encoding or the filesystem
 /// write fails.
-fn compose_and_write_upload(state: &EditorState) -> flintshot_core::Result<std::path::PathBuf> {
-    let img = compose_upload_image(state);
-    write_upload_tempfile(&img)
+pub(crate) fn compose_and_write_upload(
+    state: &EditorState,
+) -> flintshot_core::Result<std::path::PathBuf> {
+    write_upload_tempfile(&compose_selection_aware(state))
 }
 
 /// Write `img` to a PNG under the OS temp dir with a recognizable,
@@ -960,7 +988,7 @@ fn write_upload_tempfile(img: &image::RgbaImage) -> flintshot_core::Result<std::
 /// # Errors
 /// Surfaces [`FlintshotError::Shell`] if the binary can't be resolved,
 /// the child can't be spawned, or the reaper thread can't start.
-fn spawn_upload_worker(path: &std::path::Path) -> flintshot_core::Result<()> {
+pub(crate) fn spawn_upload_worker(path: &std::path::Path) -> flintshot_core::Result<()> {
     let exe = std::env::current_exe().map_err(|e| FlintshotError::Shell {
         detail: format!("resolving current_exe for upload: {e}"),
     })?;
@@ -1266,5 +1294,33 @@ mod tests {
             "selection crops the uploaded image"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Selection-aware compose (Task 006) ---
+
+    #[test]
+    fn compose_selection_aware_without_selection_is_full_image() {
+        let img = compose_selection_aware(&blank_state(10, 8));
+        assert_eq!(img.dimensions(), (10, 8), "no selection → full image");
+    }
+
+    #[test]
+    fn compose_selection_aware_crops_to_usable_selection() {
+        let mut state = blank_state(10, 10);
+        state.selection = Some(Rect::from_xywh(2.0, 3.0, 4.0, 3.0));
+        let img = compose_selection_aware(&state);
+        assert_eq!(img.dimensions(), (4, 3), "selection crops the output");
+    }
+
+    #[test]
+    fn compose_selection_aware_falls_back_on_degenerate_selection() {
+        let mut state = blank_state(10, 8);
+        state.selection = Some(Rect::from_xywh(2.0, 3.0, 0.5, 3.0));
+        let img = compose_selection_aware(&state);
+        assert_eq!(
+            img.dimensions(),
+            (10, 8),
+            "sub-1px selection is degenerate → full image, matching copy/pin/upload"
+        );
     }
 }
