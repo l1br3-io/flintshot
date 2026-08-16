@@ -20,6 +20,23 @@ Categories used below:
 
 ### Added
 
+- Phase 5 Wayland detection + editor-window fallback: the
+  interaction-mode resolution chain is now complete — CLI flag >
+  `[ui] interaction-mode` > platform. On a Wayland session
+  (detected from `WAYLAND_DISPLAY` / `XDG_SESSION_TYPE`, the same
+  signals winit keys off), a config-set `overlay` is demoted to the
+  Phase 1 editor window with an info log naming the fallback —
+  honest UX, never silent — because a fullscreen borderless window
+  cannot reliably be raised above other windows or grab input on
+  all Wayland compositors. The decision log gains a
+  `platform-fallback` source so every capture's resolution is
+  legible. An explicit `--overlay` flag is honored best-effort on
+  Wayland (with a warning naming the risk, documented in
+  `--help`): the fallback protects the default path, not informed
+  overrides. macOS / Windows have no Wayland, so detection is
+  constant false there and the overlay stays available; standalone
+  and daemon-worker captures share the same resolution code
+  (workers inherit the session environment).
 - Phase 5 overlay output flows: the live overlay's outputs now run
   the real pipelines instead of placeholders. `Enter` (also the ✓ /
   Copy chips and `Ctrl+C`) copies the selection-aware region to the
