@@ -104,8 +104,9 @@ help:
     cargo run -- --help
 
 # Start the long-running daemon (tray, hotkeys, IPC server). [Phase 2]
-daemon:
-    cargo run -- daemon
+# Extra args pass through, e.g. `just daemon --replace`.
+daemon *args:
+    cargo run -- daemon {{ args }}
 
 # Capture a region and open the editor. Extra args pass through, e.g.
 #   just region --monitor 1 --delay-ms 500
@@ -117,14 +118,29 @@ region *args:
 fullscreen *args:
     cargo run -- fullscreen {{ args }}
 
+# Print the resolved configuration as TOML to stdout.
+config *args:
+    cargo run -- config {{ args }}
+
 # Open a pin-to-desktop window for an existing image. [Phase 3]
+#   just pin foo.png --at 100,200 --size 800x600
 pin path *args:
     cargo run -- pin {{ path }} {{ args }}
+
+# Open an existing image in the editor (no capture). [Phase 3]
+open path *args:
+    cargo run -- open {{ path }} {{ args }}
 
 # Upload an image to a backend and print the resulting URL. [Phase 4]
 #   just upload foo.png --backend imgur
 upload path *args:
     cargo run -- upload {{ path }} {{ args }}
+
+# Set or clear credentials for an upload backend (OS keychain). [Phase 4]
+#   just auth imgur            # set (hidden prompt; or IMGUR_CLIENT_ID env)
+#   just auth imgur --clear    # remove the stored credential
+auth backend *args:
+    cargo run -- auth {{ backend }} {{ args }}
 
 # --- Dev loop ---
 

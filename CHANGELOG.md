@@ -20,6 +20,11 @@ Categories used below:
 
 ### Added
 
+- `justfile` run-shortcut recipes now cover the full CLI surface:
+  `config`, `open PATH`, and `auth BACKEND` join the existing
+  `region` / `fullscreen` / `pin` / `upload` shortcuts, and `daemon`
+  accepts passthrough args (`just daemon --replace`). All new
+  recipes forward extra args after the fixed positional ones.
 - Phase 5 Wayland detection + editor-window fallback: the
   interaction-mode resolution chain is now complete — CLI flag >
   `[ui] interaction-mode` > platform. On a Wayland session
