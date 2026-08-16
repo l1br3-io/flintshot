@@ -7,5 +7,5 @@
 - [x] 005: All ten annotation tools active inside the selection (rendering clipped to region)
 - [x] 006: Output flows — Enter=Copy, Save, Pin/Upload workers, `EditorOutcome` publication
 - [x] 007: Wayland detection + editor-window fallback (+ force-flag semantics); macOS/Windows pass
-- [ ] 008: Idle-repaint discipline + performance check + polish
+- [x] 008: Idle-repaint discipline + performance check + polish
 - [ ] 009: Docs — ADR-0028 (capture-then-overlay), CHANGELOG, TEST_MATRIX

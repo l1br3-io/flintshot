@@ -105,6 +105,28 @@
 //!   same cut the region-cropped output applies, keeping WYSIWYG. The
 //!   background blit is exempt so the frozen screen outside the
 //!   region stays visible under the dim mask.
+//!
+//! ## Repaint discipline (Task 008)
+//!
+//! The overlay repaints **on demand only**: at rest (pointer parked,
+//! no keys) the process burns no CPU on rendering. This rides on
+//! eframe 0.35's reactive event loop (`ControlFlow::Wait` at idle —
+//! repaints happen on input events, explicit `request_repaint`s, and
+//! egui's own machinery), plus two rules this module upholds:
+//!
+//! 1. **No unconditional repaint requests.** Every state change the
+//!    overlay renders originates from an input event that already
+//!    triggered the frame (pointer/key → dispatcher or chrome
+//!    gesture); construction requests nothing (pinned by test). The
+//!    floating toolbar's appearance transitions are covered by egui's
+//!    `Area` machinery — a new or re-shown area runs an invisible
+//!    sizing pass and egui itself requests the follow-up repaint.
+//! 2. **A repaint is requested exactly when shell-side ui state needs
+//!    one more frame to settle.** The one such site: the toolbar
+//!    anchor runs a frame behind the measured size
+//!    ([`toolbar_anchor`]), so a size change while visible requests a
+//!    single convergence repaint ([`OverlayApp::show_toolbar`]) —
+//!    transition-only, never per frame.
 
 use eframe::App;
 use egui::Context;
@@ -191,10 +213,6 @@ pub(crate) fn to_canvas_physical(pos: egui::Pos2, panel: egui::Rect, ppp: f32) -
 // selection semantics. All are headless-testable; egui value types
 // (`Pos2`, `Align2`, `CursorIcon`) appear only as inert data, never
 // via a live context. Canvas-space helpers operate in the same
-// physical-px space `EditorState` uses; DPI-dependent sizes (handle
-// edge, hit radius) are parameters the caller scales by
-// `pixels_per_point` so affordances stay logical-px sized.
-
 // physical-px space `EditorState` uses; DPI-dependent sizes (handle
 // edge, hit radius) are parameters the caller scales by
 // `pixels_per_point` so affordances stay logical-px sized.
@@ -1033,7 +1051,19 @@ impl OverlayApp {
                     });
             });
         self.toolbar_rect = Some(area.response.rect);
-        self.toolbar_size = area.response.rect.size();
+        let measured = area.response.rect.size();
+        // Repaint discipline (Task 008): the anchor ran one frame
+        // behind the measured size, so a size *change* while visible
+        // (DPI move between monitors, future layout change) needs one
+        // follow-up frame to re-anchor correctly. Requests fire only
+        // on that transition — never per frame — keeping the overlay
+        // idle-quiet at rest. First appearance needs no help: egui
+        // runs a new area's invisible sizing pass and requests the
+        // repaint itself (`containers/area.rs` `visible_last_frame`).
+        if measured != self.toolbar_size {
+            ctx.request_repaint();
+        }
+        self.toolbar_size = measured;
 
         if let Some(close) = close {
             self.perform_close(ctx, close);
@@ -1104,8 +1134,12 @@ impl OverlayApp {
     }
 }
 
-impl App for OverlayApp {
-    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+impl OverlayApp {
+    /// The frame logic, minus eframe's unconstructible `Frame` (both
+    /// `logic`/`ui` ignore it) so the idle-repaint guard can drive
+    /// the real frame loop headlessly (see
+    /// `overlay_idle_frames_request_no_further_repaint`).
+    fn logic_impl(&mut self, ctx: &Context) {
         let modifiers = translate_modifiers(ctx.input(|i| i.modifiers));
 
         // If the user switched tools via the floating toolbar while a
@@ -1220,7 +1254,9 @@ impl App for OverlayApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// The frame paint pass, minus eframe's `Frame` (see
+    /// [`Self::logic_impl`] for why this split exists).
+    fn ui_impl(&mut self, ui: &mut egui::Ui) {
         // Annotation confinement (Task 005): clip the shared render
         // pass's annotation draws to the usable region. Strokes may
         // still be dragged past the edge (the dispatcher sees raw
@@ -1349,6 +1385,16 @@ impl App for OverlayApp {
     }
 }
 
+impl App for OverlayApp {
+    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.logic_impl(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.ui_impl(ui);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1377,6 +1423,108 @@ mod tests {
             app.state.tool,
             Tool::Select,
             "the first drag must draw a selection, not a rect annotation"
+        );
+    }
+
+    #[test]
+    fn overlay_app_construction_requests_no_repaint() {
+        // Repaint discipline (Task 008): constructing the app must not
+        // itself schedule work — the first frame comes from the window
+        // system, later frames from input. A fresh egui context starts
+        // with a built-in `outstanding: 1` ("run a couple of frames at
+        // the start"), so settle it with two empty passes first; a
+        // settled context reports no pending repaint.
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        let _ = ctx.end_pass();
+        ctx.begin_pass(egui::RawInput::default());
+        let _ = ctx.end_pass();
+        assert!(
+            !ctx.has_requested_repaint(),
+            "test fixture: the settled context must start idle"
+        );
+        let _app = OverlayApp::new(
+            blank_state(8, 8),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        assert!(
+            !ctx.has_requested_repaint(),
+            "construction must leave the context idle"
+        );
+    }
+
+    /// One eframe-shaped frame: `logic` then `ui` inside a single
+    /// egui pass, with empty input (no pointer, no keys) and a stable
+    /// screen rect — the idle overlay. `time` advances like eframe's
+    /// clock so anything time-dependent still sees a moving world.
+    fn idle_frame(ctx: &egui::Context, app: &mut OverlayApp, t: f64) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(64.0, 64.0),
+            )),
+            time: Some(t),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+    }
+
+    #[test]
+    fn overlay_idle_frames_request_no_further_repaint() {
+        // The repaint-discipline guard (Task 008): once the overlay's
+        // startup frames are burned (bg texture upload, first layout,
+        // egui's built-in `outstanding: 1`), idle frames must not
+        // request more — a per-frame `request_repaint` anywhere in
+        // `logic_impl`/`ui_impl` would spin the loop at full speed
+        // (spec exit criterion 6: no continuous CPU burn while idle).
+        let ctx = egui::Context::default();
+        let mut app = OverlayApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        for i in 0..6 {
+            idle_frame(&ctx, &mut app, f64::from(i) / 60.0);
+        }
+        assert!(
+            !ctx.has_requested_repaint(),
+            "idle frames must not schedule further repaints"
+        );
+        // And a stationary hover (pointer parked over the fullscreen
+        // panel — the magnifier's every-frame path) must stay quiet
+        // too: painting per frame is fine, *requesting* frames is not.
+        for i in 6..10 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(64.0, 64.0),
+                )),
+                time: Some(f64::from(i) / 60.0),
+                events: vec![egui::Event::PointerMoved(egui::pos2(32.0, 32.0))],
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            });
+        }
+        // egui's designed decay: an event-bearing frame schedules one
+        // extra settle pass (`request_repaint_after(ZERO)` inside
+        // `begin_pass` when input has events), and `repaint_delay`
+        // only resets on the second quiet pass. A true per-frame
+        // requester in our code never goes quiet, so two settle
+        // frames still catch it.
+        idle_frame(&ctx, &mut app, 10.0 / 60.0);
+        idle_frame(&ctx, &mut app, 11.0 / 60.0);
+        assert!(
+            !ctx.has_requested_repaint(),
+            "a parked pointer must not schedule repaints"
         );
     }
 
