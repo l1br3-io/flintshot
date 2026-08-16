@@ -99,7 +99,11 @@ pub struct OutputArgs {
 #[derive(Debug, Args)]
 pub struct InteractionArgs {
     /// Open the fullscreen frozen-capture overlay instead of the
-    /// editor window. Overrides `[ui] interaction-mode`.
+    /// editor window. Overrides `[ui] interaction-mode`. On Wayland
+    /// this is best-effort: the overlay may not raise above other
+    /// windows or receive input on all compositors (a config-set
+    /// `overlay` falls back to the editor window there; the explicit
+    /// flag is honored with a warning).
     #[arg(long, conflicts_with = "editor")]
     pub overlay: bool,
     /// Open the editor window even when `[ui] interaction-mode` is
@@ -168,6 +172,9 @@ enum InteractionSource {
     Flag,
     /// `[ui] interaction-mode` config value.
     Config,
+    /// The platform overrode the config value (Wayland demotes
+    /// `overlay` to the editor window).
+    PlatformFallback,
 }
 
 impl InteractionSource {
@@ -175,24 +182,46 @@ impl InteractionSource {
         match self {
             Self::Flag => "cli-flag",
             Self::Config => "config",
+            Self::PlatformFallback => "platform-fallback",
         }
     }
 }
 
 /// Resolve the interaction mode for a capture: CLI flag >
-/// `[ui] interaction-mode` config value. (Platform fallback —
-/// Wayland → editor — joins the chain in Phase 5 Task 007.)
+/// `[ui] interaction-mode` config value > platform fallback
+/// (Wayland → editor, Phase 5 Task 007).
+///
+/// The force-flag semantics: an explicit `--overlay` on Wayland is
+/// honored best-effort (warned), because the flag is an informed
+/// override — the fallback exists to protect the *default* config
+/// path, not to veto explicit requests. A config-resolved `overlay`
+/// on Wayland is demoted to the editor window with an info log
+/// naming the fallback (spec exit criterion 4).
 fn resolve_interaction_mode(
     cli_flag: Option<InteractionMode>,
     config_value: &str,
+    wayland: bool,
 ) -> (InteractionMode, InteractionSource) {
-    match cli_flag {
-        Some(mode) => (mode, InteractionSource::Flag),
-        None => (
-            InteractionMode::from_config(config_value),
-            InteractionSource::Config,
-        ),
+    let Some(mode) = cli_flag else {
+        let mode = InteractionMode::from_config(config_value);
+        if wayland && mode == InteractionMode::Overlay {
+            tracing::info!(
+                "Wayland session detected; falling back to the editor window \
+                 (a fullscreen overlay cannot reliably raise above other \
+                 windows or grab input on all Wayland compositors)"
+            );
+            return (InteractionMode::Editor, InteractionSource::PlatformFallback);
+        }
+        return (mode, InteractionSource::Config);
+    };
+    if wayland && mode == InteractionMode::Overlay {
+        tracing::warn!(
+            "--overlay on a Wayland session is best-effort: the fullscreen \
+             overlay may not raise above other windows or receive input \
+             on all compositors"
+        );
     }
+    (mode, InteractionSource::Flag)
 }
 
 /// Arguments for `flintshot region`.
@@ -408,9 +437,10 @@ fn capture_and_dispatch(
 }
 
 /// Resolve the interaction mode for a fresh capture (CLI flag >
-/// `[ui] interaction-mode`; platform fallback lands in Task 007), log
-/// the decision, and open the matching shell: the Phase 5 fullscreen
-/// overlay or the Phase 1 editor window.
+/// `[ui] interaction-mode` > platform fallback — see
+/// [`resolve_interaction_mode`]), log the decision, and open the
+/// matching shell: the Phase 5 fullscreen overlay or the Phase 1
+/// editor window.
 fn run_capture_shell(
     img: image::RgbaImage,
     mode: &str,
@@ -426,7 +456,11 @@ fn run_capture_shell(
             Config::default()
         }
     };
-    let (resolved, source) = resolve_interaction_mode(interaction, &cfg.ui.interaction_mode);
+    let (resolved, source) = resolve_interaction_mode(
+        interaction,
+        &cfg.ui.interaction_mode,
+        crate::platform::session_is_wayland(),
+    );
     tracing::info!(
         interaction = resolved.as_str(),
         source = source.as_str(),
@@ -1293,11 +1327,11 @@ mod tests {
     #[test]
     fn resolve_interaction_mode_flag_wins_over_config() {
         assert_eq!(
-            resolve_interaction_mode(Some(InteractionMode::Editor), "overlay"),
+            resolve_interaction_mode(Some(InteractionMode::Editor), "overlay", false),
             (InteractionMode::Editor, InteractionSource::Flag)
         );
         assert_eq!(
-            resolve_interaction_mode(Some(InteractionMode::Overlay), "editor"),
+            resolve_interaction_mode(Some(InteractionMode::Overlay), "editor", false),
             (InteractionMode::Overlay, InteractionSource::Flag)
         );
     }
@@ -1305,11 +1339,11 @@ mod tests {
     #[test]
     fn resolve_interaction_mode_uses_config_when_no_flag() {
         assert_eq!(
-            resolve_interaction_mode(None, "editor"),
+            resolve_interaction_mode(None, "editor", false),
             (InteractionMode::Editor, InteractionSource::Config)
         );
         assert_eq!(
-            resolve_interaction_mode(None, "overlay"),
+            resolve_interaction_mode(None, "overlay", false),
             (InteractionMode::Overlay, InteractionSource::Config)
         );
     }
@@ -1317,8 +1351,59 @@ mod tests {
     #[test]
     fn resolve_interaction_mode_unknown_config_falls_back_to_editor() {
         assert_eq!(
-            resolve_interaction_mode(None, "hologram"),
+            resolve_interaction_mode(None, "hologram", false),
             (InteractionMode::Editor, InteractionSource::Config)
+        );
+    }
+
+    // ── Platform fallback (Phase 5 Task 007) ─────────────────────
+
+    #[test]
+    fn wayland_config_overlay_falls_back_to_editor() {
+        // The spec's honest-UX stance: a fullscreen overlay cannot
+        // reliably raise/grab on all Wayland compositors, so the
+        // config value is demoted with a named-source decision.
+        assert_eq!(
+            resolve_interaction_mode(None, "overlay", true),
+            (InteractionMode::Editor, InteractionSource::PlatformFallback)
+        );
+    }
+
+    #[test]
+    fn wayland_config_editor_stays_config_sourced() {
+        // Wayland would have chosen the editor anyway; no fallback
+        // noise for the mode the platform prefers.
+        assert_eq!(
+            resolve_interaction_mode(None, "editor", true),
+            (InteractionMode::Editor, InteractionSource::Config)
+        );
+    }
+
+    #[test]
+    fn wayland_unknown_config_value_is_from_config_not_platform() {
+        // The unknown-value fallback lives in `from_config`; the
+        // platform leg never sees an overlay to demote.
+        assert_eq!(
+            resolve_interaction_mode(None, "hologram", true),
+            (InteractionMode::Editor, InteractionSource::Config)
+        );
+    }
+
+    #[test]
+    fn wayland_overlay_flag_is_honored_best_effort() {
+        // Force-flag semantics: an explicit --overlay is an informed
+        // override — honored on Wayland (best-effort), not refused.
+        assert_eq!(
+            resolve_interaction_mode(Some(InteractionMode::Overlay), "editor", true),
+            (InteractionMode::Overlay, InteractionSource::Flag)
+        );
+    }
+
+    #[test]
+    fn wayland_editor_flag_stays_flag_sourced() {
+        assert_eq!(
+            resolve_interaction_mode(Some(InteractionMode::Editor), "overlay", true),
+            (InteractionMode::Editor, InteractionSource::Flag)
         );
     }
 
