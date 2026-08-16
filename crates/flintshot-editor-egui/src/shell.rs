@@ -156,6 +156,11 @@ fn run_editor_blocking(state: EditorState) -> flintshot_core::Result<EditorOutco
 /// [`OverlayApp`] running on the same thread; a close without a
 /// published outcome (WM kill, Alt+F4) defaults to
 /// `Ok(EditorOutcome::Cancelled)`.
+///
+/// A copy-close hands the `arboard::Clipboard` handle to
+/// [`linger_for_clipboard`] before returning — the X11
+/// owner-clipboard rule adapted to the overlay's close-on-accept
+/// semantics (plan decision 6).
 fn run_overlay_blocking(state: EditorState) -> flintshot_core::Result<EditorOutcome> {
     let options = NativeOptions {
         viewport: crate::overlay::overlay_viewport(),
@@ -164,9 +169,11 @@ fn run_overlay_blocking(state: EditorState) -> flintshot_core::Result<EditorOutc
 
     let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
     let outcome_for_app = Rc::clone(&outcome);
+    let clipboard: crate::app::ClipboardSlot = Rc::new(RefCell::new(None));
+    let clipboard_for_app = Rc::clone(&clipboard);
 
     let app_creator: AppCreator<'_> = Box::new(move |cc| {
-        let app = OverlayApp::new(state, &cc.egui_ctx, outcome_for_app);
+        let app = OverlayApp::new(state, &cc.egui_ctx, outcome_for_app, clipboard_for_app);
         Ok(Box::new(app))
     });
 
@@ -177,6 +184,7 @@ fn run_overlay_blocking(state: EditorState) -> flintshot_core::Result<EditorOutc
         .borrow_mut()
         .take()
         .unwrap_or(Ok(EditorOutcome::Cancelled));
+    linger_for_clipboard(&clipboard, &resolved);
     resolved
 }
 
@@ -219,4 +227,94 @@ fn run_pin_blocking(
     eframe::run_native(PIN_WINDOW_TITLE, options, app_creator)
         .map_err(|e| eframe_err_to_flintshot(&e))?;
     Ok(())
+}
+
+/// Whether the overlay session's outcome requires holding the
+/// clipboard handle after the window closes. Only a *successful*
+/// copy does: Save / Pin / Upload never touch the clipboard, and
+/// `Cancelled` / `Err` must have no side effects at all.
+///
+/// Pure so the X11 linger policy is unit-testable without a display
+/// (the sleep itself lives in [`linger_for_clipboard`]).
+#[must_use]
+pub(crate) fn clipboard_linger_needed(outcome: &flintshot_core::Result<EditorOutcome>) -> bool {
+    matches!(outcome, Ok(EditorOutcome::CopiedToClipboard))
+}
+
+/// How long `run_overlay_blocking` holds the `arboard::Clipboard`
+/// handle after the window closes, in seconds.
+///
+/// X11's clipboard is owner-based: the process that set the
+/// selection must keep the handle (and itself) alive, or the data
+/// is lost the moment it exits. The editor window solves this by
+/// staying open after a copy; the overlay must close (Flameshot
+/// Enter semantics), so the process instead lingers invisibly for
+/// a bounded grace period — long enough to switch apps and paste,
+/// short enough not to camp on the image's memory forever.
+///
+/// macOS / Windows clipboards are OS-owned (the data survives the
+/// process), so no linger is needed there.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const CLIPBOARD_LINGER_SECS: u64 = 60;
+
+/// macOS / Windows: the OS owns the clipboard contents, so there is
+/// nothing to hold (see the X11 constant's doc for the full story).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const CLIPBOARD_LINGER_SECS: u64 = 0;
+
+/// Hold the overlay session's clipboard handle (if any) for the
+/// linger grace period when the outcome was a copy — the X11
+/// owner-clipboard rule adapted to the overlay's close-on-accept
+/// semantics (plan decision 6). No-op for every other outcome and
+/// when the platform's linger is 0.
+///
+/// Runs *after* the eframe loop returns, so the user never sees the
+/// window linger — only the process does.
+fn linger_for_clipboard(
+    slot: &crate::app::ClipboardSlot,
+    outcome: &flintshot_core::Result<EditorOutcome>,
+) {
+    if !clipboard_linger_needed(outcome) || CLIPBOARD_LINGER_SECS == 0 {
+        return;
+    }
+    // The binding keeps the arboard handle (and the X11 selection
+    // ownership it represents) alive through the sleep.
+    if let Some(_handle) = slot.borrow_mut().take() {
+        tracing::debug!(
+            secs = CLIPBOARD_LINGER_SECS,
+            "holding clipboard ownership after overlay close (X11 owner rule)"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(CLIPBOARD_LINGER_SECS));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linger_required_only_for_successful_copy() {
+        assert!(
+            clipboard_linger_needed(&Ok(EditorOutcome::CopiedToClipboard)),
+            "a copy needs the handle held"
+        );
+    }
+
+    #[test]
+    fn linger_not_required_for_other_outcomes() {
+        for outcome in [
+            Ok(EditorOutcome::Saved(std::path::PathBuf::from("/tmp/x.png"))),
+            Ok(EditorOutcome::Pinned),
+            Ok(EditorOutcome::Uploaded(String::new())),
+            Ok(EditorOutcome::Cancelled),
+            Err(flintshot_core::FlintshotError::Shell {
+                detail: "boom".into(),
+            }),
+        ] {
+            assert!(
+                !clipboard_linger_needed(&outcome),
+                "{outcome:?} must not linger"
+            );
+        }
+    }
 }

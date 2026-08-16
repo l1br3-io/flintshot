@@ -480,8 +480,9 @@ fn run_editor_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Re
 ///
 /// The overlay opens with `Tool::Select` (forced inside
 /// `OverlayApp`), so the first drag draws a region selection;
-/// `Esc` cancels, `Enter` accepts (the accept output pipeline —
-/// copy — lands in Phase 5 Task 006).
+/// `Esc` cancels, `Enter` accepts (Enter = Copy: the annotated
+/// region lands on the clipboard and the overlay closes; the shell
+/// lingers briefly to keep the X11 selection alive).
 #[cfg(feature = "egui")]
 fn run_overlay_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Result<()> {
     let state = state_from_config(img, cfg);

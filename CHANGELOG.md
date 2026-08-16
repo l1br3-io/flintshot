@@ -20,6 +20,21 @@ Categories used below:
 
 ### Added
 
+- Phase 5 overlay output flows: the live overlay's outputs now run
+  the real pipelines instead of placeholders. `Enter` (also the ✓ /
+  Copy chips and `Ctrl+C`) copies the selection-aware region to the
+  clipboard and closes, publishing `CopiedToClipboard`; Save opens
+  the native `rfd` dialog and writes a region-cropped PNG
+  (`Saved(path)`); Pin and Upload write their temp PNG and spawn
+  the same detached workers as the editor window (`Pinned` /
+  `Uploaded`). The X11 owner-clipboard rule is adapted to the
+  overlay's close-on-accept semantics: the process lingers briefly
+  after the window closes, holding the `arboard` handle so the
+  selection survives to paste (60 s on Linux; none on macOS /
+  Windows where the OS owns the clipboard). The three copies of the
+  selection-aware compose (copy / pin / upload) collapsed into one
+  shared `compose_selection_aware`; the editor window's Save keeps
+  its full-image Phase 1 contract and is otherwise untouched.
 - Phase 5 overlay annotation confinement: all ten tools now draw
   inside the selection in the live overlay, Flameshot-style.
   Annotation-tool presses dispatch only when they land inside the
