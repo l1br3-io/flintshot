@@ -166,10 +166,10 @@ impl Magnifier {
 
         // GOTCHA: `load_texture` allocates a fresh GPU buffer + entry
         // in egui's named-texture map each call. The blur path
-        // (`canvas.rs` `draw_image_region`) pays this per-frame-per-blur
-        // and gets away with it because blur regions are few and
-        // static. The magnifier repaints every frame the modifier is
-        // held, so we cache the handle and route updates through `set`,
+        // (`canvas.rs` `draw_image_region`) now sidesteps this via its
+        // content-keyed region-texture cache (Phase 5 Task 008); the
+        // magnifier can't — its pixels change on every pointer event —
+        // so we cache the handle and route updates through `set`,
         // which uploads into the existing buffer.
         let color_image = egui::ColorImage::from_rgba_unmultiplied(
             [sub.width() as usize, sub.height() as usize],

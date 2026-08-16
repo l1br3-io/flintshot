@@ -2,6 +2,9 @@
 //!
 //! [`Canvas`]: flintshot_core::render::Canvas
 
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+
 use flintshot_core::{
     arrow_barbs,
     render::Canvas,
@@ -42,6 +45,33 @@ pub struct EguiCanvas {
     /// [`set_clip`](Self::set_clip). Constrains every draw except
     /// the background blit (Phase 5 overlay's region confinement).
     clip: Option<egui::Rect>,
+    /// Cached textures for [`draw_image_region`](Self::draw_image_region)
+    /// (the blur path), keyed by pixel content. Phase 5 Task 008:
+    /// this path used to re-upload a fresh GPU texture every frame
+    /// per blur — tolerable in the editor window, come due in the
+    /// overlay, whose fullscreen hover magnifier repaints on every
+    /// pointer motion.
+    region_textures: HashMap<RegionTexKey, egui::TextureHandle>,
+    /// Keys drawn this frame; [`bind_painter`](Self::bind_painter)
+    /// evicts unmarked entries, so undrawn blurs (undo, crop) free
+    /// their GPU textures and long sessions can't leak.
+    region_used: HashSet<RegionTexKey>,
+}
+
+/// Identity of a region-blit's pixels: a content hash plus the
+/// dimensions (which factor the byte stream into a width/height).
+/// Deliberately **not** the dest rect or the buffer's address — a
+/// dest-only key serves a stale blur after undo-and-redraw at the
+/// same rect, and an address key breaks when the core `BlurCache`
+/// re-allocates (crop clears it; allocator address reuse would alias
+/// different pixels at the same address). The hash is a read-only
+/// pass over the buffer and still costs far less than the
+/// premultiply+copy+GPU upload it prevents.
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct RegionTexKey {
+    hash: u64,
+    width: u32,
+    height: u32,
 }
 
 impl EguiCanvas {
@@ -55,13 +85,22 @@ impl EguiCanvas {
             painter: None,
             origin: egui::Pos2::ZERO,
             clip: None,
+            region_textures: HashMap::new(),
+            region_used: HashSet::new(),
         }
     }
 
     /// Bind the per-frame [`egui::Painter`]. Called by the shell from
     /// inside its `update()` body; subsequent `draw_*` calls dispatch
     /// through this painter until the next bind.
+    ///
+    /// Also the frame boundary for the region-texture cache: entries
+    /// not drawn since the last bind are evicted here, dropping their
+    /// [`egui::TextureHandle`]s and freeing the GPU textures.
     pub fn bind_painter(&mut self, painter: &egui::Painter) {
+        self.region_textures
+            .retain(|key, _| self.region_used.contains(key));
+        self.region_used.clear();
         self.origin = painter.clip_rect().min;
         self.painter = Some(painter.clone());
     }
@@ -177,8 +216,7 @@ impl Canvas for EguiCanvas {
 
     #[allow(
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "dest.min components are non-negative physical px within image bounds"
+        reason = "image dims are u32; the usize casts are widening on every supported platform"
     )]
     fn draw_image_region(&mut self, img: &image::RgbaImage, dest: Rect) {
         // A 0×0 source image creates a zero-dimension wgpu texture,
@@ -193,21 +231,41 @@ impl Canvas for EguiCanvas {
         let Some(painter) = self.clip_painter() else {
             return;
         };
+        // Content-keyed cache (Phase 5 Task 008): identical pixels
+        // re-blit the existing GPU texture instead of paying the
+        // premultiply+copy of `ColorImage::from_rgba_unmultiplied`
+        // plus a `load_texture` allocation and upload every frame.
+        // The core `BlurCache` hands committed blurs the same buffer
+        // each frame, so this hits for exactly the static case; a
+        // pending (in-flight) blur drag changes content per frame and
+        // misses, uploading fresh — the same behaviour as before, now
+        // without accumulating (the stale entry evicts a frame later).
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        img.as_raw().hash(&mut hasher);
+        let key = RegionTexKey {
+            hash: hasher.finish(),
+            width: img.width(),
+            height: img.height(),
+        };
+        self.region_used.insert(key.clone());
+        let texture = if let Some(handle) = self.region_textures.get(&key) {
+            handle.clone()
+        } else {
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                [img.width() as usize, img.height() as usize],
+                img.as_raw(),
+            );
+            // Unique name per content: egui's texture manager keys by
+            // name, and two different blurs drawn in the same frame
+            // must not clobber each other's entry.
+            let name = format!("flintshot-region-{}", key.hash);
+            let handle = self
+                .ctx
+                .load_texture(name, color_image, egui::TextureOptions::NEAREST);
+            self.region_textures.insert(key.clone(), handle.clone());
+            handle
+        };
         let ppp = self.ppp();
-        // Upload the raw pixels to a uniquely-named texture so multiple
-        // blur annotations in the same frame don't clobber each other
-        // in egui's texture manager. The name incorporates the dest
-        // origin; Phase 1 doesn't cache across frames (re-uploads each
-        // frame), which is acceptable for the small number of blur
-        // annotations a typical screenshot accumulates.
-        let name = format!("flintshot-blur-{}-{}", dest.min.x as u32, dest.min.y as u32);
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [img.width() as usize, img.height() as usize],
-            img.as_raw(),
-        );
-        let texture = self
-            .ctx
-            .load_texture(name, color_image, egui::TextureOptions::NEAREST);
         let dest_rect = to_egui_rect(dest, ppp, self.origin);
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         painter.image(texture.id(), dest_rect, uv, egui::Color32::WHITE);
@@ -591,6 +649,118 @@ mod tests {
                 egui::vec2(100.0, 100.0)
             )],
             "a flipped clip rect must normalize before recording"
+        );
+    }
+
+    // --- Region texture cache (Phase 5 Task 008) ---
+    //
+    // `draw_image_region` (the blur path) must not re-upload identical
+    // pixels every frame. The tests drive the real begin-pass → paint
+    // → end-pass flow a backend runs, so each frame's
+    // `textures_delta` reflects exactly what a GPU integration would
+    // upload / free.
+
+    /// A solid 8×8 RGBA image (all `v`), the stand-in for a cached
+    /// blur buffer.
+    fn region_image(v: u8) -> image::RgbaImage {
+        image::RgbaImage::from_raw(8, 8, vec![v; 8 * 8 * 4]).expect("raw buffer matches w*h*4")
+    }
+
+    /// Run one headless frame that region-blits `draws`, returning the
+    /// frame's texture delta. `bind_painter` runs every frame — the
+    /// same contract both shells uphold — so frame-start eviction is
+    /// exercised exactly as in the apps.
+    fn region_frame(
+        ctx: &egui::Context,
+        canvas: &mut EguiCanvas,
+        draws: &[(image::RgbaImage, Rect)],
+    ) -> egui::TexturesDelta {
+        ctx.begin_pass(egui::RawInput::default());
+        let clip_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        let painter = egui::Painter::new(ctx.clone(), egui::LayerId::debug(), clip_rect);
+        canvas.bind_painter(&painter);
+        for (img, dest) in draws {
+            canvas.draw_image_region(img, *dest);
+        }
+        ctx.end_pass().textures_delta
+    }
+
+    /// Uploads in a delta, excluding the font atlas (`TextureId::default`).
+    fn region_uploads(delta: &egui::TexturesDelta) -> usize {
+        delta
+            .set
+            .iter()
+            .filter(|(id, _)| *id != egui::TextureId::default())
+            .count()
+    }
+
+    #[test]
+    fn identical_blur_regions_are_not_reuploaded() {
+        let ctx = egui::Context::default();
+        let mut canvas = EguiCanvas::new(ctx.clone());
+        let draws = [
+            (region_image(200), Rect::from_xywh(10.0, 10.0, 8.0, 8.0)),
+            (region_image(120), Rect::from_xywh(60.0, 60.0, 8.0, 8.0)),
+        ];
+        let first = region_frame(&ctx, &mut canvas, &draws);
+        assert_eq!(
+            region_uploads(&first),
+            2,
+            "frame 1 uploads one texture per distinct blur"
+        );
+        let second = region_frame(&ctx, &mut canvas, &draws);
+        assert_eq!(
+            region_uploads(&second),
+            0,
+            "frame 2 with identical blurs must upload nothing"
+        );
+    }
+
+    #[test]
+    fn changed_blur_content_is_reuploaded() {
+        let ctx = egui::Context::default();
+        let mut canvas = EguiCanvas::new(ctx.clone());
+        let dest = Rect::from_xywh(10.0, 10.0, 8.0, 8.0);
+        let first = region_frame(&ctx, &mut canvas, &[(region_image(200), dest)]);
+        assert_eq!(region_uploads(&first), 1);
+        // Same dest, same dims, different pixels: a dest-only or
+        // pointer-keyed cache would wrongly reuse the old texture.
+        let second = region_frame(&ctx, &mut canvas, &[(region_image(60), dest)]);
+        assert_eq!(
+            region_uploads(&second),
+            1,
+            "different content at the same dest must re-upload"
+        );
+    }
+
+    #[test]
+    fn undrawn_blur_texture_is_freed() {
+        let ctx = egui::Context::default();
+        let mut canvas = EguiCanvas::new(ctx.clone());
+        let draws = [(region_image(200), Rect::from_xywh(10.0, 10.0, 8.0, 8.0))];
+        let first = region_frame(&ctx, &mut canvas, &draws);
+        assert_eq!(region_uploads(&first), 1);
+        // Eviction runs at bind with the *previous* frame's marks, so a
+        // texture survives one grace frame after its last draw and
+        // frees on the second — a long session can't leak textures.
+        let _ = region_frame(&ctx, &mut canvas, &[]);
+        let second = region_frame(&ctx, &mut canvas, &[]);
+        assert!(
+            !second.free.is_empty(),
+            "an undrawn region texture must free once its grace frame passes"
+        );
+    }
+
+    #[test]
+    fn drawn_blur_texture_is_retained() {
+        let ctx = egui::Context::default();
+        let mut canvas = EguiCanvas::new(ctx.clone());
+        let draws = [(region_image(200), Rect::from_xywh(10.0, 10.0, 8.0, 8.0))];
+        let _ = region_frame(&ctx, &mut canvas, &draws);
+        let second = region_frame(&ctx, &mut canvas, &draws);
+        assert!(
+            second.free.is_empty(),
+            "a still-drawn region texture must not free"
         );
     }
 }

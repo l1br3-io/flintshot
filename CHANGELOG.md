@@ -823,6 +823,19 @@ Categories used below:
 
 ### Fixed
 
+- The editor's blur rendering re-uploaded a fresh GPU texture every
+  frame per blur annotation (admitted Phase 1 debt the overlay's
+  every-pointer-motion repaint cadence made expensive).
+  `EguiCanvas::draw_image_region` now keeps a content-hash-keyed
+  region-texture cache with per-frame liveness eviction at
+  `bind_painter`: committed blurs re-blit an existing texture,
+  changed content misses and uploads as before, and undrawn entries
+  free their GPU memory — so long overlay sessions neither re-upload
+  nor leak. The overlay's on-demand repaint contract is now pinned by
+  tests: construction and idle frames (pointer parked, hover held)
+  request no repaints, and the floating toolbar requests a single
+  convergence repaint only when its measured size changes while
+  visible.
 - `ImageCanvas::draw_ellipse` was a no-op throughout Phase 1 — committed
   ellipses silently dropped from saved/copied PNGs even though they
   rendered correctly in the live editor (a WYSIWYG hole masked because
