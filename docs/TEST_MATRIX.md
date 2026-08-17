@@ -857,7 +857,7 @@ instead.
 
 ### Test script
 
-**1. Mode resolution (rows 1–4).**
+**1. Mode resolution (rows 1–4, 21).**
 
 ```sh
 flintshot region --overlay        # overlay opens (log: mode source "flag")
@@ -869,7 +869,7 @@ flintshot region                  # warn + editor window (fallback)
 flintshot region --overlay --editor   # clap error: mutually exclusive
 ```
 
-**2. Overlay shell (rows 5, 18).**
+**2. Overlay shell (rows 1, 18).**
 
 The overlay opens fullscreen showing the frozen capture. Press `Esc`:
 the process exits 0 with no file written, no clipboard write, and no
@@ -922,11 +922,13 @@ fallback (`RUST_LOG=flintshot=info`). An explicit
 `flintshot region --overlay` is honored best-effort with a warning
 naming the risk — expect compositor-dependent raise/behaviour.
 
-**8. Idle repaint + fullscreen (rows 21–22).**
+**8. Idle repaint + fullscreen (rows 22–23).**
 
 Leave the overlay open, hands off: CPU use drops to ~0 (on-demand
 repaint — no 60 fps burn). Also run `flintshot fullscreen --overlay`:
-same flow with the whole monitor pre-selected as the capture.
+the same overlay flow over the full-monitor frozen capture — the
+region is drawn by the first drag, exactly like `region` (nothing is
+pre-selected).
 
 ### Matrix
 
@@ -954,7 +956,7 @@ same flow with the whole monitor pre-selected as the capture.
 | Wayland: explicit `--overlay` honored best-effort with warning | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 | `--editor` / `interaction-mode = "editor"`: editor window unregressed | | | | | | | | | |
 | Overlay idle CPU ≈ 0 (on-demand repaint, no 60 fps burn)    |    | N/A | N/A | N/A | N/A |    |    |    |    |
-| `flintshot fullscreen --overlay`: same flow, whole monitor  |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| `flintshot fullscreen --overlay`: same overlay flow, full-monitor capture | | N/A | N/A | N/A | N/A |    |    |    |    |
 
 ### Phase 5 known caveats
 
@@ -962,9 +964,9 @@ same flow with the whole monitor pre-selected as the capture.
   behind the overlay — animations stop and anything changing behind
   it is invisible until accept/cancel. This is the price of a
   deterministic, portable, WYSIWYG-by-construction selection surface.
-- **Active monitor only.** The overlay covers the monitor the cursor
-  is on (mirroring `flintshot region`); multi-monitor spanning is
-  deferred.
+- **Primary monitor only.** The overlay captures the monitor `xcap`
+  flags primary (the `flintshot region` default; `--monitor N`
+  overrides); multi-monitor spanning is deferred.
 - **Wayland `--overlay` is best-effort.** A plain fullscreen window
   may not raise above other windows or grab input on every
   compositor; the warning says so. The default path (config-set
