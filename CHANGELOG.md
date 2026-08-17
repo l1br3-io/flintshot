@@ -894,6 +894,16 @@ Categories used below:
 
 ### Notes
 
+- **Phase 5 (Live overlay) shipped 2026-08-17.** All nine tasks
+  complete; exit criteria in
+  `docs/specs/phase-5-live-overlay/spec.md` met (per-task entries
+  above landed with their code). ADR-0028 records the
+  capture-then-overlay decision and the Wayland editor-window
+  fallback that follows from it; `docs/TEST_MATRIX.md` gains the
+  Phase 5 manual section (per-OS overlay flows + Wayland fallback).
+  Spec status flipped to `shipped`. No version tag cut — `0.x.y`
+  remains in effect; the `1.0.0` dogfooding clock (earliest
+  2026-09-14, see `docs/ROADMAP.md`) is unaffected.
 - **Phase 4 deviations from the spec draft** (documented in
   ADR-0025 and `docs/TEST_MATRIX.md` Phase 4 caveats): upload
   *failures* do not reach daemon subscribers (the sketched
