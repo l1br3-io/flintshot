@@ -1,5 +1,7 @@
 ---
-status: draft
+status: shipped
+started: 2026-08-15
+shipped: 2026-08-17
 ---
 
 # Spec — Phase 5: Live overlay

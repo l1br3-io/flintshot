@@ -835,15 +835,146 @@ message: "no capture has been saved yet" }`.
 
 ## Phase 5 — live overlay
 
-> **Not yet implemented.** Rows are forward-looking; do not test until
-> the phase ships.
+### Test setup
+
+```sh
+cargo build --release
+flintshot region --overlay
+```
+
+The overlay is **capture-then-overlay** (ADR-0028): `xcap` grabs the
+screen first, then a fullscreen borderless viewport shows the frozen
+pixels — the desktop is never visible beneath it. All annotation runs
+through the unchanged `EditorState` dispatcher (the same engine as the
+editor window), so tool behaviour is pinned by the ten-tools parity
+test; the rows below verify the *overlay shell* around it.
+
+Overlay-proper rows are **N/A on L2–L5**: on Wayland a fullscreen
+borderless window cannot reliably be raised above other windows or
+grab input, so the overlay is demoted to the Phase 1 editor window
+(logged, never silent). Wayland platforms test the fallback rows
+instead.
+
+### Test script
+
+**1. Mode resolution (rows 1–4).**
+
+```sh
+flintshot region --overlay        # overlay opens (log: mode source "flag")
+flintshot region --editor         # editor window, byte-identical to Phase 1
+# set [ui] interaction-mode = "overlay" in config, then:
+flintshot region                  # overlay opens (log: mode source "config")
+# set interaction-mode = "hologram" (unknown), then:
+flintshot region                  # warn + editor window (fallback)
+flintshot region --overlay --editor   # clap error: mutually exclusive
+```
+
+**2. Overlay shell (rows 5, 18).**
+
+The overlay opens fullscreen showing the frozen capture. Press `Esc`:
+the process exits 0 with no file written, no clipboard write, and no
+worker spawned (check `RUST_LOG=flintshot=info` + paste into an image
+app to confirm nothing changed).
+
+**3. Selection chrome (rows 5–9).**
+
+Drag anywhere → a region selection appears; everything outside dims.
+Hover each of the 8 handles (corners + edge midpoints) → cursor
+changes per direction; drag to resize. Drag inside the region → it
+moves, clamped to the screen edges. Watch the `W × H` badge track the
+live size near the selection (it flips below near the top screen
+edge). Rest the cursor (no modifier) → the pixel-zoom magnifier
+appears; move away → it hides.
+
+**4. Floating toolbar (row 10).**
+
+With a selection present, the two-row toolbar floats below its
+bottom-left; drag the selection near the bottom edge → it flips
+above; near any edge → it clamps into the viewport. It hides during
+fresh region drags and follows resize/move gestures.
+
+**5. Annotation inside the selection (rows 11–12).**
+
+Activate each of the ten tools (chip click or single-key
+`S R E A L M P T B N`) and draw inside the region: strokes are clipped
+at the region edge — exactly where the region-cropped output cuts.
+`Ctrl+Z` / `Ctrl+Y` undo/redo through the toolbar's arrows. Text /
+Number / Blur / Marker render identically to the editor window (the
+parity is test-pinned; this verifies it live).
+
+**6. Outputs (rows 13–17).**
+
+| Action                     | Expected                                                    |
+| -------------------------- | ----------------------------------------------------------- |
+| `Enter` (or ✓ / Copy chip) | region copied to clipboard, overlay closes; paste an image app |
+| Save chip                  | native `rfd` dialog; saved PNG is the region-cropped shot    |
+| Pin chip                   | overlay closes; pin worker floats the region                 |
+| Upload chip                | overlay closes; upload worker → URL notification + clipboard |
+
+With the daemon running, subscribers see the same `Saved` /
+`Pinned` / `Uploaded` events as the editor window produces.
+
+**7. Wayland fallback (rows 19–20).**
+
+With `[ui] interaction-mode = "overlay"` on a Wayland session:
+`flintshot region` opens the **editor window**; the log names the
+fallback (`RUST_LOG=flintshot=info`). An explicit
+`flintshot region --overlay` is honored best-effort with a warning
+naming the risk — expect compositor-dependent raise/behaviour.
+
+**8. Idle repaint + fullscreen (rows 21–22).**
+
+Leave the overlay open, hands off: CPU use drops to ~0 (on-demand
+repaint — no 60 fps burn). Also run `flintshot fullscreen --overlay`:
+same flow with the whole monitor pre-selected as the capture.
+
+### Matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| Hotkey opens transparent fullscreen overlay                 |    | N/A | N/A | N/A | N/A |    |    |    |    |
-| Annotation drawn in overlay matches editor-window output    |    | N/A | N/A | N/A | N/A |    |    |    |    |
-| Cross-monitor selection drag                                |    | N/A | N/A | N/A | N/A |    |    |    |    |
-| Wayland falls back to editor-window cleanly                 | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| `flintshot region --overlay` opens fullscreen frozen-frame overlay | | N/A | N/A | N/A | N/A |    |    |    |    |
+| `[ui] interaction-mode = "overlay"` (no flag) opens overlay |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| Unknown `interaction-mode` value → warn + editor window     |    |    |    |    |    |    |    |    |    |
+| `--overlay --editor` together → clap mutual-exclusion error |    |    |    |    |    |    |    |    |    |
+| Drag draws region; dim mask outside the region              |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| 8 resize handles resize; per-direction resize cursors       |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| Move-drag inside region moves it, clamped to the screen     |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| `W × H` badge tracks live size; flips near the top edge     |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| Magnifier shows on hover (no modifier hold), hides away     |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| Toolbar anchors to selection; flips above / clamps to viewport | | N/A | N/A | N/A | N/A |    |    |    |    |
+| All ten tools annotate inside the selection, clipped at edges |  | N/A | N/A | N/A | N/A |    |    |    |    |
+| Single-key tool switching + `Ctrl+Z`/`Ctrl+Y` work in overlay |  | N/A | N/A | N/A | N/A |    |    |    |    |
+| `Enter` (or ✓ / Copy chip) copies region; paste verified    |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| X11: process lingers ≤60 s post-copy (clipboard owner rule) |    | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| Save chip → `rfd` dialog writes region-cropped PNG          |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| Pin chip → pin worker floats the region                     |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| Upload chip → upload worker; URL notification + clipboard   |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| `Esc` cancels: exit 0, no clipboard/file/worker side effects |   | N/A | N/A | N/A | N/A |    |    |    |    |
+| Wayland: config `overlay` demoted to editor window; log names fallback | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| Wayland: explicit `--overlay` honored best-effort with warning | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| `--editor` / `interaction-mode = "editor"`: editor window unregressed | | | | | | | | | |
+| Overlay idle CPU ≈ 0 (on-demand repaint, no 60 fps burn)    |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| `flintshot fullscreen --overlay`: same flow, whole monitor  |    | N/A | N/A | N/A | N/A |    |    |    |    |
+
+### Phase 5 known caveats
+
+- **Frozen frame (by design, ADR-0028):** the desktop is not live
+  behind the overlay — animations stop and anything changing behind
+  it is invisible until accept/cancel. This is the price of a
+  deterministic, portable, WYSIWYG-by-construction selection surface.
+- **Active monitor only.** The overlay covers the monitor the cursor
+  is on (mirroring `flintshot region`); multi-monitor spanning is
+  deferred.
+- **Wayland `--overlay` is best-effort.** A plain fullscreen window
+  may not raise above other windows or grab input on every
+  compositor; the warning says so. The default path (config-set
+  overlay) is demoted to the editor window instead — honest UX, not a
+  hidden bug.
+- **X11 clipboard linger.** After an accept-with-copy the worker
+  process stays alive up to 60 s holding the `arboard` handle (X11's
+  owner-based clipboard), then exits — `ps` will show it outlive the
+  window close. macOS / Windows own the clipboard at the OS level and
+  exit immediately.
 
 ## Phase 6 — Wayland global hotkeys via portal
 
