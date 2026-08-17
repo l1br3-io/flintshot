@@ -32,7 +32,9 @@ upload) composes against.
 - `xcap` capture runs first, unchanged; `OverlayApp` (a new eframe
   app in `flintshot-editor-egui::overlay`, precedent: the Phase 3 pin
   window's borderless `ViewportBuilder`) opens fullscreen and
-  undecorated over the active monitor, rendering the frozen capture
+  undecorated over the captured monitor (primary by default,
+  `--monitor N` to override — the `flintshot region` default),
+  rendering the frozen capture
   through the same shared `render()` path as the editor window.
 - The overlay is a *shell*, not a second editor: all input translates
   to `InputEvent`s and drives the unchanged `EditorState` dispatcher;
@@ -72,11 +74,13 @@ upload) composes against.
   menus/tooltips that vanish on capture are frozen *in* the shot,
   which is usually the desired outcome.
 - One capture's worth of latency is paid before the overlay appears;
-  the overlay itself must open in <200 ms beyond capture cost (met —
-  the frozen frame is a single cached texture blit).
-- Multi-monitor spanning is deferred: the overlay covers the active
-  monitor only, mirroring the `flintshot region` default. Spanning
-  windows are a future effort.
+  the overlay itself must open in <200 ms beyond capture cost —
+  achievable by construction because the frozen frame is a single
+  cached-texture blit (formal measurement deferred to the `1.0.0`
+  dogfooding window).
+- Multi-monitor spanning is deferred: the overlay covers the
+  primary monitor only (the `flintshot region` default;
+  `--monitor N` overrides). Spanning windows are a future effort.
 - Wayland users get the editor window until a layer-shell effort
   exists (post-1.0 candidate). The fallback is logged, never silent —
   "honest UX, not a hidden bug".
