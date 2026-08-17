@@ -6,10 +6,11 @@ status-flipped in place when shipped). For the narrative "why", see
 [`VISION.md`](VISION.md); for decision rationale, see
 [`adrs/`](adrs/).
 
-**CURRENT MILESTONE: Phase 5 — Live overlay** (upload shipped
-2026-08-15; see [`specs/phase-4-upload/`](specs/phase-4-upload/)).
-With Phase 4 landed, the `1.0.0` clock starts: tag once we have 30
-days of dogfooding (earliest 2026-09-14).
+**CURRENT MILESTONE: Phase 6 — Wayland global hotkeys via `ashpd`**
+(live overlay shipped 2026-08-17; see
+[`specs/phase-5-live-overlay/`](specs/phase-5-live-overlay/)).
+With Phase 4 landed, the `1.0.0` clock is running: tag once we have
+30 days of dogfooding (earliest 2026-09-14).
 
 ## Milestones
 
@@ -22,8 +23,8 @@ days of dogfooding (earliest 2026-09-14).
 | Phase 3 — Pin-to-desktop                       | Shipped       |
 | Phase 3b — COSMIC panel applet                 | Shipped       |
 | Phase 4 — Upload                               | Shipped       |
-| Phase 5 — Live overlay (Flameshot-style)       | **Next**      |
-| Phase 6 — Wayland global hotkeys via `ashpd`   | Planned       |
+| Phase 5 — Live overlay (Flameshot-style)       | Shipped       |
+| Phase 6 — Wayland global hotkeys via `ashpd`   | **Next**      |
 
 ## Versioning
 
