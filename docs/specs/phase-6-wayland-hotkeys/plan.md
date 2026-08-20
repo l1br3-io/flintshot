@@ -44,7 +44,7 @@ unaffected.
 ## Task Index
 
 ### Phase 1: Contract + session (high risk, early)
-- [ ] Task 1: IPC contract `Request::BindShortcuts` + `flintshot hotkeys bind` CLI → `tasks/001-ipc-bind-contract.md`
+- [x] Task 1: IPC contract `Request::BindShortcuts` + `flintshot hotkeys bind` CLI → `tasks/001-ipc-bind-contract.md`
 - [ ] Task 2: Portal session — silent attach, activation dispatch, Wayland selection, fallback classification → `tasks/002-portal-session.md`
 
 ### Checkpoint: First end-to-end fire (after Tasks 1–2)

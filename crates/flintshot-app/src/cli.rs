@@ -53,6 +53,8 @@ pub enum Command {
     Upload(UploadArgs),
     /// Set or clear credentials for an upload backend. [Phase 4]
     Auth(AuthArgs),
+    /// Manage global hotkeys (bind via the Wayland portal). [Phase 6]
+    Hotkeys(HotkeysArgs),
 }
 
 /// Arguments for `flintshot daemon`.
@@ -298,6 +300,22 @@ pub struct AuthArgs {
 pub struct OpenArgs {
     /// Path to the image file to open in the editor.
     pub path: PathBuf,
+}
+
+/// Arguments for `flintshot hotkeys`.
+#[derive(Debug, Args)]
+pub struct HotkeysArgs {
+    #[command(subcommand)]
+    pub command: HotkeysCommand,
+}
+
+/// `flintshot hotkeys` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum HotkeysCommand {
+    /// Open the global-shortcuts bind dialog via the running daemon's
+    /// portal session (Wayland). X11/macOS/Windows hotkeys come from
+    /// `[hotkeys]` config and need no bind step.
+    Bind,
 }
 
 /// `flintshot daemon` — Phase 2.
@@ -1104,6 +1122,39 @@ fn read_client_id() -> Result<String> {
     }
 }
 
+/// `flintshot hotkeys` — Phase 6. Dispatches to the hotkeys
+/// subcommand.
+pub fn run_hotkeys(args: &HotkeysArgs) -> Result<()> {
+    match args.command {
+        HotkeysCommand::Bind => run_hotkeys_bind(),
+    }
+}
+
+/// `flintshot hotkeys bind` — ask the running daemon to open the
+/// xdg-desktop-portal `GlobalShortcuts` bind dialog (with the daemon's
+/// `[hotkeys]` chords as suggestions). Binding must happen in the
+/// daemon's portal session — portal bindings belong to the session
+/// that bound them — so with no daemon running this errors clearly
+/// instead of trying to bind standalone.
+fn run_hotkeys_bind() -> Result<()> {
+    run_hotkeys_bind_at(None)
+}
+
+/// Testable seam for [`run_hotkeys_bind`]: send the bind request
+/// against an explicit socket path.
+fn run_hotkeys_bind_at(override_path: Option<&std::path::Path>) -> Result<()> {
+    match crate::ipc_client::delegate_to(override_path, &Request::BindShortcuts) {
+        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {
+            eprintln!("Bind request sent; choose the shortcuts in the portal dialog.");
+            Ok(())
+        }
+        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => Err(color_eyre::eyre::eyre!(
+            "no running daemon; start `flintshot daemon` first"
+        )),
+        Err(e) => Err(e.wrap_err("sending hotkeys bind request to the daemon")),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::float_cmp, reason = "exact pixel coords, no arithmetic error")]
 mod tests {
@@ -1320,6 +1371,44 @@ mod tests {
             }
             other => panic!("expected Auth, got {other:?}"),
         }
+    }
+
+    // ── Hotkeys bind (Phase 6 Task 001) ──────────────────────────
+
+    #[test]
+    fn hotkeys_bind_parses() {
+        let cli = Cli::parse_from(["flintshot", "hotkeys", "bind"]);
+        match cli.command {
+            Some(Command::Hotkeys(args)) => match args.command {
+                HotkeysCommand::Bind => {}
+            },
+            other => panic!("expected Hotkeys, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hotkeys_without_subcommand_is_rejected() {
+        // `flintshot hotkeys` alone must not silently do nothing.
+        let err = Cli::try_parse_from(["flintshot", "hotkeys"]).expect_err("needs a subcommand");
+        assert!(
+            err.to_string().to_lowercase().contains("subcommand"),
+            "expected a subcommand-required error, got: {err}"
+        );
+    }
+
+    /// No daemon → the exact actionable error from the spec, not a raw
+    /// connect error. Uses an explicit socket path so the test never
+    /// touches a real daemon's socket.
+    #[test]
+    fn hotkeys_bind_without_daemon_errors_with_start_daemon_hint() {
+        let err = run_hotkeys_bind_at(Some(std::path::Path::new(
+            "/this/does/not/exist/flintshot-test-bind.sock",
+        )))
+        .expect_err("absent socket must error");
+        assert_eq!(
+            err.to_string(),
+            "no running daemon; start `flintshot daemon` first"
+        );
     }
 
     // ── Interaction mode (Phase 5 Task 001) ──────────────────────
