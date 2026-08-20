@@ -1,10 +1,13 @@
 //! Global hotkey registration from `[hotkeys]` config.
 //!
 //! X11/macOS/Windows only — `global-hotkey` has no Wayland backend, so
-//! on Wayland the daemon logs the compositor-keybind workaround and the
-//! `[hotkeys]` section is simply unused. Chord strings use
-//! `global-hotkey`'s accelerator format (`"Ctrl+Shift+Print"`), parsed
-//! via [`global_hotkey::hotkey::HotKey`]'s `FromStr`.
+//! on a Wayland session the daemon never builds this registry at all:
+//! the xdg-desktop-portal session in [`crate::hotkeys_portal`] owns
+//! hotkeys there, and this module's compositor-keybind notice below
+//! only fires when the manager fails on a non-Wayland session
+//! (e.g. a headless X11 box). Chord strings use `global-hotkey`'s
+//! accelerator format (`"Ctrl+Shift+Print"`), parsed via
+//! [`global_hotkey::hotkey::HotKey`]'s `FromStr`.
 //!
 //! Fires are dispatched by the daemon's main loop (same worker path as
 //! tray clicks and IPC requests) — this module only owns registration +
@@ -82,7 +85,11 @@ impl HotkeyRegistry {
         }
     }
 
-    fn empty() -> Self {
+    /// An empty registry: no manager, no lookups. The Wayland daemon
+    /// path starts here — the portal session (`hotkeys_portal`) owns
+    /// hotkeys instead, and `global-hotkey` X11 grabs are skipped
+    /// entirely (under `XWayland` they can register-but-never-fire).
+    pub(crate) fn empty() -> Self {
         Self {
             manager: None,
             by_id: HashMap::new(),
