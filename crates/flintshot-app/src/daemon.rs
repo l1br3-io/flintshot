@@ -72,6 +72,12 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     //    subscriber bus is shared between the IPC server (tokio side)
     //    and the tray/hotkey dispatch (main loop), so a capture started
     //    from any source reaches every subscriber.
+    //
+    //    Hotkey backend is display-server-dependent (portal-first on
+    //    Wayland: XWayland X11 grabs can register-but-never-fire, so
+    //    they are skipped entirely there; the portal session runs on
+    //    the tokio side instead — see hotkeys_portal).
+    let wayland = crate::platform::session_is_wayland();
     let bus = crate::ipc_server::SubscriberBus::new();
     let state = crate::worker::DispatchState::new();
     let (tx, rx) = mpsc::channel::<()>();
@@ -80,7 +86,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         .spawn({
             let bus = bus.clone();
             let state = state.clone();
-            move || run_tokio_side(tx, bus, state)
+            move || run_tokio_side(tx, bus, state, wayland)
         })
         .map_err(|e| eyre::eyre!("spawning tokio side thread: {e}"))?;
 
@@ -96,7 +102,12 @@ pub fn run(replace: bool) -> eyre::Result<()> {
             None
         }
     };
-    let hotkey_registry = crate::hotkeys::HotkeyRegistry::from_config(&config.hotkeys);
+    let hotkey_registry = if wayland {
+        tracing::info!("Wayland session: global hotkeys via xdg-desktop-portal GlobalShortcuts");
+        crate::hotkeys::HotkeyRegistry::empty()
+    } else {
+        crate::hotkeys::HotkeyRegistry::from_config(&config.hotkeys)
+    };
 
     // Start the config hot-reload watcher (best-effort — a missing
     // config dir or notify failure just means no hot-reload).
@@ -308,6 +319,7 @@ fn run_tokio_side(
     tx: mpsc::Sender<()>,
     bus: crate::ipc_server::SubscriberBus,
     state: crate::worker::DispatchState,
+    wayland: bool,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -321,6 +333,17 @@ fn run_tokio_side(
     };
 
     runtime.block_on(async move {
+        // Wayland: portal GlobalShortcuts session (replaces X11
+        // global-hotkey grabs). Runs as its own task for the daemon's
+        // lifetime; startup failures are classified + logged inside
+        // (non-fatal). Dropped — closing the portal session with it —
+        // when the runtime shuts down.
+        if wayland {
+            let portal_bus = bus.clone();
+            let portal_state = state.clone();
+            tokio::spawn(crate::hotkeys_portal::run(portal_bus, portal_state));
+        }
+
         // Bind the IPC server inside the reactor, sharing the daemon's
         // bus so tray/hotkey-initiated captures reach IPC subscribers.
         let (serve_handle, shutdown) =

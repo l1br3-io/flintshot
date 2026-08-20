@@ -9,6 +9,7 @@ mod cli;
 mod config_watcher;
 mod daemon;
 mod hotkeys;
+mod hotkeys_portal;
 mod ipc_client;
 mod ipc_server;
 mod platform;

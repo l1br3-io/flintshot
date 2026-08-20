@@ -27,7 +27,28 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
     "use global_hotkey",
     "use tray_icon",
     "use notify",
+    // Phase 6: the xdg-desktop-portal client lives in flintshot-app;
+    // core stays portal-free (plan: Wayland hotkeys via ashpd).
+    "use ashpd",
 ];
+
+/// The deny-list must actually flag a matching line for every prefix —
+/// a regression guard for future additions that would otherwise never be
+/// exercised until core really imports the crate.
+#[test]
+fn every_forbidden_prefix_flags_a_matching_use_line() {
+    for prefix in FORBIDDEN_PREFIXES {
+        let line = format!("{prefix}::example::Thing;");
+        assert!(
+            line.trim_start().starts_with(prefix),
+            "deny-list prefix {prefix:?} does not flag its own use line"
+        );
+    }
+    assert!(
+        FORBIDDEN_PREFIXES.contains(&"use ashpd"),
+        "Phase 6 added ashpd to flintshot-app; core must deny it too"
+    );
+}
 
 #[test]
 fn no_gui_toolkit_imports_in_core_src() {

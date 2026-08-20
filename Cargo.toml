@@ -22,11 +22,17 @@ flintshot-core = { path = "crates/flintshot-core", version = "0.0.0" }
 flintshot-editor-egui = { path = "crates/flintshot-editor-egui", version = "0.0.0" }
 
 arboard = { version = "3", default-features = false }
+# default-features = false + tokio: ashpd's defaults pull the async-io
+# zbus backend, which would clash with the daemon's tokio runtime.
+# global_shortcuts is the Phase 6 portal interface. zbus is pure Rust,
+# so this adds no system deps (CI stays green unchanged).
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts"] }
 clap = { version = "4.5", features = ["derive"] }
 color-eyre = "0.6"
 dirs = "6"
 eframe = "0.35"
 egui = "0.35"
+futures-util = "0.3"
 global-hotkey = "0.8"
 gtk = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

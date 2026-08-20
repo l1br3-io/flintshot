@@ -20,6 +20,21 @@ Categories used below:
 
 ### Added
 
+- Wayland global hotkeys via the xdg-desktop-portal
+  `GlobalShortcuts` interface (`ashpd`): on a Wayland session the
+  daemon is now portal-first — it skips `global-hotkey` X11 grabs
+  entirely (under `XWayland` those can register-but-never-fire) and
+  instead attaches silently to whatever shortcuts the portal already
+  has bound under the stable ids `region` / `fullscreen`, dispatching
+  activations through the same worker path as IPC and tray. Portal
+  startup failures are classified (no session bus / portal frontend
+  missing / interface too old) and logged as non-fatal notices naming
+  the compositor-keybind workaround. Non-Wayland sessions keep the
+  existing `global-hotkey` registration unchanged.
+- `flintshot hotkeys bind` subcommand (Phase 6, Task 001): sends
+  `Request::BindShortcuts` over IPC to the daemon, which will drive
+  the portal bind dialog once Task 003 wires the interception (today
+  the daemon reports the request as unsupported until then).
 - `justfile` run-shortcut recipes now cover the full CLI surface:
   `config`, `open PATH`, and `auth BACKEND` join the existing
   `region` / `fullscreen` / `pin` / `upload` shortcuts, and `daemon`
