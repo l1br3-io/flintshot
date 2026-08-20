@@ -8,21 +8,29 @@
 //! (see ADR-0018's bridge; activations dispatch through the same
 //! `worker::dispatch` table the IPC server uses on that thread).
 //!
-//! Binding is user-initiated (`flintshot hotkeys bind`, Task 003).
-//! Startup is a *silent attach*: `list_shortcuts` reports whatever the
-//! portal already has bound under our ids — no dialog at daemon start.
+//! Binding is user-initiated (`flintshot hotkeys bind` over IPC, or
+//! the tray's *Bind shortcuts…* item — Task 004). Startup is a
+//! *silent attach*: `list_shortcuts` reports whatever the portal
+//! already has bound under our ids — no dialog at daemon start.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ashpd::desktop::global_shortcuts::{
     BindShortcutsOptions, GlobalShortcuts, ListShortcutsOptions, NewShortcut, Shortcut,
 };
 use ashpd::desktop::CreateSessionOptions;
 use futures_util::StreamExt;
+use tokio::sync::Notify;
 
 use crate::ipc_server::SubscriberBus;
 use crate::worker::DispatchState;
 use flintshot_core::ipc::{Request, ShortcutBinding};
+
+/// The daemon's live `[hotkeys]` section: written by the main loop on
+/// config hot-reload, read here at bind time so the dialog always
+/// suggests the chords the config file has *right now* (see
+/// `daemon::apply_wayland_hotkey_reload`).
+pub(crate) type SharedHotkeys = Arc<Mutex<flintshot_core::HotkeyConfig>>;
 
 /// Stable portal shortcut id for region capture. The same string is
 /// used as the `BindShortcuts` id (Task 003), so re-binds keep
@@ -247,10 +255,16 @@ pub(crate) fn classify_failure(stage: PortalStage, error: &str) -> FallbackKind 
 /// the background. Bind requests sent before startup finishes simply
 /// wait in the channel until the task reaches its command loop (or,
 /// if startup failed, receive the classified failure).
+///
+/// `bind_requested` is the tray's trigger: `notify_waiters()` on it
+/// (sync-callable from the daemon's main thread) runs the same bind
+/// path as `Request::BindShortcuts`, minus the reply channel — the
+/// outcome only lands in the log.
 pub(crate) fn start(
     bus: SubscriberBus,
     state: DispatchState,
-    hotkeys: flintshot_core::HotkeyConfig,
+    hotkeys: SharedHotkeys,
+    bind_requested: Arc<Notify>,
 ) -> PortalHandle {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let unavailable = Arc::new(std::sync::Mutex::new(None));
@@ -258,16 +272,25 @@ pub(crate) fn start(
         tx,
         unavailable: Arc::clone(&unavailable),
     };
-    tokio::spawn(session_task(bus, state, hotkeys, rx, unavailable));
+    tokio::spawn(session_task(
+        bus,
+        state,
+        hotkeys,
+        bind_requested,
+        rx,
+        unavailable,
+    ));
     handle
 }
 
 /// The portal session task behind [`start`]: startup (silent attach)
-/// then a select loop over activations and bind commands.
+/// then a select loop over activations, `ShortcutsChanged`, bind
+/// commands, and the tray's bind trigger.
 async fn session_task(
     bus: SubscriberBus,
     state: DispatchState,
-    hotkeys: flintshot_core::HotkeyConfig,
+    hotkeys: SharedHotkeys,
+    bind_requested: Arc<Notify>,
     mut cmds: tokio::sync::mpsc::UnboundedReceiver<PortalCmd>,
     unavailable: Arc<std::sync::Mutex<Option<BindFailure>>>,
 ) {
@@ -310,15 +333,34 @@ async fn session_task(
         Ok(stream) => stream,
         Err(e) => return abort(&unavailable, &mut cmds, PortalStage::Attach, &e),
     };
+    // Re-binds done outside flintshot (the compositor's own settings
+    // UI) arrive here; consumed below to keep the logged binding set
+    // honest. Dispatch needs no refresh: ids are stable, and the
+    // portal only emits `Activated` for shortcuts that are bound.
+    let mut changed = match shortcuts.receive_shortcuts_changed().await {
+        Ok(stream) => stream,
+        Err(e) => return abort(&unavailable, &mut cmds, PortalStage::Attach, &e),
+    };
     loop {
         tokio::select! {
             event = activated.next() => {
                 let Some(event) = event else { break };
                 dispatch_activation(&bus, &state, event.shortcut_id());
             }
+            event = changed.next() => {
+                let Some(event) = event else { break };
+                log_shortcuts_changed(event.shortcuts());
+            }
             cmd = cmds.recv() => {
                 let Some(PortalCmd::Bind { reply }) = cmd else { break };
-                do_bind(&shortcuts, &session, &hotkeys, reply).await;
+                let result = do_bind(&shortcuts, &session, &hotkeys).await;
+                let _ = reply.send(result);
+            }
+            // Tray "Bind shortcuts…": same dialog as the IPC path,
+            // outcome logged instead of replied.
+            () = bind_requested.notified() => {
+                tracing::info!("bind requested from the tray; opening portal bind dialog");
+                log_tray_bind(do_bind(&shortcuts, &session, &hotkeys).await);
             }
         }
     }
@@ -368,18 +410,24 @@ fn abort(
 }
 
 /// Run the user-initiated bind: open the portal dialog with one
-/// `NewShortcut` per capture id, `[hotkeys]` chords as *suggested*
+/// `NewShortcut` per capture id, the *current* `[hotkeys]` chords (the
+/// daemon keeps the shared copy fresh on config edits) as *suggested*
 /// bindings (converted; a chord with no portal form degrades to "no
 /// suggestion" at warn). Awaiting the response blocks until the user
-/// closes the dialog; the reply then carries what the user actually
+/// closes the dialog; the caller then receives what the user actually
 /// chose (suggestions are not authority). A repeat bind on the same
 /// session replaces the bindings — the portal treats it as a re-bind.
 async fn do_bind(
     shortcuts: &GlobalShortcuts,
     session: &ashpd::desktop::Session<GlobalShortcuts>,
-    hotkeys: &flintshot_core::HotkeyConfig,
-    reply: tokio::sync::oneshot::Sender<Result<Vec<ShortcutBinding>, BindFailure>>,
-) {
+    hotkeys: &SharedHotkeys,
+) -> Result<Vec<ShortcutBinding>, BindFailure> {
+    // Clone out under a short lock — never held across the dialog
+    // await (clippy::await_holding_lock).
+    let hotkeys = hotkeys
+        .lock()
+        .expect("hotkeys config mutex poisoned")
+        .clone();
     let to_bind = vec![
         suggested_shortcut(REGION_ID, "Capture region", &hotkeys.region),
         suggested_shortcut(FULLSCREEN_ID, "Capture fullscreen", &hotkeys.fullscreen),
@@ -404,13 +452,27 @@ async fn do_bind(
             for b in &bindings {
                 tracing::info!(id = %b.id, trigger = %b.trigger, "portal shortcut bound");
             }
-            let _ = reply.send(Ok(bindings));
+            Ok(bindings)
         }
-        Err(e) => {
-            let _ = reply.send(Err(BindFailure {
-                code: bind_failure_code_for_display(&e.to_string()).into(),
-                message: e.to_string(),
-            }));
+        Err(e) => Err(BindFailure {
+            code: bind_failure_code_for_display(&e.to_string()).into(),
+            message: e.to_string(),
+        }),
+    }
+}
+
+/// Tray-initiated bind outcome: success and dismissal are both normal
+/// user endings (`info`); anything else is a real failure (`warn`).
+fn log_tray_bind(result: Result<Vec<ShortcutBinding>, BindFailure>) {
+    match result {
+        Ok(bindings) => {
+            tracing::info!(count = bindings.len(), "portal bind finished (tray)");
+        }
+        Err(failure) if failure.code == "bind-cancelled" => {
+            tracing::info!("portal bind dialog dismissed (tray)");
+        }
+        Err(failure) => {
+            tracing::warn!(code = %failure.code, error = %failure.message, "portal bind failed (tray)");
         }
     }
 }
@@ -536,20 +598,45 @@ impl PortalHandle {
     }
 }
 
-/// Log the bound-shortcut set from the silent attach: only our ids
-/// matter; anything else bound in the session is left alone.
-fn log_bound_shortcuts(shortcuts: &[Shortcut]) {
-    let bound: Vec<String> = shortcuts
+/// Our ids from a portal shortcut list, as `"id=trigger"` pairs.
+/// Only our ids matter; anything else bound in the session is left
+/// alone.
+fn our_bound_set(shortcuts: &[Shortcut]) -> Vec<String> {
+    shortcuts
         .iter()
         .filter(|s| request_for_shortcut_id(s.id()).is_some())
         .map(|s| format!("{}={}", s.id(), s.trigger_description()))
-        .collect();
+        .collect()
+}
+
+/// Log the bound-shortcut set from the silent attach.
+fn log_bound_shortcuts(shortcuts: &[Shortcut]) {
+    let bound = our_bound_set(shortcuts);
     if bound.is_empty() {
         tracing::info!("portal session attached; nothing bound yet — run `flintshot hotkeys bind`");
     } else {
         tracing::info!(
             bound = %bound.join(", "),
             "portal session attached; bound shortcuts"
+        );
+    }
+}
+
+/// Log a `ShortcutsChanged` notification: the bindings were re-made
+/// outside flintshot (typically the compositor's own settings UI).
+/// The id → request mapping stays valid by construction — ids are
+/// stable strings, so this is bookkeeping, not a re-subscribe.
+fn log_shortcuts_changed(shortcuts: &[Shortcut]) {
+    let bound = our_bound_set(shortcuts);
+    if bound.is_empty() {
+        tracing::info!(
+            "portal shortcuts changed outside flintshot; nothing of ours is bound — \
+             re-run `flintshot hotkeys bind` (or the tray item) to re-bind"
+        );
+    } else {
+        tracing::info!(
+            bound = %bound.join(", "),
+            "portal shortcuts changed outside flintshot; new binding set"
         );
     }
 }
