@@ -37,3 +37,5 @@ Format: **Context · Decision · Consequences**.
 | ADR-0025 | [Worker upload-result reporting (`Request::ReportUploaded`)](ADR-0025-worker-reports-upload-result.md) |
 | ADR-0026 | [`reqwest` for upload HTTP](ADR-0026-reqwest-for-http.md) |
 | ADR-0027 | [Painter-drawn toolbar glyphs over icon fonts or emoji](ADR-0027-painter-drawn-toolbar-glyphs.md) |
+| ADR-0028 | [Capture-then-overlay (frozen frame) for the live overlay](ADR-0028-capture-then-overlay.md) |
+| ADR-0029 | [Global hotkeys on Wayland via the xdg-desktop-portal (`ashpd`)](ADR-0029-ashpd-global-shortcuts.md) |

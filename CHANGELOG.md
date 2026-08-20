@@ -46,6 +46,29 @@ Categories used below:
   bindings. Non-Wayland daemons answer with a clear
   "Wayland-portal-only" error; no daemon → "start `flintshot daemon`
   first".
+- Tray *Bind shortcuts…* item + portal signal refresh (Phase 6,
+  Task 004): Wayland trays (built with `--features tray`) gain a
+  *Bind shortcuts…* item that opens the same portal bind dialog as
+  the CLI (the item is absent on non-Wayland sessions — it would be
+  dead there). Re-binds made from the compositor's own settings UI
+  arrive as the portal's `ShortcutsChanged` signal; the daemon
+  consumes it and logs the new binding set (ids are stable, so no
+  re-subscribe is needed). Config hot-reload is now
+  platform-asymmetric by design: on Wayland a `[hotkeys]` edit logs
+  an info notice — "hotkey suggestions changed; re-run
+  `flintshot hotkeys bind`" — instead of re-registering (re-binding
+  requires the user dialog), while existing portal bindings keep
+  firing; X11 `HotkeyRegistry::refresh` semantics are unchanged.
+- New dependency: `ashpd` 0.13 (workspace-pinned with
+  `default-features = false, features = ["tokio",
+  "global_shortcuts"]` so its async runtime matches the daemon's
+  single tokio side thread; `zbus` arrives transitively). Runtime
+  requirement for the portal path: xdg-desktop-portal ≥ 1.16 **and**
+  a frontend implementing `GlobalShortcuts` (KDE Plasma; COSMIC
+  where the packaged `xdg-desktop-portal-cosmic` lists it — some
+  distro builds do not). Elsewhere on Wayland the daemon logs the
+  classified fallback notice naming the compositor-keybind
+  workaround and continues (see ADR-0029).
 - `justfile` run-shortcut recipes now cover the full CLI surface:
   `config`, `open PATH`, and `auth BACKEND` join the existing
   `region` / `fullscreen` / `pin` / `upload` shortcuts, and `daemon`

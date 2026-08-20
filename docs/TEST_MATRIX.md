@@ -980,13 +980,113 @@ pre-selected).
 
 ## Phase 6 — Wayland global hotkeys via portal
 
-> **Not yet implemented.** Rows are forward-looking.
+### Test setup
+
+```sh
+cargo build --release
+cargo test --workspace --all-targets      # X11 regression gate: existing tests pass unmodified
+pgrep -af xdg-desktop-portal              # confirm which frontends run
+cat /usr/share/xdg-desktop-portal/portals/*.portal   # does any list GlobalShortcuts?
+RUST_LOG=flintshot=info ./target/release/flintshot daemon &
+```
+
+Happy-path rows need a desktop whose portal frontend implements
+`org.freedesktop.impl.portal.GlobalShortcuts` — KDE Plasma, or a
+COSMIC build whose `xdg-desktop-portal-cosmic` lists it (see the
+caveat below; the L5 machine's packaged build does not). Fallback
+rows are verifiable anywhere, including a mocked no-bus run.
+
+### Test script
+
+**1. Gates (rows 1–2).**
+
+```sh
+cargo test --workspace --all-targets        # HotkeyRegistry/X11 units unmodified + green
+./target/release/flintshot hotkeys bind     # no daemon yet → error names the fix, exit ≠ 0
+```
+
+**2. Fresh daemon start (rows 3–4).**
+
+Start the daemon on Wayland. Expected log: `Wayland session: global
+hotkeys via xdg-desktop-portal GlobalShortcuts`, then either the
+silent attach line (`portal session attached; bound shortcuts …` —
+**no dialog at startup**, by design) or a classified fallback notice
+(see step 5). Ctrl-C: `daemon exited cleanly`, exit 0, socket at
+`$XDG_RUNTIME_DIR/flintshot.sock` reclaimed.
+
+**3. Bind flow (rows 5–8, portal-capable desktop only).**
+
+```sh
+flintshot daemon &
+flintshot hotkeys bind
+```
+
+Dialog lists `region` / `fullscreen` with the `[hotkeys]` chords as
+suggested bindings. Bind, then press the chord → region capture fires
+(same dispatch as tray). Restart the daemon → attach line reports the
+bound set, no dialog. Re-run `hotkeys bind`, pick different keys →
+only the new set fires. Dismiss the dialog instead → daemon healthy,
+CLI reports `bind-cancelled`.
+
+**4. Hot-reload (row 9).**
+
+With the daemon running, edit `[hotkeys] region` in `config.toml`.
+Expected: info notice "hotkey suggestions changed; re-run
+`flintshot hotkeys bind`", no dialog, no crash, previously bound
+shortcuts keep firing.
+
+**5. Fallback (rows 10–11).**
+
+On a desktop without GlobalShortcuts (GNOME, sway, or the L5 COSMIC
+package build): daemon logs the classified warn notice naming the
+compositor-keybind workaround; tray + IPC still serve; Ctrl-C exit 0.
+For the no-bus variant:
+
+```sh
+RUST_LOG=flintshot=info DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent \
+  ./target/release/flintshot daemon
+# expect: "no D-Bus session bus reachable…" at info, IPC bound, Ctrl-C → exit 0
+```
+
+**6. X11 regression (row 12, L1).**
+
+Re-run the Phase 2 hotkey + tray + hot-reload rows on an X11 session:
+menu has no *Bind shortcuts…* item, `[hotkeys]` edit re-registers as
+before.
+
+### Matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| `ashpd` portal prompts on first bind                        | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
-| Hotkey fires capture after bind                             | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
-| Graceful fallback when portal unsupported                   | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| Workspace tests green; existing X11 hotkey units unmodified  |    | N/A | N/A | N/A | PASS 1da727a 2026-08-20 | N/A | N/A | N/A | N/A |
+| `hotkeys bind` with no daemon → clear error, non-zero exit   | N/A |    |    |    | PASS 1da727a 2026-08-20 | N/A | N/A | N/A | N/A |
+| Daemon start on Wayland selects portal path (log line)      | N/A |    |    |    | PASS 1da727a 2026-08-20 | N/A | N/A | N/A | N/A |
+| Portal attach logs bound set; **no dialog at startup**      | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| `hotkeys bind` dialog lists both shortcuts w/ suggested chords | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| Bound chord fires capture through the shared worker path    | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| Daemon restart re-attaches bound shortcuts, no dialog       | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| Second `bind` replaces bindings; only new set fires         | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| `[hotkeys]` edit mid-daemon: suggestions notice, no dialog/crash, old bindings keep firing | N/A |    |    |    | PARTIAL 1da727a 2026-08-20 (notice + no-dialog verified; "keep firing" needs a bound portal) | N/A | N/A | N/A | N/A |
+| Fallback, frontend lacks GlobalShortcuts: classified warn, tray/IPC alive, Ctrl-C exit 0 | N/A |    |    |    | PASS 1da727a 2026-08-20 (real: packaged cosmic portal lacks the interface) | N/A | N/A | N/A | N/A |
+| Fallback, no session bus: classified info notice, IPC alive, exit 0 | N/A |    |    |    | PASS 1da727a 2026-08-20 (mocked `DBUS_SESSION_BUS_ADDRESS`) | N/A | N/A | N/A | N/A |
+| X11: Phase 2 hotkey/tray/reload flows unchanged (no bind tray item) |    | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+
+### Phase 6 known caveats
+
+- **"COSMIC ships it" is package-dependent.** The L5 machine's
+  `xdg-desktop-portal-cosmic 0.1.0pop1` (Ubuntu 24.04-based) does
+  **not** list GlobalShortcuts in its Interfaces, so the daemon
+  correctly falls back there. Upstream COSMIC implements it — check
+  the installed `*.portal` files before expecting the happy path.
+  Happy-path cells (rows 4–8) await a KDE (L3) or
+  GlobalShortcuts-capable COSMIC pass; see ADR-0029.
+- **App-id in the dialog may be generic** for a windowless daemon
+  (portal matches bus credentials against installed `.desktop`
+  files). Cosmetic; `flintshot.desktop` matching the binary name
+  mitigates. Record what the dialog actually shows when filling row 5.
+- **Portal-owned persistence:** bindings outlive the daemon in the
+  portal's store (per-app); `hotkeys bind` re-binds the session's set
+  rather than accumulating.
 
 ---
 
