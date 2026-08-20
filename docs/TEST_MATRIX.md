@@ -1080,6 +1080,16 @@ before.
   the installed `*.portal` files before expecting the happy path.
   Happy-path cells (rows 4–8) await a KDE (L3) or
   GlobalShortcuts-capable COSMIC pass; see ADR-0029.
+- **X11 code path re-verified via an env-spoofed XWayland run**
+  (56e783f, 2026-08-20): with `WAYLAND_DISPLAY` /
+  `XDG_SESSION_TYPE` unset, the daemon takes the `global-hotkey`
+  branch — both default chords register, a `[hotkeys]` edit
+  re-registers with the new chord (`re-registered global hotkeys
+  after a config change`), and Ctrl-C exits 0 with the socket
+  reclaimed. Registration + reload semantics are unchanged by
+  Phase 6; actual key *firing* and the tray-menu check still need
+  a real L1 (X11 session) pass — XWayland grabs register but
+  never fire.
 - **App-id in the dialog may be generic** for a windowless daemon
   (portal matches bus credentials against installed `.desktop`
   files). Cosmetic; `flintshot.desktop` matching the binary name
