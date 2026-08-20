@@ -416,7 +416,7 @@ All choices are documented in [decision records](adr/).
 
 | Risk                                                    | Mitigation                                                                                    |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Wayland: no global hotkeys in `global-hotkey`           | CLI subcommand + compositor keybind; `ashpd` portal in Phase 6                                  |
+| Wayland: no global hotkeys in `global-hotkey`           | Phase 6: `ashpd` GlobalShortcuts portal (ADR-0029); compositor-keybind remains the documented fallback |
 | Wayland: live overlay can't grab fullscreen input       | Phase 5 falls back to editor-window on Wayland; honest UX, not a hidden bug                   |
 | Wayland: capture needs xdg-desktop-portal (user prompt) | `xcap` handles this; document that first capture per session may show a portal dialog           |
 | Multi-window eframe is younger than single-window       | Each window is an independent viewport; root stays alive — well-trodden path in egui examples |

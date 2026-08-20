@@ -88,3 +88,11 @@ Alternatives considered:
   (`global-hotkey`/keyboard-types `PrintScreen` vs GDK `Print`,
   `Ctrl` vs `<Control>`); unknown tokens degrade to "no suggestion"
   so a config typo can never break binding.
+- **No timeout on the CLI's bind-reply wait.** Every daemon-side
+  terminal path writes exactly one reply (success, cancel, failure,
+  or `gone` when the session task died — a mid-session portal crash
+  is logged and recorded on the handle, not left vague), and a dead
+  daemon closes the socket, which errors the read. The only
+  indefinite wait is the user's own open dialog, where a timeout
+  would be *wrong* (minutes is a legitimate deliberation time);
+  Ctrl-C is safe and leaves the daemon healthy.
