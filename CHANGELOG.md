@@ -774,6 +774,21 @@ Categories used below:
   editor with the error; a spawn failure keeps the editor open so
   Save / Copy still work.
 
+### Fixed
+
+- Tray *Bind shortcuts…* clicks are no longer silently dropped when
+  the portal session task is outside its select loop (during
+  startup awaits or while a bind dialog is open): the trigger now
+  uses `Notify::notify_one`, whose stored permit survives the busy
+  window and fires when the loop resumes; repeat clicks collapse
+  into one queued bind (found in the Phase 6 ship review).
+- A mid-session portal crash or restart no longer stops global
+  hotkeys *silently*: every stream-end path of the portal session
+  now logs a `warn` naming the ended signal source and the re-attach
+  fix, and records an actionable failure on the handle so a later
+  `hotkeys bind` reports "restart the daemon to re-attach" instead
+  of a vague session-gone error.
+
 ### Changed
 
 - Editor toolbar reorganized from a single overflowing row into the

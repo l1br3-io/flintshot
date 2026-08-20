@@ -344,15 +344,24 @@ async fn session_task(
     loop {
         tokio::select! {
             event = activated.next() => {
-                let Some(event) = event else { break };
+                let Some(event) = event else {
+                    session_ended(&unavailable, "the Activated signal stream closed");
+                    break;
+                };
                 dispatch_activation(&bus, &state, event.shortcut_id());
             }
             event = changed.next() => {
-                let Some(event) = event else { break };
+                let Some(event) = event else {
+                    session_ended(&unavailable, "the ShortcutsChanged signal stream closed");
+                    break;
+                };
                 log_shortcuts_changed(event.shortcuts());
             }
             cmd = cmds.recv() => {
-                let Some(PortalCmd::Bind { reply }) = cmd else { break };
+                let Some(PortalCmd::Bind { reply }) = cmd else {
+                    session_ended(&unavailable, "every portal handle was dropped");
+                    break;
+                };
                 let result = do_bind(&shortcuts, &session, &hotkeys).await;
                 let _ = reply.send(result);
             }
@@ -364,6 +373,26 @@ async fn session_task(
             }
         }
     }
+}
+
+/// A live session ended without a startup-classified cause: a signal
+/// stream closed (xdg-desktop-portal crashed or restarted) or every
+/// handle went away. Hotkeys are dead from here on, so say so loudly
+/// — the spec's stance is that every portal log line names the cause
+/// and the workaround — and leave a note on the handle so a later
+/// `bind()` fails fast with the fix instead of a vague `gone`.
+fn session_ended(unavailable: &Arc<std::sync::Mutex<Option<BindFailure>>>, source: &str) {
+    tracing::warn!(
+        source = %source,
+        "portal session ended; global hotkeys stopped - restart the daemon (`flintshot daemon --replace`) to re-attach"
+    );
+    let failure = BindFailure {
+        code: "bind-failed".into(),
+        message: format!(
+            "portal session ended ({source}); hotkeys stopped - restart the daemon to re-attach"
+        ),
+    };
+    *unavailable.lock().expect("portal note mutex poisoned") = Some(failure);
 }
 
 /// Handle one `Activated` signal: map the shortcut id and dispatch the
@@ -763,6 +792,26 @@ mod tests {
         let err = handle.bind().await.expect_err("must fail");
         assert_eq!(err.code, "bind-failed");
         assert!(err.message.contains("no portal for you"), "got: {err:?}");
+    }
+
+    #[test]
+    fn session_ended_leaves_an_actionable_note() {
+        let unavailable = Arc::new(std::sync::Mutex::new(None));
+        session_ended(&unavailable, "the Activated signal stream closed");
+        let note = unavailable
+            .lock()
+            .expect("portal note mutex poisoned")
+            .clone()
+            .expect("note recorded");
+        assert_eq!(note.code, "bind-failed");
+        assert!(
+            note.message.contains("the Activated signal stream closed"),
+            "names the cause, got: {note:?}"
+        );
+        assert!(
+            note.message.contains("restart the daemon"),
+            "names the fix, got: {note:?}"
+        );
     }
 
     #[tokio::test]
