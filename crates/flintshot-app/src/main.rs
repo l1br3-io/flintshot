@@ -37,6 +37,7 @@ fn main() -> Result<()> {
         Some(Command::Open(args)) => cli::run_open(&args),
         Some(Command::Upload(args)) => cli::run_upload(&args),
         Some(Command::Auth(args)) => cli::run_auth(&args),
+        Some(Command::Hotkeys(args)) => cli::run_hotkeys(&args),
         None => Ok(()),
     }
 }

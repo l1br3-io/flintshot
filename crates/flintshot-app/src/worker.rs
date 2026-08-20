@@ -229,9 +229,11 @@ pub fn dispatch(
         Request::ReportSaved { .. } | Request::ReportUploaded { .. } => {
             Ok(DispatchOutcome::Continue)
         }
-        // Subscribe (handled by the connection layer in Task 004),
-        // and any future variant: report unsupported rather than
-        // pretending to act.
+        // Subscribe (handled by the connection layer in Task 004) and
+        // BindShortcuts (Phase 6: the connection layer intercepts it
+        // to drive the daemon's portal session in Task 003), plus any
+        // future variant: report unsupported rather than pretending
+        // to act.
         _ => {
             sink(Event::Error {
                 code: "unsupported".to_string(),
@@ -322,6 +324,7 @@ fn variant_name(request: &Request) -> &'static str {
         Request::OpenLast => "open-last",
         Request::PinLast => "pin-last",
         Request::UploadLast { .. } => "upload-last",
+        Request::BindShortcuts => "bind-shortcuts",
         _ => "request",
     }
 }
@@ -479,8 +482,9 @@ mod tests {
     #[test]
     fn unsupported_requests_emit_error_and_continue() {
         // PinLast, OpenLast (Task 4), and UploadLast (Task 007) are now
-        // supported; only the still-unbuilt variants remain here.
-        let cases = [Request::Subscribe];
+        // supported; BindShortcuts joins Subscribe here until the IPC
+        // connection layer intercepts it (Phase 6 Task 003).
+        let cases = [Request::Subscribe, Request::BindShortcuts];
         for request in cases {
             let spawner = RecordingSpawner::new();
             let mut events = Vec::new();
@@ -865,6 +869,7 @@ mod tests {
                 },
                 "report-uploaded",
             ),
+            (Request::BindShortcuts, "bind-shortcuts"),
         ];
         for (request, expected) in cases {
             assert_eq!(

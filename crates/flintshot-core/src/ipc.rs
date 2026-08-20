@@ -87,6 +87,15 @@ pub enum Request {
         /// deletion, otherwise `None`.
         delete_handle: Option<String>,
     },
+    // Phase 6 — appended rather than inserted: postcard encodes the
+    // variant index, so appending keeps the wire bytes of every
+    // earlier variant stable across daemon/CLI version skew.
+    /// Open the xdg-desktop-portal `GlobalShortcuts` bind dialog in the
+    /// daemon's portal session (Phase 6), with the daemon's `[hotkeys]`
+    /// chords as suggested bindings. Intercepted by the IPC connection
+    /// layer: binding belongs to the daemon's portal session, so the
+    /// worker dispatch table never acts on it.
+    BindShortcuts,
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -231,6 +240,7 @@ mod tests {
                 url: "https://imgur.com/xyz".into(),
                 delete_handle: None,
             },
+            Request::BindShortcuts,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");
