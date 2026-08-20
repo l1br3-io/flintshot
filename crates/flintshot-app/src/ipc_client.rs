@@ -9,9 +9,9 @@
 use std::path::Path;
 
 use color_eyre::eyre;
-use flintshot_core::ipc::{socket_path, Request};
+use flintshot_core::ipc::{socket_path, Event as IpcEvent, Request};
 
-use crate::ipc_server::{encode_msg, socket_name, write_frame, Stream};
+use crate::ipc_server::{decode_event, encode_msg, socket_name, write_frame, Stream};
 
 /// The result of trying to delegate a capture to the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +76,43 @@ fn is_no_daemon(error: &std::io::Error) -> bool {
     )
 }
 
+/// Send `Request::BindShortcuts` to the daemon at `override_path` (or
+/// the default socket) and await its one-frame reply — the portal bind
+/// dialog blocks until the user finishes, so this is a request/reply
+/// round-trip, not a fire-and-forget delegate. Returns `Ok(None)` when
+/// no daemon answers (the CLI's "start the daemon first" error).
+pub(crate) fn bind_shortcuts_to(override_path: Option<&Path>) -> eyre::Result<Option<IpcEvent>> {
+    let path = socket_path(override_path);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| eyre::eyre!("building bind runtime: {e}"))?;
+
+    runtime.block_on(async move {
+        let name = socket_name(&path)?;
+        let mut stream =
+            match <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name).await
+            {
+                Ok(s) => s,
+                Err(e) if is_no_daemon(&e) => return Ok(None),
+                Err(e) => {
+                    return Err(eyre::eyre!(
+                        "connecting to daemon at {}: {e}",
+                        path.display()
+                    ))
+                }
+            };
+        let bytes = encode_msg(&Request::BindShortcuts)?;
+        write_frame(&mut stream, &bytes).await?;
+        let payload = crate::ipc_server::read_frame(&mut stream).await?;
+        Ok(Some(decode_event(&payload)?))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +127,14 @@ mod tests {
         )
         .expect("absent path should not error");
         assert_eq!(outcome, DelegateOutcome::NoDaemon);
+    }
+
+    #[test]
+    fn bind_shortcuts_absent_socket_reports_no_daemon() {
+        let reply = bind_shortcuts_to(Some(Path::new(
+            "/this/does/not/exist/flintshot-test-bind.sock",
+        )))
+        .expect("absent path should not error");
+        assert!(reply.is_none(), "no daemon → None reply");
     }
 }

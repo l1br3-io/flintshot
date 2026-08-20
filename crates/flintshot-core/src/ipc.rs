@@ -148,6 +148,29 @@ pub enum Event {
         /// deletion, otherwise `None`.
         delete_handle: Option<String>,
     },
+    // Phase 6 — appended rather than inserted (postcard encodes the
+    // variant index; appending keeps earlier wire bytes stable).
+    /// The user completed a portal `GlobalShortcuts` bind (Phase 6).
+    /// Written back on the connection that sent
+    /// [`Request::BindShortcuts`] so the CLI can print the outcome.
+    ShortcutsBound {
+        /// Every shortcut now bound in the daemon's portal session:
+        /// what the user actually chose, not the config suggestions.
+        bindings: Vec<ShortcutBinding>,
+    },
+}
+
+/// One entry of an [`Event::ShortcutsBound`] reply: a bound shortcut's
+/// stable id and the effective trigger the user chose.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ShortcutBinding {
+    /// Stable shortcut id (`"region"` / `"fullscreen"`).
+    pub id: String,
+    /// The effective trigger, in the portal's human-readable form
+    /// (e.g. `"Print"`, `"<Ctrl><Shift>P"` — whatever the portal
+    /// reports as the trigger description).
+    pub trigger: String,
 }
 
 /// Resolve the IPC socket/pipe path.
@@ -256,6 +279,18 @@ mod tests {
             Event::EditorOpened,
             Event::Saved {
                 path: PathBuf::from("/tmp/x.png"),
+            },
+            Event::ShortcutsBound {
+                bindings: vec![
+                    ShortcutBinding {
+                        id: "region".into(),
+                        trigger: "Print".into(),
+                    },
+                    ShortcutBinding {
+                        id: "fullscreen".into(),
+                        trigger: "<Control><Alt>F4".into(),
+                    },
+                ],
             },
             Event::Error {
                 code: "unsupported".into(),

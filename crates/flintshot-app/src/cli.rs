@@ -1141,17 +1141,39 @@ fn run_hotkeys_bind() -> Result<()> {
 }
 
 /// Testable seam for [`run_hotkeys_bind`]: send the bind request
-/// against an explicit socket path.
+/// against an explicit socket path, await the daemon's one-frame reply,
+/// and render it. Exit 0 with the bound chords on success; a non-zero
+/// error (`eyre::Report`) with the failure reason otherwise.
 fn run_hotkeys_bind_at(override_path: Option<&std::path::Path>) -> Result<()> {
-    match crate::ipc_client::delegate_to(override_path, &Request::BindShortcuts) {
-        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {
-            eprintln!("Bind request sent; choose the shortcuts in the portal dialog.");
-            Ok(())
-        }
-        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => Err(color_eyre::eyre::eyre!(
+    match crate::ipc_client::bind_shortcuts_to(override_path)? {
+        Some(event) => render_bind_outcome(&event),
+        None => Err(color_eyre::eyre::eyre!(
             "no running daemon; start `flintshot daemon` first"
         )),
-        Err(e) => Err(e.wrap_err("sending hotkeys bind request to the daemon")),
+    }
+}
+
+/// Turn the daemon's bind reply into the CLI's output: bindings on
+/// success, a cancellation notice on `bind-cancelled`, the carried
+/// message on other errors, and a protocol complaint for anything
+/// unexpected.
+fn render_bind_outcome(event: &flintshot_core::ipc::Event) -> Result<()> {
+    match event {
+        flintshot_core::ipc::Event::ShortcutsBound { bindings } => {
+            for b in bindings {
+                println!("{} = {}", b.id, b.trigger);
+            }
+            Ok(())
+        }
+        flintshot_core::ipc::Event::Error { code, message } if code == "bind-cancelled" => Err(
+            color_eyre::eyre::eyre!("bind dismissed — no shortcuts were changed"),
+        ),
+        flintshot_core::ipc::Event::Error { code: _, message } => {
+            Err(color_eyre::eyre::eyre!("hotkeys bind failed: {message}"))
+        }
+        other => Err(color_eyre::eyre::eyre!(
+            "unexpected reply from daemon: {other:?}"
+        )),
     }
 }
 
@@ -1409,6 +1431,49 @@ mod tests {
             err.to_string(),
             "no running daemon; start `flintshot daemon` first"
         );
+    }
+
+    // ── Bind outcome rendering (Phase 6, Task 003) ────────────────
+
+    use flintshot_core::ipc::{Event as IpcEvent, ShortcutBinding};
+
+    #[test]
+    fn bind_outcome_success_renders_each_binding() {
+        let event = IpcEvent::ShortcutsBound {
+            bindings: vec![ShortcutBinding {
+                id: "region".into(),
+                trigger: "<Control><Shift>Print".into(),
+            }],
+        };
+        assert!(render_bind_outcome(&event).is_ok());
+    }
+
+    #[test]
+    fn bind_outcome_cancelled_is_a_dismissal_error() {
+        let event = IpcEvent::Error {
+            code: "bind-cancelled".into(),
+            message: "Portal request was cancelled".into(),
+        };
+        let err = render_bind_outcome(&event).expect_err("cancelled must error");
+        assert!(err.to_string().contains("dismissed"), "got: {err}");
+    }
+
+    #[test]
+    fn bind_outcome_failure_carries_the_message() {
+        let event = IpcEvent::Error {
+            code: "bind-failed".into(),
+            message: "the portal exploded".into(),
+        };
+        let err = render_bind_outcome(&event).expect_err("failure must error");
+        assert!(
+            err.to_string().contains("the portal exploded"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn bind_outcome_unexpected_event_is_an_error() {
+        assert!(render_bind_outcome(&IpcEvent::CaptureStarted).is_err());
     }
 
     // ── Interaction mode (Phase 5 Task 001) ──────────────────────

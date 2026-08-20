@@ -53,7 +53,7 @@ unaffected.
 - [ ] On headless CI / no-portal: daemon starts clean with classified notice (log inspection)
 
 ### Phase 2: Bind flow + integration
-- [ ] Task 3: `BindShortcuts` flow — portal dialog with config-suggested chords, CLI end-to-end → `tasks/003-bind-flow.md`
+- [x] Task 3: `BindShortcuts` flow — portal dialog with config-suggested chords, CLI end-to-end → `tasks/003-bind-flow.md`
 - [ ] Task 4: Tray "Bind shortcuts…" item + `ShortcutsChanged` refresh + Wayland config hot-reload notice → `tasks/004-tray-reload-signals.md`
 
 ### Checkpoint: Feature complete (after Tasks 3–4)
