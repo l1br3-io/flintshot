@@ -15,10 +15,12 @@
 //! a future-work note).
 
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use color_eyre::eyre;
+use tokio::sync::Notify;
 
 use crate::single;
 
@@ -80,20 +82,30 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     let wayland = crate::platform::session_is_wayland();
     let bus = crate::ipc_server::SubscriberBus::new();
     let state = crate::worker::DispatchState::new();
+    // The live `[hotkeys]` section: written by the config hot-reload
+    // below, read by the portal task at bind time (fresh suggestions
+    // without a daemon restart). The tray's bind trigger crosses the
+    // main → tokio boundary through the `Notify` — `notify_waiters()`
+    // is sync-callable from the main loop's tray handler.
+    let hotkeys_shared = Arc::new(Mutex::new(config.hotkeys.clone()));
+    let bind_requested = Arc::new(Notify::new());
     let (tx, rx) = mpsc::channel::<()>();
     let builder = thread::Builder::new().name("flintshot-tokio".into());
     let tokio_join = builder
         .spawn({
             let bus = bus.clone();
             let state = state.clone();
-            let hotkeys = config.hotkeys.clone();
-            move || run_tokio_side(tx, bus, state, wayland, hotkeys)
+            let hotkeys = Arc::clone(&hotkeys_shared);
+            let bind_requested = Arc::clone(&bind_requested);
+            move || run_tokio_side(tx, bus, state, wayland, hotkeys, bind_requested)
         })
         .map_err(|e| eyre::eyre!("spawning tokio side thread: {e}"))?;
 
-    // 3. Platform sources on the main thread.
+    // 3. Platform sources on the main thread. The tray's
+    // "Bind shortcuts…" item exists only where it works: Wayland
+    // portal sessions.
     #[cfg(feature = "tray")]
-    let _tray = match crate::tray::build() {
+    let _tray = match crate::tray::build(wayland) {
         Ok(t) => Some(t),
         Err(e) => {
             tracing::warn!(
@@ -133,6 +145,9 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         &state,
         &mut hotkey_registry,
         config_watcher.as_ref(),
+        wayland,
+        &hotkeys_shared,
+        &bind_requested,
     );
 
     // Wait for the tokio side to finish so we don't leak the runtime.
@@ -172,6 +187,11 @@ fn replace_running_daemon() -> eyre::Result<()> {
 ///
 /// Returns when the tokio side drops its sender (Ctrl-C / IPC `Quit`)
 /// or a tray *Quit* is clicked.
+//
+// Eight wiring params by design: this loop is the daemon's integration
+// point, and each param is a distinct event source or shared state; a
+// context struct would only relocate the list, not shrink it.
+#[allow(clippy::too_many_arguments)]
 fn run_event_loop(
     rx: &mpsc::Receiver<()>,
     #[cfg_attr(not(feature = "tray"), allow(unused_variables))]
@@ -179,10 +199,13 @@ fn run_event_loop(
     state: &crate::worker::DispatchState,
     hotkeys: &mut crate::hotkeys::HotkeyRegistry,
     config_watcher: Option<&crate::config_watcher::ConfigWatcher>,
+    wayland: bool,
+    hotkeys_shared: &crate::hotkeys_portal::SharedHotkeys,
+    #[cfg_attr(not(feature = "tray"), allow(unused_variables))] bind_requested: &Notify,
 ) {
     loop {
         #[cfg(feature = "tray")]
-        if drain_tray_menu(bus, state) {
+        if drain_tray_menu(bus, state, bind_requested) {
             // Tray *Quit*: stop polling. `run` then returns, the lock
             // is released, and the daemon exits.
             tracing::info!("tray Quit clicked; exiting event loop");
@@ -197,7 +220,9 @@ fn run_event_loop(
             if watcher.poll_changed() {
                 match flintshot_core::Config::load() {
                     Ok(new_config) => {
-                        if hotkeys.refresh(&new_config.hotkeys) {
+                        if wayland {
+                            apply_wayland_hotkey_reload(hotkeys_shared, &new_config.hotkeys);
+                        } else if hotkeys.refresh(&new_config.hotkeys) {
                             tracing::info!("applied hotkey change from config");
                         }
                     }
@@ -229,6 +254,7 @@ fn run_event_loop(
 fn drain_tray_menu(
     bus: &crate::ipc_server::SubscriberBus,
     state: &crate::worker::DispatchState,
+    bind_requested: &Notify,
 ) -> bool {
     use tray_icon::menu::MenuEvent;
 
@@ -249,6 +275,13 @@ fn drain_tray_menu(
                     Err(e) => tracing::warn!(error = %e, "tray dispatch failed"),
                 }
             }
+            Some(crate::tray::TrayAction::BindShortcuts) => {
+                // Crosses into the portal session task (tokio side);
+                // the dialog itself opens over there. Fire-and-forget:
+                // if the portal is unavailable (startup fallback), the
+                // notice for that was already logged at startup.
+                bind_requested.notify_waiters();
+            }
             Some(crate::tray::TrayAction::OpenConfig) => {
                 if let Err(e) = open_config_file() {
                     tracing::warn!(error = %e, "opening config from tray");
@@ -258,6 +291,35 @@ fn drain_tray_menu(
         }
     }
     false
+}
+
+/// Pure check: did the `[hotkeys]` section change between two config
+/// reads? (`HotkeyConfig` deliberately has no `PartialEq` — fields
+/// could grow without anyone noticing the comparison going stale.)
+fn hotkeys_differ(new: &flintshot_core::HotkeyConfig, last: &flintshot_core::HotkeyConfig) -> bool {
+    new.region != last.region || new.fullscreen != last.fullscreen
+}
+
+/// Wayland arm of the config hot-reload. This is *not* a missed
+/// re-registration: on the portal path the daemon does not own the
+/// grabs — the portal does, and swapping them requires the user-facing
+/// bind dialog (`HotkeyRegistry::refresh` is X11-only by design). A
+/// `[hotkeys]` edit therefore only refreshes the suggestion source the
+/// next bind reads, plus this notice; the existing portal bindings
+/// keep firing untouched.
+fn apply_wayland_hotkey_reload(
+    shared: &crate::hotkeys_portal::SharedHotkeys,
+    fresh: &flintshot_core::HotkeyConfig,
+) {
+    let mut last = shared.lock().expect("hotkeys config mutex poisoned");
+    if hotkeys_differ(fresh, &last) {
+        last.clone_from(fresh);
+        drop(last);
+        tracing::info!(
+            "hotkey suggestions changed; re-run `flintshot hotkeys bind` \
+             (or the tray item) to update portal bindings — existing bindings keep firing"
+        );
+    }
 }
 
 /// Open `config.toml` in `$EDITOR` (fallback `$VISUAL`); print the path
@@ -321,7 +383,8 @@ fn run_tokio_side(
     bus: crate::ipc_server::SubscriberBus,
     state: crate::worker::DispatchState,
     wayland: bool,
-    hotkeys: flintshot_core::HotkeyConfig,
+    hotkeys: crate::hotkeys_portal::SharedHotkeys,
+    bind_requested: Arc<Notify>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -341,7 +404,7 @@ fn run_tokio_side(
         // a permanently-unavailable handle so a stray bind request
         // gets a clear "portal-only" error instead of a hang.
         let portal = if wayland {
-            crate::hotkeys_portal::start(bus.clone(), state.clone(), hotkeys)
+            crate::hotkeys_portal::start(bus.clone(), state.clone(), hotkeys, bind_requested)
         } else {
             crate::hotkeys_portal::PortalHandle::unavailable(
                 "hotkeys bind is Wayland-portal-only; on X11/macOS/Windows configure \
@@ -407,6 +470,55 @@ fn run_tokio_side(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Wayland config hot-reload semantics (Task 004) ──────────
+
+    use flintshot_core::HotkeyConfig;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn hotkeys_differ_detects_region_or_fullscreen_change() {
+        let base = HotkeyConfig::default();
+        let mut region_only = base.clone();
+        region_only.region = "Ctrl+Shift+KeyR".into();
+        let mut fullscreen_only = base.clone();
+        fullscreen_only.fullscreen = "Ctrl+Alt+KeyF".into();
+        assert!(hotkeys_differ(&region_only, &base));
+        assert!(hotkeys_differ(&fullscreen_only, &base));
+        assert!(hotkeys_differ(&base, &region_only));
+    }
+
+    #[test]
+    fn hotkeys_identical_means_no_diff() {
+        let a = HotkeyConfig::default();
+        let b = HotkeyConfig::default();
+        assert!(!hotkeys_differ(&a, &b));
+    }
+
+    #[test]
+    fn wayland_reload_updates_the_suggestion_source() {
+        let shared = Arc::new(Mutex::new(HotkeyConfig::default()));
+        let mut fresh = HotkeyConfig::default();
+        fresh.region = "Ctrl+Shift+KeyR".into();
+        apply_wayland_hotkey_reload(&shared, &fresh);
+        assert_eq!(
+            shared.lock().expect("hotkeys mutex poisoned").region,
+            "Ctrl+Shift+KeyR"
+        );
+    }
+
+    #[test]
+    fn wayland_reload_is_idempotent_for_unchanged_hotkeys() {
+        // The watcher fires on ANY config edit; an unrelated section
+        // change must not touch the suggestion source (or spam the
+        // notice).
+        let shared = Arc::new(Mutex::new(HotkeyConfig::default()));
+        apply_wayland_hotkey_reload(&shared, &HotkeyConfig::default());
+        assert_eq!(
+            shared.lock().expect("hotkeys mutex poisoned").region,
+            HotkeyConfig::default().region
+        );
+    }
 
     /// The main loop drains tray/hotkey then blocks on the heartbeat
     /// channel. We can't exercise the real OS receivers headless, but we

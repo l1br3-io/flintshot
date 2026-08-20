@@ -1,7 +1,9 @@
 //! System tray menu (`tray-icon` + `muda`), behind the `tray` feature.
 //!
 //! The menu offers *Capture region*, *Capture fullscreen*, *Open
-//! config*, and *Quit*. Clicks arrive on [`tray_icon::menu::MenuEvent`]'s
+//! config*, and *Quit* — plus *Bind shortcuts…* on Wayland sessions
+//! (the portal hotkey path, Phase 6). Clicks arrive on
+//! [`tray_icon::menu::MenuEvent`]'s
 //! global receiver (muda pumps the OS internally and hands events to a
 //! static crossbeam channel); the daemon's main loop drains it via
 //! [`action_for`] and routes each click through the same dispatch path
@@ -17,6 +19,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 // short and namespaced so they don't collide with any muda defaults.
 const ID_CAPTURE_REGION: &str = "flintshot.region";
 const ID_CAPTURE_FULLSCREEN: &str = "flintshot.fullscreen";
+const ID_BIND_SHORTCUTS: &str = "flintshot.bind-shortcuts";
 const ID_OPEN_CONFIG: &str = "flintshot.open-config";
 const ID_QUIT: &str = "flintshot.quit";
 /// Per-monitor submenu items use this prefix + the monitor index, e.g.
@@ -29,6 +32,9 @@ pub(crate) enum TrayAction {
     /// A request the daemon dispatches via the worker table
     /// (region/fullscreen spawn a worker; quit shuts down).
     Request(Request),
+    /// Open the portal bind dialog (the Wayland portal path; the menu
+    /// item only exists on a Wayland session — see [`build`]).
+    BindShortcuts,
     /// Open `config.toml` in the user's `$EDITOR`.
     OpenConfig,
 }
@@ -54,16 +60,21 @@ pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
         ID_CAPTURE_FULLSCREEN => Some(TrayAction::Request(Request::CaptureFullscreen {
             monitor: None,
         })),
+        ID_BIND_SHORTCUTS => Some(TrayAction::BindShortcuts),
         ID_OPEN_CONFIG => Some(TrayAction::OpenConfig),
         ID_QUIT => Some(TrayAction::Request(Request::Quit)),
         _ => None,
     }
 }
 
-/// Build the tray icon with its context menu. The returned [`TrayIcon`]
-/// must be held alive for the daemon's lifetime; muda retains the menu
-/// items itself (they're reference-counted), so they can drop here.
-pub(crate) fn build() -> eyre::Result<TrayIcon> {
+/// Build the tray icon with its context menu. `wayland` gates the
+/// *Bind shortcuts…* item: it drives the xdg-desktop-portal bind
+/// dialog, which only exists on Wayland portal sessions — an X11 tray
+/// must not grow a dead item (there hotkeys re-register from
+/// `[hotkeys]` directly). The returned [`TrayIcon`] must be held alive
+/// for the daemon's lifetime; muda retains the menu items itself
+/// (they're reference-counted), so they can drop here.
+pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
     // libappindicator (tray-icon's Linux backend) touches GTK widgets
     // for the menu, so GTK must be initialized first — on the main
     // thread, which is where the daemon calls us. macOS/Windows use
@@ -76,6 +87,7 @@ pub(crate) fn build() -> eyre::Result<TrayIcon> {
     let menu = Menu::new();
     let region = MenuItem::with_id(ID_CAPTURE_REGION, "Capture region", true, None);
     let fullscreen = MenuItem::with_id(ID_CAPTURE_FULLSCREEN, "Capture fullscreen", true, None);
+    let bind_shortcuts = MenuItem::with_id(ID_BIND_SHORTCUTS, "Bind shortcuts…", true, None);
     let open_config = MenuItem::with_id(ID_OPEN_CONFIG, "Open config", true, None);
     let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
 
@@ -86,11 +98,17 @@ pub(crate) fn build() -> eyre::Result<TrayIcon> {
     let monitor_submenu = Submenu::with_id("flintshot.monitors", "Fullscreen on monitor", true);
     append_monitor_entries(&monitor_submenu)?;
 
-    if let Err(e) = menu
+    let mut appending = menu
         .append(&region)
         .and_then(|()| menu.append(&fullscreen))
         .and_then(|()| menu.append(&monitor_submenu))
-        .and_then(|()| menu.append(&PredefinedMenuItem::separator()))
+        .and_then(|()| menu.append(&PredefinedMenuItem::separator()));
+    if wayland {
+        appending = appending
+            .and_then(|()| menu.append(&bind_shortcuts))
+            .and_then(|()| menu.append(&PredefinedMenuItem::separator()));
+    }
+    if let Err(e) = appending
         .and_then(|()| menu.append(&open_config))
         .and_then(|()| menu.append(&PredefinedMenuItem::separator()))
         .and_then(|()| menu.append(&quit))
@@ -216,6 +234,14 @@ mod tests {
         assert_eq!(
             action_for(&event(ID_OPEN_CONFIG)),
             Some(TrayAction::OpenConfig)
+        );
+    }
+
+    #[test]
+    fn bind_shortcuts_maps_directly() {
+        assert_eq!(
+            action_for(&event(ID_BIND_SHORTCUTS)),
+            Some(TrayAction::BindShortcuts)
         );
     }
 
