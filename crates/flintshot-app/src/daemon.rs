@@ -86,7 +86,8 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         .spawn({
             let bus = bus.clone();
             let state = state.clone();
-            move || run_tokio_side(tx, bus, state, wayland)
+            let hotkeys = config.hotkeys.clone();
+            move || run_tokio_side(tx, bus, state, wayland, hotkeys)
         })
         .map_err(|e| eyre::eyre!("spawning tokio side thread: {e}"))?;
 
@@ -320,6 +321,7 @@ fn run_tokio_side(
     bus: crate::ipc_server::SubscriberBus,
     state: crate::worker::DispatchState,
     wayland: bool,
+    hotkeys: flintshot_core::HotkeyConfig,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -333,21 +335,24 @@ fn run_tokio_side(
     };
 
     runtime.block_on(async move {
-        // Wayland: portal GlobalShortcuts session (replaces X11
-        // global-hotkey grabs). Runs as its own task for the daemon's
-        // lifetime; startup failures are classified + logged inside
-        // (non-fatal). Dropped — closing the portal session with it —
-        // when the runtime shuts down.
-        if wayland {
-            let portal_bus = bus.clone();
-            let portal_state = state.clone();
-            tokio::spawn(crate::hotkeys_portal::run(portal_bus, portal_state));
-        }
+        // Hotkey backend. Wayland: portal GlobalShortcuts session
+        // (replaces X11 global-hotkey grabs); the handle is the IPC
+        // layer's entry point for `Request::BindShortcuts`. Non-Wayland:
+        // a permanently-unavailable handle so a stray bind request
+        // gets a clear "portal-only" error instead of a hang.
+        let portal = if wayland {
+            crate::hotkeys_portal::start(bus.clone(), state.clone(), hotkeys)
+        } else {
+            crate::hotkeys_portal::PortalHandle::unavailable(
+                "hotkeys bind is Wayland-portal-only; on X11/macOS/Windows configure \
+                 [hotkeys] chords in config.toml instead",
+            )
+        };
 
         // Bind the IPC server inside the reactor, sharing the daemon's
         // bus so tray/hotkey-initiated captures reach IPC subscribers.
         let (serve_handle, shutdown) =
-            match crate::ipc_server::IpcServer::bind_with_bus(None, bus, state) {
+            match crate::ipc_server::IpcServer::bind_with_bus(None, bus, state, portal) {
                 Ok(ipc) => {
                     let shutdown = ipc.shutdown_signal();
                     let handle = tokio::spawn(async move {

@@ -40,7 +40,7 @@ const EVENT_BUS_CAPACITY: usize = 64;
 /// exactly that many payload bytes. Rejects lengths over
 /// [`MAX_FRAME_LEN`]. A short read (truncation / clean disconnect)
 /// surfaces as an error, never a panic.
-async fn read_frame<R>(r: &mut R) -> eyre::Result<Vec<u8>>
+pub(crate) async fn read_frame<R>(r: &mut R) -> eyre::Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
 {
@@ -98,6 +98,11 @@ where
 /// Postcard-decode a [`Request`].
 fn decode_request(buf: &[u8]) -> eyre::Result<IpcRequest> {
     postcard::from_bytes(buf).map_err(|e| eyre::eyre!("postcard decode request: {e}"))
+}
+
+/// Postcard-decode an [`Event`] (client side of the bind reply).
+pub(crate) fn decode_event(buf: &[u8]) -> eyre::Result<IpcEvent> {
+    postcard::from_bytes(buf).map_err(|e| eyre::eyre!("postcard decode event: {e}"))
 }
 
 // ── subscriber fan-out ──────────────────────────────────────────────
@@ -195,18 +200,21 @@ type Listener = interprocess::local_socket::tokio::Listener;
 pub(crate) type Stream = interprocess::local_socket::tokio::Stream;
 
 /// The IPC server: owns the listener, the subscriber bus, the
-/// last-saved + pin-id dispatch state, and a shutdown signal.
+/// last-saved + pin-id dispatch state, the portal-bind handle, and a
+/// shutdown signal.
 pub struct IpcServer {
     listener: Listener,
     bus: SubscriberBus,
     state: crate::worker::DispatchState,
+    portal: crate::hotkeys_portal::PortalHandle,
     shutdown: Arc<Notify>,
 }
 
 impl IpcServer {
     /// Bind a listener on [`socket_path`] (`override_path` honoured),
     /// reclaiming any stale socket file on Unix via `try_overwrite`,
-    /// with a fresh subscriber bus.
+    /// with a fresh subscriber bus and a permanently-unavailable
+    /// portal handle (integration tests don't drive the portal).
     ///
     /// # Errors
     /// - If the socket name can't be resolved.
@@ -214,25 +222,31 @@ impl IpcServer {
     ///   holds the path and can't be replaced).
     //
     // The daemon uses `bind_with_bus` (it shares a bus with the tray
-    // path); this convenience is used by the integration tests.
+    // path and owns the live portal session); this convenience is used
+    // by the integration tests.
     #[allow(dead_code)]
     pub fn bind(override_path: Option<&Path>) -> eyre::Result<Self> {
         Self::bind_with_bus(
             override_path,
             SubscriberBus::new(),
             crate::worker::DispatchState::new(),
+            crate::hotkeys_portal::PortalHandle::unavailable(
+                "portal bind is not wired in this IPC server instance",
+            ),
         )
     }
 
-    /// Like [`bind`](Self::bind) but uses an externally-provided
-    /// `bus`. The daemon shares one bus between the IPC server (which
-    /// fans `Event`s to IPC subscribers) and its own tray/hotkey
-    /// dispatch path, so a capture started from the tray reaches IPC
-    /// subscribers and vice versa.
+    /// Like [`bind`](Self::bind) but uses an externally-provided `bus`
+    /// and `portal` handle. The daemon shares one bus between the IPC
+    /// server (which fans `Event`s to IPC subscribers) and its own
+    /// tray/hotkey dispatch path, so a capture started from the tray
+    /// reaches IPC subscribers and vice versa; the portal handle routes
+    /// `Request::BindShortcuts` into the daemon's portal session.
     pub fn bind_with_bus(
         override_path: Option<&Path>,
         bus: SubscriberBus,
         state: crate::worker::DispatchState,
+        portal: crate::hotkeys_portal::PortalHandle,
     ) -> eyre::Result<Self> {
         let path = socket_path(override_path);
         let name = socket_name(&path)?;
@@ -246,6 +260,7 @@ impl IpcServer {
             listener,
             bus,
             state,
+            portal,
             shutdown: Arc::new(Notify::new()),
         })
     }
@@ -292,6 +307,7 @@ impl IpcServer {
         let shutdown = Arc::clone(&self.shutdown);
         let bus = self.bus.clone();
         let state = self.state.clone();
+        let portal = self.portal.clone();
         let listener = self.listener;
         loop {
             tokio::select! {
@@ -310,9 +326,10 @@ impl IpcServer {
                     };
                     let bus = bus.clone();
                     let state = state.clone();
+                    let portal = portal.clone();
                     let shutdown = Arc::clone(&shutdown);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, bus, state, shutdown).await {
+                        if let Err(e) = handle_connection(stream, bus, state, shutdown, portal).await {
                             tracing::debug!(error = %e, "IPC connection ended");
                         }
                     });
@@ -327,14 +344,19 @@ impl IpcServer {
 /// disconnects. `Subscribe` converts the connection into a pure
 /// [`Event`] sink; `ReportSaved` records the worker's path in the
 /// daemon's last-saved state (and broadcasts [`Event::Saved`]);
-/// `Quit` signals daemon shutdown; other requests route through the
-/// worker dispatch table.
-async fn handle_connection(
-    mut stream: Stream,
+/// `BindShortcuts` drives the daemon's portal session and writes the
+/// outcome back on this connection; `Quit` signals daemon shutdown;
+/// other requests route through the worker dispatch table.
+async fn handle_connection<S>(
+    mut stream: S,
     bus: SubscriberBus,
     state: crate::worker::DispatchState,
     shutdown: Arc<Notify>,
-) -> eyre::Result<()> {
+    portal: crate::hotkeys_portal::PortalHandle,
+) -> eyre::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     loop {
         let payload = read_frame(&mut stream).await?;
         let request = decode_request(&payload)?;
@@ -395,6 +417,25 @@ async fn handle_connection(
                 url: url.clone(),
                 delete_handle: delete_handle.clone(),
             });
+            continue;
+        }
+
+        // BindShortcuts (Phase 6): binding belongs to the daemon's
+        // portal session, so the connection layer drives it — the
+        // worker dispatch table never sees it. Awaiting the user's
+        // dialog blocks only this connection; the reply is one Event
+        // frame (ShortcutsBound / Error) written straight back.
+        if matches!(request, IpcRequest::BindShortcuts) {
+            tracing::info!("IPC BindShortcuts received; opening portal bind dialog");
+            let event = match portal.bind().await {
+                Ok(bindings) => IpcEvent::ShortcutsBound { bindings },
+                Err(failure) => IpcEvent::Error {
+                    code: failure.code,
+                    message: failure.message,
+                },
+            };
+            let bytes = encode_msg(&event)?;
+            write_frame(&mut stream, &bytes).await?;
             continue;
         }
 
@@ -597,6 +638,122 @@ mod tests {
         // The alive receiver still gets the event; broadcast to a
         // dropped receiver didn't error (broadcast::send ignores it).
         assert_eq!(alive.recv().await.unwrap(), ev);
+    }
+
+    // ── BindShortcuts interception (Phase 6, Task 003) ─────────────
+    //
+    // Duplex pairs exercise `handle_connection` directly — no real
+    // socket needed, and the portal side is a stub the test drives.
+
+    use crate::hotkeys_portal::{BindFailure, PortalCmd, PortalHandle};
+    use flintshot_core::ipc::ShortcutBinding;
+
+    /// Spawn `handle_connection` on the server half of a duplex pair
+    /// with a fresh bus/state/shutdown and the given portal handle.
+    /// Returns the client half + the task handle.
+    fn bind_test_connection(
+        portal: PortalHandle,
+    ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
+        let (client, server) = tokio::io::duplex(8 * 1024);
+        let bus = SubscriberBus::new();
+        let state = crate::worker::DispatchState::new();
+        let shutdown = Arc::new(Notify::new());
+        let task = tokio::spawn(async move {
+            let _ = handle_connection(server, bus, state, shutdown, portal).await;
+        });
+        (client, task)
+    }
+
+    #[tokio::test]
+    async fn bind_shortcuts_replies_with_bound_event() {
+        let (portal, mut cmds) = PortalHandle::stub();
+        // Drive the stub: answer the bind with a successful binding.
+        tokio::spawn(async move {
+            if let Some(PortalCmd::Bind { reply }) = cmds.recv().await {
+                let binding = ShortcutBinding {
+                    id: "region".into(),
+                    trigger: "Print".into(),
+                };
+                reply.send(Ok(vec![binding])).expect("reply sends");
+            }
+        });
+
+        let (mut client, task) = bind_test_connection(portal);
+        write_frame(&mut client, &encode_msg(&Request::BindShortcuts).unwrap())
+            .await
+            .unwrap();
+
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .expect("reply arrives")
+                .unwrap();
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert!(matches!(
+            &decoded,
+            Event::ShortcutsBound { bindings }
+                if bindings.len() == 1
+                    && bindings[0].id == "region"
+                    && bindings[0].trigger == "Print"
+        ));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn bind_shortcuts_cancelled_replies_with_error_event() {
+        let (portal, mut cmds) = PortalHandle::stub();
+        tokio::spawn(async move {
+            if let Some(PortalCmd::Bind { reply }) = cmds.recv().await {
+                reply
+                    .send(Err(BindFailure {
+                        code: "bind-cancelled".into(),
+                        message: "dismissed".into(),
+                    }))
+                    .expect("reply sends");
+            }
+        });
+
+        let (mut client, task) = bind_test_connection(portal);
+        write_frame(&mut client, &encode_msg(&Request::BindShortcuts).unwrap())
+            .await
+            .unwrap();
+
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .expect("reply arrives")
+                .unwrap();
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert!(
+            matches!(&decoded, Event::Error { code, .. } if code == "bind-cancelled"),
+            "expected bind-cancelled error, got {decoded:?}"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn bind_shortcuts_with_unavailable_portal_replies_error() {
+        let portal = PortalHandle::unavailable("no portal frontend");
+        let (mut client, task) = bind_test_connection(portal);
+        write_frame(&mut client, &encode_msg(&Request::BindShortcuts).unwrap())
+            .await
+            .unwrap();
+
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .expect("reply arrives")
+                .unwrap();
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert!(
+            matches!(
+                &decoded,
+                Event::Error { code, message }
+                    if code == "bind-failed" && message.contains("no portal frontend")
+            ),
+            "expected classified bind-failed error, got {decoded:?}"
+        );
+        task.abort();
     }
 
     /// Real-socket end-to-end: server binds a temp socket, a client

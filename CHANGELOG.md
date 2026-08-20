@@ -31,10 +31,21 @@ Categories used below:
   missing / interface too old) and logged as non-fatal notices naming
   the compositor-keybind workaround. Non-Wayland sessions keep the
   existing `global-hotkey` registration unchanged.
-- `flintshot hotkeys bind` subcommand (Phase 6, Task 001): sends
-  `Request::BindShortcuts` over IPC to the daemon, which will drive
-  the portal bind dialog once Task 003 wires the interception (today
-  the daemon reports the request as unsupported until then).
+- `flintshot hotkeys bind` end-to-end (Phase 6, Tasks 001 + 003):
+  the CLI sends `Request::BindShortcuts` over IPC; the daemon opens
+  the xdg-desktop-portal bind dialog with one row per capture id
+  (`region` / `fullscreen`), each carrying a human description and a
+  *suggested* binding converted from the `[hotkeys]` config chords
+  (`global-hotkey` accelerator syntax → XDG desktop-entry syntax; a
+  chord with no portal form degrades to "no suggestion" at warn — the
+  suggestion is never authority). The reply (`Event::ShortcutsBound`
+  with the user's actual bindings, or a `bind-cancelled` /
+  `bind-failed` `Event::Error`) is written back on the requesting
+  connection and printed by the CLI; bindings take effect immediately
+  (no daemon restart) and a repeat bind cleanly replaces the session's
+  bindings. Non-Wayland daemons answer with a clear
+  "Wayland-portal-only" error; no daemon → "start `flintshot daemon`
+  first".
 - `justfile` run-shortcut recipes now cover the full CLI surface:
   `config`, `open PATH`, and `auth BACKEND` join the existing
   `region` / `fullscreen` / `pin` / `upload` shortcuts, and `daemon`
