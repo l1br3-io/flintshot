@@ -277,10 +277,15 @@ fn drain_tray_menu(
             }
             Some(crate::tray::TrayAction::BindShortcuts) => {
                 // Crosses into the portal session task (tokio side);
-                // the dialog itself opens over there. Fire-and-forget:
-                // if the portal is unavailable (startup fallback), the
-                // notice for that was already logged at startup.
-                bind_requested.notify_waiters();
+                // the dialog itself opens over there. notify_one, not
+                // notify_waiters: the session task spends long windows
+                // outside select (startup awaits, an open dialog), and
+                // notify_waiters only wakes an already-parked waiter —
+                // a click in those windows would vanish silently.
+                // notify_one stores one permit, so the click survives
+                // until the loop re-enters select (repeat clicks
+                // collapse into that single queued bind).
+                bind_requested.notify_one();
             }
             Some(crate::tray::TrayAction::OpenConfig) => {
                 if let Err(e) = open_config_file() {
