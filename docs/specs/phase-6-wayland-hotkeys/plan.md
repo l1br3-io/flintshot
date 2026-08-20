@@ -62,7 +62,7 @@ unaffected.
 - [ ] X11 regression pass: hotkeys + tray unchanged (manual/CI)
 
 ### Phase 3: Ship prep
-- [ ] Task 5: Dogfood both compositors, TEST_MATRIX rows, ADR-0029, CHANGELOG → `tasks/005-dogfood-docs.md`
+- [x] Task 5: Dogfood both compositors, TEST_MATRIX rows, ADR-0029, CHANGELOG → `tasks/005-dogfood-docs.md` (happy-path rows deferred — TEST_MATRIX Phase 6 caveats)
 
 ### Checkpoint: Complete
 - [ ] Spec exit criteria 1–6 verified (spec.md §Exit criteria)
