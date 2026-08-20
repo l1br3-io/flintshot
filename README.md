@@ -66,11 +66,19 @@ cargo run --features tray -- daemon # with the system tray enabled
 is present (centralising the event stream) and fall back to standalone
 otherwise; `--standalone` forces the in-process path.
 
-> **Wayland:** `global-hotkey` has no Wayland backend yet (Phase 6,
-> via the `ashpd` `GlobalShortcuts` portal). On Wayland the daemon logs
-> a notice and you bind a compositor keybinding to `flintshot region` /
-> `flintshot fullscreen`. See
-> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §Cross-platform concerns.
+> **Wayland hotkeys:** on a Wayland session the daemon binds global
+> hotkeys through the xdg-desktop-portal `GlobalShortcuts` interface
+> (requires xdg-desktop-portal ≥ 1.16 and a frontend that implements
+> it — KDE Plasma, and COSMIC where the packaged portal lists it).
+> Run `flintshot hotkeys bind` (or use the tray's *Bind shortcuts…*)
+> once to open the portal bind dialog; `[hotkeys]` chords are offered
+> as suggestions. On desktops without that interface (GNOME, sway),
+> the daemon logs a notice and the compositor-keybinding workaround
+> still applies: bind it to `flintshot region` / `flintshot
+> fullscreen`. See
+> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §Cross-platform
+> concerns and
+> [`docs/adrs/ADR-0029`](docs/adrs/ADR-0029-ashpd-global-shortcuts.md).
 
 > **Pin always-on-top (Wayland):** the pin window's always-on-top hint
 > is honoured on X11, macOS, and Windows, but Wayland has no

@@ -1,6 +1,7 @@
 ---
-status: draft
+status: shipped
 started: 2026-08-20
+shipped: 2026-08-20
 ---
 
 # Spec — Phase 6: Wayland global hotkeys via `ashpd`
