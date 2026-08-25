@@ -2,5 +2,5 @@
 
 - [x] 001 — Assets: SVG icon + `flintshot.desktop` + autostart variant
 - [x] 002 — Validation test: parse grammar + `Exec=` ↔ CLI sync
-- [ ] 003 — `just install` / `install-user` / `uninstall` recipes
+- [x] 003 — `just install` / `install-user` / `uninstall` recipes
 - [ ] 004 — Docs: CHANGELOG, TEST_MATRIX, final gate run
