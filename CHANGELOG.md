@@ -20,6 +20,28 @@ Categories used below:
 
 ### Added
 
+- Desktop launcher entry: after `just install-user` (or
+  `sudo env "PATH=$PATH" just install` for a system prefix), typing
+  "Flintshot" in the app menu — GNOME Activities, KDE kicker, COSMIC
+  launcher — starts the daemon; no terminal needed. Right-click /
+  long-press the entry for *Capture region* / *Capture fullscreen*
+  desktop actions, and `AUTOSTART=1 just install-user` additionally
+  installs the login-autostart entry (`~/.config/autostart`) so the
+  daemon is running from your next login on. `just uninstall` removes
+  everything either recipe installed, and re-running an install over
+  an existing one is safe. Assets live under `assets/` (SVG icon,
+  `flintshot.desktop`, autostart variant). Caveat: the recipes build
+  the default binary, whose system tray is a `--features tray` build
+  option (Phase 2) — without it the entry still starts the daemon,
+  there is just no tray icon to click.
+- Desktop-file guardrail test
+  (`crates/flintshot-app/tests/desktop_files.rs`): parses both
+  `.desktop` files per the freedesktop entry grammar (required keys,
+  `Actions=` ↔ `[Desktop Action …]` consistency, autostart variant
+  action-free) and asserts every `Exec=` names a real CLI subcommand
+  by diffing against `flintshot --help` — renaming or removing a
+  subcommand now fails the test suite instead of shipping a dead
+  launcher entry.
 - Wayland global hotkeys via the xdg-desktop-portal
   `GlobalShortcuts` interface (`ashpd`): on a Wayland session the
   daemon is now portal-first — it skips `global-hotkey` X11 grabs
