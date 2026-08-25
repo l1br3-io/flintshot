@@ -1,0 +1,27 @@
+[Desktop Entry]
+Type=Application
+Name=Flintshot
+Comment=Capture and annotate screenshots
+# The launcher entry starts the resident daemon (tray); one-shot
+# captures ride the Desktop Actions below (spec decision: "daemon is
+# the app").
+Exec=flintshot daemon
+Icon=flintshot
+Terminal=false
+Categories=Utility;Graphics;
+Keywords=screenshot;capture;
+Actions=region;fullscreen;
+# StartupWMClass verified via xprop on a running editor window (X11):
+#   WM_CLASS(STRING) = "", "flintshot — annotate"
+# eframe/winit derive the class from the editor window title — NOT
+# from argv[0] — so this value must stay in sync with WINDOW_TITLE in
+# crates/flintshot-editor-egui/src/shell.rs.
+StartupWMClass=flintshot — annotate
+
+[Desktop Action region]
+Name=Capture region
+Exec=flintshot region
+
+[Desktop Action fullscreen]
+Name=Capture fullscreen
+Exec=flintshot fullscreen

@@ -1,0 +1,21 @@
+[Desktop Entry]
+# Autostart variant — installed to ~/.config/autostart only via
+# `AUTOSTART=1 just install[-user]` (opt-in per spec decision).
+# Same launch target as flintshot.desktop; no Desktop Actions (a
+# login session wants the tray, not a capture), plus the GNOME
+# autostart keys for parity.
+Type=Application
+Name=Flintshot
+Comment=Capture and annotate screenshots
+Exec=flintshot daemon
+Icon=flintshot
+Terminal=false
+Categories=Utility;Graphics;
+Keywords=screenshot;capture;
+Hidden=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=2
+# StartupWMClass: see flintshot.desktop (verified WM_CLASS of the
+# eframe editor window; keep in sync with WINDOW_TITLE in
+# crates/flintshot-editor-egui/src/shell.rs).
+StartupWMClass=flintshot — annotate
