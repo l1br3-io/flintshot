@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Flintshot mark: a flint shard striking an orange spark.
+     Placeholder geometry per spec OQ-1 — simple silhouette, readable
+     at 16 px on light and dark panels. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- flint shard -->
+  <path d="M18 110 L32 54 L66 20 L86 60 L70 110 Z" fill="#475569"/>
+  <!-- spark -->
+  <path d="M102 14 L110.5 29.5 L126 38 L110.5 46.5 L102 62 L93.5 46.5 L78 38 L93.5 29.5 Z" fill="#f97316"/>
+  <!-- ember flecks -->
+  <circle cx="114" cy="60" r="5" fill="#f97316"/>
+  <circle cx="97" cy="72" r="3.5" fill="#f97316"/>
+</svg>
