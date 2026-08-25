@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 started: 2026-08-25
 ---
 
@@ -13,6 +13,21 @@ started: 2026-08-25
 > [Phase 6](../phase-6-wayland-hotkeys/spec.md). Full packaging
 > (Flatpak, MSI, notarized `.app`) stays a post-1.0 stretch goal —
 > this effort is only about *discoverability* in desktop launchers.
+
+## Effort status (revised 2026-08-26)
+
+Tasks 001–004 shipped and are on `main` (icon, desktop entries,
+validation test, install recipes, docs). Closeout surfaced one gap
+that breaks the core promise: `just install` built the default
+**no-tray** binary (`tray` is an opt-in cargo feature), so
+launch-from-menu started a daemon with no tray icon. This revision
+extends scope to close that gap. Remaining work:
+
+1. Install recipes build `--features tray` by default (`FEATURES=`
+   overrides) — not yet implemented.
+2. Manual TEST_MATRIX pass (exit criteria 1–4) — pending a desktop
+   session; the tray-build workaround in the matrix setup becomes
+   obsolete once (1) lands.
 
 ## Objective
 
@@ -33,7 +48,8 @@ not in `~/.cargo/bin`.
 **Success looks like:**
 
 - Fresh install → `just install` → "Flintshot" appears in the app
-  launcher with an icon; launching it shows the tray icon; launching
+  launcher with an icon; the installed binary includes the tray
+  (recipe-level default); launching it shows the tray icon; launching
   it again is a no-op (single-instance lock already guarantees
   join-or-replace semantics).
 - Right-click / long-press the launcher entry offers *Capture
@@ -55,6 +71,13 @@ fullscreen actions only.
 3. Autostart is opt-in via the install recipe, not default.
 4. XDG data dirs only (`~/.local/share` user install, `/usr/local`
    or `$PREFIX` system install). Flatpak/Snap/MSI remain out.
+5. Install recipes build `--features tray` by default. The crate's
+   cargo-level default features stay minimal (CI and bare checkouts
+   stay hermetic); only the install path opts in. `FEATURES=`
+   overrides (e.g. `FEATURES=""` for a minimal build). Consequence:
+   GTK3 dev libs (libappindicator stack) become a build-time
+   prerequisite for the default install; the recipe's failure path
+   must say so and point at the escape hatch.
 
 ## Scope (in / out)
 
@@ -74,6 +97,11 @@ fullscreen actions only.
   (+ optional `AUTOSTART=1` for the autostart entry); `just
   uninstall` inverse. `desktop-file-install` / `update-desktop-database`
   used when present, skipped gracefully when absent.
+- **Revision:** the same recipes build the binary with
+  `--features "{{FEATURES:-tray}}"` — tray on by default at the
+  recipe level, minimal (or custom) via `FEATURES=`. A build failure
+  from missing GTK dev libs prints an actionable hint (install the
+  deps or re-run with `FEATURES=""`).
 - Validation: a unit/integration test asserting the `.desktop` files
   parse (spec 1.0 key/value grammar) and every `Exec=` resolves to a
   real subcommand — protects against drift when CLI flags change.
@@ -85,6 +113,9 @@ fullscreen actions only.
 - Packaging formats (Flatpak, AppImage, MSI, `.app`), binaries-only
   distribution channels (release artifacts with tarball layout can
   ride along later).
+- Changing `flintshot-app`'s cargo-level default features — tray
+  stays opt-in at the crate level; only install recipes default it
+  on.
 - Tray icon artwork changes (`tray-icon` currently uses a default
   icon; a branded tray icon is a follow-up once the mark exists).
 - macOS (`.app` bundle) and Windows (Start-menu shortcut) — those
@@ -98,13 +129,18 @@ fullscreen actions only.
 2. `just` install/uninstall recipes with PREFIX + AUTOSTART support.
 3. Desktop-file validation test (parse + Exec-target checks).
 4. CHANGELOG + TEST_MATRIX updates.
+5. *(Revision)* Tray-default install builds: `FEATURES=` passthrough in
+   `install` / `install-user`, actionable failure hint when GTK dev
+   libs are missing.
 
 ## Exit criteria
 
 1. On a Linux session (X11 and Wayland each), after `just
-   install-user`: the launcher lists "Flintshot" with the SVG icon;
-   activation starts the daemon and shows the tray; a second
-   activation joins/does nothing harmful (no second tray icon).
+   install-user` (no extra env, tray included by default): the
+   launcher lists "Flintshot" with the SVG icon; activation starts
+   the daemon and shows the tray; a second activation joins/does
+   nothing harmful (no second tray icon). `FEATURES="" just
+   install-user` still succeeds as the minimal path.
 2. Launcher context menu shows *Capture region* / *Capture
    fullscreen*; both trigger the standard capture flow without a
    terminal.
@@ -127,9 +163,10 @@ icon theme layout; plain `install`/`cp` in `just` recipes. Optional
 ## Commands
 
 ```sh
-just install              # system install (PREFIX=/usr/local)
-just install-user         # ~/.local (XDG data + bin)
+just install              # system install (PREFIX=/usr/local), tray build
+just install-user         # ~/.local (XDG data + bin), tray build
 AUTOSTART=1 just install-user
+FEATURES="" just install-user   # minimal build (no tray; no GTK build deps)
 just uninstall            # inverse of install
 cargo test --workspace --all-targets   # includes desktop-file validation test
 ```
@@ -159,13 +196,18 @@ table-driven cases).
   the clap command surface (share the subcommand list or hard-code
   with a pointer comment to `cli.rs`).
 - **Manual:** TEST_MATRIX rows per session type; WM_CLASS check
-  (`xprop` on X11) confirming `StartupWMClass` correctness.
+  (`xprop` on X11) confirming `StartupWMClass` correctness. Once the
+  tray-default revision lands, the matrix's `--features tray` build
+  workaround goes away — plain `just install-user` is the test path;
+  also verify the missing-GTK-dev-libs hint fires on a clean
+  container.
 
 ## Boundaries
 
 - **Always:** keep `.desktop` `Exec=` targets in sync with the CLI
   surface (test-enforced); follow hicolor/XDG layout conventions;
-  install recipes must be idempotent.
+  install recipes must be idempotent; install recipes build with
+  tray enabled unless `FEATURES=` overrides.
 - **Ask first:** new dependencies (goal: zero); touching
   `flintshot-app` code beyond WM_CLASS verification; CI changes.
 - **Never:** sudo inside recipes (document that system install needs
@@ -191,12 +233,23 @@ table-driven cases).
 - **SVG-only icon at hicolor scalable/** — modern launchers scale;
   raster sizes can be generated later if a gap shows up (older tray
   implementations are out of this effort's scope).
+- **Tray on by default at the recipe level** *(revision, 2026-08-26)*
+  — the launcher promise is "start the daemon, see the tray"; a
+  no-tray default install breaks the core UX, as closeout found.
+  Cargo-level defaults stay minimal so CI and bare checkouts remain
+  hermetic; `just install*` opts into `--features tray`, `FEATURES=`
+  is the escape hatch, and the build-failure path must explain the
+  GTK dev-lib prerequisite.
 
 ## Open questions
 
-1. Icon design: accept a placeholder geometric flint/spark now and
-   refine post-1.0 branding, or block on designed artwork?
-   (Recommendation: placeholder now.)
+1. ~~Icon design: placeholder vs designed artwork?~~ **Resolved
+   2026-08-25** — placeholder geometric mark shipped in task 001;
+   refinement is post-1.0 branding.
 2. Should `just install` also install the bash/zsh completions if
    `clap_complete` generation lands someday? Out of scope now —
    noted for the packaging effort.
+3. ~~Should CI gain a `--features tray` build job?~~ **Resolved
+   2026-08-26** — yes: task 006 adds a `tray-build` job (clippy with
+   the feature, `-D warnings`); the stale `flintshot-app/Cargo.toml`
+   comment gets fixed with it.
