@@ -1100,6 +1100,117 @@ before.
 
 ---
 
+## Launcher desktop entry — app-menu integration
+
+Effort: `launcher-desktop-entry`. Linux-only by design (XDG desktop
+entries + hicolor icons); macOS / Windows cells are N/A pending the
+packaging stretch goal. The entry, its desktop actions, and the
+autostart variant are validated headless by
+`crates/flintshot-app/tests/desktop_files.rs` (grammar + `Exec=`
+↔ CLI sync); the rows below cover what a test can't — the actual
+launcher, session, and login flows.
+
+### Test setup
+
+```sh
+just install-user
+```
+
+Expected: release build + three files land under `~/.local` —
+
+```sh
+ls ~/.local/bin/flintshot \
+   ~/.local/share/applications/flintshot.desktop \
+   ~/.local/share/icons/hicolor/scalable/apps/flintshot.svg
+```
+
+**Tray rows need a `--features tray` binary** (Phase 2's opt-in
+feature; `just install-user` builds without it). Build one and drop
+it over the installed copy:
+
+```sh
+cargo build --release --features tray
+cp target/release/flintshot ~/.local/bin/flintshot
+```
+
+Daemon-absent verification: `pgrep -af flintshot` before / after each
+step.
+
+### Test script
+
+**1. Launcher discovery + activation (rows 1–5).**
+
+Open the app menu / launcher, type "Flintshot". Expected: the entry
+appears with the flint/spark SVG icon. Activate it → the daemon
+process starts (`pgrep -af 'flintshot daemon'`); with a tray build,
+the tray icon appears. Activate it again → no second daemon and no
+second tray icon (single-instance lock; the second process exits).
+
+**2. Desktop actions (rows 6–7).**
+
+Right-click / long-press the launcher entry. Expected menu actions:
+*Capture region*, *Capture fullscreen*. Each triggers the standard
+capture flow — same editor window, portal prompts, and fallbacks as
+the tray / CLI paths on your platform (Phase 1 / Phase 5 caveats
+apply unchanged).
+
+**3. Autostart (rows 8–9).**
+
+```sh
+AUTOSTART=1 just install-user
+ls ~/.config/autostart/flintshot-autostart.desktop
+```
+
+Log out and back in. Expected: the daemon is running with no manual
+action (tray icon present on a tray build).
+
+**4. Uninstall + idempotent reinstall (rows 10–11).**
+
+```sh
+just uninstall            # remove the autostart entry too if installed
+pgrep -af flintshot       # daemon (if any) unaffected — uninstall removes files only
+ls ~/.local/bin/flintshot 2>&1   # expected: No such file or directory
+```
+
+Then re-run `just install-user` over the removed install, and once
+more over the existing install — launcher entry works identically
+after both (recipes are idempotent; `cp --remove-destination` handles
+pre-existing files/symlinks).
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| `just install-user`: binary + `.desktop` + icon land under `~/.local` |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Launcher lists "Flintshot" with the SVG icon                 |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Activating the entry starts the daemon (no terminal)         |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Tray icon appears after activation (`--features tray` build) |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Second activation: no second daemon / tray icon              |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Desktop action *Capture region* opens the standard capture flow | |    |    |    |    | N/A | N/A | N/A | N/A |
+| Desktop action *Capture fullscreen* ditto                    |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| `AUTOSTART=1 just install-user` writes the autostart entry   |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Re-login after autostart install → daemon running, no manual action | | | | | | N/A | N/A | N/A | N/A |
+| `just uninstall` removes every installed file (bin, entries, icon, autostart) | | | | | | N/A | N/A | N/A | N/A |
+| Reinstall after uninstall, and install over existing, both idempotent | | | | | | N/A | N/A | N/A | N/A |
+
+### Known caveats
+
+- **Default build has no tray.** `just install` / `just install-user`
+  build without `--features tray`, so activation starts the daemon
+  (IPC + hotkeys + desktop actions all work) but no tray icon
+  appears. A `FEATURES=` passthrough on the recipes is a candidate
+  follow-up; until then use the setup step above for tray rows.
+- **System install needs elevation externally** — the recipes never
+  sudo. `sudo env "PATH=$PATH" just install` (rustup's cargo path
+  must survive sudo's `secure_path`).
+- **Launcher caching.** If the icon or entry doesn't refresh
+  immediately, the recipes already run `update-desktop-database` /
+  `gtk-update-icon-cache` when present; otherwise re-login or run
+  them manually. GNOME has been known to need a session restart to
+  pick up new icons.
+
+---
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).
