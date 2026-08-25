@@ -97,6 +97,132 @@ msrv:
 cosmic:
     cargo build -p flintshot-cosmic
 
+# --- Install / uninstall (desktop integration) ---
+
+# Install system-wide: release binary, launcher entry, and icon under
+# PREFIX (default /usr/local). Needs write access to PREFIX — elevate
+# externally, there is no sudo inside the recipe. Builds first.
+#   sudo just install                      # -> /usr/local
+#   sudo env PREFIX=/opt just install      # custom prefix, elevated
+#   AUTOSTART=1 just install               # + per-user login autostart
+# Rustup users: cargo lives in ~/.cargo/bin, which sudo's secure_path
+# hides from root — preserve your PATH with:
+#   sudo env "PATH=$PATH" just install
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== build (release) =="
+    cargo build --release
+    just _deploy "${PREFIX:-/usr/local}"
+
+# Install per-user, no elevation: release binary, launcher entry, and
+# icon under ~/.local. Builds first.
+#   just install-user                      # -> ~/.local
+#   AUTOSTART=1 just install-user          # + ~/.config/autostart entry
+install-user:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== build (release) =="
+    cargo build --release
+    just _deploy "${HOME}/.local"
+
+# Copy the built artifacts under a scope root, then refresh desktop /
+# icon caches (graceful skip when those tools are missing). AUTOSTART=1
+# adds the login-autostart entry — always per-user
+# (~/.config/autostart), even for a system install. Private helper.
+[private]
+_deploy root:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    apps="{{ root }}/share/applications"
+    icons="{{ root }}/share/icons/hicolor/scalable/apps"
+    bins="{{ root }}/bin"
+
+    mkdir -p "$bins" "$apps" "$icons"
+    # --remove-destination: a pre-existing symlink (dev setups often
+    # link ~/.local/bin/flintshot at target/release) makes cp refuse
+    # with "same file"; replace it with a real copy instead.
+    cp --remove-destination target/release/flintshot "$bins/flintshot"
+    cp assets/applications/flintshot.desktop "$apps/flintshot.desktop"
+    cp assets/icons/hicolor/scalable/apps/flintshot.svg "$icons/flintshot.svg"
+    chmod 755 "$bins/flintshot"
+    chmod 644 "$apps/flintshot.desktop" "$icons/flintshot.svg"
+    echo "ok: binary + desktop entry + icon installed under {{ root }}"
+
+    if [[ "${AUTOSTART:-0}" == "1" ]]; then
+        # Autostart is per-user even for system installs; when
+        # elevated, resolve the invoking user's home, not root's.
+        home="$HOME"
+        if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+            home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+        fi
+        autostart_dir="${XDG_CONFIG_HOME:-$home/.config}/autostart"
+        mkdir -p "$autostart_dir"
+        cp assets/applications/flintshot-autostart.desktop "$autostart_dir/"
+        chmod 644 "$autostart_dir/flintshot-autostart.desktop"
+        echo "ok: autostart entry installed to $autostart_dir"
+    fi
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$apps"
+    else
+        echo "ok: update-desktop-database not on PATH; skipping"
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache --quiet --force --ignore-theme-index \
+            "${icons%/scalable/apps}" \
+            || echo "ok: gtk-update-icon-cache failed; skipping (caches rebuild on demand)"
+    else
+        echo "ok: gtk-update-icon-cache not on PATH; skipping"
+    fi
+
+# Remove everything install / install-user put down — both scopes
+# (PREFIX and ~/.local) plus the autostart entry. Safe to re-run when
+# nothing is installed. System paths need the same elevation as
+# install; PREFIX applies exactly as there:
+#   just uninstall                         # user scope + /usr/local
+#   sudo env PREFIX=/opt just uninstall    # elevated, custom prefix
+uninstall:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    prefix="${PREFIX:-/usr/local}"
+    # User-scope files belong to the invoking user, not root.
+    home="$HOME"
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    fi
+    local_root="$home/.local"
+
+    rm -f -- \
+        "$prefix/bin/flintshot" \
+        "$prefix/share/applications/flintshot.desktop" \
+        "$prefix/share/icons/hicolor/scalable/apps/flintshot.svg" \
+        "$local_root/bin/flintshot" \
+        "$local_root/share/applications/flintshot.desktop" \
+        "$local_root/share/icons/hicolor/scalable/apps/flintshot.svg" \
+        "${XDG_CONFIG_HOME:-$home/.config}/autostart/flintshot-autostart.desktop"
+    echo "ok: removed installed files from $prefix and $local_root (incl. autostart)"
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        for d in "$prefix/share/applications" "$local_root/share/applications"; do
+            if [[ -d "$d" ]]; then
+                update-desktop-database "$d"
+            fi
+        done
+    else
+        echo "ok: update-desktop-database not on PATH; skipping"
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        for d in "$prefix/share/icons/hicolor" "$local_root/share/icons/hicolor"; do
+            if [[ -d "$d" ]]; then
+                gtk-update-icon-cache --quiet --force --ignore-theme-index "$d" \
+                    || echo "ok: gtk-update-icon-cache failed; skipping"
+            fi
+        done
+    else
+        echo "ok: gtk-update-icon-cache not on PATH; skipping"
+    fi
+
 # --- Run subcommands (shortcuts for `cargo run -- <cmd>`) ---
 
 # Show the CLI help (full subcommand surface).
