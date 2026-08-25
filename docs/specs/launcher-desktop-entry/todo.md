@@ -4,7 +4,7 @@
 - [x] 002 — Validation test: parse grammar + `Exec=` ↔ CLI sync
 - [x] 003 — `just install` / `install-user` / `uninstall` recipes
 - [x] 004 — Docs: CHANGELOG, TEST_MATRIX, final gate run
-- [ ] 005 — Tray-default install builds (`FEATURES=` passthrough)
+- [x] 005 — Tray-default install builds (`FEATURES=` passthrough)
 - [ ] 006 — CI `tray-build` job (compiles tray feature path)
 - [ ] 007 — Manual TEST_MATRIX pass + exit-criteria sweep
 

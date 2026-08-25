@@ -101,30 +101,61 @@ cosmic:
 
 # Install system-wide: release binary, launcher entry, and icon under
 # PREFIX (default /usr/local). Needs write access to PREFIX — elevate
-# externally, there is no sudo inside the recipe. Builds first.
+# externally, there is no sudo inside the recipe. Builds first with
+# the tray feature on (FEATURES= overrides; FEATURES='' for minimal).
 #   sudo just install                      # -> /usr/local
 #   sudo env PREFIX=/opt just install      # custom prefix, elevated
 #   AUTOSTART=1 just install               # + per-user login autostart
+#   sudo env FEATURES='' just install      # minimal build, no GTK deps
 # Rustup users: cargo lives in ~/.cargo/bin, which sudo's secure_path
 # hides from root — preserve your PATH with:
 #   sudo env "PATH=$PATH" just install
 install:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== build (release) =="
-    cargo build --release
+    just _build
     just _deploy "${PREFIX:-/usr/local}"
 
 # Install per-user, no elevation: release binary, launcher entry, and
-# icon under ~/.local. Builds first.
+# icon under ~/.local. Builds first with the tray feature on
+# (FEATURES= overrides; FEATURES='' for minimal).
 #   just install-user                      # -> ~/.local
 #   AUTOSTART=1 just install-user          # + ~/.config/autostart entry
+#   FEATURES='' just install-user          # minimal build, no GTK deps
 install-user:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== build (release) =="
-    cargo build --release
+    just _build
     just _deploy "${HOME}/.local"
+
+# Build the release binary for the install recipes. FEATURES selects
+# the feature set: unset -> tray (the launcher promise: daemon +
+# tray), '' -> minimal (no tray; no GTK build deps), 'a,b' -> passed
+# through verbatim. Private helper for install / install-user.
+[private]
+_build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # ${FEATURES-tray}, not ${FEATURES:-tray}: unset -> "tray",
+    # set-but-empty -> "" (minimal). The :- form would make the
+    # FEATURES='' escape hatch impossible.
+    features="${FEATURES-tray}"
+    if [[ -n "$features" ]]; then
+        echo "== build (release, features: ${features}) =="
+        if ! cargo build --release --features "$features"; then
+            # Comma-boundary match so a feature like 'mytray' can't
+            # trigger the hint.
+            if [[ ",${features}," == *",tray,"* ]]; then
+                echo "hint: the 'tray' feature needs the GTK dev libs at build time" >&2
+                echo "      (Debian/Ubuntu: libgtk-3-dev libayatana-appindicator3-dev)" >&2
+                echo "      Install them, or re-run with FEATURES='' for a minimal no-tray build" >&2
+            fi
+            exit 1
+        fi
+    else
+        echo "== build (release, minimal: no features) =="
+        cargo build --release
+    fi
 
 # Copy the built artifacts under a scope root, then refresh desktop /
 # icon caches (graceful skip when those tools are missing). AUTOSTART=1

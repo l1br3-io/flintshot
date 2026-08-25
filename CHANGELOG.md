@@ -18,6 +18,20 @@ Categories used below:
 
 ## [Unreleased]
 
+### Changed
+
+- `just install` / `just install-user` now build the release binary
+  with the `tray` feature on by default, so the launcher entry's
+  promise holds: activate it, the daemon starts *and the tray icon
+  appears*. This needs the GTK dev libs at build time
+  (`libgtk-3-dev` + `libayatana-appindicator3-dev` on Debian/Ubuntu;
+  the tray backend links `libgtk-3`, appindicator itself is dlopened
+  at runtime); on failure the recipes print that prerequisite plus
+  the escape hatch. `FEATURES=` overrides the set — `FEATURES=''`
+  installs the minimal no-tray binary (no GTK build deps),
+  `FEATURES='a,b'` passes through verbatim. Cargo-level default
+  features are unchanged, so plain `cargo build` / CI stay minimal.
+
 ### Added
 
 - Desktop launcher entry: after `just install-user` (or
@@ -30,10 +44,7 @@ Categories used below:
   daemon is running from your next login on. `just uninstall` removes
   everything either recipe installed, and re-running an install over
   an existing one is safe. Assets live under `assets/` (SVG icon,
-  `flintshot.desktop`, autostart variant). Caveat: the recipes build
-  the default binary, whose system tray is a `--features tray` build
-  option (Phase 2) — without it the entry still starts the daemon,
-  there is just no tray icon to click.
+  `flintshot.desktop`, autostart variant).
 - Desktop-file guardrail test
   (`crates/flintshot-app/tests/desktop_files.rs`): parses both
   `.desktop` files per the freedesktop entry grammar (required keys,
