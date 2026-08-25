@@ -64,6 +64,23 @@ jobs:
       - name: Verify build on MSRV (workspace)
         run: cargo build --workspace --all-targets
 
+  tray-build:
+    name: cargo clippy -p flintshot-app --features tray
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcap + GTK (tray) system deps
+        # tray-icon's Linux backend (libappindicator) needs the GTK3
+        # dev stack on top of the xcap deps flintshot-core pulls.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            ${{ env.XCAP_LINUX_DEPS }}
+      - name: Run cargo clippy (tray feature)
+        run: cargo clippy -p flintshot-app --features tray --all-targets -- -D warnings
+
   cosmic-build:
     name: cargo build -p flintshot-cosmic
     runs-on: ubuntu-latest

@@ -5,7 +5,7 @@
 - [x] 003 — `just install` / `install-user` / `uninstall` recipes
 - [x] 004 — Docs: CHANGELOG, TEST_MATRIX, final gate run
 - [x] 005 — Tray-default install builds (`FEATURES=` passthrough)
-- [ ] 006 — CI `tray-build` job (compiles tray feature path)
+- [x] 006 — CI `tray-build` job (compiles tray feature path)
 - [ ] 007 — Manual TEST_MATRIX pass + exit-criteria sweep
 
 ## Exit-criteria sweep (task 004 closeout, 2026-08-25; reopened by revision)

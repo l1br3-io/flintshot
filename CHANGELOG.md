@@ -34,6 +34,12 @@ Categories used below:
 
 ### Added
 
+- CI: new `tray-build` job compiles and lints `flintshot-app` with
+  `--features tray` (`cargo clippy -p flintshot-app --features tray
+  --all-targets -- -D warnings`, GTK + appindicator dev libs installed
+  in the job), so the opt-in tray code path can't rot silently between
+  manual `just install` builds.
+
 - Desktop launcher entry: after `just install-user` (or
   `sudo env "PATH=$PATH" just install` for a system prefix), typing
   "Flintshot" in the app menu — GNOME Activities, KDE kicker, COSMIC

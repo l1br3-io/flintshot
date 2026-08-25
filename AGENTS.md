@@ -112,7 +112,9 @@ sudo apt-get install -y --no-install-recommends \
 ```
 
 CI installs these in the `lint`, `test`, and `msrv` jobs (see the
-`XCAP_LINUX_DEPS` env in `.github/workflows/ci.yml`). macOS and
+`XCAP_LINUX_DEPS` env in `.github/workflows/ci.yml`); the `tray-build`
+job additionally compiles the tray feature path (adds
+`libgtk-3-dev` + `libayatana-appindicator3-dev`). macOS and
 Windows need no extra deps for Phase 1's capture path.
 
 > **Note:** `libgbm-dev` is required at link time even though xcap's
