@@ -1124,14 +1124,14 @@ ls ~/.local/bin/flintshot \
    ~/.local/share/icons/hicolor/scalable/apps/flintshot.svg
 ```
 
-**Tray rows need a `--features tray` binary** (Phase 2's opt-in
-feature; `just install-user` builds without it). Build one and drop
-it over the installed copy:
-
-```sh
-cargo build --release --features tray
-cp target/release/flintshot ~/.local/bin/flintshot
-```
+`just install-user` builds with the `tray` feature on by default
+(the launcher promise: daemon + tray), so the GTK dev libs
+(`libgtk-3-dev`, `libayatana-appindicator3-dev` on Debian/Ubuntu)
+must be present at build time; the installed binary links
+`libgtk-3` (`ldd ~/.local/bin/flintshot | grep libgtk-3`). The
+appindicator backend itself is dlopened at runtime — a missing SNI
+host degrades to no-tray, daemon still runs. `FEATURES=''` selects
+the minimal no-tray build (row 12).
 
 Daemon-absent verification: `pgrep -af flintshot` before / after each
 step.
@@ -1177,6 +1177,17 @@ more over the existing install — launcher entry works identically
 after both (recipes are idempotent; `cp --remove-destination` handles
 pre-existing files/symlinks).
 
+**5. Minimal-build path (row 12).**
+
+```sh
+FEATURES='' just install-user
+ldd ~/.local/bin/flintshot | grep -c libgtk-3   # expected: 0
+```
+
+Activate the launcher entry: daemon starts (IPC + hotkeys + desktop
+actions work) but no tray icon. Re-run plain `just install-user`
+afterwards to restore the tray build.
+
 ### Matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
@@ -1184,7 +1195,7 @@ pre-existing files/symlinks).
 | `just install-user`: binary + `.desktop` + icon land under `~/.local` |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Launcher lists "Flintshot" with the SVG icon                 |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Activating the entry starts the daemon (no terminal)         |    |    |    |    |    | N/A | N/A | N/A | N/A |
-| Tray icon appears after activation (`--features tray` build) |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Tray icon appears after activation (tray-default build)    |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Second activation: no second daemon / tray icon              |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Desktop action *Capture region* opens the standard capture flow | |    |    |    |    | N/A | N/A | N/A | N/A |
 | Desktop action *Capture fullscreen* ditto                    |    |    |    |    |    | N/A | N/A | N/A | N/A |
@@ -1192,14 +1203,16 @@ pre-existing files/symlinks).
 | Re-login after autostart install → daemon running, no manual action | | | | | | N/A | N/A | N/A | N/A |
 | `just uninstall` removes every installed file (bin, entries, icon, autostart) | | | | | | N/A | N/A | N/A | N/A |
 | Reinstall after uninstall, and install over existing, both idempotent | | | | | | N/A | N/A | N/A | N/A |
+| `FEATURES='' just install-user`: minimal binary (no libgtk-3), daemon runs, no tray | | | | | | N/A | N/A | N/A | N/A |
 
 ### Known caveats
 
-- **Default build has no tray.** `just install` / `just install-user`
-  build without `--features tray`, so activation starts the daemon
-  (IPC + hotkeys + desktop actions all work) but no tray icon
-  appears. A `FEATURES=` passthrough on the recipes is a candidate
-  follow-up; until then use the setup step above for tray rows.
+- **Tray build needs GTK dev libs.** `just install` /
+  `install-user` build with `--features tray` by default, which
+  needs `libgtk-3-dev` + `libayatana-appindicator3-dev` at build
+  time (Debian/Ubuntu names). On failure the recipe prints the
+  prerequisite and the `FEATURES=''` escape hatch (minimal no-tray
+  binary; IPC, hotkeys, and desktop actions still work).
 - **System install needs elevation externally** — the recipes never
   sudo. `sudo env "PATH=$PATH" just install` (rustup's cargo path
   must survive sudo's `secure_path`).
