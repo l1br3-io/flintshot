@@ -1192,18 +1192,18 @@ afterwards to restore the tray build.
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| `just install-user`: binary + `.desktop` + icon land under `~/.local` |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| `just install-user`: binary + `.desktop` + icon land under `~/.local` |    |    |    |    | PASS 54383b1 2026-08-28 (tray build; `ldd` links libgtk-3) | N/A | N/A | N/A | N/A |
 | Launcher lists "Flintshot" with the SVG icon                 |    |    |    |    |    | N/A | N/A | N/A | N/A |
-| Activating the entry starts the daemon (no terminal)         |    |    |    |    |    | N/A | N/A | N/A | N/A |
-| Tray icon appears after activation (tray-default build)    |    |    |    |    |    | N/A | N/A | N/A | N/A |
-| Second activation: no second daemon / tray icon              |    |    |    |    |    | N/A | N/A | N/A | N/A |
-| Desktop action *Capture region* opens the standard capture flow | |    |    |    |    | N/A | N/A | N/A | N/A |
-| Desktop action *Capture fullscreen* ditto                    |    |    |    |    |    | N/A | N/A | N/A | N/A |
-| `AUTOSTART=1 just install-user` writes the autostart entry   |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Activating the entry starts the daemon (no terminal)         |    |    |    |    | PASS 54383b1 2026-08-28 (via `gtk-launch` / `g_desktop_app_info_launch_action`, the XDG activation path; daemon detaches, lock + IPC bound) | N/A | N/A | N/A | N/A |
+| Tray icon appears after activation (tray-default build)    |    |    |    |    | FAIL 54383b1 2026-08-28 — SNI item never registers with COSMIC's StatusNotifierWatcher (see caveats; issue pending) | N/A | N/A | N/A | N/A |
+| Second activation: no second daemon / tray icon              |    |    |    |    | PASS 54383b1 2026-08-28 (second process refuses via single-instance lock; exactly one daemon) | N/A | N/A | N/A | N/A |
+| Desktop action *Capture region* opens the standard capture flow | |    |    |    | FAIL 54383b1 2026-08-28 — delegated capture fork-loops, no editor (see caveats; issue pending) | N/A | N/A | N/A | N/A |
+| Desktop action *Capture fullscreen* ditto                    |    |    |    |    | FAIL 54383b1 2026-08-28 (same dispatch path as *Capture region*) | N/A | N/A | N/A | N/A |
+| `AUTOSTART=1 just install-user` writes the autostart entry   |    |    |    |    | PASS 54383b1 2026-08-28 | N/A | N/A | N/A | N/A |
 | Re-login after autostart install → daemon running, no manual action | | | | | | N/A | N/A | N/A | N/A |
-| `just uninstall` removes every installed file (bin, entries, icon, autostart) | | | | | | N/A | N/A | N/A | N/A |
-| Reinstall after uninstall, and install over existing, both idempotent | | | | | | N/A | N/A | N/A | N/A |
-| `FEATURES='' just install-user`: minimal binary (no libgtk-3), daemon runs, no tray | | | | | | N/A | N/A | N/A | N/A |
+| `just uninstall` removes every installed file (bin, entries, icon, autostart) | | | | | PASS 54383b1 2026-08-28 (no leftovers) | N/A | N/A | N/A | N/A |
+| Reinstall after uninstall, and install over existing, both idempotent | | | | | PASS 54383b1 2026-08-28 (entry still activates the daemon after both) | N/A | N/A | N/A | N/A |
+| `FEATURES='' just install-user`: minimal binary (no libgtk-3), daemon runs, no tray | | | | | PASS 54383b1 2026-08-28 (0 libgtk-3 links; daemon runs; owns no bus names — no SNI object at all. Desktop actions broken by the fork loop above, orthogonal to the build) | N/A | N/A | N/A | N/A |
 
 ### Known caveats
 
@@ -1213,6 +1213,9 @@ afterwards to restore the tray build.
   time (Debian/Ubuntu names). On failure the recipe prints the
   prerequisite and the `FEATURES=''` escape hatch (minimal no-tray
   binary; IPC, hotkeys, and desktop actions still work).
+  *Clean-container verification of the failure hint deferred*
+  (2026-08-28) — re-ride the next task-007 re-run after the
+  blockers below are fixed.
 - **System install needs elevation externally** — the recipes never
   sudo. `sudo env "PATH=$PATH" just install` (rustup's cargo path
   must survive sudo's `secure_path`).
@@ -1221,6 +1224,65 @@ afterwards to restore the tray build.
   `gtk-update-icon-cache` when present; otherwise re-login or run
   them manually. GNOME has been known to need a session restart to
   pick up new icons.
+
+#### L5 pass findings (2026-08-28, commit 54383b1) — three blockers, all pre-existing product bugs outside this effort's scope
+
+1. **Delegated captures fork-loop; no editor ever opens** (fails
+   rows 6–7, exit criteria 1–2). `worker.rs::region_argv` /
+   `fullscreen_argv` spawn `flintshot region` **without
+   `--standalone`**, and `cli.rs::run_region` re-delegates
+   whenever the daemon is up — so the daemon-spawned worker
+   delegates right back, and the daemon spawns the next worker.
+   Observed: ~470 worker processes in 8 s (~60–100/s) from a
+   single desktop action; each generation connects, writes one
+   frame, exits; the daemon log fills with
+   `IPC connection ended … early eof` (one per generation) and no
+   editor window appears. Affects **every** daemon-mediated
+   capture path (tray menu, desktop actions, CLI-with-daemon,
+   hotkeys) since Phase 2's detect-and-delegate; never caught
+   because the Phase 2 tray-capture matrix rows were never run.
+   Fix shape: mark daemon-spawned capture workers
+   `--standalone` (or equivalent env/argv guard) + a
+   no-re-delegation regression test.
+2. **Standalone editor workers crash on at-spi sessions**
+   (blocks the fallback path, and pin/upload windows share it).
+   `flintshot region --standalone` (or with no daemon running)
+   panics before any window opens:
+   `there is no reactor running, must be called from the context
+   of a Tokio 1.x runtime` at `zbus-5.18.0/src/abstractions/
+   executor.rs`. Chain: eframe → egui-winit → accesskit_winit →
+   accesskit_unix → atspi → zbus 5. zbus 5 (tokio feature)
+   requires an ambient tokio reactor; window-opening workers have
+   none (the CLI's one-shot delegate runtime is already dropped).
+   zbus 5 entered the tree with Phase 6's `ashpd` (commit 23d85b6)
+   and unified accesskit onto it — so this likely affects **every
+   desktop with at-spi running** (GNOME/KDE included), not just
+   COSMIC. Sessions without `org.a11y.Bus` skip the path and work.
+   Fix shape: give window workers a dropped-in ambient tokio
+   runtime (or pin accesskit's zbus back to 4.x / async-io
+   backend).
+3. **Tray SNI item never registers with COSMIC's watcher** (fails
+   row 4, exit criterion 1). The daemon (tray build) publishes
+   `/StatusNotifierItem` + `/org/ayatana/NotificationItem` on its
+   bus name, but `RegisteredStatusNotifierItems` on
+   `org.kde.StatusNotifierWatcher` (cosmic-applet-status-area)
+   never includes it — no tray icon appears. Other apps
+   (syncthing-gtk, pcloud) register fine on the same watcher.
+   Needs hands-on debugging in the tray-icon/appindicator init
+   path (registration call ordering vs watcher availability).
+
+Minor notes (non-blocking):
+
+- `gtk-launch` from a terminal stays attached to the daemon's
+  output (it doesn't fork); real launchers detach properly. Use
+  `setsid gtk-launch flintshot` when scripting.
+- The daemon takes >1–2 s after SIGTERM to release the
+  single-instance lock; rapid `pkill` → restart cycles fail with
+  "already running" (the `--replace` path handles this via
+  `wait_for_socket_to_free`; scripts should sleep ~2 s).
+- Daemon startup logs ~100 × `Ignoring a wl_output with version
+  < 4.` on COSMIC (wayland-client noise from monitor
+  enumeration). Cosmetic; pre-existing.
 
 ---
 

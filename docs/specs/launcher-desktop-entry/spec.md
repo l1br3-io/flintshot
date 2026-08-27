@@ -14,20 +14,27 @@ started: 2026-08-25
 > (Flatpak, MSI, notarized `.app`) stays a post-1.0 stretch goal —
 > this effort is only about *discoverability* in desktop launchers.
 
-## Effort status (revised 2026-08-26)
+## Effort status (revised 2026-08-26; task-007 pass 2026-08-28)
 
-Tasks 001–004 shipped and are on `main` (icon, desktop entries,
-validation test, install recipes, docs). Closeout surfaced one gap
-that breaks the core promise: `just install` built the default
-**no-tray** binary (`tray` is an opt-in cargo feature), so
-launch-from-menu started a daemon with no tray icon. This revision
-extends scope to close that gap. Remaining work:
+Tasks 001–006 shipped (icon, desktop entries, validation test,
+install recipes with tray-default builds, docs, CI tray job). Task
+007 (manual TEST_MATRIX pass) ran on L5 on 2026-08-28: all install
+mechanics PASS (rows 1/3/5/8/10/11/12), but the pass surfaced three
+**pre-existing product bugs** outside this effort's scope that fail
+exit criteria 1–2 — recorded in TEST_MATRIX "L5 pass findings":
 
-1. Install recipes build `--features tray` by default (`FEATURES=`
-   overrides) — not yet implemented.
-2. Manual TEST_MATRIX pass (exit criteria 1–4) — pending a desktop
-   session; the tray-build workaround in the matrix setup becomes
-   obsolete once (1) lands.
+1. Delegated captures fork-loop (daemon-spawned workers re-delegate;
+   no editor opens via tray/desktop-action/hotkey/CLI-with-daemon).
+2. Standalone editor/pin workers panic in zbus 5 at accesskit/AT-SPI
+   init on sessions with at-spi (likely all mainstream desktops
+   since Phase 6 unified zbus to 5.18).
+3. The tray SNI item never registers with COSMIC's
+   StatusNotifierWatcher (no tray icon on L5).
+
+Remaining work: fix the three bugs in a follow-up effort (scope
+boundary here is "ask first" for flintshot-app code), then re-run
+task 007 (rows 2/9 + visual tray confirmation + X11 session pass +
+the deferred clean-container GTK-hint check).
 
 ## Objective
 
