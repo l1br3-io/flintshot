@@ -12,16 +12,16 @@ rejected (workspace `Cargo.toml` pins ashpd tokio deliberately).
 
 **Acceptance criteria:**
 
-- [ ] ADR file exists at `docs/adrs/ADR-0030-ambient-runtime-for-window-workers.md`
-- [ ] Sections cover: context, decision, consequences (incl. cost,
+- [x] ADR file exists at `docs/adrs/ADR-0030-ambient-runtime-for-window-workers.md`
+- [x] Sections cover: context, decision, consequences (incl. cost,
       alternatives rejected, link to TEST_MATRIX finding 2)
-- [ ] `docs/adrs/README.md` index updated if that's the established
+- [x] `docs/adrs/README.md` index updated if that's the established
       pattern (check first; skip if ADRs aren't indexed there)
 
 **Verification:**
 
-- [ ] Format matches a sampled recent ADR (e.g. ADR-0029)
-- [ ] Claims consistent with the code landed in Task 2
+- [x] Format matches a sampled recent ADR (e.g. ADR-0029)
+- [x] Claims consistent with the code landed in Task 2
 
 **Dependencies:** Task 2 (records its decision)
 
