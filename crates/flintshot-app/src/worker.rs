@@ -247,7 +247,14 @@ pub fn dispatch(
     }
 }
 
-/// Build the `flintshot region [--monitor N] [--delay-ms M]` argv.
+/// Build the `flintshot region [--monitor N] [--delay-ms M]
+/// --standalone` argv.
+///
+/// The trailing `--standalone` breaks the delegation loop: without
+/// it, the daemon-spawned worker would re-delegate back to the
+/// daemon, which spawns the next worker (~60–100/s observed; see
+/// `TEST_MATRIX` "L5 pass findings" 1). `delegate_to_daemon`
+/// short-circuits on the flag.
 fn region_argv(monitor: Option<u32>, delay_ms: u32) -> Vec<String> {
     let mut argv = vec!["region".to_string()];
     if let Some(m) = monitor {
@@ -258,16 +265,20 @@ fn region_argv(monitor: Option<u32>, delay_ms: u32) -> Vec<String> {
         argv.push("--delay-ms".into());
         argv.push(delay_ms.to_string());
     }
+    argv.push("--standalone".into());
     argv
 }
 
-/// Build the `flintshot fullscreen [--monitor N]` argv.
+/// Build the `flintshot fullscreen [--monitor N] --standalone` argv.
+/// The `--standalone` guard mirrors [`region_argv`]'s — see its doc
+/// comment for the fork-loop rationale.
 fn fullscreen_argv(monitor: Option<u32>) -> Vec<String> {
     let mut argv = vec!["fullscreen".to_string()];
     if let Some(m) = monitor {
         argv.push("--monitor".into());
         argv.push(m.to_string());
     }
+    argv.push("--standalone".into());
     argv
 }
 
@@ -395,6 +406,7 @@ mod tests {
                 "1".into(),
                 "--delay-ms".into(),
                 "200".into(),
+                "--standalone".into(),
             ]]
         );
         assert_eq!(
@@ -419,8 +431,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             spawner.snapshot(),
-            vec![vec!["region".to_string()]],
-            "no monitor / zero delay should yield a bare `region`"
+            vec![vec!["region".to_string(), "--standalone".into()]],
+            "no monitor / zero delay should yield `region --standalone`"
         );
     }
 
@@ -436,7 +448,10 @@ mod tests {
             &mut |ev| events.push(ev),
         )
         .unwrap();
-        assert_eq!(spawner.snapshot(), vec![vec!["fullscreen".to_string()]]);
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["fullscreen".to_string(), "--standalone".into()]]
+        );
         assert_eq!(events, vec![Event::CaptureStarted, Event::EditorOpened]);
     }
 
@@ -455,9 +470,36 @@ mod tests {
             vec![vec![
                 "fullscreen".to_string(),
                 "--monitor".into(),
-                "2".into()
+                "2".into(),
+                "--standalone".into()
             ]]
         );
+    }
+
+    /// Regression test for the L5 fork loop (`TEST_MATRIX` finding 1):
+    /// a daemon-spawned capture worker must not re-delegate back to
+    /// the daemon — `run_region` / `run_fullscreen` delegate whenever
+    /// the daemon is up unless `--standalone` is set, so its presence
+    /// in the argv is what breaks the daemon↔worker spawn cycle.
+    #[test]
+    fn capture_workers_spawn_standalone_to_break_delegation_loop() {
+        for request in [
+            Request::CaptureRegion {
+                monitor: None,
+                delay_ms: 0,
+            },
+            Request::CaptureFullscreen { monitor: None },
+        ] {
+            let spawner = RecordingSpawner::new();
+            dispatch(&request, &spawner, &DispatchState::new(), &mut |_| {}).unwrap();
+            let calls = spawner.snapshot();
+            assert_eq!(calls.len(), 1, "one worker for {request:?}");
+            assert!(
+                calls[0].contains(&"--standalone".to_string()),
+                "worker argv must carry --standalone: {:?}",
+                calls[0]
+            );
+        }
     }
 
     #[test]
