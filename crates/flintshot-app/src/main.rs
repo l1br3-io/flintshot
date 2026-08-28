@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+#[cfg(feature = "egui")]
+mod ambient;
 mod cli;
 mod config_watcher;
 mod daemon;

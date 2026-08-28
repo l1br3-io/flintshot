@@ -518,10 +518,14 @@ fn run_editor_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Re
 
     let state = state_from_config(img, cfg);
 
-    let outcome = flintshot_editor_egui::EguiShell::new()
-        .run_editor(state)
-        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
-        .with_context(|| format!("running editor for {mode} capture"))?;
+    // Under the ambient-runtime guard: accesskit → zbus 5 needs a
+    // reactor on this thread for the window to come up (see
+    // `crate::ambient`). Dropped before `report_editor_outcome`.
+    let outcome = crate::ambient::with_ambient_runtime(|| {
+        flintshot_editor_egui::EguiShell::new().run_editor(state)
+    })
+    .and_then(|ran| ran.map_err(|e| color_eyre::eyre::eyre!(e.to_string())))
+    .with_context(|| format!("running editor for {mode} capture"))?;
 
     report_editor_outcome(outcome);
     Ok(())
@@ -539,10 +543,12 @@ fn run_editor_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Re
 fn run_overlay_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Result<()> {
     let state = state_from_config(img, cfg);
 
-    let outcome = flintshot_editor_egui::EguiShell::new()
-        .run_overlay(state)
-        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
-        .with_context(|| format!("running overlay for {mode} capture"))?;
+    // Guard mirrors `run_editor_with_config` (see `crate::ambient`).
+    let outcome = crate::ambient::with_ambient_runtime(|| {
+        flintshot_editor_egui::EguiShell::new().run_overlay(state)
+    })
+    .and_then(|ran| ran.map_err(|e| color_eyre::eyre::eyre!(e.to_string())))
+    .with_context(|| format!("running overlay for {mode} capture"))?;
 
     report_editor_outcome(outcome);
     Ok(())
@@ -606,6 +612,16 @@ fn run_editor_with_config(_img: image::RgbaImage, _mode: &str, _cfg: &Config) ->
     Err(color_eyre::eyre::eyre!(
         "editor not built; pass --out PATH to capture headlessly \
          (this binary was compiled without the `egui` feature)"
+    ))
+}
+
+/// Headless-build fallback for [`run_open`]'s entry point (see
+/// [`run_editor_with_config`]'s note; pre-existing gap, surfaced by
+/// this effort's `--no-default-features` gate).
+#[cfg(not(feature = "egui"))]
+fn run_editor_for_capture(_img: image::RgbaImage, _mode: &str) -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "editor not built; this binary was compiled without the `egui` feature"
     ))
 }
 
@@ -793,10 +809,12 @@ fn run_pin_window(
 ) -> Result<()> {
     use flintshot_core::EditorShell;
 
-    flintshot_editor_egui::EguiShell::new()
-        .with_pin_config(config)
-        .run_pin(img, rect)
-        .map_err(|e| color_eyre::eyre::eyre!("running pin window: {e}"))?;
+    crate::ambient::with_ambient_runtime(|| {
+        flintshot_editor_egui::EguiShell::new()
+            .with_pin_config(config)
+            .run_pin(img, rect)
+    })
+    .and_then(|ran| ran.map_err(|e| color_eyre::eyre::eyre!("running pin window: {e}")))?;
     Ok(())
 }
 
