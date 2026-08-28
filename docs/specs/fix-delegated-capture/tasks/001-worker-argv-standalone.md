@@ -10,20 +10,20 @@ asserting it *are* the no-re-delegation regression test.
 
 **Acceptance criteria:**
 
-- [ ] `region_argv` output ends with `--standalone` (with and without
+- [x] `region_argv` output ends with `--standalone` (with and without
       `--monitor` / `--delay-ms`)
-- [ ] `fullscreen_argv` output ends with `--standalone` (with and
+- [x] `fullscreen_argv` output ends with `--standalone` (with and
       without `--monitor`)
-- [ ] `pin_argv` / `open_argv` / `upload_argv` unchanged (those
+- [x] `pin_argv` / `open_argv` / `upload_argv` unchanged (those
       subcommands never delegate)
-- [ ] A named test documents the fork-loop intent (both capture
+- [x] A named test documents the fork-loop intent (both capture
       requests spawn standalone workers)
-- [ ] Existing exact-match argv tests updated to the new expectation
+- [x] Existing exact-match argv tests updated to the new expectation
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-app` green
-- [ ] Full standing gates green (`fmt`, `clippy --workspace
+- [x] `cargo test -p flintshot-app` green
+- [x] Full standing gates green (`fmt`, `clippy --workspace
       --all-targets -D warnings`, workspace tests, doc tests)
 
 **Dependencies:** None
