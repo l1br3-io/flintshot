@@ -15,27 +15,27 @@ runtimes (no runtime nesting).
 
 **Acceptance criteria:**
 
-- [ ] New module (e.g. `crates/flintshot-app/src/ambient.rs`) with
+- [x] New module (e.g. `crates/flintshot-app/src/ambient.rs`) with
       documented `with_ambient_runtime` helper; `main.rs` wires the
       `mod`
-- [ ] `tokio::runtime::Handle::try_current()` fails on a plain
+- [x] `tokio::runtime::Handle::try_current()` fails on a plain
       thread, succeeds inside `with_ambient_runtime`, and does not
       leak after it returns (guard dropped)
-- [ ] The helper propagates the closure's return value and maps
+- [x] The helper propagates the closure's return value and maps
       runtime-construction failure to an `eyre` error (no
       `unwrap`/`expect`)
-- [ ] Editor, overlay, and pin paths call `EguiShell` under the
+- [x] Editor, overlay, and pin paths call `EguiShell` under the
       guard (both egui and headless builds compile; headless
       fallbacks unchanged — they open no window)
-- [ ] `run_upload` unchanged (already owns a runtime; never reaches
+- [x] `run_upload` unchanged (already owns a runtime; never reaches
       eframe)
-- [ ] `flintshot-core` / `flintshot-editor-egui` untouched
+- [x] `flintshot-core` / `flintshot-editor-egui` untouched
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-app` green (new guard unit tests)
-- [ ] Full standing gates green
-- [ ] `cargo check -p flintshot-app --no-default-features` clean
+- [x] `cargo test -p flintshot-app` green (new guard unit tests)
+- [x] Full standing gates green
+- [x] `cargo check -p flintshot-app --no-default-features` clean
       (headless fallbacks still compile)
 
 **Dependencies:** None (independent of Task 1; ordered after it only
