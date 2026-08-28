@@ -384,9 +384,9 @@ Expected: clean exit, socket file at
 | Wayland: hotkey does NOT fire; compositor-keybind workaround logged | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 | Edit `[hotkeys]`, save → new chord works without restart    |    |    |    |    |    |    |    |    |    |
 | IPC client `Subscribe` then `broadcast` → receives `Event`  |    |    |    |    |    |    |    |    |    |
-| `flintshot region` with daemon running delegates (events centralised) | | | | | | | | | |
-| `flintshot region` with no daemon → standalone editor       |    |    |    |    |    |    |    |    |    |
-| `flintshot region --standalone` forces in-process capture   |    |    |    |    |    |    |    |    |    |
+| `flintshot region` with daemon running delegates (events centralised) |    |    |    |    | fix landed 9ce5497+54d0bf1 2026-08-28 (fork-loop guard + ambient runtime); regression tests green, manual L5 pass pending — L5 findings 1–2 |    |    |    |    |
+| `flintshot region` with no daemon → standalone editor       |    |    |    |    | fix landed 54d0bf1 2026-08-28 (ambient runtime); regression tests green, manual L5 pass pending — L5 finding 2 |    |    |    |    |
+| `flintshot region --standalone` forces in-process capture   |    |    |    |    | fix landed 54d0bf1 2026-08-28 (ambient runtime); regression tests green, manual L5 pass pending — L5 finding 2 |    |    |    |    |
 | Ctrl-C → clean daemon shutdown (socket reclaimed)           |    |    |    |    |    |    |    |    |    |
 
 ---
@@ -1227,6 +1227,11 @@ afterwards to restore the tray build.
 
 #### L5 pass findings (2026-08-28, commit 54383b1) — three blockers, all pre-existing product bugs outside this effort's scope
 
+Findings 1–2 are **fixed** by the `fix-delegated-capture` effort
+(`9ce5497`, `54d0bf1`; automated regression tests green, manual L5
+re-verification pending — see the annotations below). Finding 3
+(tray SNI) remains open.
+
 1. **Delegated captures fork-loop; no editor ever opens** (fails
    rows 6–7, exit criteria 1–2). `worker.rs::region_argv` /
    `fullscreen_argv` spawn `flintshot region` **without
@@ -1244,6 +1249,16 @@ afterwards to restore the tray build.
    Fix shape: mark daemon-spawned capture workers
    `--standalone` (or equivalent env/argv guard) + a
    no-re-delegation regression test.
+
+   **Fixed** in `9ce5497` (2026-08-28, `fix-delegated-capture`
+   Task 1): `region_argv` / `fullscreen_argv` append
+   `--standalone`; regression test
+   `capture_workers_spawn_standalone_to_break_delegation_loop`
+   plus the updated `RecordingSpawner` dispatch assertions
+   (`crates/flintshot-app/src/worker.rs`) pin the argv contract.
+   **Manual L5 re-verification pending** — no desktop session
+   exists in the dev container; the maintainer runs spec exit
+   criteria 1–3 before merge.
 2. **Standalone editor workers crash on at-spi sessions**
    (blocks the fallback path, and pin/upload windows share it).
    `flintshot region --standalone` (or with no daemon running)
@@ -1261,6 +1276,17 @@ afterwards to restore the tray build.
    Fix shape: give window workers a dropped-in ambient tokio
    runtime (or pin accesskit's zbus back to 4.x / async-io
    backend).
+
+   **Fixed** in `54d0bf1` (2026-08-28, `fix-delegated-capture`
+   Task 2): new `flintshot-app::ambient` module enters a
+   multi-thread tokio runtime around every window path
+   (`run_editor_with_config`, `run_overlay_with_config`,
+   `run_pin_window`) for exactly the duration of the window loop;
+   regression tests in `crates/flintshot-app/src/ambient.rs`
+   proxy the exact zbus-5 panic condition via
+   `tokio::runtime::Handle::try_current()` (no handle on a plain
+   thread, visible inside `with_ambient_runtime`, gone after).
+   **Manual L5 re-verification pending** — as above.
 3. **Tray SNI item never registers with COSMIC's watcher** (fails
    row 4, exit criterion 1). The daemon (tray build) publishes
    `/StatusNotifierItem` + `/org/ayatana/NotificationItem` on its

@@ -815,6 +815,32 @@ Categories used below:
 
 ### Fixed
 
+- Daemon-mediated captures work again: daemon-spawned
+  region/fullscreen workers now carry `--standalone`, so each runs
+  the capture in its own process instead of delegating straight
+  back to the daemon. Since Phase 2's detect-and-delegate, every
+  capture path through the daemon (tray menu, desktop actions,
+  global hotkeys, CLI-with-daemon) fork-looped — each spawned
+  worker re-delegated and the daemon spawned the next (~470
+  processes in 8 s observed on COSMIC) with no editor ever
+  opening. The dispatch argv tests pin the guard, including the
+  intent-named
+  `capture_workers_spawn_standalone_to_break_delegation_loop`
+  (`crates/flintshot-app/src/worker.rs`).
+- Window-opening workers no longer crash on at-spi desktops
+  (GNOME/KDE/COSMIC with `org.a11y.Bus` running): `eframe` →
+  accesskit → zbus 5 needs an ambient tokio reactor on the
+  window-creating thread, and `region`/`fullscreen`/`open`/`pin`
+  workers owned none — they panicked ("there is no reactor
+  running, must be called from the context of a Tokio 1.x
+  runtime") before any window appeared. The new
+  `flintshot-app::ambient` module enters a multi-thread runtime
+  around every window path (`run_editor_with_config`,
+  `run_overlay_with_config`, `run_pin_window`) for exactly the
+  duration of the window loop; regression tests in
+  `crates/flintshot-app/src/ambient.rs` proxy the exact zbus-5
+  condition via `Handle::try_current()`. Standalone captures on
+  at-spi sessions open the editor instead of panicking.
 - Tray *Bind shortcuts…* clicks are no longer silently dropped when
   the portal session task is outside its select loop (during
   startup awaits or while a bind dialog is open): the trigger now
