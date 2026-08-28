@@ -39,3 +39,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0027 | [Painter-drawn toolbar glyphs over icon fonts or emoji](ADR-0027-painter-drawn-toolbar-glyphs.md) |
 | ADR-0028 | [Capture-then-overlay (frozen frame) for the live overlay](ADR-0028-capture-then-overlay.md) |
 | ADR-0029 | [Global hotkeys on Wayland via the xdg-desktop-portal (`ashpd`)](ADR-0029-ashpd-global-shortcuts.md) |
+| ADR-0030 | [Ambient tokio runtime for window workers](ADR-0030-ambient-runtime-for-window-workers.md) |
