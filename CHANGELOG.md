@@ -881,6 +881,23 @@ Categories used below:
   fix, and records an actionable failure on the handle so a later
   `hotkeys bind` reports "restart the daemon to re-attach" instead
   of a vague session-gone error.
+- The daemon no longer waits passively when the session's tray host
+  (StatusNotifierWatcher) is dead or late: an SNI watchdog (Linux,
+  `--features tray`) probes `NameHasOwner` at startup and every
+  30 s, and when the watcher is unowned pokes the standard then the
+  COSMIC well-known name (`com.system76.CosmicStatusNotifierWatcher`)
+  — a method call against an activatable name is the only
+  client-side D-Bus activation trigger, so on COSMIC the watcher is
+  brought back and the tray icon (re)appears within one interval
+  with no user action beyond having the daemon running (root cause
+  observed live on L5 2026-08-30: the watcher had exited and even a
+  daemon restart didn't help, because nothing ever activated it).
+  Pokes are best-effort and bounded (2 s), failures log at `debug`
+  (a tray-less desktop is a normal steady state), and a watchdog
+  failure never affects daemon startup or shutdown beyond one
+  bounded join. New `zbus` 5 direct dep resolves onto the copy
+  ashpd already builds — a dep edge, not a new crate build
+  (ADR-0032).
 
 ### Changed
 

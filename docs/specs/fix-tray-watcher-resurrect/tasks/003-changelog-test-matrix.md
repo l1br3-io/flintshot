@@ -14,20 +14,20 @@ pending, no simulated results.
 
 **Acceptance criteria:**
 
-- [ ] CHANGELOG `## [Unreleased]` → `### Fixed` entry (Keep-a-Changelog
+- [x] CHANGELOG `## [Unreleased]` → `### Fixed` entry (Keep-a-Changelog
       voice, matches existing entries' density)
-- [ ] TEST_MATRIX Phase 2 matrix: two new rows (watcher killed
+- [x] TEST_MATRIX Phase 2 matrix: two new rows (watcher killed
       mid-session → icon returns ≤ ~30 s; fresh daemon with watcher
       dead → icon at startup), columns blank, notes column marked
       `pending-maintainer-L5 — fix-tray-watcher-resurrect runbook
       steps N–M` with the landing commit hash
-- [ ] No existing rows or findings edited
+- [x] No existing rows or findings edited
 
 **Verification:**
 
-- [ ] `grep -n "StatusNotifierWatcher" CHANGELOG.md docs/TEST_MATRIX.md`
+- [x] `grep -n "StatusNotifierWatcher" CHANGELOG.md docs/TEST_MATRIX.md`
       shows the new entry + rows
-- [ ] Rows reference the runbook that Task 5 will add (steps land
+- [x] Rows reference the runbook that Task 5 will add (steps land
       before any L5 pass is attempted)
 
 **Dependencies:** Task 2 (commit hash to cite) — or lands in the same
