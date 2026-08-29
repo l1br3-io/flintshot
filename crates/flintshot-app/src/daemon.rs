@@ -116,6 +116,14 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     // 3. Platform sources on the main thread. The tray's
     // "Bind shortcuts…" item exists only where it works: Wayland
     // portal sessions.
+    // SNI watchdog first: its immediate first probe is the startup
+    // poke that D-Bus-activates a dead (or not-yet-started)
+    // StatusNotifierWatcher, so the icon built right below has a
+    // host to register with. Fire-and-forget by design —
+    // libappindicator re-registers on watcher appearance, so
+    // blocking here would only delay startup.
+    #[cfg(all(feature = "tray", target_os = "linux"))]
+    let sni_watchdog = crate::sni_watchdog::spawn();
     #[cfg(feature = "tray")]
     let _tray = match crate::tray::build(wayland) {
         Ok(t) => Some(t),
@@ -164,6 +172,12 @@ pub fn run(replace: bool) -> eyre::Result<()> {
 
     // Wait for the tokio side to finish so we don't leak the runtime.
     let _ = tokio_join.join();
+
+    // Watchdog stops with the daemon; bounded by one in-flight poke.
+    #[cfg(all(feature = "tray", target_os = "linux"))]
+    if let Some(watchdog) = sni_watchdog {
+        watchdog.shutdown();
+    }
     tracing::info!("daemon exited cleanly");
     Ok(())
 }
