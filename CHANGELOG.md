@@ -815,6 +815,34 @@ Categories used below:
 
 ### Fixed
 
+- The tray icon now registers with StatusNotifierItem hosts
+  (COSMIC's status area included) and tray menu clicks dispatch.
+  Since Phase 2, a tray-build daemon exported its
+  `/StatusNotifierItem` + `/org/ayatana/NotificationItem` objects
+  on the bus but never completed the `RegisterStatusNotifierItem`
+  handshake with `org.kde.StatusNotifierWatcher` — no icon
+  appeared on any SNI host — and menu clicks never arrived. The
+  daemon's platform loop never iterated the GLib main context that
+  libappindicator (behind `tray-icon` on Linux) and muda drive
+  from: it built the tray once, then blocked on
+  `recv_timeout(100 ms)` forever, so registration and menu events
+  queued on GLib sources that nobody dispatched. The module doc's
+  "raw polling suffices on Linux" claim was true for
+  `global-hotkey`'s crossbeam receiver and false for the GTK-backed
+  tray half — both code and claim are now fixed: the loop pumps the
+  default GLib context every iteration before draining tray events
+  (bounded — ≤64 non-blocking `iteration(false)` calls with
+  early-out when idle, so a busy source can't wedge the daemon),
+  and the doc states the per-source truth. Headless unit tests pin
+  the seam (`crates/flintshot-app/src/daemon.rs`): an idle source
+  never fires unpumped, fires after the pump, a self-re-arming
+  source is bounded by the cap, and the real `run_event_loop`
+  dispatches only via its own pumping. This was the last of the
+  three pre-existing bugs the launcher effort's L5 pass found
+  (2026-08-28, TEST_MATRIX finding 3); the other two shipped in
+  `fix-delegated-capture`. Manual L5 verification pending — the
+  dev container has no desktop session; the maintainer runs the
+  spec's exit criteria before merge.
 - Daemon-mediated captures work again: daemon-spawned
   region/fullscreen workers now carry `--standalone`, so each runs
   the capture in its own process instead of delegating straight

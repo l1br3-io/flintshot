@@ -1195,7 +1195,7 @@ afterwards to restore the tray build.
 | `just install-user`: binary + `.desktop` + icon land under `~/.local` |    |    |    |    | PASS 54383b1 2026-08-28 (tray build; `ldd` links libgtk-3) | N/A | N/A | N/A | N/A |
 | Launcher lists "Flintshot" with the SVG icon                 |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Activating the entry starts the daemon (no terminal)         |    |    |    |    | PASS 54383b1 2026-08-28 (via `gtk-launch` / `g_desktop_app_info_launch_action`, the XDG activation path; daemon detaches, lock + IPC bound) | N/A | N/A | N/A | N/A |
-| Tray icon appears after activation (tray-default build)    |    |    |    |    | FAIL 54383b1 2026-08-28 — SNI item never registers with COSMIC's StatusNotifierWatcher (see caveats; issue pending) | N/A | N/A | N/A | N/A |
+| Tray icon appears after activation (tray-default build)    |    |    |    |    | FAIL 54383b1 2026-08-28 — SNI item never registers with COSMIC's StatusNotifierWatcher; fix landed 5c78497+8ac5c4f 2026-08-29 (GLib context pump in the daemon loop); regression tests green, manual L5 pass pending — L5 finding 3 | N/A | N/A | N/A | N/A |
 | Second activation: no second daemon / tray icon              |    |    |    |    | PASS 54383b1 2026-08-28 (second process refuses via single-instance lock; exactly one daemon) | N/A | N/A | N/A | N/A |
 | Desktop action *Capture region* opens the standard capture flow | |    |    |    | FAIL 54383b1 2026-08-28 — delegated capture fork-loops, no editor (see caveats; issue pending) | N/A | N/A | N/A | N/A |
 | Desktop action *Capture fullscreen* ditto                    |    |    |    |    | FAIL 54383b1 2026-08-28 (same dispatch path as *Capture region*) | N/A | N/A | N/A | N/A |
@@ -1228,9 +1228,10 @@ afterwards to restore the tray build.
 #### L5 pass findings (2026-08-28, commit 54383b1) — three blockers, all pre-existing product bugs outside this effort's scope
 
 Findings 1–2 are **fixed** by the `fix-delegated-capture` effort
-(`9ce5497`, `54d0bf1`; automated regression tests green, manual L5
-re-verification pending — see the annotations below). Finding 3
-(tray SNI) remains open.
+(`9ce5497`, `54d0bf1`) and finding 3 by `fix-tray-sni`
+(`5c78497`, `8ac5c4f`); automated regression tests are green for
+all three, manual L5 re-verification pending — see the annotations
+below.
 
 1. **Delegated captures fork-loop; no editor ever opens** (fails
    rows 6–7, exit criteria 1–2). `worker.rs::region_argv` /
@@ -1296,6 +1297,26 @@ re-verification pending — see the annotations below). Finding 3
    (syncthing-gtk, pcloud) register fine on the same watcher.
    Needs hands-on debugging in the tray-icon/appindicator init
    path (registration call ordering vs watcher availability).
+
+   **Fixed** in `5c78497` + `8ac5c4f` (2026-08-29, `fix-tray-sni`
+   Tasks 1–2): root cause was not registration ordering — the
+   daemon's platform loop never iterated the GLib main context
+   libappindicator/muda drive from, so the
+   `RegisterStatusNotifierItem` call (and menu-event delivery)
+   queued on sources nobody dispatched. The loop now pumps the
+   default GLib context every iteration before draining tray
+   events (bounded: ≤64 non-blocking `iteration(false)` calls,
+   early-out when idle). Regression tests in
+   `crates/flintshot-app/src/daemon.rs` (`glib_pump` module) pin
+   the seam headless: idle source never fires unpumped, fires
+   after the pump, a self-re-arming source is bounded by the cap,
+   and the real `run_event_loop` dispatches only via its own
+   pumping. The no-SNI-host warn-and-continue path is untouched
+   (expected behavior unchanged). **Manual L5 pass pending** — no
+   desktop session exists in the dev container; the maintainer
+   runs the spec's exit criteria (icon registers, every menu
+   action dispatches, watcher-started-after-daemon race,
+   no-SNI-host + X11 unregressed) before merge.
 
 Minor notes (non-blocking):
 
