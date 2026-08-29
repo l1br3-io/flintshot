@@ -18,23 +18,23 @@ under keyring as unrelated and unchanged.
 
 **Acceptance criteria:**
 
-- [ ] ADR-0032 exists with Context / Decision / Consequences,
+- [x] ADR-0032 exists with Context / Decision / Consequences,
       numbered `0032`, slug-consistent filename
-- [ ] Covers: activation semantics (why only method calls activate),
+- [x] Covers: activation semantics (why only method calls activate),
       names + order, interval + poll-vs-event trade-off, thread +
       shutdown design, zbus-direct-dep rationale incl. the keyring
       zbus-4 note, and the OQ2 follow-up fence (back-off after
       futile activations, only if the idle-exit cycle is observed)
-- [ ] Cites the live evidence (L5 2026-08-30 session,
+- [x] Cites the live evidence (L5 2026-08-30 session,
       `busctl … Peer Ping` activation observation) and the fix-tray-sni
       effort's registration finding
-- [ ] `docs/adrs/README.md` index row added
+- [x] `docs/adrs/README.md` index row added
 
 **Verification:**
 
-- [ ] `python3 .opencode/harness/scripts/check-refs.py` (or manual
+- [x] `python3 .opencode/harness/scripts/check-refs.py` (or manual
       scan) — no dangling references from the ADR
-- [ ] Index lists ADR-0032 in order
+- [x] Index lists ADR-0032 in order
 
 **Dependencies:** Task 2 (records what was actually built, not what
 was planned)

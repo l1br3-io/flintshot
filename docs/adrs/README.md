@@ -41,3 +41,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0029 | [Global hotkeys on Wayland via the xdg-desktop-portal (`ashpd`)](ADR-0029-ashpd-global-shortcuts.md) |
 | ADR-0030 | [Ambient tokio runtime for window workers](ADR-0030-ambient-runtime-for-window-workers.md) |
 | ADR-0031 | [GLib context pumping for the Linux tray](ADR-0031-glib-context-pumping-for-tray.md)      |
+| ADR-0032 | [Poke-to-activate the SNI watcher](ADR-0032-poke-to-activate-sni-watcher.md)               |
