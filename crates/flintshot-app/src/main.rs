@@ -16,6 +16,8 @@ mod ipc_client;
 mod ipc_server;
 mod platform;
 mod single;
+#[cfg(all(feature = "tray", target_os = "linux"))]
+mod sni_watchdog;
 #[cfg(feature = "tray")]
 mod tray;
 mod upload;

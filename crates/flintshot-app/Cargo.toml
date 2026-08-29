@@ -22,7 +22,7 @@ egui = ["dep:flintshot-editor-egui"]
 # single-instance still work); the tray is best-effort. Build with
 # `--features tray` (and GTK dev libs present) to enable it — CI
 # compiles this path in the `tray-build` job. See ADR-0018/0019 area.
-tray = ["dep:tray-icon", "dep:gtk"]
+tray = ["dep:tray-icon", "dep:gtk", "dep:zbus"]
 
 [dependencies]
 flintshot-core = { workspace = true }
@@ -51,9 +51,11 @@ tray-icon = { workspace = true, optional = true }
 
 # GTK is needed on Linux to initialize libappindicator (tray-icon's
 # backend) before building the tray/menu. Target-scoped + optional so
-# the default build stays GTK-free.
+# the default build stays GTK-free. zbus backs the SNI watchdog's
+# D-Bus calls (same target-scoped + optional shape).
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { workspace = true, optional = true }
+zbus = { workspace = true, optional = true }
 
 [dev-dependencies]
 mockito = { workspace = true }

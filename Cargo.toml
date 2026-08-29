@@ -60,6 +60,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = "0.24"
 xcap = "0.9"
+# Direct dep for the SNI watchdog's poke-to-activate calls (the `gtk`
+# stack has no D-Bus client). tokio backend to match ashpd's pin —
+# and the version resolves onto ashpd's zbus 5.18, so this adds a
+# dep edge, not a new crate build. See ADR-0032.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [profile.release]
 codegen-units = 1
