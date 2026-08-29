@@ -23,39 +23,39 @@ a fake bus and a short interval; the public entry point fixes the
 
 **Acceptance criteria:**
 
-- [ ] zbus-backed `SniBus` impl: `block_on` on an owned
+- [x] zbus-backed `SniBus` impl: `block_on` on an owned
       current-thread runtime, per-call fresh connection, poke bound
       by `tokio::time::timeout(2 s)`; never constructed by tests
       (no bus in CI)
-- [ ] `sni_watchdog::spawn()`-shaped entry returns a handle owning
+- [x] `sni_watchdog::spawn()`-shaped entry returns a handle owning
       the shutdown sender + `JoinHandle`; `INTERVAL = 30 s` and the
       2 s poke bound are named `const`s
-- [ ] First tick runs immediately at thread start (before any
+- [x] First tick runs immediately at thread start (before any
       sleep); subsequent ticks every interval
-- [ ] Shutdown: dropping the sender (or an explicit handle method)
+- [x] Shutdown: dropping the sender (or an explicit handle method)
       ends the thread; join is bounded by at most one in-flight poke
-- [ ] `daemon.rs`: watchdog spawned before `tray::build`, only under
+- [x] `daemon.rs`: watchdog spawned before `tray::build`, only under
       `#[cfg(all(feature = "tray", target_os = "linux"))]`; spawn
       failure never aborts daemon startup (warn + continue); handle
       joined after `run_event_loop` returns
-- [ ] Unit tests with a fake `SniBus`: first tick fires without
+- [x] Unit tests with a fake `SniBus`: first tick fires without
       waiting an interval; the thread exits promptly (< ~1 s) once
       the sender drops; over a short interval the tick count matches
       probes seen by the fake
-- [ ] Non-tray and non-Linux builds: no watchdog code compiled;
+- [x] Non-tray and non-Linux builds: no watchdog code compiled;
       `run()` shape unchanged apart from the cfg-gated block
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-app --features tray --quiet` green
+- [x] `cargo test -p flintshot-app --features tray --quiet` green
       (new loop tests alongside Task 1's seam tests)
-- [ ] `cargo check -p flintshot-app --no-default-features --quiet`
+- [x] `cargo check -p flintshot-app --no-default-features --quiet`
       clean
-- [ ] Full standing gates: `cargo fmt --all --check`;
+- [x] Full standing gates: `cargo fmt --all --check`;
       `cargo clippy --workspace --all-targets -- -D warnings`;
       `cargo test --workspace --all-targets`;
       `cargo test --doc -p flintshot-core -p flintshot-editor-egui`
-- [ ] Manual smoke (optional pre-L5): with the daemon running on any
+- [x] Manual smoke (optional pre-L5): with the daemon running on any
       session, `RUST_LOG=flintshot=debug` shows one probe per 30 s
       and no pokes while a watcher is alive
 
