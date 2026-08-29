@@ -371,15 +371,15 @@ Expected: clean exit, socket file at
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 | `cargo build --features tray` succeeds                      |    |    |    |    |    |    |    |    |    |
-| `flintshot daemon` starts, tray icon appears (`--features tray`) | |  |    |    |    |    |    |    |    |    |
+| `flintshot daemon` starts, tray icon appears (`--features tray`) | |  |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 2 (fix landed 5c78497+8ac5c4f 2026-08-29, finding 3) |    |    |    |    |    |
 | `flintshot daemon` (no tray feature) still binds IPC + hotkeys |   |    |    |    |    |    |    |    |    |
 | Second `flintshot daemon` fails "already running"           |    |    |    |    |    |    |    |    |    |
 | `flintshot daemon --replace` swaps daemons cleanly          |    |    |    |    |    |    |    |    |    |
-| Tray *Capture region* / *Capture fullscreen* spawn editor   |    |    |    |    |    |    |    |    |    |
-| Tray *Fullscreen on monitor →* lists each monitor; each captures the right one | | | | | | | | | |
-| Tray *Open config* opens `$EDITOR` on `config.toml`         |    |    |    |    |    |    |    |    |    |
-| Tray *Quit* exits the daemon cleanly                        |    |    |    |    |    |    |    |    |    |
-| Tray visible with no SNI host → daemon stays alive (warning)|    |    |    |    |    |    |    |    |    |
+| Tray *Capture region* / *Capture fullscreen* spawn editor   |    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 4 (never run on L5 — finding 1; blocked by finding 3) |    |    |    |    |
+| Tray *Fullscreen on monitor →* lists each monitor; each captures the right one | | | | | pending-maintainer-L5 — fix-tray-sni runbook step 4 (never run on L5 — finding 1; blocked by finding 3) | | | | |
+| Tray *Open config* opens `$EDITOR` on `config.toml`         |    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 4 (never run on L5 — finding 1; blocked by finding 3) |    |    |    |    |
+| Tray *Quit* exits the daemon cleanly                        |    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 4 (never run on L5 — finding 1; blocked by finding 3) |    |    |    |    |
+| Tray visible with no SNI host → daemon stays alive (warning)|    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 7 (warn-and-continue path untouched by the fix) |    |    |    |    |
 | Global hotkey fires capture on X11 / macOS / Windows        |    | N/A | N/A | N/A | N/A |    |    |    |    |
 | Wayland: hotkey does NOT fire; compositor-keybind workaround logged | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 | Edit `[hotkeys]`, save → new chord works without restart    |    |    |    |    |    |    |    |    |    |
@@ -1195,7 +1195,7 @@ afterwards to restore the tray build.
 | `just install-user`: binary + `.desktop` + icon land under `~/.local` |    |    |    |    | PASS 54383b1 2026-08-28 (tray build; `ldd` links libgtk-3) | N/A | N/A | N/A | N/A |
 | Launcher lists "Flintshot" with the SVG icon                 |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Activating the entry starts the daemon (no terminal)         |    |    |    |    | PASS 54383b1 2026-08-28 (via `gtk-launch` / `g_desktop_app_info_launch_action`, the XDG activation path; daemon detaches, lock + IPC bound) | N/A | N/A | N/A | N/A |
-| Tray icon appears after activation (tray-default build)    |    |    |    |    | FAIL 54383b1 2026-08-28 — SNI item never registers with COSMIC's StatusNotifierWatcher; fix landed 5c78497+8ac5c4f 2026-08-29 (GLib context pump in the daemon loop); regression tests green, manual L5 pass pending — L5 finding 3 | N/A | N/A | N/A | N/A |
+| Tray icon appears after activation (tray-default build)    |    |    |    |    | FAIL 54383b1 2026-08-28 — SNI item never registers with COSMIC's StatusNotifierWatcher; fix landed 5c78497+8ac5c4f 2026-08-29 (GLib context pump in the daemon loop); regression tests green, manual L5 pass pending — L5 finding 3; re-run via the fix-tray-sni runbook on launcher task 007 | N/A | N/A | N/A | N/A |
 | Second activation: no second daemon / tray icon              |    |    |    |    | PASS 54383b1 2026-08-28 (second process refuses via single-instance lock; exactly one daemon) | N/A | N/A | N/A | N/A |
 | Desktop action *Capture region* opens the standard capture flow | |    |    |    | FAIL 54383b1 2026-08-28 — delegated capture fork-loops, no editor (see caveats; issue pending) | N/A | N/A | N/A | N/A |
 | Desktop action *Capture fullscreen* ditto                    |    |    |    |    | FAIL 54383b1 2026-08-28 (same dispatch path as *Capture region*) | N/A | N/A | N/A | N/A |
@@ -1316,7 +1316,128 @@ below.
    desktop session exists in the dev container; the maintainer
    runs the spec's exit criteria (icon registers, every menu
    action dispatches, watcher-started-after-daemon race,
-   no-SNI-host + X11 unregressed) before merge.
+   no-SNI-host + X11 unregressed) before merge — the runbook
+   below is that protocol, step by step.
+
+#### L5 runbook — fix-tray-sni (protocol only; every row it names is pending-maintainer-L5)
+
+Recorded by `fix-tray-sni` task 005. This block is the exact
+verification protocol for the three fixes above — **it records no
+results and predicts none**. Execute it in one sitting on the L5
+box, paste each command's output next to its step, and fill the
+matrix cells the steps name (Phase 2 rows 2 and 6–10, L5 column).
+Launcher rows 4/6/7 are **not** re-run here — they re-run on the
+`launcher-desktop-entry` effort's task 007
+(`docs/specs/launcher-desktop-entry/tasks/007-manual-pass-closeout.md`)
+once this effort lands.
+
+Build the tray binary and keep a log tail open (plain cargo keeps
+`tray` opt-in; `just install-user` builds it by default if you
+want the launcher path instead):
+
+```sh
+cargo build --release --features tray
+RUST_LOG=flintshot=info ./target/release/flintshot daemon
+```
+
+**Step 1 — baseline probe (daemon not yet started).**
+
+```sh
+pgrep -af flintshot    # expected: no flintshot processes
+gdbus call --session --dest org.kde.StatusNotifierWatcher \
+  --object-path /StatusNotifierWatcher \
+  --method org.kde.StatusNotifierWatcher.GetRegisteredStatusNotifierItems
+```
+
+Expected: a list **without** a flintshot entry (other apps such
+as syncthing-gtk / pcloud may legitimately appear). Save the
+output for comparison.
+
+**Step 2 — start the daemon → item registers + icon renders**
+(Phase 2 row 2, L5).
+
+```sh
+RUST_LOG=flintshot=info ./target/release/flintshot daemon &
+sleep 2
+gdbus call --session --dest org.kde.StatusNotifierWatcher \
+  --object-path /StatusNotifierWatcher \
+  --method org.kde.StatusNotifierWatcher.GetRegisteredStatusNotifierItems
+```
+
+Expected: the list now includes a flintshot entry (a unique bus
+name such as `:1.NN` plus the object path the watcher consumed),
+and the icon is visible in the status area
+(cosmic-applet-status-area). If the entry is absent, capture
+`RUST_LOG=flintshot=debug` daemon output and the probe result for
+the issue — do not debug blind.
+
+**Step 3 — which SNI interface did the watcher consume?**
+(answers `fix-tray-sni` spec open question 1). Read the flintshot
+entry's object-path suffix from step 2: `/StatusNotifierItem` =
+KDE interface, `/org/ayatana/NotificationItem` = Ayatana. The
+daemon exports both (finding 3); this records which one the
+watcher actually registered. If the suffix is ambiguous, inspect:
+
+```sh
+gdbus introspect --session --dest <flintshot bus name from step 2> \
+  --object-path /StatusNotifierItem
+```
+
+Paste the answer into the results alongside this runbook — no
+code change is expected either way.
+
+**Step 4 — menu sweep** (Phase 2 rows 6–9, L5). Click the tray
+icon and walk every item:
+
+| Menu item                        | Expected                                            |
+| -------------------------------- | --------------------------------------------------- |
+| `Capture region`                 | exactly **one** editor window opens (findings 1–2 ride the same dispatch); `pgrep -af flintshot` shows one `region --standalone` worker, no fork loop |
+| `Capture fullscreen`             | one editor on the primary monitor                   |
+| `Fullscreen on monitor →`        | one entry per monitor, `"<index> · <name>"` (`" (primary)"` on the primary); each entry captures the right monitor |
+| `Bind shortcuts…`                | portal bind dialog on a GlobalShortcuts-capable desktop; on the L5 packaged portal (lacks the interface — Phase 6 caveat) the classified fallback notice is the expected outcome |
+| `Open config`                    | `$EDITOR` opens `config.toml`                       |
+| `Quit`                           | daemon exits; `pgrep -af flintshot` empty; `$XDG_RUNTIME_DIR/flintshot.sock` reclaimed |
+
+**Step 5 — restart ordering: watcher comes up after the daemon**
+(spec success criterion 3). Find the watcher host, take it down,
+run the daemon watcher-less, then restore the watcher:
+
+```sh
+gdbus call --session --dest org.freedesktop.DBus \
+  --object-path /org/freedesktop/DBus \
+  --method org.freedesktop.DBus.GetNameOwner org.kde.StatusNotifierWatcher
+# maps to the cosmic-applet-status-area process; then:
+pkill -f cosmic-applet-status-area        # or stop the panel your way
+./target/release/flintshot daemon --replace   # daemon starts with no watcher
+pgrep -af cosmic-applet-status-area || echo "watcher still down"
+# re-launch the status area / panel the way your session does
+# (re-login also works), then repeat the step-2 probe
+```
+
+Expected: while the watcher is down the daemon stays alive and
+error-free (appindicator retries internally, silently); once the
+watcher returns the flintshot entry appears in the probe and the
+icon renders — **without** restarting the daemon.
+
+**Step 6 — X11 session sanity** (spec success criterion 4). Log
+into an X11 session (any machine) and repeat steps 2 and 4 with
+the same tray build. Expected: the icon appears in an XEmbed
+system tray and the menu works — record against Phase 2 row 2 in
+the column matching the session used (L1 for an Ubuntu X11 box).
+
+**Step 7 — no-SNI-host sanity** (Phase 2 row 10, L5; spec
+success criterion 4). With no SNI host reachable the daemon must
+warn and continue. The no-bus variant is fully scriptable:
+
+```sh
+RUST_LOG=flintshot=info DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent \
+  ./target/release/flintshot daemon
+# expected: tray-unavailable warning, IPC binds, Ctrl-C → exit 0
+```
+
+Expected: warn-and-continue, daemon functional, clean exit. (A
+desktop that simply has no SNI host works equally well as the
+test environment.)
 
 Minor notes (non-blocking):
 
