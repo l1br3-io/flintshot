@@ -2488,6 +2488,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "zbus 5.18.0",
 ]
 
 [[package]]
