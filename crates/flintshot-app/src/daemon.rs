@@ -9,10 +9,15 @@
 //! drains `tray-icon` / `global-hotkey`'s crossbeam receivers and
 //! forwards every event to a single [`ActionHandler`].
 //!
-//! See ADR-0018 for the bridge rationale and why raw polling suffices
-//! on Linux (both libraries pump the OS internally and hand events to a
-//! static crossbeam receiver; macOS would need a run loop — recorded as
-//! a future-work note).
+//! See ADR-0018 for the bridge rationale. Event delivery is
+//! per-source: `global-hotkey` hands events to a static crossbeam
+//! receiver, so raw polling suffices for that half — but the
+//! GTK-backed tray half (SNI registration via libappindicator, muda
+//! menu-event delivery) only progresses while the default `GLib`
+//! main context is iterated, which no library thread does for us.
+//! [`pump_glib_context`] does it from the daemon loop each
+//! iteration (ADR-0031). macOS would need a run loop — recorded as
+//! a future-work note.
 
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -35,10 +40,7 @@ const POLL_TIMEOUT: Duration = Duration::from_millis(100);
 /// the worst case — a pathological always-ready source — so one pump
 /// can never wedge the daemon loop; leftover work spreads over later
 /// ticks.
-// Dead until Task 002 wires the pump into `run_event_loop` (the very
-// next commit on this branch); the allow goes away with it.
 #[cfg(all(feature = "tray", target_os = "linux"))]
-#[allow(dead_code)]
 const MAX_GLIB_PUMP_ITERATIONS: usize = 64;
 
 /// Run the daemon: acquire the single-instance lock, start the tokio
@@ -214,6 +216,13 @@ fn run_event_loop(
     #[cfg_attr(not(feature = "tray"), allow(unused_variables))] bind_requested: &Notify,
 ) {
     loop {
+        // Before draining the tray: muda delivers menu events through
+        // the default GLib context, so without this the crossbeam
+        // receiver below would never see them (nor would the SNI
+        // item ever register).
+        #[cfg(all(feature = "tray", target_os = "linux"))]
+        pump_glib_context();
+
         #[cfg(feature = "tray")]
         if drain_tray_menu(bus, state, bind_requested) {
             // Tray *Quit*: stop polling. `run` then returns, the lock
@@ -267,10 +276,7 @@ fn run_event_loop(
 /// loop, so without this pump the SNI object is exported on the bus but
 /// never registers with the `StatusNotifierWatcher` (`TEST_MATRIX`
 /// finding 3; full rationale: ADR-0031).
-// Dead until Task 002 wires the pump into `run_event_loop` (the very
-// next commit on this branch); the allow goes away with it.
 #[cfg(all(feature = "tray", target_os = "linux"))]
-#[allow(dead_code)]
 fn pump_glib_context() {
     let context = gtk::glib::MainContext::default();
     for _ in 0..MAX_GLIB_PUMP_ITERATIONS {
@@ -654,6 +660,49 @@ mod tests {
             assert!(
                 fired.load(Ordering::SeqCst),
                 "idle source should dispatch during the pump"
+            );
+        }
+
+        /// The wiring this branch exists for: [`super::run_event_loop`]
+        /// must pump the default context every iteration. Drive the
+        /// real loop headless (empty registry, no watcher, tray/hotkey
+        /// receivers idle) with a channel that carries one heartbeat
+        /// then disconnects; the idle source can only have fired if
+        /// the loop itself pumped the context.
+        #[test]
+        fn run_event_loop_pumps_the_default_context() {
+            let _serial = context_lock();
+            let fired = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&fired);
+            glib::idle_add(move || {
+                flag.store(true, Ordering::SeqCst);
+                ControlFlow::Break
+            });
+
+            let (tx, rx) = mpsc::channel::<()>();
+            tx.send(()).expect("send heartbeat");
+            drop(tx);
+
+            let bus = crate::ipc_server::SubscriberBus::new();
+            let state = crate::worker::DispatchState::new();
+            let mut hotkeys = crate::hotkeys::HotkeyRegistry::empty();
+            let shared = Arc::new(Mutex::new(HotkeyConfig::default()));
+            let bind_requested = Notify::new();
+
+            run_event_loop(
+                &rx,
+                &bus,
+                &state,
+                &mut hotkeys,
+                None,
+                false,
+                &shared,
+                &bind_requested,
+            );
+
+            assert!(
+                fired.load(Ordering::SeqCst),
+                "idle source dispatched only if the loop pumped the GLib context"
             );
         }
 
