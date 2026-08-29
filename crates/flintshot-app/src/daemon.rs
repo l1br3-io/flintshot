@@ -31,6 +31,16 @@ const TICK_INTERVAL: Duration = Duration::from_millis(500);
 /// tray/hotkey again. Caps click/hotkey latency at this value.
 const POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Hard cap on `GLib` iterations per [`pump_glib_context`] call. Bounds
+/// the worst case — a pathological always-ready source — so one pump
+/// can never wedge the daemon loop; leftover work spreads over later
+/// ticks.
+// Dead until Task 002 wires the pump into `run_event_loop` (the very
+// next commit on this branch); the allow goes away with it.
+#[cfg(all(feature = "tray", target_os = "linux"))]
+#[allow(dead_code)]
+const MAX_GLIB_PUMP_ITERATIONS: usize = 64;
+
 /// Run the daemon: acquire the single-instance lock, start the tokio
 /// side thread, set up the tray (if built with `--features tray`) and a
 /// dummy global hotkey, then block on the event loop until Ctrl-C.
@@ -242,6 +252,30 @@ fn run_event_loop(
                 tracing::info!("daemon channel closed; exiting event loop");
                 break;
             }
+        }
+    }
+}
+
+/// Drain the process-default `GLib` main context: up to
+/// [`MAX_GLIB_PUMP_ITERATIONS`] non-blocking `iteration(false)` calls,
+/// stopping early once nothing is pending.
+///
+/// Why: on Linux the tray stack (libappindicator behind `tray-icon`,
+/// plus muda's menu plumbing) drives from `GLib` sources on the default
+/// context — `RegisterStatusNotifierItem` and menu-event delivery only
+/// happen while that context is iterated. The daemon owns no `GLib` main
+/// loop, so without this pump the SNI object is exported on the bus but
+/// never registers with the `StatusNotifierWatcher` (`TEST_MATRIX`
+/// finding 3; full rationale: ADR-0031).
+// Dead until Task 002 wires the pump into `run_event_loop` (the very
+// next commit on this branch); the allow goes away with it.
+#[cfg(all(feature = "tray", target_os = "linux"))]
+#[allow(dead_code)]
+fn pump_glib_context() {
+    let context = gtk::glib::MainContext::default();
+    for _ in 0..MAX_GLIB_PUMP_ITERATIONS {
+        if !context.iteration(false) {
+            break;
         }
     }
 }
@@ -551,5 +585,102 @@ mod tests {
             saw_tick,
             "the heartbeat should have arrived before disconnect"
         );
+    }
+
+    /// [`super::pump_glib_context`] tests. The default `GLib` context is
+    /// process-global and cargo runs `#[test]`s on parallel threads, so
+    /// every test that attaches sources to it (or iterates it) must hold
+    /// [`CONTEXT_LOCK`] — otherwise one test's pump would dispatch
+    /// another test's pending sources.
+    #[cfg(all(feature = "tray", target_os = "linux"))]
+    mod glib_pump {
+        use super::*;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex, MutexGuard};
+        use std::time::{Duration, Instant};
+
+        use gtk::glib;
+        use gtk::glib::ControlFlow;
+
+        /// Serializes the tests in this module around the shared
+        /// default context.
+        static CONTEXT_LOCK: Mutex<()> = Mutex::new(());
+
+        fn context_lock() -> MutexGuard<'static, ()> {
+            // Poisoning would only mean a sibling test already failed;
+            // its panic is the real signal.
+            CONTEXT_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        #[test]
+        fn idle_source_never_fires_without_a_pump() {
+            let _serial = context_lock();
+            let fired = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&fired);
+            glib::idle_add(move || {
+                flag.store(true, Ordering::SeqCst);
+                ControlFlow::Break
+            });
+
+            // Bounded wait with no context iteration: however long the
+            // thread waits, GLib dispatches nothing — a source only runs
+            // when someone iterates its context. This is the RED
+            // condition the pump exists to fix.
+            let deadline = Instant::now() + Duration::from_millis(50);
+            while Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            assert!(
+                !fired.load(Ordering::SeqCst),
+                "idle source fired without any context iteration"
+            );
+        }
+
+        #[test]
+        fn idle_source_fires_after_pumping() {
+            let _serial = context_lock();
+            let fired = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&fired);
+            glib::idle_add(move || {
+                flag.store(true, Ordering::SeqCst);
+                ControlFlow::Break
+            });
+
+            pump_glib_context();
+
+            assert!(
+                fired.load(Ordering::SeqCst),
+                "idle source should dispatch during the pump"
+            );
+        }
+
+        #[test]
+        fn self_rearming_source_cannot_run_the_pump_forever() {
+            // Every dispatch queues a successor, so the context is
+            // never empty — the cap is the only thing that ends this.
+            fn rearm_once(count: Arc<AtomicUsize>) {
+                glib::idle_add(move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    rearm_once(Arc::clone(&count));
+                    ControlFlow::Break
+                });
+            }
+
+            let _serial = context_lock();
+            let count = Arc::new(AtomicUsize::new(0));
+            rearm_once(Arc::clone(&count));
+
+            pump_glib_context();
+
+            let observed = count.load(Ordering::SeqCst);
+            assert!(
+                (1..=MAX_GLIB_PUMP_ITERATIONS).contains(&observed),
+                "pump dispatched {observed} time(s); expected the \
+                 MAX_GLIB_PUMP_ITERATIONS cap to bound it"
+            );
+        }
     }
 }
