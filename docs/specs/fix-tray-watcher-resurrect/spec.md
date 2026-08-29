@@ -234,8 +234,14 @@ exited; passive waiting = invisible icon).
    `tray::build`? Leaning fire-and-forget — libappindicator
    re-registers on appearance anyway; blocking only delays daemon
    startup for zero added correctness. Resolve in plan.md.
+   **Resolved (plan):** fire-and-forget — the watchdog's first
+   tick *is* the startup poke (immediate at thread start); no
+   separate startup path exists.
 2. Does the COSMIC watcher exit when it has zero items (idle exit)?
    If yes, the 30 s poll creates a spawn/exit cycle on trays the
    user deliberately removed. Check during the L5 pass; if observed,
    add a "back off after N futile activations" guard in a follow-up,
    not this effort.
+   **Closeout:** checked by runbook step 4 (same-PID residency
+   assertion); the back-off guard stays fenced as a follow-up and
+   is recorded in ADR-0032's consequences.

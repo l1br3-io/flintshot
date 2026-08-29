@@ -380,8 +380,8 @@ Expected: clean exit, socket file at
 | Tray *Open config* opens `$EDITOR` on `config.toml`         |    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 4 (never run on L5 — finding 1; blocked by finding 3) |    |    |    |    |
 | Tray *Quit* exits the daemon cleanly                        |    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 4 (never run on L5 — finding 1; blocked by finding 3) |    |    |    |    |
 | Tray visible with no SNI host → daemon stays alive (warning)|    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 7 (warn-and-continue path untouched by the fix) |    |    |    |    |
-| Watcher killed mid-session → icon returns within ~30 s (daemon running) | N/A | N/A | N/A | N/A | pending-maintainer-L5 — fix-tray-watcher-resurrect runbook (fix landed 547753a 2026-08-30) | N/A | N/A | N/A | N/A |
-| Fresh daemon with watcher dead → icon appears at startup | N/A | N/A | N/A | N/A | pending-maintainer-L5 — fix-tray-watcher-resurrect runbook (fix landed 547753a 2026-08-30) | N/A | N/A | N/A | N/A |
+| Watcher killed mid-session → icon returns within ~30 s (daemon running) | N/A | N/A | N/A | N/A | pending-maintainer-L5 — fix-tray-watcher-resurrect runbook step 2 (fix landed 547753a 2026-08-30) | N/A | N/A | N/A | N/A |
+| Fresh daemon with watcher dead → icon appears at startup | N/A | N/A | N/A | N/A | pending-maintainer-L5 — fix-tray-watcher-resurrect runbook step 3 (fix landed 547753a 2026-08-30) | N/A | N/A | N/A | N/A |
 | Global hotkey fires capture on X11 / macOS / Windows        |    | N/A | N/A | N/A | N/A |    |    |    |    |
 | Wayland: hotkey does NOT fire; compositor-keybind workaround logged | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 | Edit `[hotkeys]`, save → new chord works without restart    |    |    |    |    |    |    |    |    |    |
@@ -1453,6 +1453,97 @@ Minor notes (non-blocking):
 - Daemon startup logs ~100 × `Ignoring a wl_output with version
   < 4.` on COSMIC (wayland-client noise from monitor
   enumeration). Cosmetic; pre-existing.
+
+---
+
+## L5 runbook — fix-tray-watcher-resurrect
+
+Recorded by `fix-tray-watcher-resurrect` task 005 (fix landed
+`547753a` 2026-08-30). Protocol only — **it records no results and
+predicts none**. Execute in one sitting on the L5 box (COSMIC,
+Wayland) with debug logging so watchdog ticks are visible, and fill
+the two Phase 2 matrix rows this block names (L5 column):
+
+```sh
+cargo build --release --features tray
+RUST_LOG=flintshot=debug ./target/release/flintshot daemon
+```
+
+**Step 1 — baseline probe (daemon not yet started).**
+
+```sh
+pgrep -af flintshot    # expected: no flintshot processes
+gdbus call --session --dest org.kde.StatusNotifierWatcher \
+  --object-path /StatusNotifierWatcher \
+  --method org.kde.StatusNotifierWatcher.GetRegisteredStatusNotifierItems
+```
+
+Expected: a list **without** a flintshot entry. Save for
+comparison; this probe is the assertion tool for every step
+below.
+
+**Step 2 — kill the watcher mid-session → icon returns within
+~30 s** (row "Watcher killed mid-session", L5). With the daemon
+running and the icon visible, kill the tray host and wait one
+watchdog interval:
+
+```sh
+pkill -f cosmic-applet-status-area
+# icon vanishes; the daemon must stay alive and quiet
+sleep 35
+gdbus call --session --dest org.kde.StatusNotifierWatcher \
+  --object-path /StatusNotifierWatcher \
+  --method org.kde.StatusNotifierWatcher.GetRegisteredStatusNotifierItems
+```
+
+Expected: the flintshot entry is back in the list and the icon
+renders again — with **no** manual watcher restart and **no**
+daemon restart. The debug log shows the probe going unowned and
+the COSMIC poke succeeding (`poke reached the SNI watcher`). If
+the entry is absent after ~35 s, capture the daemon's debug
+output (it names both poke attempts) for the issue.
+
+**Step 3 — fresh daemon with the watcher dead → icon appears at
+startup** (row "Fresh daemon with watcher dead", L5). Keep the
+watcher dead, restart the daemon, and check the startup poke:
+
+```sh
+pkill -f flintshot; sleep 2          # let the single-instance lock go
+pgrep -af cosmic-applet-status-area || echo "watcher still down"
+RUST_LOG=flintshot=debug ./target/release/flintshot daemon &
+sleep 5
+# repeat the step-1 probe
+```
+
+Expected: the flintshot entry appears without any manual busctl —
+the watchdog's *first* probe is the startup poke (no 30 s wait).
+Note the entry typically lands ~1 s after activation
+(libappindicator's own re-registration).
+
+**Step 4 — healthy-session regression + OQ2 residency** (spec
+exit criteria 3 + open question 2; no matrix row — pass/fail note
+here). With the watcher alive and the daemon restarted, watch two
+intervals:
+
+```sh
+sleep 65
+grep -c "SNI watcher" <the daemon's debug log>
+```
+
+Expected: the daemon logs exactly two `NameHasOwner`-shaped quiet
+cycles — one probe per 30 s, **no pokes, no output above
+`debug`**, no extra processes (`pgrep -af cosmic-applet-status-area`
+still shows exactly one). Then check OQ2: the watcher must still
+be the *same* PID as after step 3 — if the COSMIC watcher
+idle-exits with zero items and the watchdog's poll creates a
+spawn/exit cycle (new PID per interval), record it here; the
+back-off guard is a fenced follow-up, not this effort.
+
+**Step 5 — X11 sanity** (no matrix row; regression note). On any
+X11 session, run the daemon with the same build for a couple of
+minutes. Expected: probes succeed (an X11 SNI host or none at
+all), failed pokes — if there is no host — stay at `debug`, and
+the daemon's behavior is otherwise unchanged.
 
 ---
 

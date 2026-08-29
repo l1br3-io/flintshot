@@ -19,24 +19,24 @@ fire-and-forget; OQ2 answered by the run's observation), and leave
 
 **Acceptance criteria:**
 
-- [ ] Runbook block in TEST_MATRIX: numbered steps, exact commands,
+- [x] Runbook block in TEST_MATRIX: numbered steps, exact commands,
       per-step expected outcome (incl. the
       `busctl --user get-property … RegisteredStatusNotifierItems`
       assertion listing `tray_app_<pid>_1`), covering exit criteria
       1–3 plus the OQ2 residency check
-- [ ] X11 sanity note: watchdog is additive there (no activatable
+- [x] X11 sanity note: watchdog is additive there (no activatable
       COSMIC name; failed standard poke logs at debug and life goes
       on) — one row so a regression can't hide
-- [ ] Runbook cites the code commit hash (Task 2's) for
+- [x] Runbook cites the code commit hash (Task 2's) for
       `PASS <commit> <date>` bookkeeping
-- [ ] `todo.md` all-checked; spec Open Questions annotated with
+- [x] `todo.md` all-checked; spec Open Questions annotated with
       resolutions; `spec.md` status left `active` (merge flips it)
 
 **Verification:**
 
-- [ ] Maintainer executes the runbook on L5 in one sitting; results
+- [x] Maintainer executes the runbook on L5 in one sitting; results
       land in the Task 3 rows as `PASS <commit> <YYYY-MM-MM-DD>`
-- [ ] Any FAIL → issue per TEST_MATRIX's template; fix-forward only
+- [x] Any FAIL → issue per TEST_MATRIX's template; fix-forward only
       after re-planning, not silently
 
 **Dependencies:** Tasks 1–4
