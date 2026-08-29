@@ -1,6 +1,7 @@
 ---
-status: active
+status: shipped
 started: 2026-08-28
+shipped: 2026-08-29
 ---
 
 # Spec — Fix delegated capture: fork loop + at-spi window crash
