@@ -237,6 +237,13 @@ exited; passive waiting = invisible icon).
    **Resolved (plan):** fire-and-forget — the watchdog's first
    tick *is* the startup poke (immediate at thread start); no
    separate startup path exists.
+   **Amended (task 006, live evidence):** fire-and-forget lost the
+   startup race (poke-activated watcher appeared during
+   libappindicator init; `NameOwnerChanged` missed; icon never
+   registered). OQ1 now resolves to the blocking variant:
+   `ensure_watcher()` runs a bounded (≤ ~2 s) probe-poke-confirm
+   barrier synchronously before `tray::build`; the watchdog thread
+   keeps mid-session liveness.
 2. Does the COSMIC watcher exit when it has zero items (idle exit)?
    If yes, the 30 s poll creates a spawn/exit cycle on trays the
    user deliberately removed. Check during the L5 pass; if observed,

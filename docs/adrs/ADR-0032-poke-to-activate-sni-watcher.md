@@ -47,6 +47,18 @@ the poll gate; only the unowned branch fires activation pokes
 (`Peer.Ping` at `/StatusNotifierWatcher`, matching the invocation
 verified live).
 
+*Amended after ship-review on live evidence (task 006):* the
+fire-and-forget startup lost a race — the poke-activated watcher
+appeared *during* libappindicator's init, its `NameOwnerChanged`
+event was missed, and the icon never registered until a daemon
+restart. Startup therefore flipped to the blocking variant of the
+spec's open question 1: `ensure_watcher()` runs synchronously
+before `tray::build` (probe → poke if unowned → poll until owned,
+bounded ≤ 2 s; returns immediately when no activatable service
+answers, so tray-less desktops pay nothing beyond two failed
+pokes). The watchdog thread is unchanged and owns **mid-session**
+liveness only.
+
 - `NameHasOwner` is answered by any live host under the standard
   rendezvous name — COSMIC's watcher included; it's how
   libappindicator finds the watcher too.

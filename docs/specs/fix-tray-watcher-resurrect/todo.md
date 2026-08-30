@@ -7,3 +7,4 @@ Single status source; mirrors `plan.md`'s task index.
 - [x] Task 3: CHANGELOG + TEST_MATRIX rows for the two live scenarios (`tasks/003-changelog-test-matrix.md`)
 - [x] Task 4: ADR-0032 poke-to-activate + index (`tasks/004-adr-0032-poke-to-activate.md`)
 - [x] Task 5: L5 runbook in TEST_MATRIX + spec closeout (`tasks/005-l5-runbook.md`)
+- [x] Task 6: Bounded startup barrier (`ensure_watcher`) before `tray::build` (`tasks/006-ensure-watcher-startup-barrier.md`)
