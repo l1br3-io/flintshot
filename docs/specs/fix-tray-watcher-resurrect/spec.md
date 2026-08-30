@@ -1,6 +1,7 @@
 ---
-status: active
+status: shipped
 started: 2026-08-30
+shipped: 2026-08-30
 ---
 
 # Spec — Fix tray watcher resurrect: daemon self-heals a dead SNI host

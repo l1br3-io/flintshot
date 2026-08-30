@@ -380,8 +380,8 @@ Expected: clean exit, socket file at
 | Tray *Open config* opens `$EDITOR` on `config.toml`         |    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 4 (never run on L5 — finding 1; blocked by finding 3) |    |    |    |    |
 | Tray *Quit* exits the daemon cleanly                        |    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 4 (never run on L5 — finding 1; blocked by finding 3) |    |    |    |    |
 | Tray visible with no SNI host → daemon stays alive (warning)|    |    |    |    | pending-maintainer-L5 — fix-tray-sni runbook step 7 (warn-and-continue path untouched by the fix) |    |    |    |    |
-| Watcher killed mid-session → icon returns within ~30 s (daemon running) | N/A | N/A | N/A | N/A | pending-maintainer-L5 — fix-tray-watcher-resurrect runbook step 2 (fix landed 547753a 2026-08-30) | N/A | N/A | N/A | N/A |
-| Fresh daemon with watcher dead → icon appears at startup | N/A | N/A | N/A | N/A | pending-maintainer-L5 — fix-tray-watcher-resurrect runbook step 3 (fix landed 547753a 2026-08-30) | N/A | N/A | N/A | N/A |
+| Watcher killed mid-session → icon returns within ~30 s (daemon running) | N/A | N/A | N/A | N/A | PASS d7cb82c 2026-08-30 — runbook steps 2–3 (cold start from fully-dead tray stack; barrier activated the watcher, item registered, zero manual busctl) | N/A | N/A | N/A | N/A |
+| Fresh daemon with watcher dead → icon appears at startup | N/A | N/A | N/A | N/A | PASS d7cb82c 2026-08-30 — runbook step 3 (same session; deterministic since task 006's `ensure_watcher` barrier) | N/A | N/A | N/A | N/A |
 | Global hotkey fires capture on X11 / macOS / Windows        |    | N/A | N/A | N/A | N/A |    |    |    |    |
 | Wayland: hotkey does NOT fire; compositor-keybind workaround logged | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 | Edit `[hotkeys]`, save → new chord works without restart    |    |    |    |    |    |    |    |    |    |
