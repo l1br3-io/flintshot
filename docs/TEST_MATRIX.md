@@ -1516,9 +1516,12 @@ sleep 5
 ```
 
 Expected: the flintshot entry appears without any manual busctl —
-the watchdog's *first* probe is the startup poke (no 30 s wait).
-Note the entry typically lands ~1 s after activation
-(libappindicator's own re-registration).
+the startup barrier (`ensure_watcher`) probes, pokes, and waits
+(≤ 2 s) for the watcher **before** building the tray, so
+registration is deterministic (amended in task 006 after the
+fire-and-forget variant lost this exact race live). Note the entry
+typically lands ~1 s after activation (libappindicator's own
+re-registration).
 
 **Step 4 — healthy-session regression + OQ2 residency** (spec
 exit criteria 3 + open question 2; no matrix row — pass/fail note

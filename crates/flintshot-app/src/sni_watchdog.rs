@@ -52,6 +52,15 @@ const PROBE_INTERVAL: Duration = Duration::from_secs(30);
 /// probe reaps the result.
 const POKE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long [`ensure_watcher`] may wait, after a poke, for the
+/// activated watcher to take the name. A successful poke usually
+/// implies the name is already up (the ping reply requires the
+/// service), so this bound mostly covers the slow-activation edge.
+const ACTIVATION_WAIT: Duration = Duration::from_secs(2);
+
+/// Poll step inside [`ensure_watcher`]'s activation wait.
+const OWNED_POLL_STEP: Duration = Duration::from_millis(50);
+
 /// The D-Bus surface the watchdog needs, as a sync seam so the
 /// decision logic runs against fakes in unit tests.
 ///
@@ -195,11 +204,12 @@ impl Watchdog {
     }
 }
 
-/// Spawn the SNI watchdog: its first probe runs immediately — that
-/// *is* the daemon's startup poke — then re-probes every
-/// [`PROBE_INTERVAL`]. Best-effort by construction: any failure is
-/// logged inside the loop and a spawn/builder failure returns
-/// `None`, never blocking daemon startup.
+/// Spawn the SNI watchdog: probes every [`PROBE_INTERVAL`] to
+/// re-poke a watcher that dies mid-session. Best-effort by
+/// construction: any failure is logged inside the loop and a
+/// spawn/builder failure returns `None`, never blocking daemon
+/// startup. Startup liveness is *not* this thread's job —
+/// [`ensure_watcher`] handles that before the tray is built.
 pub(crate) fn spawn() -> Option<Watchdog> {
     spawn_with(PROBE_INTERVAL, SessionBus::new)
 }
@@ -235,16 +245,71 @@ where
     Some(Watchdog { tx, join })
 }
 
+/// Startup barrier: make sure the SNI watcher is up — activating it
+/// if dead — **before** the tray is built, so libappindicator's
+/// first registration attempt finds a host. The fire-and-forget
+/// variant lost that race live (L5 2026-08-30: the poke-activated
+/// watcher appeared *during* appindicator's init; the
+/// `NameOwnerChanged` event was missed and the icon never
+/// registered until a daemon restart). Bounded and
+/// failure-tolerant: a healthy session pays one probe round trip,
+/// a tray-less desktop returns as soon as both pokes error, and
+/// nothing ever blocks past [`ACTIVATION_WAIT`].
+pub(crate) fn ensure_watcher() {
+    let mut bus = match SessionBus::new() {
+        Ok(bus) => bus,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "SNI startup barrier unavailable; the watchdog thread still covers mid-session"
+            );
+            return;
+        }
+    };
+    ensure_watcher_with(&mut bus, ACTIVATION_WAIT);
+}
+
+/// Test seam over [`ensure_watcher`]. Every branch returns; the
+/// tray build proceeds regardless — this barrier may improve the
+/// odds, never break the daemon.
+fn ensure_watcher_with(bus: &mut dyn SniBus, wait: Duration) {
+    if matches!(bus.watcher_owned(), Ok(true)) {
+        return;
+    }
+    let activated = [STANDARD_WATCHER_NAME, COSMIC_WATCHER_NAME]
+        .iter()
+        .any(|name| bus.poke(name).is_ok());
+    if !activated {
+        // No activatable service answered — nothing is coming.
+        return;
+    }
+    let deadline = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < deadline {
+        if matches!(bus.watcher_owned(), Ok(true)) {
+            tracing::debug!("SNI watcher confirmed up before tray build");
+            return;
+        }
+        thread::sleep(OWNED_POLL_STEP);
+    }
+    tracing::debug!(
+        "SNI watcher not owned after the activation wait; \
+         libappindicator's own name watch covers the rest"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Programmable fake: `owned` is `None` to make the probe fail;
     /// `poke_results` are consumed in order, one per poke (`Ok` by
-    /// default once exhausted).
+    /// default once exhausted). `flip_after` makes the probe report
+    /// unowned until the Nth call, then owned (activation landing
+    /// mid-sequence).
     #[derive(Default)]
     struct FakeBus {
         owned: Option<bool>,
+        flip_after: Option<usize>,
         poke_results: std::collections::VecDeque<std::result::Result<(), String>>,
         calls: Vec<String>,
     }
@@ -252,6 +317,12 @@ mod tests {
     impl FakeBus {
         fn owned(mut self, owned: bool) -> Self {
             self.owned = Some(owned);
+            self
+        }
+
+        fn becomes_owned_after(mut self, probes: usize) -> Self {
+            self.owned = Some(false);
+            self.flip_after = Some(probes);
             self
         }
 
@@ -269,6 +340,13 @@ mod tests {
     impl SniBus for FakeBus {
         fn watcher_owned(&mut self) -> color_eyre::eyre::Result<bool> {
             self.calls.push("probe".into());
+            if let Some(remaining) = self.flip_after {
+                if remaining == 0 {
+                    return Ok(true);
+                }
+                self.flip_after = Some(remaining - 1);
+                return Ok(false);
+            }
             self.owned
                 .ok_or_else(|| color_eyre::eyre::eyre!("no session bus"))
         }
@@ -421,5 +499,64 @@ mod tests {
             ["probe"],
             "owned watcher means the thread probed and never poked"
         );
+    }
+
+    // ── startup barrier (task 006) ──────────────────────────────
+
+    #[test]
+    fn barrier_returns_immediately_when_watcher_owned() {
+        let mut fake = FakeBus::default().owned(true);
+        ensure_watcher_with(&mut fake, Duration::from_secs(5));
+        assert_eq!(fake.calls, ["probe"]);
+    }
+
+    #[test]
+    fn barrier_pokes_then_confirms_once_owned() {
+        // Activation lands between the first probe and the first
+        // confirmation poll.
+        let mut fake = FakeBus::default()
+            .becomes_owned_after(1)
+            .pokes(vec![Ok(())]);
+        ensure_watcher_with(&mut fake, Duration::from_secs(5));
+        assert_eq!(
+            fake.calls,
+            ["probe", "poke:org.kde.StatusNotifierWatcher", "probe",]
+        );
+    }
+
+    #[test]
+    fn barrier_returns_without_waiting_when_nothing_is_activatable() {
+        // Both pokes fail (tray-less desktop): waiting out the bound
+        // would pointlessly delay every daemon start there.
+        let mut fake = FakeBus::default()
+            .owned(false)
+            .pokes(vec![Err("no service".into()), Err("no service".into())]);
+        let started = std::time::Instant::now();
+        ensure_watcher_with(&mut fake, Duration::from_secs(5));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "no activatable service must not wait out the bound"
+        );
+        assert_eq!(fake.calls.len(), 3, "probe + both pokes, nothing more");
+    }
+
+    #[test]
+    fn barrier_gives_up_at_the_bound_when_never_owned() {
+        let mut fake = FakeBus::default().owned(false).pokes(vec![Ok(())]);
+        let started = std::time::Instant::now();
+        ensure_watcher_with(&mut fake, Duration::from_millis(120));
+        assert!(
+            started.elapsed() >= Duration::from_millis(120),
+            "a successful poke earns the full activation wait"
+        );
+    }
+
+    #[test]
+    fn barrier_tolerates_probe_error_without_panicking() {
+        let mut fake = FakeBus::default()
+            .with_probe_error()
+            .pokes(vec![Err("no bus".into()), Err("no bus".into())]);
+        ensure_watcher_with(&mut fake, Duration::from_secs(5));
+        assert_eq!(fake.calls.len(), 3);
     }
 }

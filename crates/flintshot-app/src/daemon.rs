@@ -116,12 +116,16 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     // 3. Platform sources on the main thread. The tray's
     // "Bind shortcuts…" item exists only where it works: Wayland
     // portal sessions.
-    // SNI watchdog first: its immediate first probe is the startup
-    // poke that D-Bus-activates a dead (or not-yet-started)
-    // StatusNotifierWatcher, so the icon built right below has a
-    // host to register with. Fire-and-forget by design —
-    // libappindicator re-registers on watcher appearance, so
-    // blocking here would only delay startup.
+    // Startup barrier first: ensure the SNI watcher is up (activate
+    // it if dead) *before* the tray is built, so libappindicator's
+    // first registration attempt finds a host. Fire-and-forget lost
+    // that race live (2026-08-30): the poke-activated watcher
+    // appeared during appindicator init, the NameOwnerChanged event
+    // was missed, and the icon never registered. Bounded ≤ ~2 s and
+    // failure-tolerant; the watchdog thread still owns mid-session
+    // liveness.
+    #[cfg(all(feature = "tray", target_os = "linux"))]
+    crate::sni_watchdog::ensure_watcher();
     #[cfg(all(feature = "tray", target_os = "linux"))]
     let sni_watchdog = crate::sni_watchdog::spawn();
     #[cfg(feature = "tray")]

@@ -895,9 +895,14 @@ Categories used below:
   Pokes are best-effort and bounded (2 s), failures log at `debug`
   (a tray-less desktop is a normal steady state), and a watchdog
   failure never affects daemon startup or shutdown beyond one
-  bounded join. New `zbus` 5 direct dep resolves onto the copy
-  ashpd already builds — a dep edge, not a new crate build
-  (ADR-0032).
+  bounded join. At startup the barrier is synchronous: the daemon
+  probes, pokes if the watcher is unowned, and waits (≤ 2 s) for
+  the activated watcher to take the name **before** building the
+  tray — a live race showed the fire-and-forget variant could
+  activate the watcher mid-libappindicator-init and miss the
+  registration event, leaving the icon absent until restart. New
+  `zbus` 5 direct dep resolves onto the copy ashpd already builds —
+  a dep edge, not a new crate build (ADR-0032).
 
 ### Changed
 
