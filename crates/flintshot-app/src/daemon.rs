@@ -160,11 +160,14 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         );
 
     // 4. Block on the event loop. Ctrl-C (caught in the tokio side)
-    //    drops the channel sender → the loop exits cleanly.
+    //    drops the channel sender → the loop exits cleanly. A tray
+    //    *Quit* breaks the loop from this side instead; the loop takes
+    //    `rx` by value so returning drops it, which is the tokio
+    //    side's stop signal (its next heartbeat `send` fails).
     tracing::info!("daemon event loop running; press Ctrl-C to exit");
     let mut hotkey_registry = hotkey_registry;
     run_event_loop(
-        &rx,
+        rx,
         &bus,
         &state,
         &mut hotkey_registry,
@@ -216,14 +219,26 @@ fn replace_running_daemon() -> eyre::Result<()> {
 /// as IPC); the heartbeat just keeps the loop polling.
 ///
 /// Returns when the tokio side drops its sender (Ctrl-C / IPC `Quit`)
-/// or a tray *Quit* is clicked.
+/// or a tray *Quit* is clicked. The receiver is **owned** so both exits
+/// drop it: without the drop, a tray *Quit* would leave `run` holding
+/// `rx` alive, the tokio side's heartbeat `send`s would keep
+/// succeeding, and `run`'s `join()` would wait forever on a thread that
+/// no longer has a reason to stop — the daemon hung on-screen with a
+/// dead tray (every later click silently dropped, L5 2026-08-31).
 //
 // Eight wiring params by design: this loop is the daemon's integration
 // point, and each param is a distinct event source or shared state; a
 // context struct would only relocate the list, not shrink it.
 #[allow(clippy::too_many_arguments)]
+// Owned on purpose: dropping the receiver on return is the tokio
+// side's stop signal on the tray-Quit path (see the doc comment);
+// a `&Receiver` here is exactly the hung-daemon bug.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "ownership is the shutdown contract; the body only reads it"
+)]
 fn run_event_loop(
-    rx: &mpsc::Receiver<()>,
+    rx: mpsc::Receiver<()>,
     #[cfg_attr(not(feature = "tray"), allow(unused_variables))]
     bus: &crate::ipc_server::SubscriberBus,
     state: &crate::worker::DispatchState,
@@ -394,7 +409,14 @@ fn open_config_file() -> eyre::Result<()> {
     let path = flintshot_core::config_path()
         .ok_or_else(|| eyre::eyre!("no platform config_dir available"))?;
     if let Some(editor) = std::env::var_os("EDITOR").or_else(|| std::env::var_os("VISUAL")) {
-        Command::new(&editor)
+        let argv = editor_argv(&editor);
+        if argv.is_empty() {
+            println!("{}", path.display());
+            tracing::info!(path = %path.display(), "$EDITOR/$VISUAL is blank; printed config path");
+            return Ok(());
+        }
+        Command::new(&argv[0])
+            .args(&argv[1..])
             .arg(&path)
             .spawn()
             .map_err(|e| eyre::eyre!("launching {editor:?} on {}: {e}", path.display()))?;
@@ -404,6 +426,21 @@ fn open_config_file() -> eyre::Result<()> {
         tracing::info!(path = %path.display(), "no $EDITOR/$VISUAL; printed config path");
     }
     Ok(())
+}
+
+/// Split an `$EDITOR`/`$VISUAL` value into program + leading args.
+/// Values like `code --wait` are common (and conventionally unquoted —
+/// shells do not expand the variable into words, but every editor
+/// launcher tolerates whitespace splitting); treating the whole value
+/// as one binary name makes `Command::new` look for a file literally
+/// named `code --wait` and the tray *Open config* click silently fail.
+#[cfg(feature = "tray")]
+fn editor_argv(value: &std::ffi::OsStr) -> Vec<std::ffi::OsString> {
+    value
+        .to_string_lossy()
+        .split_whitespace()
+        .map(std::ffi::OsString::from)
+        .collect()
 }
 
 /// Drain pending *pressed* hotkey events, dispatching each through the
@@ -611,6 +648,59 @@ mod tests {
         );
     }
 
+    /// A tray *Quit* breaks the event loop from the main side while
+    /// the tokio side is still sending heartbeats. `run_event_loop`
+    /// owns its receiver, so its return must drop it — that drop is
+    /// the tokio side's only stop signal on this path. Model the
+    /// handshake: hold the sender, "return" from the loop (drop the
+    /// receiver), and require the next send to fail. With the old
+    /// `&Receiver` signature the send kept succeeding forever — the
+    /// exact mechanism behind the hung-after-Quit daemon.
+    #[test]
+    fn loop_return_drops_the_receiver_the_tokio_side_stops_on() {
+        let (tx, rx) = mpsc::channel::<()>();
+        tx.send(()).expect("heartbeat");
+
+        // Loop body: one heartbeat, then a tray-Quit-style return.
+        // Dropping `rx` here stands in for run_event_loop returning.
+        {
+            let rx = rx;
+            assert!(rx.recv_timeout(Duration::from_millis(10)).is_ok());
+        }
+
+        assert!(
+            tx.send(()).is_err(),
+            "receiver must be gone once the event loop returns"
+        );
+    }
+
+    // ── tray Open config: $EDITOR splitting ─────────────────────
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn editor_value_with_args_splits_into_program_and_args() {
+        use std::ffi::OsStr;
+        let argv = editor_argv(OsStr::new("code --wait"));
+        assert_eq!(argv, ["code", "--wait"].map(std::ffi::OsString::from));
+    }
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn plain_editor_value_is_a_single_word() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            editor_argv(OsStr::new("vim")),
+            ["vim"].map(std::ffi::OsString::from)
+        );
+    }
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn blank_editor_value_is_empty() {
+        use std::ffi::OsStr;
+        assert!(editor_argv(OsStr::new("   ")).is_empty());
+    }
+
     /// [`super::pump_glib_context`] tests. The default `GLib` context is
     /// process-global and cargo runs `#[test]`s on parallel threads, so
     /// every test that attaches sources to it (or iterates it) must hold
@@ -708,7 +798,7 @@ mod tests {
             let bind_requested = Notify::new();
 
             run_event_loop(
-                &rx,
+                rx,
                 &bus,
                 &state,
                 &mut hotkeys,

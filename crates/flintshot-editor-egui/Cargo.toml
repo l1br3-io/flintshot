@@ -14,7 +14,24 @@ path = "src/lib.rs"
 
 [dependencies]
 flintshot-core = { workspace = true }
-eframe = { workspace = true }
+# eframe with `accesskit` OFF: eframe → egui-winit → accesskit_winit
+# hard-defaults accesskit's unix backend to its async-io executor, and
+# that backend's a11y event-pump thread builds a zbus 5 session
+# connection — zbus is feature-unified onto the tokio executor in this
+# workspace (ashpd + the SNI watchdog need it), so `spawn_blocking`
+# panicked with "no reactor running" on that plain thread, and with
+# the release profile's `panic = "abort"` every editor window
+# core-dumped before opening. accesskit's tokio executor is mutually
+# exclusive with async-io and unreachable through eframe's feature
+# set (egui-winit offers no switch), so the editor builds without
+# accesskit. Revisit when egui exposes the executor choice. Rest of
+# eframe's defaults are re-listed verbatim.
+eframe = { workspace = true, features = [
+    "default_fonts",
+    "wayland",
+    "wgpu",
+    "x11",
+] }
 egui = { workspace = true }
 image = { workspace = true }
 rfd = { workspace = true }
