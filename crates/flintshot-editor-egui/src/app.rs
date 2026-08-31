@@ -713,10 +713,12 @@ impl App for EditorApp {
 }
 
 impl EditorApp {
-    /// Save button handler: compose the final image, prompt for a
-    /// path via `rfd`, write PNG, publish `Saved(path)` on success.
+    /// Save button / Ctrl+S handler: compose the image per the
+    /// phase contract ([`compose_for_save`] — selection-aware while
+    /// the selection-first phase is live), prompt for a path via
+    /// `rfd`, write PNG, publish `Saved(path)` on success.
     fn handle_save(&self, ctx: &Context) {
-        match save_to_disk(&self.state) {
+        match save_to_disk(&self.state, self.phase_active()) {
             Ok(Some(path)) => {
                 tracing::info!(path = %path.display(), "editor saved");
                 self.publish_outcome(Ok(EditorOutcome::Saved(path)));
@@ -868,9 +870,35 @@ fn prompt_png_path() -> Option<std::path::PathBuf> {
         .save_file()
 }
 
-/// Compose the full image and write it to a user-chosen PNG path
-/// (the editor window's Save contract since Phase 1 — selection
-/// output is Copy/Pin/Upload's job there).
+/// Compose the image a Save writes: selection-aware while the
+/// selection-first phase is live, full-image otherwise.
+///
+/// The Save half of the outputs-with-live-selection contract
+/// (region-selection-first Task 003): Copy / Pin / Upload are
+/// selection-aware unconditionally via
+/// [`compose_selection_aware`], but Save only while the phase is
+/// live — the post-phase and plain-editor (`fullscreen` / `open`)
+/// sessions keep the Phase 1 full-image contract, pinned unregressed
+/// by tests.
+///
+/// Pure decision point so the phase-scoped contract is
+/// headless-testable; the rfd prompt wrapped around it in
+/// [`save_to_disk`] is not.
+fn compose_for_save(selection_aware: bool, state: &EditorState) -> image::RgbaImage {
+    if selection_aware {
+        compose_selection_aware(state)
+    } else {
+        compose_final(state)
+    }
+}
+
+/// Prompt for a PNG path and write the [`compose_for_save`] image.
+///
+/// `selection_aware` comes from the caller's phase state — the only
+/// call site, [`EditorApp::handle_save`], passes
+/// `self.phase_active()`; the overlay's
+/// [`save_region_to_disk`] passes `true` (its model is "the region
+/// defines what ships").
 ///
 /// Returns `Ok(None)` when the user cancels the dialog (no file
 /// written, no error); callers should keep the editor open in that
@@ -879,21 +907,25 @@ fn prompt_png_path() -> Option<std::path::PathBuf> {
 /// # Errors
 /// Surfaces [`FlintshotError::Image`] if PNG encoding or the
 /// filesystem write fails.
-fn save_to_disk(state: &EditorState) -> flintshot_core::Result<Option<std::path::PathBuf>> {
+fn save_to_disk(
+    state: &EditorState,
+    selection_aware: bool,
+) -> flintshot_core::Result<Option<std::path::PathBuf>> {
     let Some(path) = prompt_png_path() else {
         return Ok(None);
     };
-    compose_final(state)
+    compose_for_save(selection_aware, state)
         .save_with_format(&path, image::ImageFormat::Png)
         .map_err(FlintshotError::from)?;
     Ok(Some(path))
 }
 
-/// The overlay's Save (Phase 5 Task 006): like [`save_to_disk`] but
-/// **selection-aware** — the overlay's model is "the region defines
-/// what ships in the output" (Task 005), so a usable selection
-/// saves just the region; without one it saves the full composed
-/// frame (the `Ctrl+S`-before-any-drag case).
+/// The overlay's Save (Phase 5 Task 006):
+/// [`save_to_disk`] with `selection_aware = true` — the overlay's
+/// model is "the region defines what ships in the output" (Task
+/// 005), so a usable selection saves just the region; without one
+/// it saves the full composed frame (the `Ctrl+S`-before-any-drag
+/// case).
 ///
 /// Returns `Ok(None)` when the user cancels the dialog.
 ///
@@ -903,13 +935,7 @@ fn save_to_disk(state: &EditorState) -> flintshot_core::Result<Option<std::path:
 pub(crate) fn save_region_to_disk(
     state: &EditorState,
 ) -> flintshot_core::Result<Option<std::path::PathBuf>> {
-    let Some(path) = prompt_png_path() else {
-        return Ok(None);
-    };
-    compose_selection_aware(state)
-        .save_with_format(&path, image::ImageFormat::Png)
-        .map_err(FlintshotError::from)?;
-    Ok(Some(path))
+    save_to_disk(state, true)
 }
 
 /// Compose the final image honouring an active `Tool::Select`
@@ -918,9 +944,11 @@ pub(crate) fn save_region_to_disk(
 /// image (`compose_final`). Pure / non-mutating.
 ///
 /// The single selection-aware compose for every region-defining
-/// output (Copy / Pin / Upload / the Phase 5 overlay's Save), so
-/// "what the user sees outlined" is "what ships", in one place.
-/// The editor window's `Ctrl+S` / Save button deliberately does
+/// output (Copy / Pin / Upload / the Phase 5 overlay's Save, and
+/// the editor window's Save while the selection-first phase is
+/// live — see [`compose_for_save`]), so "what the user sees
+/// outlined" is "what ships", in one place. Outside the phase,
+/// the editor window's `Ctrl+S` / Save button deliberately does
 /// **not** use this — its Phase 1 contract saves the full image.
 pub(crate) fn compose_selection_aware(state: &EditorState) -> image::RgbaImage {
     // The 1.0-px threshold matches the render path's selection-rect
@@ -1590,6 +1618,127 @@ mod tests {
         assert!(
             !app.phase_active(),
             "the latch is one-way: undo must not resurrect the phase"
+        );
+    }
+
+    // --- Selection-first Esc + outputs (Task 003) ---
+
+    #[test]
+    fn esc_during_phase_cancels_without_side_effects() {
+        let mut app = phase_app(true);
+        // The exact event `logic` translates an Esc press into. With
+        // no selection yet the dispatcher must answer Cancel — the
+        // outcome `logic` publishes-if-unset as Cancelled and closes
+        // on, which the app crate reports as "no file written" before
+        // exiting 0 (the overlay's cancel contract).
+        let outcome = app.state.dispatch_input(&InputEvent::Key {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        });
+        assert!(matches!(outcome, DispatchOutcome::Cancel));
+        // No state side effects: nothing committed, no selection
+        // fabricated — and a stray Esc must not end the phase (only
+        // a crop does), so the landing chrome survives it.
+        assert!(app.state.anns.is_empty());
+        assert!(app.state.selection.is_none());
+        assert!(app.phase_active());
+    }
+
+    #[test]
+    fn esc_with_live_selection_keeps_standing_cancel() {
+        let mut app = phase_app(true);
+        drag_selection(&mut app.state, (5.0, 5.0), (30.0, 25.0));
+        // Spec: after a selection exists, Esc keeps today's editor
+        // behaviour — the standing close-as-Cancelled, not a
+        // selection-clearing Esc.
+        let outcome = app.state.dispatch_input(&InputEvent::Key {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        });
+        assert!(matches!(outcome, DispatchOutcome::Cancel));
+    }
+
+    #[test]
+    fn esc_after_copy_keeps_copied_outcome() {
+        // A copy pre-publishes CopiedToClipboard and keeps the window
+        // open; the later Esc close must honour it. This is the
+        // if-unset publish — the mechanism behind "keeps today's
+        // editor behaviour" after an output has fired.
+        let app = phase_app(true);
+        *app.outcome.borrow_mut() = Some(Ok(EditorOutcome::CopiedToClipboard));
+        app.publish_outcome_if_unset(Ok(EditorOutcome::Cancelled));
+        assert!(
+            matches!(
+                *app.outcome.borrow(),
+                Some(Ok(EditorOutcome::CopiedToClipboard))
+            ),
+            "the prior copy wins over the Esc cancel"
+        );
+    }
+
+    #[test]
+    fn save_during_phase_honours_live_selection() {
+        let mut app = phase_app(true);
+        app.state.selection = Some(Rect::from_xywh(4.0, 8.0, 20.0, 12.0));
+        let img = compose_for_save(app.phase_active(), &app.state);
+        assert_eq!(
+            img.dimensions(),
+            (20, 12),
+            "phase-live Save crops to the live selection"
+        );
+    }
+
+    #[test]
+    fn save_after_phase_ends_keeps_full_image_contract() {
+        let mut app = phase_app(true);
+        drag_selection(&mut app.state, (4.0, 8.0), (24.0, 20.0));
+        let _ = app.state.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        app.end_phase_on_crop();
+        assert!(!app.phase_active(), "fixture: the crop ended the phase");
+        // A fresh selection after the crop must not scope Save — the
+        // post-phase editor keeps the Phase 1 full-image contract.
+        app.state.selection = Some(Rect::from_xywh(0.0, 0.0, 10.0, 6.0));
+        let img = compose_for_save(app.phase_active(), &app.state);
+        assert_eq!(img.dimensions(), (20, 12), "post-crop image saves whole");
+    }
+
+    #[test]
+    fn save_during_phase_without_selection_falls_back_to_full() {
+        let app = phase_app(true);
+        let img = compose_for_save(app.phase_active(), &app.state);
+        assert_eq!(
+            img.dimensions(),
+            (64, 64),
+            "no selection → degenerate fallback saves the full shot"
+        );
+    }
+
+    #[test]
+    fn live_selection_save_matches_crop_then_save_pixels() {
+        // Spec exit criterion 3: Copy/Save with an active (uncropped)
+        // selection produce the selected region only — the same
+        // pixels as cropping first and then outputting. Pinned with
+        // an annotation fully inside the region, where render-then-
+        // crop == crop-then-render; straddling annotations
+        // legitimately differ (geometric clip vs pixel clip) and sit
+        // outside the parity claim.
+        let mut state = blank_state(40, 30);
+        state.tool = Tool::Rect;
+        drag_selection(&mut state, (6.0, 4.0), (18.0, 14.0));
+        assert_eq!(state.anns.len(), 1, "fixture: annotation committed");
+        state.selection = Some(Rect::from_xywh(2.0, 2.0, 20.0, 16.0));
+        let live = compose_for_save(true, &state);
+        let mut cropped = state.clone();
+        cropped.confirm_selection();
+        let after = compose_final(&cropped);
+        assert_eq!(live.dimensions(), after.dimensions());
+        assert_eq!(
+            live.into_raw(),
+            after.into_raw(),
+            "live-selection Save is pixel-identical to crop-then-Save"
         );
     }
 }
