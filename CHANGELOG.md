@@ -73,6 +73,28 @@ Categories used below:
 
 ### Changed
 
+- `flintshot region` now lands in a **selection-first** editor
+  session whenever the editor window is the shell (the default
+  `interaction-mode = "editor"` on every platform, `--editor`, and
+  the Wayland demotion of config-set `overlay`; see ADR-0035). The
+  window opens on the frozen capture with the Select tool pre-armed,
+  a spotlight dim mask over everything outside the live selection
+  (the overlay's own four-rect mask + `MASK_ALPHA` via shared
+  helpers — no second implementation), and a one-line hint ("drag to
+  select · Enter crop · Esc cancel"). The first drag draws the
+  region; `Enter` (or the Crop button) crops and the session drops
+  into the normal editor on the cropped image — the phase never
+  returns, not even via undo after the crop. `Esc` during the phase
+  cancels the capture (exit 0, no file, no clipboard write, no
+  worker). Copy / Save / Pin / Upload honour an active *uncropped*
+  selection while the phase is live (Save joins the selection-aware
+  outputs via `compose_for_save`, byte-identical to crop-then-Save
+  for fully-contained annotations); after the phase ends — and in
+  `fullscreen` / `open`, which stay plain — Save keeps its
+  full-image Phase 1 contract. `fullscreen`, `open`, and the true
+  overlay on X11 / macOS / Windows are otherwise unchanged, pinned
+  by dispatch tests.
+
 - `just install` / `just install-user` now build the release binary
   with the `tray` feature on by default, so the launcher entry's
   promise holds: activate it, the daemon starts *and the tray icon

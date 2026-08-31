@@ -42,3 +42,6 @@ Format: **Context · Decision · Consequences**.
 | ADR-0030 | [Ambient tokio runtime for window workers](ADR-0030-ambient-runtime-for-window-workers.md) |
 | ADR-0031 | [GLib context pumping for the Linux tray](ADR-0031-glib-context-pumping-for-tray.md)      |
 | ADR-0032 | [Poke-to-activate the SNI watcher](ADR-0032-poke-to-activate-sni-watcher.md)               |
+| ADR-0033 | [Cloexec-safe single-instance lock (std abstract socket on Linux)](ADR-0033-cloexec-safe-single-instance-lock.md) |
+| ADR-0034 | [Build the editor without eframe's accesskit feature](ADR-0034-editor-without-accesskit.md) |
+| ADR-0035 | [Selection-first editor phase for `region` captures](ADR-0035-selection-first-editor-fallback.md) |

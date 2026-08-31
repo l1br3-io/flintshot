@@ -1,6 +1,7 @@
 ---
-status: draft
+status: shipped
 started: 2026-08-31
+shipped: 2026-08-31
 ---
 
 # Spec — Region selection-first editor (spotlight in the editor window)
