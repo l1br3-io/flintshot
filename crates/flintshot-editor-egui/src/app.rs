@@ -26,7 +26,22 @@ use flintshot_core::{
 
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
+use crate::overlay::{mask_color, mask_rects, usable_selection};
 use crate::toolbar::{self, ToolbarAction};
+
+/// The selection-first phase's hint line (spec copy). Visible while
+/// the phase is live; every clause stays truthful for the whole
+/// phase (Esc cancels the editor session both before and after a
+/// selection exists).
+const SELECTION_HINT: &str = "drag to select · Enter crop · Esc cancel";
+
+/// Hint font size, logical px. Monospace + the overlay badge's size
+/// so the phase chrome shares the overlay's rhythm.
+const HINT_FONT_SIZE: f32 = 12.0;
+
+/// Gap between the canvas top and the hint pill, logical px —
+/// matches the overlay's `BADGE_GAP` rhythm.
+const HINT_GAP: f32 = 6.0;
 
 /// Outcome slot shared between the shell (which lives after
 /// `eframe::run_native` returns) and the [`EditorApp`] (which is
@@ -53,6 +68,22 @@ pub(crate) type OutcomeSlot = Rc<RefCell<Option<flintshot_core::Result<EditorOut
 /// (and therefore the app) open, so `EditorApp::clipboard` holds the
 /// selection until the user closes the window themselves.
 pub(crate) type ClipboardSlot = Rc<RefCell<Option<arboard::Clipboard>>>;
+
+/// The selection-first phase lifecycle (region-selection-first Task
+/// 001). An enum rather than two bools so the states can't combine
+/// illegally (there is no "ended without being requested").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionPhase {
+    /// Not requested — the plain editor (`fullscreen` / `open` /
+    /// `pin` paths).
+    Off,
+    /// Requested and live: Select pre-armed, dim mask + hint line
+    /// painting. Runs from construction until the first crop.
+    Live,
+    /// A crop landed; the phase is over permanently for this
+    /// session (undo does not restart it).
+    Ended,
+}
 
 /// The eframe app: owns editor state + canvas + cached background
 /// handle, runs `render()` each frame, and translates `Esc` (and any
@@ -121,12 +152,34 @@ pub(crate) struct EditorApp {
     /// magnifier-modifier`). Defaults to `Space`; unknown config
     /// values fall back to `Space` with a warning.
     magnifier_key: egui::Key,
+    /// The selection-first phase state (the `region` capture landing
+    /// experience: Select pre-armed, dim mask outside the live
+    /// selection, hint line). Requested by the app crate via
+    /// [`EguiShell::with_selection_first`](crate::EguiShell::with_selection_first);
+    /// every other editor entry point leaves it off. See
+    /// [`SelectionPhase`] for the lifecycle.
+    phase: SelectionPhase,
 }
 
 impl EditorApp {
     /// Construct the app. The canvas captures a clone of the
     /// [`Context`] for texture loading outside the per-frame `ui` call.
-    pub(crate) fn new(state: EditorState, ctx: &Context, outcome: OutcomeSlot) -> Self {
+    ///
+    /// `selection_first` seeds the region-capture landing phase:
+    /// `Tool::Select` is pre-armed (mirroring `OverlayApp::new`, so
+    /// the first drag draws a region instead of a rect annotation)
+    /// and the dim mask + hint line render until the first crop.
+    /// Core stays untouched — the phase is shell-owned state, the
+    /// state only seeded with a value the core API already exposes.
+    pub(crate) fn new(
+        mut state: EditorState,
+        ctx: &Context,
+        outcome: OutcomeSlot,
+        selection_first: bool,
+    ) -> Self {
+        if selection_first {
+            state.tool = Tool::Select;
+        }
         // One-time theme application: the graphite + ember styling
         // (see `crate::theme`) persists for the window's lifetime.
         crate::theme::apply(ctx);
@@ -151,7 +204,68 @@ impl EditorApp {
             magnifier: Magnifier::new(),
             magnifier_always_on,
             magnifier_key,
+            phase: if selection_first {
+                SelectionPhase::Live
+            } else {
+                SelectionPhase::Off
+            },
         }
+    }
+
+    /// Whether the selection-first phase is live: requested at
+    /// construction and not yet ended by a crop.
+    fn phase_active(&self) -> bool {
+        self.phase == SelectionPhase::Live
+    }
+
+    /// Latch the selection-first phase over once a crop lands. Crop
+    /// detection rides the undo stack: [`EditorState::crop`] is the
+    /// only mutation that pushes a `Snapshot` carrying an image, so a
+    /// full snapshot on the stack ⇔ a crop happened this session —
+    /// image dimensions alone would miss a same-size crop. Called
+    /// from both crop sites (`logic`'s Enter dispatch and `ui`'s
+    /// toolbar action) so the mask never paints on the crop's own
+    /// frame. One-way by design: undo pops the snapshot, the latch
+    /// keeps the phase ended.
+    fn end_phase_on_crop(&mut self) {
+        if self.phase == SelectionPhase::Live && self.state.undo.iter().any(|s| s.image.is_some()) {
+            self.phase = SelectionPhase::Ended;
+        }
+    }
+
+    /// Paint the selection-first phase chrome over the shared render
+    /// output: the dim mask outside the live (usable, normalized)
+    /// selection — the overlay's mask math verbatim — and the hint
+    /// line in a badge-style pill at the canvas's top centre. No-op
+    /// outside the phase; see [`Self::phase_active`].
+    fn paint_selection_phase(&self, ctx: &Context, painter: &egui::Painter) {
+        let Some(panel) = self.canvas_rect else {
+            return;
+        };
+        let ppp = ctx.pixels_per_point();
+        let to_logical = |p: Point| egui::pos2(panel.min.x + p.x / ppp, panel.min.y + p.y / ppp);
+        let sel_logical = usable_selection(self.state.selection)
+            .map(|s| egui::Rect::from_two_pos(to_logical(s.min), to_logical(s.max)));
+        for band in mask_rects(panel, sel_logical) {
+            painter.rect_filled(band, egui::CornerRadius::ZERO, mask_color());
+        }
+        let galley = painter.layout_no_wrap(
+            SELECTION_HINT.to_owned(),
+            egui::FontId::monospace(HINT_FONT_SIZE),
+            egui::Color32::WHITE,
+        );
+        let anchor = egui::pos2(panel.center().x, panel.min.y + HINT_GAP);
+        let mut rect = egui::Align2::CENTER_TOP.anchor_size(anchor, galley.size());
+        rect.min.x = rect
+            .min
+            .x
+            .clamp(panel.min.x, (panel.max.x - rect.width()).max(panel.min.x));
+        painter.rect_filled(
+            rect.expand(4.0),
+            egui::CornerRadius::same(3),
+            egui::Color32::from_black_alpha(200),
+        );
+        painter.galley(rect.min, galley, egui::Color32::WHITE);
     }
 
     /// Publish an outcome to the shared slot. First writer wins in
@@ -396,6 +510,12 @@ impl App for EditorApp {
             }
         }
 
+        // Selection-first phase: the dispatcher's Enter-crop is one
+        // of the two phase-ending sites (the other is `ui`'s toolbar
+        // Crop button). Checked immediately after the dispatch so the
+        // mask never paints on the crop's own frame.
+        self.end_phase_on_crop();
+
         // Single-key tool selection: unmodified S R E A L M P T B N
         // switch tools (advertised in the rail tooltips). Guarded on
         // the *event's own* modifiers so Ctrl+S / Ctrl+Shift+Z chords
@@ -489,6 +609,12 @@ impl App for EditorApp {
         // disjoint from `self.copied`.
         let action = toolbar::show(ui, &mut self.state, self.copied);
 
+        // Selection-first phase: the toolbar's "Crop · Enter" button
+        // crops through `confirm_selection`, bypassing `logic` — so
+        // this is the second latch site, checked before this frame's
+        // render paints the mask.
+        self.end_phase_on_crop();
+
         // Invalidate the bg texture cache and resize the window when
         // the image dimensions change (crop replaces state.image with
         // a different-sized sub-image).
@@ -532,6 +658,14 @@ impl App for EditorApp {
             // Return early — Save / Copy handlers below would touch
             // state the render path has already abandoned.
             return;
+        }
+
+        // Selection-first phase chrome: the dim mask outside the
+        // live selection plus the hint line, painted over the shared
+        // render output and under the magnifier — the overlay's
+        // chrome ordering. No-op once the phase has ended.
+        if self.phase_active() {
+            self.paint_selection_phase(ui.ctx(), ui.painter());
         }
 
         // Magnifier inset overlay (Task 005). Painted after render
@@ -1321,6 +1455,141 @@ mod tests {
             img.dimensions(),
             (10, 8),
             "sub-1px selection is degenerate → full image, matching copy/pin/upload"
+        );
+    }
+
+    // --- Selection-first phase (Task 001) ---
+
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Construct an `EditorApp` over a blank 64×64 state with the
+    /// given selection-first request. Headless: `EditorApp::new` needs
+    /// no display (the bg texture uploads lazily on the first `ui`).
+    fn phase_app(selection_first: bool) -> EditorApp {
+        EditorApp::new(
+            blank_state(64, 64),
+            &egui::Context::default(),
+            Rc::new(RefCell::new(None)),
+            selection_first,
+        )
+    }
+
+    /// Drag a fresh selection via the dispatcher's exact event
+    /// sequence, then release.
+    fn drag_selection(state: &mut EditorState, min: (f32, f32), max: (f32, f32)) {
+        let _ = state.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(min.0, min.1),
+        });
+        let _ = state.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(max.0, max.1),
+        });
+        let _ = state.dispatch_input(&InputEvent::PointerUp);
+    }
+
+    #[test]
+    fn selection_first_opens_select_armed_and_phase_active() {
+        let app = phase_app(true);
+        assert_eq!(
+            app.state.tool,
+            Tool::Select,
+            "the first drag must draw a selection, not a rect annotation"
+        );
+        assert!(app.phase_active(), "no crop yet → phase is live");
+    }
+
+    #[test]
+    fn plain_editor_keeps_default_tool_and_no_phase() {
+        let app = phase_app(false);
+        assert_eq!(
+            app.state.tool,
+            Tool::Rect,
+            "the editor default is untouched"
+        );
+        assert!(!app.phase_active(), "no request → no phase");
+    }
+
+    #[test]
+    fn enter_crop_ends_phase() {
+        let mut app = phase_app(true);
+        drag_selection(&mut app.state, (10.0, 10.0), (40.0, 30.0));
+        let _ = app.state.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        app.end_phase_on_crop();
+        assert!(
+            !app.phase_active(),
+            "the first Enter-crop must end the phase"
+        );
+    }
+
+    #[test]
+    fn toolbar_crop_button_path_ends_phase() {
+        let mut app = phase_app(true);
+        app.state.selection = Some(Rect::from_xywh(8.0, 8.0, 32.0, 16.0));
+        app.state.confirm_selection(); // the "Crop · Enter" button's call
+        app.end_phase_on_crop();
+        assert!(
+            !app.phase_active(),
+            "the toolbar crop must end the phase too"
+        );
+    }
+
+    #[test]
+    fn enter_without_selection_keeps_phase() {
+        let mut app = phase_app(true);
+        let _ = app.state.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        app.end_phase_on_crop();
+        assert!(
+            app.phase_active(),
+            "Enter with no selection is a no-op, not a crop"
+        );
+    }
+
+    #[test]
+    fn annotation_commit_keeps_phase() {
+        let mut app = phase_app(true);
+        app.state.tool = Tool::Rect; // user switches tools mid-phase
+        drag_selection(&mut app.state, (5.0, 5.0), (20.0, 20.0));
+        assert_eq!(app.state.anns.len(), 1, "fixture: one annotation committed");
+        app.end_phase_on_crop();
+        assert!(
+            app.phase_active(),
+            "anns-only snapshots must not read as crops"
+        );
+    }
+
+    #[test]
+    fn phase_end_survives_undo() {
+        let mut app = phase_app(true);
+        drag_selection(&mut app.state, (10.0, 10.0), (40.0, 30.0));
+        let _ = app.state.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        app.end_phase_on_crop();
+        // Undo pops the full snapshot (restoring the pre-crop image);
+        // the latch must keep the phase ended.
+        let _ = app.state.dispatch_input(&InputEvent::Key {
+            key: Key::Char('z'),
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        });
+        assert_eq!(
+            app.state.image.dimensions(),
+            (64, 64),
+            "fixture: undo restored the full capture"
+        );
+        app.end_phase_on_crop();
+        assert!(
+            !app.phase_active(),
+            "the latch is one-way: undo must not resurrect the phase"
         );
     }
 }

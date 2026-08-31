@@ -35,13 +35,19 @@ const PIN_WINDOW_TITLE: &str = "flintshot — pin";
 /// [`with_pin_config`](Self::with_pin_config) builder — the
 /// [`EditorShell::run_pin`] trait signature stays `(image, rect)` (a
 /// core boundary, GUI-toolkit-free), and the config rides along on the
-/// shell as a side channel.
+/// shell as a side channel. The selection-first request rides the
+/// same way via [`with_selection_first`](Self::with_selection_first).
 #[derive(Default)]
 pub struct EguiShell {
     /// Resolved pin config applied to the next `run_pin` call.
     /// Defaults to `[pin]` config defaults; the CLI applies its
     /// `--opacity` / `--no-clipboard` overrides before calling.
     pin: PinConfig,
+    /// Whether the next `run_editor` call opens selection-first (the
+    /// `region` capture landing experience: Select pre-armed, dim
+    /// mask, hint line — see `EditorApp::selection_first`). Set by
+    /// the app crate's region path only.
+    selection_first: bool,
 }
 
 impl EguiShell {
@@ -50,6 +56,7 @@ impl EguiShell {
     pub fn new() -> Self {
         Self {
             pin: PinConfig::default(),
+            selection_first: false,
         }
     }
 
@@ -63,11 +70,28 @@ impl EguiShell {
         self.pin = config;
         self
     }
+
+    /// Open the next [`EditorShell::run_editor`] session
+    /// **selection-first**: `Tool::Select` pre-armed, the overlay's
+    /// dim mask outside the live selection, and the hint line — the
+    /// `region` capture landing experience. The phase ends
+    /// permanently on the session's first crop.
+    ///
+    /// A concrete builder method mirroring
+    /// [`with_pin_config`](Self::with_pin_config): no
+    /// [`EditorShell`] trait change — the request rides the shell
+    /// into the editor state construction (region-selection-first
+    /// plan decision 2).
+    #[must_use]
+    pub fn with_selection_first(mut self) -> Self {
+        self.selection_first = true;
+        self
+    }
 }
 
 impl EditorShell for EguiShell {
     fn run_editor(&self, state: EditorState) -> flintshot_core::Result<EditorOutcome> {
-        run_editor_blocking(state)
+        run_editor_blocking(state, self.selection_first)
     }
 
     fn run_pin(&self, image: image::RgbaImage, rect: Rect) -> flintshot_core::Result<()> {
@@ -101,7 +125,14 @@ impl EguiShell {
 /// calling thread until the window closes, so the [`OutcomeSlot`]
 /// (`Rc<RefCell<…>>`) is shared only between this function and the
 /// [`EditorApp`] running on the same thread.
-fn run_editor_blocking(state: EditorState) -> flintshot_core::Result<EditorOutcome> {
+///
+/// `selection_first` seeds the region-capture landing phase in
+/// [`EditorApp::new`] (Select pre-arm + mask + hint; see the app
+/// module for the phase lifecycle).
+fn run_editor_blocking(
+    state: EditorState,
+    selection_first: bool,
+) -> flintshot_core::Result<EditorOutcome> {
     let (img_w, img_h) = state.image.dimensions();
     // egui's `ViewportBuilder::with_inner_size` takes logical px.
     // We pass the screenshot's physical dimensions directly; on a
@@ -131,7 +162,7 @@ fn run_editor_blocking(state: EditorState) -> flintshot_core::Result<EditorOutco
     let outcome_for_app = Rc::clone(&outcome);
 
     let app_creator: AppCreator<'_> = Box::new(move |cc| {
-        let app = EditorApp::new(state, &cc.egui_ctx, outcome_for_app);
+        let app = EditorApp::new(state, &cc.egui_ctx, outcome_for_app, selection_first);
         Ok(Box::new(app))
     });
 
@@ -316,5 +347,30 @@ mod tests {
                 "{outcome:?} must not linger"
             );
         }
+    }
+
+    // --- Selection-first builder (region-selection-first Task 001) ---
+
+    #[test]
+    fn default_shell_is_not_selection_first() {
+        assert!(!EguiShell::new().selection_first);
+        assert!(!EguiShell::default().selection_first);
+    }
+
+    #[test]
+    fn with_selection_first_flags_the_next_run_editor() {
+        let shell = EguiShell::new().with_selection_first();
+        assert!(shell.selection_first);
+    }
+
+    #[test]
+    fn with_selection_first_composes_with_pin_config() {
+        // Both builder flags ride the shell independently — the
+        // region path sets selection-first while the CLI merges pin
+        // config (the `with_pin_config` precedent).
+        let shell = EguiShell::new()
+            .with_pin_config(PinConfig::default())
+            .with_selection_first();
+        assert!(shell.selection_first);
     }
 }

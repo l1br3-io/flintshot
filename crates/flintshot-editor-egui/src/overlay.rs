@@ -223,6 +223,44 @@ pub(crate) fn to_canvas_physical(pos: egui::Pos2, panel: egui::Rect, ppp: f32) -
 /// recognizable for a fresh drag.
 const MASK_ALPHA: u8 = 128;
 
+/// The dim-mask fill: black at [`MASK_ALPHA`]. Exposed as a
+/// constructor (not a second constant) so the overlay and the editor
+/// window's selection-first phase cannot drift apart in shade.
+#[must_use]
+pub(crate) fn mask_color() -> egui::Color32 {
+    egui::Color32::from_black_alpha(MASK_ALPHA)
+}
+
+/// The dim-mask coverage of `panel` minus `hole`: the four bands
+/// framing the selection (`[top, bottom, left, right]`), or the whole
+/// panel when `hole` is `None` (everything is "unselected"). Bands
+/// collapse to zero width/height when the hole hugs a panel edge —
+/// the painter skips degenerate rects, so no special-casing is
+/// needed at the call sites. A `hole` larger than the panel is
+/// clamped by `Rect::from_two_pos`'s ordering; callers pass a
+/// selection inside the canvas anyway.
+///
+/// Shared by the overlay and the editor window's selection-first
+/// phase (region-selection-first plan decision 3): one mask
+/// implementation, one [`MASK_ALPHA`], two shells.
+#[must_use]
+pub(crate) fn mask_rects(panel: egui::Rect, hole: Option<egui::Rect>) -> Vec<egui::Rect> {
+    let Some(hole) = hole else {
+        return vec![panel];
+    };
+    let top = egui::Rect::from_two_pos(panel.min, egui::pos2(panel.max.x, hole.min.y));
+    let bottom = egui::Rect::from_two_pos(egui::pos2(panel.min.x, hole.max.y), panel.max);
+    let left = egui::Rect::from_two_pos(
+        egui::pos2(panel.min.x, hole.min.y),
+        egui::pos2(hole.min.x, hole.max.y),
+    );
+    let right = egui::Rect::from_two_pos(
+        egui::pos2(hole.max.x, hole.min.y),
+        egui::pos2(panel.max.x, hole.max.y),
+    );
+    vec![top, bottom, left, right]
+}
+
 /// Handle square edge, logical px (scaled by `ppp` into physical).
 /// 10 px matches Flameshot's grab squares: big enough to hit, small
 /// enough to stay out of the annotated content.
@@ -1303,24 +1341,13 @@ impl OverlayApp {
             |p: Point| egui::pos2(panel_rect.min.x + p.x / ppp, panel_rect.min.y + p.y / ppp);
 
         // Dim mask: four rects framing the region (the full panel
-        // when nothing is selected — everything is "unselected").
-        let mask = egui::Color32::from_black_alpha(MASK_ALPHA);
-        if let Some(s) = sel_phys {
-            let min = to_logical(s.min);
-            let max = to_logical(s.max);
-            let panel_max = panel_rect.max;
-            let panel_min = panel_rect.min;
-            let top = egui::Rect::from_two_pos(panel_min, egui::pos2(panel_max.x, min.y));
-            let bottom = egui::Rect::from_two_pos(egui::pos2(panel_min.x, max.y), panel_max);
-            let left =
-                egui::Rect::from_two_pos(egui::pos2(panel_min.x, min.y), egui::pos2(min.x, max.y));
-            let right =
-                egui::Rect::from_two_pos(egui::pos2(max.x, min.y), egui::pos2(panel_max.x, max.y));
-            for band in [top, bottom, left, right] {
-                painter.rect_filled(band, egui::CornerRadius::ZERO, mask);
-            }
-        } else {
-            painter.rect_filled(panel_rect, egui::CornerRadius::ZERO, mask);
+        // when nothing is selected) — the shared mask math
+        // (`mask_rects` + `mask_color`), reused verbatim by the
+        // editor window's selection-first phase.
+        let sel_logical =
+            sel_phys.map(|s| egui::Rect::from_two_pos(to_logical(s.min), to_logical(s.max)));
+        for band in mask_rects(panel_rect, sel_logical) {
+            painter.rect_filled(band, egui::CornerRadius::ZERO, mask_color());
         }
 
         // Grab handles: visible only while they're actually
@@ -1375,8 +1402,7 @@ impl OverlayApp {
         // Floating toolbar (Task 004), drawn before the magnifier so
         // this frame's rect already steers the loupe away from it.
         // Foreground order keeps it above the chrome regardless.
-        let sel_logical =
-            sel_phys.map(|s| egui::Rect::from_two_pos(to_logical(s.min), to_logical(s.max)));
+        // `sel_logical` was computed at the mask site above.
         self.show_toolbar(&ctx, panel_rect, sel_logical);
 
         // Magnifier on hover (overlay UX: no modifier hold, per the
@@ -2194,6 +2220,78 @@ mod tests {
                 key(&mut blank_state(8, 8), ch, false),
                 flintshot_core::DispatchOutcome::Continue,
                 "unmodified {ch} must not trigger an output"
+            );
+        }
+    }
+
+    // --- Shared dim-mask math (region-selection-first Task 001) ---
+
+    #[test]
+    fn mask_covers_whole_panel_without_selection() {
+        assert_eq!(
+            mask_rects(panel(), None),
+            vec![panel()],
+            "no selection → everything is unselected"
+        );
+    }
+
+    #[test]
+    fn mask_bands_frame_the_selection() {
+        let hole = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(200.0, 100.0));
+        let bands = mask_rects(panel(), Some(hole));
+        assert_eq!(bands.len(), 4, "top, bottom, left, right");
+        assert_eq!(
+            bands[0],
+            egui::Rect::from_two_pos(egui::pos2(0.0, 0.0), egui::pos2(1920.0, 100.0)),
+            "top band spans the panel above the hole"
+        );
+        assert_eq!(
+            bands[1],
+            egui::Rect::from_two_pos(egui::pos2(0.0, 200.0), egui::pos2(1920.0, 1080.0)),
+            "bottom band spans the panel below the hole"
+        );
+        assert_eq!(
+            bands[2],
+            egui::Rect::from_two_pos(egui::pos2(0.0, 100.0), egui::pos2(100.0, 200.0)),
+            "left band fills the hole's rows left of it"
+        );
+        assert_eq!(
+            bands[3],
+            egui::Rect::from_two_pos(egui::pos2(300.0, 100.0), egui::pos2(1920.0, 200.0)),
+            "right band fills the hole's rows right of it"
+        );
+    }
+
+    #[test]
+    fn mask_bands_plus_hole_tile_the_panel() {
+        let hole = egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(200.0, 100.0));
+        let bands = mask_rects(panel(), Some(hole));
+        let mut covered = 0.0;
+        for band in bands.iter().copied().chain([hole]) {
+            assert!(
+                panel().contains_rect(band),
+                "every piece must stay inside the panel"
+            );
+            covered += band.width() * band.height();
+        }
+        let total = panel().width() * panel().height();
+        assert!(
+            (covered - total).abs() < 1e-3,
+            "bands + hole must tile the panel exactly (no gap, no overlap): {covered} vs {total}"
+        );
+    }
+
+    #[test]
+    fn mask_bands_at_panel_edge_degenerate_not_inverted() {
+        // A hole hugging the panel's top-left: the top and left bands
+        // collapse to zero width/height (the painter skips degenerate
+        // rects) instead of inverting past the panel.
+        let hole = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 200.0));
+        for band in mask_rects(panel(), Some(hole)) {
+            assert!(band.is_finite(), "no NaN bands");
+            assert!(
+                band.width() <= panel().width() && band.height() <= panel().height(),
+                "degenerate bands must not grow past the panel"
             );
         }
     }
