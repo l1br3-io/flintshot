@@ -18,6 +18,59 @@ Categories used below:
 
 ## [Unreleased]
 
+### Fixed
+
+- Tray menu clicks appeared to do nothing (any item, any click). One
+  click on *Quit* was enough to kill them all: the event loop broke
+  for the shutdown but the daemon never exited — `run` still held the
+  heartbeat channel's receiver, so the tokio side's `send`s kept
+  succeeding and the `join()` after the loop waited forever. The
+  half-dead daemon kept its tray icon, stopped pumping the GLib
+  context, and silently dropped every later menu click (L5,
+  2026-08-31; reproduced by driving the tray's DBusMenu `Event`
+  exactly as the panel does). `run_event_loop` now owns the receiver,
+  so returning from it drops it, the tokio side's next heartbeat
+  fails, and the daemon exits cleanly ~300 ms after the click.
+  A regression test pins the receiver-drop handshake.
+
+- Tray *Open config* silently failed whenever `$EDITOR`/`$VISUAL`
+  carried arguments (`code --wait`): the whole value was passed to
+  `Command::new` as one binary name, so the spawn died with "No such
+  file or directory" before any window opened. The value is now
+  whitespace-split into program + leading args; a blank value prints
+  the config path like an unset one.
+
+- The release binary aborted with a core dump on every capture
+  (`flintshot region` → *"there is no reactor running"* at
+  `zbus-5.18.0/…/executor.rs`): accesskit's a11y event-pump thread
+  builds a zbus connection with no ambient tokio reactor, and the
+  release profile's `panic = "abort"` turned that thread panic into
+  process death — no editor window ever appeared (debug builds
+  survived with a scary panic printed, masking the release
+  breakage). accesskit's `tokio` executor is unreachable through
+  eframe's feature set (egui-winit hard-defaults its `async-io`
+  executor, mutually exclusive with `tokio`), so the editor crate
+  now builds eframe without the `accesskit` feature; editor /
+  overlay / pin windows lose screen-reader support until egui
+  exposes the executor choice (ADR-0034, TEST_MATRIX finding 2
+  amended).
+
+- Daemon could never restart while an editor from a previous daemon
+  was still open: `single-instance` 0.3's Linux lock binds its
+  abstract unix socket **without `FD_CLOEXEC`**, so the daemon's
+  spawned workers (`region --standalone` editors) inherited the fd
+  and ghost-held the lock name after the daemon exited — every
+  subsequent `flintshot daemon` (including `--replace`) failed with
+  "another flintshot daemon is already running" while no daemon
+  existed. Live-reproduced on COSMIC (L5, 2026-08-30): after a
+  daemon quit with an editor open, the only recovery was closing
+  every editor. Linux now uses a std-only abstract-socket lock
+  (`UnixListener::bind_addr`, close-on-exec by construction) in
+  `single.rs`; macOS/Windows keep the crate (ADR-0033). With the fix,
+  `daemon --replace` acquires the lock ~50 ms after the old daemon
+  quits, and a fresh `flintshot daemon` starts cleanly beside a
+  live orphaned editor.
+
 ### Changed
 
 - `just install` / `just install-user` now build the release binary

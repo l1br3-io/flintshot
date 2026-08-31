@@ -1290,6 +1290,23 @@ below.
    `tokio::runtime::Handle::try_current()` (no handle on a plain
    thread, visible inside `with_ambient_runtime`, gone after).
    **Manual L5 re-verification pending** — as above.
+
+   *Amended (2026-08-30, L5):* the ambient fix was incomplete —
+   it covers the window-creating **main thread**, but
+   `accesskit_unix` also spawns a plain **a11y event-pump
+   thread** that builds its own zbus session connection with no
+   reactor. Unwound (debug) that killed only the a11y thread
+   (window still opened — masking the finding); with the release
+   profile's `panic = "abort"` the whole worker SIGABRTs before
+   the window shows (`flintshot region` on the installed binary,
+   core dump). accesskit's `tokio` executor would self-host a
+   runtime on that thread, but it is mutually exclusive with its
+   `async-io` default, and eframe → egui-winit → accesskit_winit
+   hard-defaults `async-io` with no switch — so the editor now
+   builds eframe **without** the `accesskit` feature
+   (`flintshot-editor-egui`, ADR-0034). L5-verified: standalone +
+   daemon-delegated `region` both open the editor cleanly in the
+   release binary, no panic output.
 3. **Tray SNI item never registers with COSMIC's watcher** (fails
    row 4, exit criterion 1). The daemon (tray build) publishes
    `/StatusNotifierItem` + `/org/ayatana/NotificationItem` on its

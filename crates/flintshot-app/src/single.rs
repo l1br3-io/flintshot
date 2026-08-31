@@ -2,25 +2,56 @@
 //!
 //! Only the daemon acquires this lock (see ADR-0020 — workers such as
 //! `flintshot region` never take it, so multiple editors can run at
-//! once). On Linux `single-instance` binds an abstract Unix-domain
-//! socket; on macOS it `flock`s a file; on Windows it creates a named
-//! mutex. A second `flintshot daemon` against the same id fails the
-//! `is_single()` check and exits.
+//! once). A second `flintshot daemon` against the same id fails the
+//! acquire and exits.
 //!
-//! `--replace` (tell the running daemon to quit via IPC and take over)
-//! is wired in Task 006; this module only owns the lock primitive.
+//! Linux implements the lock directly with a std abstract-socket bind
+//! instead of the `single-instance` crate: the crate creates its
+//! socket **without `FD_CLOEXEC`**, and the daemon spawns worker
+//! children (`region --standalone` editors) that inherit the fd. The
+//! abstract name then outlives the daemon — held ghost-alive by any
+//! open editor — and every subsequent `flintshot daemon` fails with
+//! "already running" while no daemon exists (live L5 finding,
+//! 2026-08-30; ADR-0033). std marks every fd it creates
+//! close-on-exec, so the lock dies with the daemon and only the
+//! daemon. macOS/Windows keep the crate (flock file / named mutex),
+//! where child inheritance is not a hazard for the lock primitive.
+//!
+//! `--replace` (tell the running daemon to quit via IPC and take
+//! over) is wired in Task 006; this module only owns the lock
+//! primitive.
 
 use color_eyre::eyre;
-use single_instance::SingleInstance;
 use std::time::Duration;
 
-/// Lock name for the daemon role. Hashed by `single-instance` into the
-/// OS's lock namespace (abstract-socket name on Linux).
+/// Lock name for the daemon role. An abstract-socket name on Linux
+/// (hashed namespace in the crate on macOS/Windows).
 const DAEMON_LOCK_NAME: &str = "flintshot-daemon";
+
+/// A held single-instance lock. Dropping it releases the OS resource.
+pub struct InstanceLock {
+    // `_`-prefixed: held for Drop (the lock release), never read.
+    #[cfg(target_os = "linux")]
+    _inner: LinuxLock,
+    #[cfg(not(target_os = "linux"))]
+    _inner: single_instance::SingleInstance,
+}
+
+/// The Linux lock: a bound abstract unix-domain socket owned by a std
+/// [`std::os::unix::net::UnixListener`]. Binding fails with
+/// `AddrInUse` while any other live socket holds the name — the same
+/// semantics as the crate, minus the fd-inheritance hazard.
+#[cfg(target_os = "linux")]
+struct LinuxLock {
+    /// Held for the lock's lifetime; never `accept`ed. std creates the
+    /// socket with `SOCK_CLOEXEC`, so spawned workers cannot inherit
+    /// it and ghost-hold the name after the daemon exits.
+    _listener: std::os::unix::net::UnixListener,
+}
 
 /// Acquire the daemon single-instance lock.
 ///
-/// Returns the held [`SingleInstance`] on success — **the caller must
+/// Returns the held [`InstanceLock`] on success — **the caller must
 /// keep it alive for the daemon's lifetime** (dropping it releases the
 /// lock). Errors if another daemon already holds it.
 ///
@@ -28,24 +59,24 @@ const DAEMON_LOCK_NAME: &str = "flintshot-daemon";
 /// - [`eyre::Report`] if the OS lock primitive could not be created.
 /// - [`eyre::Report`] (`"already running"`) if another daemon holds the
 ///   lock.
-pub fn acquire_daemon_lock() -> eyre::Result<SingleInstance> {
+pub fn acquire_daemon_lock() -> eyre::Result<InstanceLock> {
     acquire_named(DAEMON_LOCK_NAME)
 }
 
 /// Acquire the daemon lock, retrying until `timeout` elapses. Used by
 /// `--replace`: after the old daemon releases its IPC socket there's a
-/// short window before its single-instance (abstract-socket) lock is
-/// freed, so a single immediate acquire can race. Retry absorbs it.
+/// short window before its single-instance lock is freed, so a single
+/// immediate acquire can race. Retry absorbs it.
 ///
 /// # Errors
 /// Propagates the last acquire error if `timeout` expires.
-pub fn acquire_daemon_lock_with_retry(timeout: Duration) -> eyre::Result<SingleInstance> {
+pub fn acquire_daemon_lock_with_retry(timeout: Duration) -> eyre::Result<InstanceLock> {
     acquire_named_with_retry(DAEMON_LOCK_NAME, timeout)
 }
 
 /// Testable seam: [`acquire_daemon_lock_with_retry`] with an explicit
 /// lock name (tests pass a unique name per case).
-fn acquire_named_with_retry(name: &str, timeout: Duration) -> eyre::Result<SingleInstance> {
+fn acquire_named_with_retry(name: &str, timeout: Duration) -> eyre::Result<InstanceLock> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match acquire_named(name) {
@@ -63,15 +94,36 @@ fn acquire_named_with_retry(name: &str, timeout: Duration) -> eyre::Result<Singl
 /// Testable seam: same as [`acquire_daemon_lock`] but with an explicit
 /// lock name. Tests pass a unique name per case to avoid cross-test
 /// interference under parallel `cargo test`.
-fn acquire_named(name: &str) -> eyre::Result<SingleInstance> {
-    let instance = SingleInstance::new(name)
-        .map_err(|e| eyre::eyre!("creating single-instance lock {name:?}: {e}"))?;
-    if instance.is_single() {
-        Ok(instance)
-    } else {
-        Err(eyre::eyre!(
-            "another flintshot daemon is already running (single-instance lock {name:?} held)"
-        ))
+fn acquire_named(name: &str) -> eyre::Result<InstanceLock> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::linux::net::SocketAddrExt;
+        use std::os::unix::net::{SocketAddr, UnixListener};
+        let addr = SocketAddr::from_abstract_name(name.as_bytes())
+            .map_err(|e| eyre::eyre!("building abstract lock name {name:?}: {e}"))?;
+        match UnixListener::bind_addr(&addr) {
+            Ok(listener) => Ok(InstanceLock {
+                _inner: LinuxLock {
+                    _listener: listener,
+                },
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(eyre::eyre!(
+                "another flintshot daemon is already running (single-instance lock {name:?} held)"
+            )),
+            Err(e) => Err(eyre::eyre!("binding single-instance lock {name:?}: {e}")),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let instance = single_instance::SingleInstance::new(name)
+            .map_err(|e| eyre::eyre!("creating single-instance lock {name:?}: {e}"))?;
+        if instance.is_single() {
+            Ok(InstanceLock { _inner: instance })
+        } else {
+            Err(eyre::eyre!(
+                "another flintshot daemon is already running (single-instance lock {name:?} held)"
+            ))
+        }
     }
 }
 
@@ -92,11 +144,7 @@ mod tests {
     #[test]
     fn first_acquire_is_single() {
         let name = unique_name("first");
-        let lock = acquire_named(&name).expect("first acquire should succeed");
-        assert!(
-            lock.is_single(),
-            "freshly acquired lock must report is_single"
-        );
+        let _lock = acquire_named(&name).expect("first acquire should succeed");
     }
 
     #[test]
@@ -121,18 +169,71 @@ mod tests {
             let _lock = acquire_named(&name).expect("first acquire");
         }
         // After the first lock dropped, a new acquire must succeed.
-        let reagained = acquire_named(&name).expect("re-acquire after drop");
-        assert!(reagained.is_single());
+        let _reagained = acquire_named(&name).expect("re-acquire after drop");
     }
 
     #[test]
     fn distinct_names_coexist() {
-        let a = acquire_named(&unique_name("coexist-a")).expect("a");
-        let b = acquire_named(&unique_name("coexist-b")).expect("b");
-        assert!(
-            a.is_single() && b.is_single(),
-            "distinct names don't conflict"
-        );
+        let _a = acquire_named(&unique_name("coexist-a")).expect("a");
+        let _b = acquire_named(&unique_name("coexist-b")).expect("b");
+    }
+
+    /// The regression this module exists for (ADR-0033): a child
+    /// spawned while the lock is held must NOT keep the lock alive
+    /// after the holder drops it. The `single-instance` crate's
+    /// non-CLOEXEC socket made this fail — a leftover editor
+    /// ghost-held the daemon lock and no daemon could restart.
+    ///
+    /// The reacquire retries briefly: a concurrent `Command::spawn`
+    /// fork (anywhere in the test process) duplicates the fd table
+    /// before exec closes CLOEXEC fds, transiently holding the name
+    /// for microseconds. The bug this guards against holds it for
+    /// the child's whole lifetime (`sleep 2`), so a bounded 1 s
+    /// retry separates the two cleanly.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lock_not_inherited_by_spawned_children() {
+        let name = unique_name("inherit");
+        let mut child = {
+            let _lock = acquire_named(&name).expect("holder acquires");
+            std::process::Command::new("sleep")
+                .arg("2")
+                .spawn()
+                .expect("spawning sleep child")
+        };
+        // Lock dropped above (end of block) while the child still runs.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let reacquired = loop {
+            match acquire_named(&name) {
+                Ok(lock) => break Some(lock),
+                Err(e) if std::time::Instant::now() >= deadline => {
+                    let holders = holders_of_abstract_name(&name);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!(
+                        "a live spawned child must not ghost-hold the single-instance lock: \
+                         {e} (holders: {holders:?})"
+                    );
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(reacquired);
+    }
+
+    /// Diagnostic for the failure path: raw `/proc/net/unix` lines
+    /// still referencing `name` (empty = the name was already gone —
+    /// a transient fork-dup window, not a real holder). Test-only.
+    #[cfg(target_os = "linux")]
+    fn holders_of_abstract_name(name: &str) -> Vec<String> {
+        std::fs::read_to_string("/proc/net/unix")
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains(name))
+            .map(str::to_string)
+            .collect()
     }
 
     #[test]
@@ -146,8 +247,8 @@ mod tests {
         });
         // Give the holder a moment to grab the lock first.
         std::thread::sleep(Duration::from_millis(50));
-        let lock = acquire_named_with_retry(&name, Duration::from_secs(2)).expect("retry succeeds");
-        assert!(lock.is_single());
+        let _lock = acquire_named_with_retry(&name, Duration::from_secs(2))
+            .expect("retry succeeds while the holder releases");
         t.join().expect("holder thread");
     }
 
