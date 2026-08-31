@@ -226,6 +226,19 @@ fn resolve_interaction_mode(
     (mode, InteractionSource::Flag)
 }
 
+/// Decide whether the editor window opens selection-first (the
+/// `region` capture landing experience): yes iff the capture is a
+/// `region` *and* the resolved shell is the editor window. This is
+/// the single app-crate decision point (plan decision 4) — it covers
+/// the default `editor` mode on all platforms, the `--editor` flag,
+/// and the Wayland demotion of config-set `overlay` (the demoted
+/// editor is still region's editor path). Fullscreen stays plain even
+/// when demoted (spec Open Question 1: "the whole monitor is the
+/// shot"); `open` / `pin` never request the phase.
+fn selection_first_for(mode: &str, resolved: InteractionMode) -> bool {
+    mode == "region" && resolved == InteractionMode::Editor
+}
+
 /// Arguments for `flintshot region`.
 #[derive(Debug, Args)]
 pub struct RegionArgs {
@@ -479,14 +492,16 @@ fn run_capture_shell(
         &cfg.ui.interaction_mode,
         crate::platform::session_is_wayland(),
     );
+    let selection_first = selection_first_for(mode, resolved);
     tracing::info!(
         interaction = resolved.as_str(),
         source = source.as_str(),
+        selection_first,
         "{mode} capture interaction mode resolved"
     );
     match resolved {
         InteractionMode::Overlay => run_overlay_with_config(img, mode, &cfg),
-        InteractionMode::Editor => run_editor_with_config(img, mode, &cfg),
+        InteractionMode::Editor => run_editor_with_config(img, mode, selection_first, &cfg),
     }
 }
 
@@ -494,7 +509,9 @@ fn run_capture_shell(
 /// Returns `Ok(())` regardless of which `EditorOutcome` the user picked
 /// (saved / copied / cancelled); only shell or render failures bubble
 /// up as `Err`. Loads config (lossily) for the UI defaults — callers
-/// that already hold a config use [`run_editor_with_config`].
+/// that already hold a config use [`run_editor_with_config`]. Never
+/// selection-first: its only caller is `open` (an existing image, not
+/// a region capture).
 #[cfg(feature = "egui")]
 fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
     let cfg = match Config::load() {
@@ -507,13 +524,21 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
             Config::default()
         }
     };
-    run_editor_with_config(img, mode, &cfg)
+    run_editor_with_config(img, mode, false, &cfg)
 }
 
 /// [`run_editor_for_capture`] over an already-loaded config (the
 /// interaction-mode resolution path loads config once and shares it).
+/// `selection_first` opens the region landing phase (Select
+/// pre-armed, dim mask, hint line) — see [`selection_first_for`]; the
+/// `open` path always passes `false`.
 #[cfg(feature = "egui")]
-fn run_editor_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Result<()> {
+fn run_editor_with_config(
+    img: image::RgbaImage,
+    mode: &str,
+    selection_first: bool,
+    cfg: &Config,
+) -> Result<()> {
     use flintshot_core::EditorShell;
 
     let state = state_from_config(img, cfg);
@@ -522,7 +547,12 @@ fn run_editor_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Re
     // reactor on this thread for the window to come up (see
     // `crate::ambient`). Dropped before `report_editor_outcome`.
     let outcome = crate::ambient::with_ambient_runtime(|| {
-        flintshot_editor_egui::EguiShell::new().run_editor(state)
+        let shell = if selection_first {
+            flintshot_editor_egui::EguiShell::new().with_selection_first()
+        } else {
+            flintshot_editor_egui::EguiShell::new()
+        };
+        shell.run_editor(state)
     })
     .and_then(|ran| ran.map_err(|e| color_eyre::eyre::eyre!(e.to_string())))
     .with_context(|| format!("running editor for {mode} capture"))?;
@@ -607,8 +637,15 @@ fn report_editor_outcome(outcome: flintshot_core::EditorOutcome) {
 /// Headless-build fallback: editor is unavailable without the `egui`
 /// feature. The image argument is accepted (and dropped) purely so the
 /// call site in [`run_capture_shell`] is uniform across feature sets.
+/// `selection_first` is likewise accepted and dropped (mirrors the
+/// egui-build signature).
 #[cfg(not(feature = "egui"))]
-fn run_editor_with_config(_img: image::RgbaImage, _mode: &str, _cfg: &Config) -> Result<()> {
+fn run_editor_with_config(
+    _img: image::RgbaImage,
+    _mode: &str,
+    _selection_first: bool,
+    _cfg: &Config,
+) -> Result<()> {
     Err(color_eyre::eyre::eyre!(
         "editor not built; pass --out PATH to capture headlessly \
          (this binary was compiled without the `egui` feature)"
@@ -1577,6 +1614,53 @@ mod tests {
             resolve_interaction_mode(Some(InteractionMode::Editor), "overlay", true),
             (InteractionMode::Editor, InteractionSource::Flag)
         );
+    }
+
+    // ── Selection-first wiring (region-selection-first Task 002) ─
+
+    #[test]
+    fn region_editor_shell_is_selection_first() {
+        // Any source that lands region on the editor window — config
+        // default, `--editor` flag, or the Wayland overlay demotion —
+        // opens selection-first.
+        assert!(selection_first_for("region", InteractionMode::Editor));
+    }
+
+    #[test]
+    fn region_true_overlay_is_not_selection_first() {
+        // The overlay has its own selection chrome; the editor flag is
+        // meaningless there.
+        assert!(!selection_first_for("region", InteractionMode::Overlay));
+    }
+
+    #[test]
+    fn fullscreen_editor_shell_is_not_selection_first() {
+        assert!(!selection_first_for("fullscreen", InteractionMode::Editor));
+    }
+
+    #[test]
+    fn open_editor_shell_is_not_selection_first() {
+        assert!(!selection_first_for("open", InteractionMode::Editor));
+    }
+
+    #[test]
+    fn wayland_region_overlay_demotion_lands_selection_first() {
+        // The composed path from `run_capture_shell`: config-set
+        // overlay on Wayland demotes to the editor, which is still
+        // region's editor path → selection-first.
+        let (resolved, _source) = resolve_interaction_mode(None, "overlay", true);
+        assert_eq!(resolved, InteractionMode::Editor);
+        assert!(selection_first_for("region", resolved));
+    }
+
+    #[test]
+    fn wayland_fullscreen_overlay_demotion_stays_plain_editor() {
+        // Spec Open Question 1 (lean no): fullscreen's contract is
+        // "the whole monitor is the shot" — its demotion must not
+        // grow a spotlight.
+        let (resolved, _source) = resolve_interaction_mode(None, "overlay", true);
+        assert_eq!(resolved, InteractionMode::Editor);
+        assert!(!selection_first_for("fullscreen", resolved));
     }
 
     #[test]
