@@ -1567,6 +1567,145 @@ the daemon's behavior is otherwise unchanged.
 
 ---
 
+## Region selection-first editor — spotlight phase in the editor window
+
+Effort: `region-selection-first`. Applies wherever the editor window
+is the shell for a region capture: the default
+`interaction-mode = "editor"` on **every** platform, `--editor`, and
+the Wayland demotion of config-set `overlay` (ADR-0035). The phase
+is shell-owned (zero core changes): Select pre-armed, dim mask
+outside the live selection, one-line hint; the first crop ends it
+permanently. Phase transitions, mask math, the Esc contract, and
+selection-aware Save parity are unit-pinned in
+`flintshot-editor-egui` and `flintshot-app`; the rows below verify
+what tests can't — the live flow on real displays.
+
+### Test setup
+
+```sh
+cargo build --release
+cargo test --workspace --all-targets   # gates green before manual
+flintshot region
+```
+
+### Test script
+
+**1. Landing (row 1).**
+
+```sh
+flintshot region
+```
+
+Expected: the editor opens on the frozen fullscreen capture with
+everything dimmed (spotlight mask over the whole canvas until a
+selection exists), the Select tool active, and the hint pill "drag
+to select · Enter crop · Esc cancel" near the top.
+
+**2. Selection + crop (rows 2–3).**
+
+Drag anywhere → the selection lights up and the mask follows its
+edges. Press `Enter` → the window snaps to the cropped image, the
+mask and hint are gone, and the normal toolbar session continues on
+the crop. Undo (`Ctrl+Z`) restores the pre-crop image **without**
+reviving the mask.
+
+**3. Cancel contract (row 4).**
+
+```sh
+flintshot region      # then press Esc before any drag
+echo $?
+```
+
+Expected: exit 0, no output file, clipboard unchanged (paste into an
+image app shows nothing new), no worker spawned. Esc *after* a
+selection or a crop keeps the editor's standing behaviour
+(close-as-cancelled).
+
+**4. Outputs with a live selection (rows 5–8).**
+
+Re-open `flintshot region`, drag a selection, and without cropping:
+
+| Action              | Expected                                            |
+| ------------------- | --------------------------------------------------- |
+| `Ctrl+C` (or Copy)  | pastes the selected region only                     |
+| `Ctrl+S` (or Save)  | saved PNG is the selected region only               |
+| Pin                 | pin worker floats the selected region only          |
+| Upload              | upload worker sends the selected region only        |
+
+Then crop (Enter) and `Ctrl+S` again → the full (cropped) image is
+saved — the full-image contract resumes once the phase has ended.
+
+**5. Unregressed commands (rows 9–10).**
+
+```sh
+flintshot fullscreen
+flintshot open /tmp/shot.png     # any existing image
+```
+
+Expected: both open the plain editor — no mask, no pre-armed
+Select, default tool.
+
+**6. Wayland demotion lands selection-first (rows 11–12).**
+
+With `[ui] interaction-mode = "overlay"` on a Wayland session:
+
+```sh
+flintshot region                  # log: platform fallback + selection_first
+```
+
+Expected: the demoted **editor window** opens selection-first
+(mask, Select, hint) — not the plain editor of before this effort.
+The tray's *Capture region* item and a daemon-delegated
+`flintshot region` land the same way (workers run bare `region`
+argv). `flintshot fullscreen` on the same session still demotes to
+the **plain** editor (fullscreen's contract is the whole monitor;
+the fallback log points at `region` for the spotlight).
+
+**7. X11 overlay unregressed (row 13).**
+
+With `interaction-mode = "overlay"` on X11 (or macOS / Windows):
+`flintshot region` opens the **true `OverlayApp`** — never the
+selection-first editor (the overlay is never selection-first;
+dispatch-pinned, verified live here).
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| `flintshot region` opens selection-first: mask, Select armed, hint line | | | | | | | | | |
+| First drag draws the selection; mask follows its edges       |    |    |    |    |    |    |    |    |    |
+| `Enter` crops; window resizes to the crop; mask gone; toolbar session continues; undo doesn't revive the chrome | | | | | | | | | |
+| `Esc` before any drag: exit 0, no file / clipboard / worker  |    |    |    |    |    |    |    |    |    |
+| Live selection: `Ctrl+C` pastes the region only              |    |    |    |    |    |    |    |    |    |
+| Live selection: `Ctrl+S` saves the region only               |    |    |    |    |    |    |    |    |    |
+| Live selection: Pin floats the region only                   |    |    |    |    |    |    |    |    |    |
+| Live selection: Upload sends the region only; after crop, Save is full-image again | | | | | | | | | |
+| `flintshot fullscreen` opens the plain editor (no mask / pre-arm) | | | | | | | | | |
+| `flintshot open <path>` opens the plain editor               |    |    |    |    |    |    |    |    |    |
+| Wayland: config `overlay` demoted → selection-first editor; log names fallback | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| Wayland: tray / daemon-delegated `region` lands selection-first; `fullscreen` demotes plain | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
+| X11 / macOS / Windows: `interaction-mode = "overlay"` opens the true overlay (unregressed) |    | N/A | N/A | N/A | N/A |    |    |    |    |
+
+### Known caveats
+
+- **Mask only, not the overlay's full chrome** (by design,
+  ADR-0035): no resize handles, W×H badge, or magnifier in the
+  editor window — the Select-tool bay shows live dims. Porting them
+  is deferred polish.
+- **The window is decorated and image-sized**, not maximized or
+  undecorated: the capture already fills the monitor, and
+  decorations are honest Wayland UX.
+- **Straddling annotations**: Save-with-live-selection is
+  pixel-identical to crop-then-Save only for annotations fully
+  inside the region; annotations crossing the region edge
+  legitimately differ (geometric clip after crop vs pixel clip
+  before). Parity for the contained case is unit-pinned.
+- **`[ui]` default persistence still runs on cancel** (colour,
+  stroke width): it fires on every editor exit including X-close;
+  the cancel contract enumerates capture side effects only.
+
+---
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).
