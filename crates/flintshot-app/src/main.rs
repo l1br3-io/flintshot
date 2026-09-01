@@ -20,6 +20,7 @@ mod single;
 mod sni_watchdog;
 #[cfg(feature = "tray")]
 mod tray;
+mod tray_gate;
 mod upload;
 mod worker;
 

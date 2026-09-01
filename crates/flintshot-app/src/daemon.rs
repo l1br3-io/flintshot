@@ -22,12 +22,13 @@
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre;
 use tokio::sync::Notify;
 
 use crate::single;
+use crate::tray_gate::{TrayAction, TrayGate};
 
 /// Heartbeat interval for the tokio → main bridge tick. Proves the
 /// channel works; not a performance-sensitive path.
@@ -87,13 +88,14 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     //    and the tray/hotkey dispatch (main loop), so a capture started
     //    from any source reaches every subscriber.
     //
-    //    Hotkey backend is display-server-dependent (portal-first on
-    //    Wayland: XWayland X11 grabs can register-but-never-fire, so
-    //    they are skipped entirely there; the portal session runs on
-    //    the tokio side instead — see hotkeys_portal).
+    //    The tray gate crosses the other way (tokio IPC → main loop):
+    //    capture workers ask it to hide this daemon's tray icon for
+    //    the grab window (ADR-0036); only the main loop may touch the
+    //    icon, so the gate hands it actions to apply.
     let wayland = crate::platform::session_is_wayland();
     let bus = crate::ipc_server::SubscriberBus::new();
     let state = crate::worker::DispatchState::new();
+    let tray_gate = Arc::new(TrayGate::new());
     // The live `[hotkeys]` section: written by the config hot-reload
     // below, read by the portal task at bind time (fresh suggestions
     // without a daemon restart). The tray's bind trigger crosses the
@@ -109,7 +111,8 @@ pub fn run(replace: bool) -> eyre::Result<()> {
             let state = state.clone();
             let hotkeys = Arc::clone(&hotkeys_shared);
             let bind_requested = Arc::clone(&bind_requested);
-            move || run_tokio_side(tx, bus, state, wayland, hotkeys, bind_requested)
+            let tray_gate = Arc::clone(&tray_gate);
+            move || run_tokio_side(tx, bus, state, wayland, hotkeys, bind_requested, tray_gate)
         })
         .map_err(|e| eyre::eyre!("spawning tokio side thread: {e}"))?;
 
@@ -128,17 +131,22 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     crate::sni_watchdog::ensure_watcher();
     #[cfg(all(feature = "tray", target_os = "linux"))]
     let sni_watchdog = crate::sni_watchdog::spawn();
+    // The icon handle rides in `DaemonTray` for the daemon's lifetime
+    // (dropping a `TrayIcon` removes it); the event loop drives its
+    // visibility through the tray gate (ADR-0036).
     #[cfg(feature = "tray")]
-    let _tray = match crate::tray::build(wayland) {
-        Ok(t) => Some(t),
+    let tray = match crate::tray::build(wayland) {
+        Ok(icon) => DaemonTray::from_opt(Some(icon)),
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "system tray unavailable; continuing without it (IPC + hotkeys still work)"
             );
-            None
+            DaemonTray::none()
         }
     };
+    #[cfg(not(feature = "tray"))]
+    let tray = DaemonTray::none();
     let hotkey_registry = if wayland {
         tracing::info!("Wayland session: global hotkeys via xdg-desktop-portal GlobalShortcuts");
         crate::hotkeys::HotkeyRegistry::empty()
@@ -175,6 +183,8 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         wayland,
         &hotkeys_shared,
         &bind_requested,
+        &tray_gate,
+        &tray,
     );
 
     // Wait for the tokio side to finish so we don't leak the runtime.
@@ -226,7 +236,7 @@ fn replace_running_daemon() -> eyre::Result<()> {
 /// no longer has a reason to stop — the daemon hung on-screen with a
 /// dead tray (every later click silently dropped, L5 2026-08-31).
 //
-// Eight wiring params by design: this loop is the daemon's integration
+// Ten wiring params by design: this loop is the daemon's integration
 // point, and each param is a distinct event source or shared state; a
 // context struct would only relocate the list, not shrink it.
 #[allow(clippy::too_many_arguments)]
@@ -247,6 +257,8 @@ fn run_event_loop(
     wayland: bool,
     hotkeys_shared: &crate::hotkeys_portal::SharedHotkeys,
     #[cfg_attr(not(feature = "tray"), allow(unused_variables))] bind_requested: &Notify,
+    tray_gate: &TrayGate,
+    tray: &DaemonTray,
 ) {
     loop {
         // Before draining the tray: muda delivers menu events through
@@ -256,14 +268,19 @@ fn run_event_loop(
         #[cfg(all(feature = "tray", target_os = "linux"))]
         pump_glib_context();
 
+        // Tray-gate tick first: apply any hide the IPC layer owes a
+        // waiting capture worker before that worker's own reply bound
+        // expires, and restore icons whose captures have reported.
+        service_tray_gate(tray_gate, tray);
+
         #[cfg(feature = "tray")]
-        if drain_tray_menu(bus, state, bind_requested) {
+        if drain_tray_menu(bus, state, bind_requested, tray_gate, tray) {
             // Tray *Quit*: stop polling. `run` then returns, the lock
             // is released, and the daemon exits.
             tracing::info!("tray Quit clicked; exiting event loop");
             break;
         }
-        drain_hotkeys(hotkeys, bus, state);
+        drain_hotkeys(hotkeys, bus, state, tray_gate, tray);
 
         // Config hot-reload: re-read on change; re-register hotkeys only
         // when [hotkeys] actually changed. A mid-write parse failure is
@@ -319,6 +336,97 @@ fn pump_glib_context() {
     }
 }
 
+/// The daemon's tray icon for the event loop to drive, when one was
+/// built (and the `tray` feature is on). Holding the `TrayIcon` keeps
+/// the SNI item registered; the gate decides visibility, this type
+/// applies it. Exists in no-tray builds as an always-absent handle so
+/// the loop and drains keep one signature.
+struct DaemonTray {
+    #[cfg(feature = "tray")]
+    icon: Option<tray_icon::TrayIcon>,
+}
+
+impl DaemonTray {
+    #[cfg(feature = "tray")]
+    fn from_opt(icon: Option<tray_icon::TrayIcon>) -> Self {
+        Self { icon }
+    }
+
+    fn none() -> Self {
+        Self {
+            #[cfg(feature = "tray")]
+            icon: None,
+        }
+    }
+
+    #[cfg(feature = "tray")]
+    fn is_present(&self) -> bool {
+        self.icon.is_some()
+    }
+
+    #[cfg(not(feature = "tray"))]
+    #[allow(
+        clippy::unused_self,
+        reason = "no-tray builds have no icon; the method exists so callers keep one signature"
+    )]
+    fn is_present(&self) -> bool {
+        false
+    }
+
+    /// Apply a gate-decided visibility change. Failures are non-fatal
+    /// (a compositor refusing the status flip must never wedge the
+    /// loop); on Linux the `GLib` pump follows so libappindicator's
+    /// `DBus` call actually reaches the bus (ADR-0031).
+    #[cfg(feature = "tray")]
+    fn apply(&self, action: TrayAction) {
+        if let Some(icon) = &self.icon {
+            let visible = !matches!(action, TrayAction::Hide);
+            if let Err(e) = icon.set_visible(visible) {
+                tracing::warn!(error = %e, ?action, "tray visibility change failed");
+            }
+        }
+        #[cfg(target_os = "linux")]
+        pump_glib_context();
+    }
+
+    #[cfg(not(feature = "tray"))]
+    #[allow(
+        clippy::unused_self,
+        reason = "no-tray builds have no icon; the method exists so callers keep one signature"
+    )]
+    fn apply(&self, _action: TrayAction) {}
+}
+
+/// One tray-gate tick: advance the state machine and apply whatever
+/// side effect it decided on. Runs every loop iteration (≤
+/// [`POLL_TIMEOUT`]), so hides owed to waiting workers land well
+/// inside their reply bound.
+fn service_tray_gate(gate: &TrayGate, tray: &DaemonTray) {
+    if let Some(action) = gate.step(Instant::now(), tray.is_present()) {
+        if action == TrayAction::ForceShow {
+            tracing::warn!(
+                "tray stayed hidden past the safety bound; restoring \
+                 (a capture worker may have died before reporting)"
+            );
+        }
+        tracing::debug!(?action, "tray gate transition");
+        tray.apply(action);
+    }
+}
+
+/// Pre-hide the tray icon for a dispatch that is about to spawn a
+/// capture worker (tray click / hotkey fire): hides at the interaction
+/// itself — instant feedback, and the handshake's grace counts from
+/// here — without touching the capture depth (the worker's
+/// `HideTrayForCapture` owns that; one capture, one count). See
+/// ADR-0036.
+fn pre_hide_for_capture(gate: &TrayGate, tray: &DaemonTray) {
+    if gate.pre_hide(Instant::now(), tray.is_present()) {
+        tracing::debug!("pre-hiding tray icon for an imminent capture");
+        tray.apply(TrayAction::Hide);
+    }
+}
+
 /// Drain pending tray menu clicks, routing each through the worker
 /// dispatch table (capture → spawn + `CaptureStarted`/`EditorOpened`;
 /// quit → shutdown) or opening the config. Returns `true` if *Quit* was
@@ -328,6 +436,8 @@ fn drain_tray_menu(
     bus: &crate::ipc_server::SubscriberBus,
     state: &crate::worker::DispatchState,
     bind_requested: &Notify,
+    tray_gate: &TrayGate,
+    tray: &DaemonTray,
 ) -> bool {
     use tray_icon::menu::MenuEvent;
 
@@ -335,6 +445,12 @@ fn drain_tray_menu(
     while let Ok(event) = rx.try_recv() {
         match crate::tray::action_for(&event) {
             Some(crate::tray::TrayAction::Request(request)) => {
+                // A capture dispatch is about to freeze the screen —
+                // start hiding our own icon now rather than waiting
+                // for the worker's handshake round trip.
+                if crate::worker::spawns_capture_worker(&request) {
+                    pre_hide_for_capture(tray_gate, tray);
+                }
                 match crate::worker::dispatch(
                     &request,
                     &crate::worker::CommandSpawner,
@@ -446,11 +562,14 @@ fn editor_argv(value: &std::ffi::OsStr) -> Vec<std::ffi::OsString> {
 /// Drain pending *pressed* hotkey events, dispatching each through the
 /// worker table (same path as tray/IPC). `Released` is ignored to avoid
 /// double-firing. A no-op when hotkeys are unavailable (the registry is
-/// empty).
+/// empty). Hotkey captures pre-hide the tray like tray clicks do
+/// (ADR-0036) — the handshake that follows owns the depth.
 fn drain_hotkeys(
     registry: &crate::hotkeys::HotkeyRegistry,
     bus: &crate::ipc_server::SubscriberBus,
     state: &crate::worker::DispatchState,
+    tray_gate: &TrayGate,
+    tray: &DaemonTray,
 ) {
     use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 
@@ -460,6 +579,9 @@ fn drain_hotkeys(
             continue;
         }
         if let Some(request) = registry.lookup(event.id) {
+            if crate::worker::spawns_capture_worker(request) {
+                pre_hide_for_capture(tray_gate, tray);
+            }
             if let Err(e) =
                 crate::worker::dispatch(request, &crate::worker::CommandSpawner, state, &mut |ev| {
                     bus.broadcast(ev);
@@ -485,6 +607,7 @@ fn run_tokio_side(
     wayland: bool,
     hotkeys: crate::hotkeys_portal::SharedHotkeys,
     bind_requested: Arc<Notify>,
+    tray_gate: Arc<TrayGate>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -513,26 +636,28 @@ fn run_tokio_side(
         };
 
         // Bind the IPC server inside the reactor, sharing the daemon's
-        // bus so tray/hotkey-initiated captures reach IPC subscribers.
-        let (serve_handle, shutdown) =
-            match crate::ipc_server::IpcServer::bind_with_bus(None, bus, state, portal) {
-                Ok(ipc) => {
-                    let shutdown = ipc.shutdown_signal();
-                    let handle = tokio::spawn(async move {
-                        if let Err(e) = ipc.serve().await {
-                            tracing::error!(error = %e, "IPC server accept loop ended with error");
-                        }
-                    });
-                    (handle, Some(shutdown))
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "IPC server unavailable; continuing without it (tray + hotkeys still work)"
-                    );
-                    (tokio::spawn(async {}), None)
-                }
-            };
+        // bus so tray/hotkey-initiated captures reach IPC subscribers,
+        // and the tray gate so worker handshakes reach the main loop.
+        let (serve_handle, shutdown) = match crate::ipc_server::IpcServer::bind_with_bus(
+            None, bus, state, portal, tray_gate,
+        ) {
+            Ok(ipc) => {
+                let shutdown = ipc.shutdown_signal();
+                let handle = tokio::spawn(async move {
+                    if let Err(e) = ipc.serve().await {
+                        tracing::error!(error = %e, "IPC server accept loop ended with error");
+                    }
+                });
+                (handle, Some(shutdown))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "IPC server unavailable; continuing without it (tray + hotkeys still work)"
+                );
+                (tokio::spawn(async {}), None)
+            }
+        };
 
         let mut interval = tokio::time::interval(TICK_INTERVAL);
         // Discard the immediate first tick so heartbeats are paced.
@@ -796,6 +921,8 @@ mod tests {
             let mut hotkeys = crate::hotkeys::HotkeyRegistry::empty();
             let shared = Arc::new(Mutex::new(HotkeyConfig::default()));
             let bind_requested = Notify::new();
+            let tray_gate = TrayGate::new();
+            let tray = DaemonTray::none();
 
             run_event_loop(
                 rx,
@@ -806,6 +933,8 @@ mod tests {
                 false,
                 &shared,
                 &bind_requested,
+                &tray_gate,
+                &tray,
             );
 
             assert!(
