@@ -113,6 +113,80 @@ pub(crate) fn bind_shortcuts_to(override_path: Option<&Path>) -> eyre::Result<Op
     })
 }
 
+/// Outcome of asking the daemon to hide its tray for an imminent
+/// capture (see [`hide_tray_for_capture_to`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HideTrayOutcome {
+    /// No daemon answered: nothing was registered server-side, so no
+    /// `ReportCaptured` is owed — proceed and grab immediately.
+    NoDaemon,
+    /// The daemon registered the in-flight capture. `acked` says
+    /// whether its `Event::TrayHidden` reply arrived inside the
+    /// bound — the caller may grab either way (an unconfirmed hide is
+    /// the pre-fix behaviour, not a failure); a `ReportCaptured` is
+    /// owed the moment the grab finishes.
+    Registered { acked: bool },
+}
+
+/// How long the worker waits for the daemon's `TrayHidden` ack before
+/// capturing anyway. Deliberately shorter than the daemon's own
+/// confirm bound so the worker — the thing the user is staring at —
+/// is never the one left hanging.
+const TRAY_REPLY_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Ask the daemon at `override_path` (or the default socket) to hide
+/// its tray icon for an imminent capture, and await the ack —
+/// bounded by [`TRAY_REPLY_BOUND`]: a slow daemon must not stall the
+/// capture. Mirrors [`bind_shortcuts_to`]'s round-trip shape with a
+/// timeout on top; see ADR-0036.
+pub(crate) fn hide_tray_for_capture_to(
+    override_path: Option<&Path>,
+) -> eyre::Result<HideTrayOutcome> {
+    let path = socket_path(override_path);
+    if !path.exists() {
+        return Ok(HideTrayOutcome::NoDaemon);
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| eyre::eyre!("building tray-hide runtime: {e}"))?;
+
+    runtime.block_on(async move {
+        let name = socket_name(&path)?;
+        let mut stream =
+            match <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name).await
+            {
+                Ok(s) => s,
+                Err(e) if is_no_daemon(&e) => return Ok(HideTrayOutcome::NoDaemon),
+                Err(e) => {
+                    return Err(eyre::eyre!(
+                        "connecting to daemon at {}: {e}",
+                        path.display()
+                    ))
+                }
+            };
+        let bytes = encode_msg(&Request::HideTrayForCapture)?;
+        write_frame(&mut stream, &bytes).await?;
+        match tokio::time::timeout(TRAY_REPLY_BOUND, crate::ipc_server::read_frame(&mut stream))
+            .await
+        {
+            Ok(Ok(payload)) => {
+                decode_event(&payload)?;
+                Ok(HideTrayOutcome::Registered { acked: true })
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                tracing::warn!(
+                    "daemon did not confirm the tray hide within {TRAY_REPLY_BOUND:?}; \
+                     capturing anyway (the icon may appear in the shot)"
+                );
+                Ok(HideTrayOutcome::Registered { acked: false })
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +210,18 @@ mod tests {
         )))
         .expect("absent path should not error");
         assert!(reply.is_none(), "no daemon → None reply");
+    }
+
+    #[test]
+    fn hide_tray_absent_socket_reports_no_daemon() {
+        let outcome = hide_tray_for_capture_to(Some(Path::new(
+            "/this/does/not/exist/flintshot-test-hide.sock",
+        )))
+        .expect("absent path should not error");
+        assert_eq!(
+            outcome,
+            HideTrayOutcome::NoDaemon,
+            "no daemon → nothing hidden, nothing owed"
+        );
     }
 }

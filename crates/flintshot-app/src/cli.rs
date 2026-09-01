@@ -453,9 +453,7 @@ fn capture_and_dispatch(
     output: &OutputArgs,
     interaction: Option<InteractionMode>,
 ) -> Result<()> {
-    let img = capture_fullscreen(monitor)
-        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
-        .with_context(|| format!("capturing {mode} on monitor {monitor:?}"))?;
+    let img = capture_with_tray_hidden(monitor, mode)?;
 
     match &output.out {
         Some(path) => {
@@ -465,6 +463,85 @@ fn capture_and_dispatch(
         None => run_capture_shell(img, mode, interaction)?,
     }
     Ok(())
+}
+
+/// Grab the monitor with any daemon's tray icon hidden (ADR-0036):
+/// the hide handshake, the capture, and the restore report all sit
+/// inside the guard's scope, so the icon returns the instant the
+/// pixels are taken — success or failure — while the editor /
+/// overlay session beyond this function never holds it hostage.
+/// No daemon (standalone capture) costs one socket probe.
+fn capture_with_tray_hidden(monitor: Option<u32>, mode: &str) -> Result<image::RgbaImage> {
+    let _tray_hidden = TrayHiddenGuard::request_at(None);
+    capture_fullscreen(monitor)
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
+        .with_context(|| format!("capturing {mode} on monitor {monitor:?}"))
+}
+
+/// RAII tray-hide for one capture: on construction, asks a running
+/// daemon to hide its tray icon (so it never lands in the frozen
+/// frame); on drop, reports the grab finished so the icon returns.
+/// Best-effort end to end — a capture must never fail because the
+/// daemon was slow, absent, or hostile. See ADR-0036.
+struct TrayHiddenGuard {
+    /// The daemon registered our hide request, so a
+    /// [`Request::ReportCaptured`] is owed to release it.
+    report_owed: bool,
+}
+
+impl TrayHiddenGuard {
+    /// Testable seam: request against an explicit socket path.
+    fn request_at(override_path: Option<&std::path::Path>) -> Self {
+        match crate::ipc_client::hide_tray_for_capture_to(override_path) {
+            Ok(crate::ipc_client::HideTrayOutcome::NoDaemon) => Self { report_owed: false },
+            // The unacked case already warned inside the helper; the
+            // report is owed either way (the daemon registered us).
+            Ok(crate::ipc_client::HideTrayOutcome::Registered { .. }) => Self { report_owed: true },
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "tray-hide handshake failed; capturing with the tray as-is"
+                );
+                Self { report_owed: false }
+            }
+        }
+    }
+}
+
+impl Drop for TrayHiddenGuard {
+    fn drop(&mut self) {
+        if self.report_owed {
+            report_captured_to_daemon();
+        }
+    }
+}
+
+/// Tell a running daemon this capture's grab finished so it can
+/// restore its tray icon (pairs the hide handshake, ADR-0036).
+/// Best-effort fire-and-forget, mirroring [`report_saved_to_daemon`].
+fn report_captured_to_daemon() {
+    report_captured_to_daemon_at(None);
+}
+
+/// Testable seam for [`report_captured_to_daemon`]: report against an
+/// explicit socket path. `NoDaemon` is a silent no-op; transport
+/// errors are logged at `warn` and swallowed so a report failure
+/// never breaks a finished capture.
+fn report_captured_to_daemon_at(override_path: Option<&std::path::Path>) {
+    match crate::ipc_client::delegate_to(override_path, &Request::ReportCaptured) {
+        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {
+            tracing::debug!("reported capture done; the daemon may restore its tray");
+        }
+        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {
+            tracing::debug!("no daemon running; skipping capture-done report");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not report capture done to the daemon; ignoring"
+            );
+        }
+    }
 }
 
 /// Resolve the interaction mode for a fresh capture (CLI flag >
@@ -1339,6 +1416,29 @@ mod tests {
             )),
             std::path::Path::new("/tmp/flintshot-saved.png"),
         );
+    }
+
+    #[test]
+    fn report_captured_to_daemon_is_silent_when_no_daemon() {
+        // Mirror of the save-report contract: a standalone capture
+        // must not error (or even log above debug) reporting done.
+        report_captured_to_daemon_at(Some(std::path::Path::new(
+            "/this/does/not/exist/flintshot-test-captured.sock",
+        )));
+    }
+
+    #[test]
+    fn tray_hidden_guard_owes_no_report_without_a_daemon() {
+        // Standalone capture: nothing was hidden, so Drop has nothing
+        // to report — and must not attempt a connection.
+        let guard = TrayHiddenGuard::request_at(Some(std::path::Path::new(
+            "/this/does/not/exist/flintshot-test-guard.sock",
+        )));
+        assert!(
+            !guard.report_owed,
+            "no daemon → no hide registered → no report owed"
+        );
+        drop(guard); // silent by contract
     }
 
     // ── Upload helpers ───────────────────────────────────────────
