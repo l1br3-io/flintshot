@@ -1,6 +1,6 @@
 # Todo — Hide the tray during daemon-dispatched captures
 
-- [ ] 001: Core IPC variants (`HideTrayForCapture`, `ReportCaptured`,
+- [x] 001: Core IPC variants (`HideTrayForCapture`, `ReportCaptured`,
       `Event::TrayHidden`) + round-trip tests
 - [ ] 002: Daemon `TrayGate`/`TrayVisibility` state machine, loop
       wiring, tray/hotkey pre-hide, IPC interception

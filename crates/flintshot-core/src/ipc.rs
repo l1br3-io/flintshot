@@ -96,6 +96,21 @@ pub enum Request {
     /// layer: binding belongs to the daemon's portal session, so the
     /// worker dispatch table never acts on it.
     BindShortcuts,
+    /// Worker → daemon, pre-grab: the sender is about to capture the
+    /// screen; the daemon hides its own tray icon so it doesn't land
+    /// in the frozen frame. Request/reply like `BindShortcuts`: the
+    /// daemon answers with [`Event::TrayHidden`] only once the icon is
+    /// hidden *and* a propagation grace has elapsed (the panel removes
+    /// the item asynchronously — an early ack would race the grab).
+    /// A daemon without a tray replies promptly (the hide is vacuous).
+    HideTrayForCapture,
+    /// Worker → daemon, post-grab: the screen has been captured
+    /// (successfully or not), so the tray icon may return. Sent
+    /// best-effort and fire-and-forget: silently dropped when no
+    /// daemon answers. Pairs with [`Request::HideTrayForCapture`];
+    /// the daemon tracks concurrent captures with a depth counter and
+    /// restores the icon when the last one reports.
+    ReportCaptured,
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -158,6 +173,11 @@ pub enum Event {
         /// what the user actually chose, not the config suggestions.
         bindings: Vec<ShortcutBinding>,
     },
+    /// Reply to [`Request::HideTrayForCapture`]: the daemon's tray
+    /// icon is out of the frame (hidden for long enough that the
+    /// panel has re-rendered), so the worker may grab now. Reply-only
+    /// — never broadcast to subscribers (see ADR-0036).
+    TrayHidden,
 }
 
 /// One entry of an [`Event::ShortcutsBound`] reply: a bound shortcut's
@@ -264,6 +284,8 @@ mod tests {
                 delete_handle: None,
             },
             Request::BindShortcuts,
+            Request::HideTrayForCapture,
+            Request::ReportCaptured,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");
@@ -308,6 +330,7 @@ mod tests {
                 url: "https://i/y".into(),
                 delete_handle: Some("hk".into()),
             },
+            Event::TrayHidden,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode event");
