@@ -20,6 +20,21 @@ Categories used below:
 
 ### Fixed
 
+- The daemon's own tray icon landed in every daemon-dispatched
+  capture's frozen frame (tray clicks, hotkeys, CLI delegation,
+  applet / desktop actions — L5, 2026-08-31). A worker→daemon
+  handshake now spans exactly the grab (ADR-0036): before capturing,
+  the worker asks the daemon to hide its icon (SNI `Passive` + the
+  GLib pump, with a 250 ms propagation grace before the ack so the
+  panel has actually re-rendered); the instant the pixels are taken
+  — success or failure — a best-effort report restores it. The icon
+  vanishes at the tray click itself (pre-hide), concurrent captures
+  share a depth counter, a killed worker self-heals via a 30 s
+  safety bound, every timeout degrades to "capture anyway" rather
+  than hanging, and standalone no-daemon captures cost one socket
+  probe. Daemon-triggered captures gain ~250–400 ms click-to-grab —
+  the panel repaint the guarantee depends on.
+
 - Tray menu clicks appeared to do nothing (any item, any click). One
   click on *Quit* was enough to kill them all: the event loop broke
   for the shutdown but the daemon never exited — `run` still held the

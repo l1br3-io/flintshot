@@ -1706,6 +1706,105 @@ dispatch-pinned, verified live here).
 
 ---
 
+## Hide tray during captures — the icon never lands in the shot
+
+Effort: `hide-tray-for-capture` (ADR-0036). Applies to **every**
+daemon-dispatched capture: tray menu, hotkeys, CLI delegation, COSMIC
+applet, desktop actions, and daemon-spawned `--standalone` workers.
+The state machine, IPC interception, and worker guard are unit-pinned
+(`tray_gate`, `ipc_server`, `cli` tests); the rows below verify what
+tests can't — the panel actually re-rendering, per-platform.
+
+### Test setup
+
+```sh
+cargo build --release --features tray
+flintshot daemon &            # tray icon visible
+```
+
+Watch the daemon log alongside (`RUST_LOG=flintshot=info`) — the
+grace, acks, and safety restore each log.
+
+### Test script
+
+**1. Tray-initiated region (rows 1, 5).**
+
+Click the tray icon → *Capture region*. Expected: the icon vanishes
+**at the click**; the editor/overlay opens on a frozen frame
+**without the icon**; the icon is back in the panel by the time the
+session is interactable (it must NOT stay hidden while you annotate).
+The frozen frame keeps every *other* panel item — only flintshot's
+own icon hides.
+
+**2. Other triggers (rows 2–4).**
+
+| Trigger                                    | Expected                       |
+| ------------------------------------------ | ------------------------------ |
+| Tray *Capture fullscreen* / monitor items  | same hide/grab/restore cycle   |
+| Hotkey (portal or X11)                     | same                           |
+| `flintshot region` with the daemon running (CLI delegate), applet / desktop action | same |
+
+**3. Cancel + failure paths (rows 6–7).**
+
+Tray *Capture region* → `Esc` before any drag → process exits 0;
+icon is present again. For a failed capture: run with a display
+permission revoked (or block the portal) so the grab errors — the
+icon still returns (the restore report fires on error paths too).
+
+**4. Dead worker (row 8).**
+
+```sh
+# click tray *Capture region*, then within the grace:
+pkill -9 -f 'flintshot region'
+```
+
+Expected: the icon returns within ~30 s (the safety bound) with a
+`tray stayed hidden past the safety bound` warning in the log; the
+next capture works normally.
+
+**5. Standalone unregressed (rows 9–10).**
+
+With the daemon stopped: `flintshot region --standalone` — normal
+capture, no visible latency added (one socket probe). With a
+no-tray-feature daemon (`FEATURES='' just install-user`): delegated
+captures work and the handshake acks promptly (nothing to hide).
+
+**6. X11 regression (row 11).** Re-run the Phase 2 tray rows on an
+X11 session; the visibility flip must not disturb registration
+(ADR-0032 territory).
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| Tray capture: icon vanishes at the click; frame is icon-free |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Fullscreen / per-monitor / hotkey captures: icon-free frame  |    |    |    |    |    |    |    |    |    |
+| CLI-delegated `region` (daemon up): icon-free frame          |    |    |    |    |    |    |    |    |    |
+| Applet / desktop action captures: icon-free frame            |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Icon returns right after the grab (not held for the session) |    |    |    |    |    |    |    |    |    |
+| Esc-cancel capture: icon back, exit 0                       |    |    |    |    |    |    |    |    |    |
+| Failed capture (permission denied): icon still returns      |    |    |    |    |    |    |    |    |    |
+| `kill -9` worker mid-grab: icon back ≤ ~30 s + warn logged   |    |    |    |    |    |    |    |    |    |
+| Standalone (no daemon): capture unchanged, no added latency  |    |    |    |    |    |    |    |    |    |
+| No-tray-feature daemon: delegated captures work, prompt ack  |    |    |    |    |    |    |    |    |    |
+| X11: tray registration/menu unregressed by the visibility flips | | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+
+### Known caveats
+
+- **~250–400 ms click-to-grab on daemon captures** (the propagation
+  grace + poll cadence): the guarantee's price. A shorter grace
+  risks freezing the icon's ghost mid-fade.
+- **A killed worker ghosts the icon up to 30 s** (safety bound,
+  logged). The bound deliberately encloses a dawdled first-capture
+  portal dialog rather than re-icing the icon into that capture.
+- **Grace is one constant across platforms**; native-tray repaint
+  (macOS/Windows) is faster than the SNI round trip — tune per
+  platform if a cell ever shows a ghost.
+- Only flintshot's own icon hides. Other panels' icons (and any
+  other app's) remain in the shot by design.
+
+---
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).

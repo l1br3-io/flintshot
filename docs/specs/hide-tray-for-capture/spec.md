@@ -1,6 +1,7 @@
 ---
-status: draft
+status: shipped
 started: 2026-09-01
+shipped: 2026-09-01
 ---
 
 # Spec — Hide the tray during daemon-dispatched captures

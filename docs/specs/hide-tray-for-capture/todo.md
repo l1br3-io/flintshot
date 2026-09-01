@@ -6,4 +6,4 @@
       wiring, tray/hotkey pre-hide, IPC interception
 - [x] 003: Worker handshake — bounded-wait helper + RAII guard around
       the grab in `capture_and_dispatch`
-- [ ] 004: Docs — ADR-0036, CHANGELOG, TEST_MATRIX, spec closeout
+- [x] 004: Docs — ADR-0036, CHANGELOG, TEST_MATRIX, spec closeout
