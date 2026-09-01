@@ -200,13 +200,14 @@ type Listener = interprocess::local_socket::tokio::Listener;
 pub(crate) type Stream = interprocess::local_socket::tokio::Stream;
 
 /// The IPC server: owns the listener, the subscriber bus, the
-/// last-saved + pin-id dispatch state, the portal-bind handle, and a
-/// shutdown signal.
+/// last-saved + pin-id dispatch state, the portal-bind handle, the
+/// tray gate (capture handshake, ADR-0036), and a shutdown signal.
 pub struct IpcServer {
     listener: Listener,
     bus: SubscriberBus,
     state: crate::worker::DispatchState,
     portal: crate::hotkeys_portal::PortalHandle,
+    gate: Arc<crate::tray_gate::TrayGate>,
     shutdown: Arc<Notify>,
 }
 
@@ -233,6 +234,7 @@ impl IpcServer {
             crate::hotkeys_portal::PortalHandle::unavailable(
                 "portal bind is not wired in this IPC server instance",
             ),
+            Arc::new(crate::tray_gate::TrayGate::new()),
         )
     }
 
@@ -241,12 +243,17 @@ impl IpcServer {
     /// server (which fans `Event`s to IPC subscribers) and its own
     /// tray/hotkey dispatch path, so a capture started from the tray
     /// reaches IPC subscribers and vice versa; the portal handle routes
-    /// `Request::BindShortcuts` into the daemon's portal session.
+    /// `Request::BindShortcuts` into the daemon's portal session; the
+    /// tray gate carries the capture handshake (`HideTrayForCapture`
+    /// → ack, `ReportCaptured` → restore) between this tokio-side
+    /// handler and the daemon's main loop, which alone may touch the
+    /// tray icon.
     pub fn bind_with_bus(
         override_path: Option<&Path>,
         bus: SubscriberBus,
         state: crate::worker::DispatchState,
         portal: crate::hotkeys_portal::PortalHandle,
+        gate: Arc<crate::tray_gate::TrayGate>,
     ) -> eyre::Result<Self> {
         let path = socket_path(override_path);
         let name = socket_name(&path)?;
@@ -261,6 +268,7 @@ impl IpcServer {
             bus,
             state,
             portal,
+            gate,
             shutdown: Arc::new(Notify::new()),
         })
     }
@@ -308,6 +316,7 @@ impl IpcServer {
         let bus = self.bus.clone();
         let state = self.state.clone();
         let portal = self.portal.clone();
+        let gate = Arc::clone(&self.gate);
         let listener = self.listener;
         loop {
             tokio::select! {
@@ -327,9 +336,10 @@ impl IpcServer {
                     let bus = bus.clone();
                     let state = state.clone();
                     let portal = portal.clone();
+                    let gate = Arc::clone(&gate);
                     let shutdown = Arc::clone(&shutdown);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, bus, state, shutdown, portal).await {
+                        if let Err(e) = handle_connection(stream, bus, state, shutdown, portal, gate).await {
                             tracing::debug!(error = %e, "IPC connection ended");
                         }
                     });
@@ -345,14 +355,18 @@ impl IpcServer {
 /// [`Event`] sink; `ReportSaved` records the worker's path in the
 /// daemon's last-saved state (and broadcasts [`Event::Saved`]);
 /// `BindShortcuts` drives the daemon's portal session and writes the
-/// outcome back on this connection; `Quit` signals daemon shutdown;
+/// outcome back on this connection; `HideTrayForCapture` /
+/// `ReportCaptured` drive the tray gate (capture handshake,
+/// ADR-0036); `Quit` signals daemon shutdown;
 /// other requests route through the worker dispatch table.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection<S>(
     mut stream: S,
     bus: SubscriberBus,
     state: crate::worker::DispatchState,
     shutdown: Arc<Notify>,
     portal: crate::hotkeys_portal::PortalHandle,
+    gate: Arc<crate::tray_gate::TrayGate>,
 ) -> eyre::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -436,6 +450,35 @@ where
             };
             let bytes = encode_msg(&event)?;
             write_frame(&mut stream, &bytes).await?;
+            continue;
+        }
+
+        // HideTrayForCapture (ADR-0036): a capture worker is about to
+        // grab the screen. Register the in-flight capture, wait —
+        // bounded — for the daemon's main loop to hide the icon and
+        // let the panel re-render, then ack on this connection. Like
+        // BindShortcuts, this is connection-layer interception: the
+        // worker dispatch table never sees it. The wait blocks only
+        // this connection; the worker's own reply wait is the
+        // authoritative bound.
+        if matches!(request, IpcRequest::HideTrayForCapture) {
+            let baseline = gate.begin_capture();
+            if !gate.wait_confirmed(baseline).await {
+                tracing::warn!(
+                    "tray-hide confirmation timed out; acking anyway (the capture proceeds)"
+                );
+            }
+            let bytes = encode_msg(&IpcEvent::TrayHidden)?;
+            write_frame(&mut stream, &bytes).await?;
+            continue;
+        }
+
+        // ReportCaptured (ADR-0036): the grab finished (success or
+        // failure), so this in-flight capture releases its hold — the
+        // icon returns when the last one reports. Fire-and-forget,
+        // never broadcast: only the daemon's tray cares.
+        if matches!(request, IpcRequest::ReportCaptured) {
+            gate.end_capture();
             continue;
         }
 
@@ -648,18 +691,151 @@ mod tests {
     use crate::hotkeys_portal::{BindFailure, PortalCmd, PortalHandle};
     use flintshot_core::ipc::ShortcutBinding;
 
+    // ── Tray-hide handshake interception (ADR-0036) ────────────────
+
+    use crate::tray_gate::TrayGate;
+
+    /// A gate with a 30 ms grace so a background stepper confirms in
+    /// tens of milliseconds, and a 2 s confirm bound.
+    fn handshake_gate() -> Arc<TrayGate> {
+        Arc::new(TrayGate::with_durations(
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(2),
+        ))
+    }
+
+    /// Step a shared gate as if a real tray were present, for `millis`
+    /// — the main loop's job, stood in for the test.
+    fn step_in_background(gate: &Arc<TrayGate>, millis: u64) -> tokio::task::JoinHandle<()> {
+        let gate = Arc::clone(gate);
+        tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+            while std::time::Instant::now() < deadline {
+                gate.step(std::time::Instant::now(), true);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn hide_tray_for_capture_replies_tray_hidden_once_confirmed() {
+        let gate = handshake_gate();
+        let stepper = step_in_background(&gate, 2_000);
+        let (mut client, task) = bind_test_connection(
+            crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
+            Arc::clone(&gate),
+        );
+        write_frame(
+            &mut client,
+            &encode_msg(&Request::HideTrayForCapture).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .expect("the ack arrives once the main loop confirms")
+                .unwrap();
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert!(
+            matches!(decoded, Event::TrayHidden),
+            "expected TrayHidden, got {decoded:?}"
+        );
+        assert_eq!(gate.hide_depth(), 1, "the handshake holds until the report");
+        task.abort();
+        stepper.abort();
+    }
+
+    #[tokio::test]
+    async fn hide_tray_for_capture_acks_after_the_bound_when_unconfirmed() {
+        // A gate nothing steps and a 20 ms confirm bound: the reply
+        // must still arrive (the worker proceeds regardless; worst
+        // case the icon made it into the shot — pre-fix behaviour).
+        let gate = Arc::new(TrayGate::with_durations(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(20),
+        ));
+        let (mut client, task) = bind_test_connection(
+            crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
+            Arc::clone(&gate),
+        );
+        write_frame(
+            &mut client,
+            &encode_msg(&Request::HideTrayForCapture).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .expect("the bounded wait still acks")
+                .unwrap();
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert!(matches!(decoded, Event::TrayHidden));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn report_captured_releases_the_handshake_hold() {
+        let gate = handshake_gate();
+        let stepper = step_in_background(&gate, 2_000);
+        let (mut client, task) = bind_test_connection(
+            crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
+            Arc::clone(&gate),
+        );
+        write_frame(
+            &mut client,
+            &encode_msg(&Request::HideTrayForCapture).unwrap(),
+        )
+        .await
+        .unwrap();
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .expect("ack arrives")
+                .unwrap();
+        assert!(matches!(
+            postcard::from_bytes::<Event>(&payload).unwrap(),
+            Event::TrayHidden
+        ));
+
+        // The grab finished: fire-and-forget report, then the hold
+        // must drain back to zero (no reply is expected — poll).
+        write_frame(&mut client, &encode_msg(&Request::ReportCaptured).unwrap())
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while gate.hide_depth() != 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            gate.hide_depth(),
+            0,
+            "the report releases the in-flight capture"
+        );
+        task.abort();
+        stepper.abort();
+    }
+
     /// Spawn `handle_connection` on the server half of a duplex pair
-    /// with a fresh bus/state/shutdown and the given portal handle.
-    /// Returns the client half + the task handle.
+    /// with a fresh bus/state/shutdown, the given portal handle, and
+    /// the given tray gate. Returns the client half + the task handle.
     fn bind_test_connection(
         portal: PortalHandle,
+        gate: Arc<crate::tray_gate::TrayGate>,
     ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
         let (client, server) = tokio::io::duplex(8 * 1024);
         let bus = SubscriberBus::new();
         let state = crate::worker::DispatchState::new();
         let shutdown = Arc::new(Notify::new());
         let task = tokio::spawn(async move {
-            let _ = handle_connection(server, bus, state, shutdown, portal).await;
+            let _ = handle_connection(server, bus, state, shutdown, portal, gate).await;
         });
         (client, task)
     }
@@ -678,7 +854,8 @@ mod tests {
             }
         });
 
-        let (mut client, task) = bind_test_connection(portal);
+        let (mut client, task) =
+            bind_test_connection(portal, Arc::new(crate::tray_gate::TrayGate::new()));
         write_frame(&mut client, &encode_msg(&Request::BindShortcuts).unwrap())
             .await
             .unwrap();
@@ -713,7 +890,8 @@ mod tests {
             }
         });
 
-        let (mut client, task) = bind_test_connection(portal);
+        let (mut client, task) =
+            bind_test_connection(portal, Arc::new(crate::tray_gate::TrayGate::new()));
         write_frame(&mut client, &encode_msg(&Request::BindShortcuts).unwrap())
             .await
             .unwrap();
@@ -734,7 +912,8 @@ mod tests {
     #[tokio::test]
     async fn bind_shortcuts_with_unavailable_portal_replies_error() {
         let portal = PortalHandle::unavailable("no portal frontend");
-        let (mut client, task) = bind_test_connection(portal);
+        let (mut client, task) =
+            bind_test_connection(portal, Arc::new(crate::tray_gate::TrayGate::new()));
         write_frame(&mut client, &encode_msg(&Request::BindShortcuts).unwrap())
             .await
             .unwrap();

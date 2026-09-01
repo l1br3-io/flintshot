@@ -229,6 +229,11 @@ pub fn dispatch(
         Request::ReportSaved { .. } | Request::ReportUploaded { .. } => {
             Ok(DispatchOutcome::Continue)
         }
+        // The tray-hide handshake (ADR-0036) is likewise
+        // connection-layer territory: `HideTrayForCapture` drives the
+        // daemon's tray gate for its ack, `ReportCaptured` releases
+        // it. Same defensive no-op contract as the reports above.
+        Request::HideTrayForCapture | Request::ReportCaptured => Ok(DispatchOutcome::Continue),
         // Subscribe (handled by the connection layer in Task 004) and
         // BindShortcuts (Phase 6: the connection layer intercepts it
         // to drive the daemon's portal session in Task 003), plus any
@@ -336,8 +341,22 @@ fn variant_name(request: &Request) -> &'static str {
         Request::PinLast => "pin-last",
         Request::UploadLast { .. } => "upload-last",
         Request::BindShortcuts => "bind-shortcuts",
+        Request::HideTrayForCapture => "hide-tray-for-capture",
+        Request::ReportCaptured => "report-captured",
         _ => "request",
     }
+}
+
+/// Does dispatching this request spawn a capture worker (region /
+/// fullscreen)? The daemon's main-loop dispatch sites pre-hide the
+/// tray icon for exactly these — nothing else freezes the screen, so
+/// nothing else should make the icon vanish. See ADR-0036.
+#[must_use]
+pub fn spawns_capture_worker(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::CaptureRegion { .. } | Request::CaptureFullscreen { .. }
+    )
 }
 
 #[cfg(test)]
@@ -593,6 +612,63 @@ mod tests {
         assert_eq!(outcome, DispatchOutcome::Continue);
         assert!(spawner.snapshot().is_empty(), "ReportSaved spawns nothing");
         assert!(events.is_empty(), "ReportSaved emits nothing from dispatch");
+    }
+
+    #[test]
+    fn tray_hide_handshake_requests_are_no_ops_in_dispatch() {
+        // The handshake lives in the IPC connection layer (it drives
+        // the tray gate); dispatch must not report these as
+        // "unsupported" if a refactor routes them here.
+        for request in [Request::HideTrayForCapture, Request::ReportCaptured] {
+            let spawner = RecordingSpawner::new();
+            let mut events = Vec::new();
+            let outcome = dispatch(&request, &spawner, &DispatchState::new(), &mut |ev| {
+                events.push(ev);
+            })
+            .unwrap();
+            assert_eq!(outcome, DispatchOutcome::Continue, "{request:?}");
+            assert!(spawner.snapshot().is_empty(), "{request:?} spawns nothing");
+            assert!(events.is_empty(), "{request:?} emits nothing");
+        }
+    }
+
+    #[test]
+    fn spawns_capture_worker_is_true_only_for_captures() {
+        let captures = [
+            Request::CaptureRegion {
+                monitor: None,
+                delay_ms: 0,
+            },
+            Request::CaptureRegion {
+                monitor: Some(2),
+                delay_ms: 500,
+            },
+            Request::CaptureFullscreen { monitor: None },
+            Request::CaptureFullscreen { monitor: Some(1) },
+        ];
+        for request in &captures {
+            assert!(
+                spawns_capture_worker(request),
+                "{request:?} freezes the screen: pre-hide applies"
+            );
+        }
+        let others = [
+            Request::Quit,
+            Request::Subscribe,
+            Request::OpenLast,
+            Request::PinLast,
+            Request::UploadLast {
+                backend: "imgur".into(),
+            },
+            Request::HideTrayForCapture,
+            Request::ReportCaptured,
+        ];
+        for request in &others {
+            assert!(
+                !spawns_capture_worker(request),
+                "{request:?} never grabs the screen: the icon must not vanish"
+            );
+        }
     }
 
     #[test]
