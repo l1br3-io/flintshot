@@ -418,10 +418,16 @@ fn service_tray_gate(gate: &TrayGate, tray: &DaemonTray) {
 /// capture worker (tray click / hotkey fire): hides at the interaction
 /// itself — instant feedback, and the handshake's grace counts from
 /// here — without touching the capture depth (the worker's
-/// `HideTrayForCapture` owns that; one capture, one count). See
-/// ADR-0036.
-fn pre_hide_for_capture(gate: &TrayGate, tray: &DaemonTray) {
-    if gate.pre_hide(Instant::now(), tray.is_present()) {
+/// `HideTrayForCapture` owns that; one capture, one count). The
+/// origin selects the grace: a tray click's popup is still
+/// mid-close and unobservable, so it waits out the menu grace too
+/// (ADR-0037). See ADR-0036.
+fn pre_hide_for_capture(
+    gate: &TrayGate,
+    tray: &DaemonTray,
+    origin: crate::tray_gate::PreHideOrigin,
+) {
+    if gate.pre_hide(Instant::now(), tray.is_present(), origin) {
         tracing::debug!("pre-hiding tray icon for an imminent capture");
         tray.apply(TrayAction::Hide);
     }
@@ -447,9 +453,16 @@ fn drain_tray_menu(
             Some(crate::tray::TrayAction::Request(request)) => {
                 // A capture dispatch is about to freeze the screen —
                 // start hiding our own icon now rather than waiting
-                // for the worker's handshake round trip.
+                // for the worker's handshake round trip. TrayMenu,
+                // not just for the icon: this click also dismissed
+                // the panel's popup, whose close the ack must wait
+                // out (ADR-0037).
                 if crate::worker::spawns_capture_worker(&request) {
-                    pre_hide_for_capture(tray_gate, tray);
+                    pre_hide_for_capture(
+                        tray_gate,
+                        tray,
+                        crate::tray_gate::PreHideOrigin::TrayMenu,
+                    );
                 }
                 match crate::worker::dispatch(
                     &request,
@@ -580,7 +593,8 @@ fn drain_hotkeys(
         }
         if let Some(request) = registry.lookup(event.id) {
             if crate::worker::spawns_capture_worker(request) {
-                pre_hide_for_capture(tray_gate, tray);
+                // Hotkey: no menu is closing, so the icon grace alone.
+                pre_hide_for_capture(tray_gate, tray, crate::tray_gate::PreHideOrigin::Other);
             }
             if let Err(e) =
                 crate::worker::dispatch(request, &crate::worker::CommandSpawner, state, &mut |ev| {

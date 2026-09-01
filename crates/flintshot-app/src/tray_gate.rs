@@ -39,6 +39,14 @@ use std::time::{Duration, Instant};
 /// order of magnitude of headroom.
 const HIDE_GRACE: Duration = Duration::from_millis(250);
 
+/// Grace for **tray-menu-launched** captures, anchored at the click:
+/// the panel's popup close is a `DBusMenu` round trip plus a spring
+/// animation that outlasts the icon repaint, and nothing observable
+/// says when the popup is actually gone — so the ack waits this out
+/// blind (ADR-0037). Only the icon-grace applies to hotkey / IPC /
+/// applet launches (no menu involved), and only tray clicks pay it.
+const MENU_GRACE: Duration = Duration::from_millis(600);
+
 /// How long a pre-hidden tray stays hidden with no handshake
 /// arrived: worker spawn + connect + request is ~tens of ms; past
 /// half a second the spawn failed and the icon returns.
@@ -72,6 +80,20 @@ pub(crate) enum TrayAction {
     ForceShow,
 }
 
+/// Why the daemon is pre-hiding at dispatch time — decides which
+/// grace the hide confirms under (see [`TrayVisibility::pre_hide`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreHideOrigin {
+    /// A tray-menu click: the panel's popup is mid-close when the
+    /// capture launches, so the ack waits out [`MENU_GRACE`] too.
+    // No-tray builds never take this arm (the tray drain is
+    // feature-gated); tests keep it honest.
+    #[cfg_attr(not(feature = "tray"), allow(dead_code))]
+    TrayMenu,
+    /// Hotkey / anything menu-less: only the icon repaint matters.
+    Other,
+}
+
 /// Pure visibility state machine. Owned by the main loop (via
 /// [`TrayGate`]'s mutex); `now` is always injected so every
 /// transition is unit-testable without sleeping.
@@ -84,13 +106,15 @@ struct TrayVisibility {
     /// Monotonic count of completed (grace-elapsed) hides. Each
     /// handshake's ack waits for this to exceed its baseline.
     confirmed_epoch: u64,
-    grace: Duration,
+    icon_grace: Duration,
+    menu_grace: Duration,
     handshake_window: Duration,
     safety: Duration,
 }
 
 /// The icon's visibility. `Hidden` carries the grace anchor
-/// (`since`), whether the grace has elapsed and been acknowledged
+/// (`since`), the grace this hide confirms under (`grace` — icon
+/// or menu), whether the grace has elapsed and been acknowledged
 /// (`confirmed`), and the earliest a depth-of-zero restore may run
 /// (`hold_until` — the pre-hide window that bridges click →
 /// handshake).
@@ -99,18 +123,25 @@ enum Visibility {
     Shown,
     Hidden {
         since: Instant,
+        grace: Duration,
         confirmed: bool,
         hold_until: Instant,
     },
 }
 
 impl TrayVisibility {
-    fn new(grace: Duration, handshake_window: Duration, safety: Duration) -> Self {
+    fn new(
+        icon_grace: Duration,
+        menu_grace: Duration,
+        handshake_window: Duration,
+        safety: Duration,
+    ) -> Self {
         Self {
             state: Visibility::Shown,
             hide_depth: 0,
             confirmed_epoch: 0,
-            grace,
+            icon_grace,
+            menu_grace,
             handshake_window,
             safety,
         }
@@ -126,6 +157,9 @@ impl TrayVisibility {
                 if tray_present {
                     self.state = Visibility::Hidden {
                         since: now,
+                        // No pre-hide anchored a click, so no menu is
+                        // known to be closing — the icon grace alone.
+                        grace: self.icon_grace,
                         confirmed: false,
                         hold_until: now,
                     };
@@ -140,6 +174,7 @@ impl TrayVisibility {
             }
             Visibility::Hidden {
                 since,
+                grace,
                 confirmed,
                 hold_until,
             } => {
@@ -157,7 +192,7 @@ impl TrayVisibility {
                     self.state = Visibility::Shown;
                     return Some(TrayAction::Show);
                 }
-                if !confirmed && now.duration_since(since) >= self.grace {
+                if !confirmed && now.duration_since(since) >= grace {
                     // The panel has had the grace to re-render — ack.
                     if let Visibility::Hidden { confirmed, .. } = &mut self.state {
                         *confirmed = true;
@@ -196,14 +231,23 @@ impl TrayVisibility {
 
     /// Pre-hide at dispatch time (tray click / hotkey fire): hide
     /// now, without any depth — the worker's handshake owns it.
-    /// Returns whether the caller must apply the hide side effect
-    /// (false when already hidden or there is no tray to hide).
-    fn pre_hide(&mut self, now: Instant, tray_present: bool) -> bool {
+    /// `origin` picks the grace this hide confirms under: a tray
+    /// click's popup is still mid-close (a `DBusMenu` round trip + spring
+    /// animation) and unobservable, so [`PreHideOrigin::TrayMenu`]
+    /// waits out the menu grace too, anchored here at the click
+    /// (ADR-0037). Returns whether the caller must apply the hide
+    /// side effect (false when already hidden or there is no tray).
+    fn pre_hide(&mut self, now: Instant, tray_present: bool, origin: PreHideOrigin) -> bool {
         if !tray_present || self.state != Visibility::Shown {
             return false;
         }
+        let grace = match origin {
+            PreHideOrigin::TrayMenu => self.menu_grace,
+            PreHideOrigin::Other => self.icon_grace,
+        };
         self.state = Visibility::Hidden {
             since: now,
+            grace,
             confirmed: false,
             hold_until: now + self.handshake_window,
         };
@@ -226,21 +270,29 @@ impl TrayGate {
     pub(crate) fn new() -> Self {
         Self::with_durations(
             HIDE_GRACE,
+            MENU_GRACE,
             HANDSHAKE_WINDOW,
             SAFETY_RESTORE,
             CONFIRM_TIMEOUT,
         )
     }
 
-    /// Testable seam: explicit timings.
+    /// Testable seam: explicit timings (icon grace, menu grace,
+    /// handshake window, safety, confirm timeout).
     pub(crate) fn with_durations(
-        grace: Duration,
+        icon_grace: Duration,
+        menu_grace: Duration,
         handshake_window: Duration,
         safety: Duration,
         confirm_timeout: Duration,
     ) -> Self {
         Self {
-            inner: Mutex::new(TrayVisibility::new(grace, handshake_window, safety)),
+            inner: Mutex::new(TrayVisibility::new(
+                icon_grace,
+                menu_grace,
+                handshake_window,
+                safety,
+            )),
             confirmed_epoch: AtomicU64::new(0),
             confirm_timeout,
         }
@@ -265,12 +317,13 @@ impl TrayGate {
     }
 
     /// Main-loop pre-hide at dispatch (tray click / hotkey). Returns
-    /// whether the caller must hide the icon right now.
-    pub(crate) fn pre_hide(&self, now: Instant, tray_present: bool) -> bool {
+    /// whether the caller must hide the icon right now. `origin`
+    /// selects the grace (see [`PreHideOrigin`]).
+    pub(crate) fn pre_hide(&self, now: Instant, tray_present: bool, origin: PreHideOrigin) -> bool {
         self.inner
             .lock()
             .expect("tray visibility mutex poisoned")
-            .pre_hide(now, tray_present)
+            .pre_hide(now, tray_present, origin)
     }
 
     /// Main-loop tick: advance the state machine, mirror the confirm
@@ -320,11 +373,12 @@ impl TrayGate {
 mod tests {
     use super::*;
 
-    /// A gate with timings small enough to advance by hand: grace
-    /// 100 ms, handshake window 200 ms, safety 1 s.
+    /// A gate with timings small enough to advance by hand: icon grace
+    /// 100 ms, menu grace 300 ms, handshake window 200 ms, safety 1 s.
     fn gate() -> TrayGate {
         TrayGate::with_durations(
             Duration::from_millis(100),
+            Duration::from_millis(300),
             Duration::from_millis(200),
             Duration::from_secs(1),
             Duration::from_millis(50),
@@ -434,7 +488,10 @@ mod tests {
     fn pre_hide_hides_without_depth_and_survives_the_handshake_gap() {
         let g = gate();
         let t0 = Instant::now();
-        assert!(g.pre_hide(t0, true), "first pre-hide acts");
+        assert!(
+            g.pre_hide(t0, true, PreHideOrigin::Other),
+            "first pre-hide acts"
+        );
         // The worker's handshake has not arrived yet (200 ms window).
         assert_eq!(
             g.step(at(t0, 50), true),
@@ -443,7 +500,10 @@ mod tests {
         );
         let baseline = g.begin_capture(); // the handshake lands
         assert_eq!(baseline, 0);
-        assert!(!g.pre_hide(at(t0, 60), true), "already hidden: no-op");
+        assert!(
+            !g.pre_hide(at(t0, 60), true, PreHideOrigin::Other),
+            "already hidden: no-op"
+        );
         g.step(at(t0, 100), true);
         assert_eq!(g.confirmed_epoch(), 1, "grace counted from the click");
         g.end_capture();
@@ -454,7 +514,7 @@ mod tests {
     fn pre_hide_expires_when_no_handshake_arrives() {
         let g = gate();
         let t0 = Instant::now();
-        assert!(g.pre_hide(t0, true));
+        assert!(g.pre_hide(t0, true, PreHideOrigin::Other));
         assert_eq!(
             g.step(at(t0, 201), true),
             Some(TrayAction::Show),
@@ -478,7 +538,7 @@ mod tests {
     fn pre_hide_without_a_tray_is_a_no_op() {
         let g = gate();
         let t0 = Instant::now();
-        assert!(!g.pre_hide(t0, false));
+        assert!(!g.pre_hide(t0, false, PreHideOrigin::TrayMenu));
         assert_eq!(g.step(t0, false), None);
     }
 
@@ -489,6 +549,58 @@ mod tests {
         g.end_capture();
         g.begin_capture();
         assert_eq!(g.hide_depth(), 1, "extra ends never underflow the depth");
+    }
+
+    #[test]
+    fn tray_menu_pre_hide_waits_out_the_menu_grace() {
+        // The panel's popup close (a `DBusMenu` round trip + a spring
+        // animation) outlasts the icon repaint — a tray-launched
+        // capture must not be confirmed at the icon grace.
+        let g = gate();
+        let t0 = Instant::now();
+        assert!(g.pre_hide(t0, true, PreHideOrigin::TrayMenu));
+        g.begin_capture(); // the handshake lands; the pre-hide anchors
+        assert_eq!(
+            g.step(at(t0, 100), true),
+            None,
+            "icon grace elapsed: still not confirmable"
+        );
+        assert_eq!(g.confirmed_epoch(), 0);
+        g.step(at(t0, 300), true);
+        assert_eq!(
+            g.confirmed_epoch(),
+            1,
+            "menu grace elapsed from the click: confirmed"
+        );
+    }
+
+    #[test]
+    fn hotkey_pre_hide_uses_the_icon_grace() {
+        // No menu is involved — only the icon repaint must be waited
+        // out, so hotkey captures stay as fast as the icon grace.
+        let g = gate();
+        let t0 = Instant::now();
+        assert!(g.pre_hide(t0, true, PreHideOrigin::Other));
+        g.begin_capture();
+        g.step(at(t0, 100), true);
+        assert_eq!(
+            g.confirmed_epoch(),
+            1,
+            "no menu: the icon grace alone gates the ack"
+        );
+    }
+
+    #[test]
+    fn step_created_hide_uses_the_icon_grace() {
+        // Hides begun without a pre-hide (IPC/applet path — the
+        // daemon learns from the handshake alone) wait only the icon
+        // grace; the origin of the click is unknowable there.
+        let g = gate();
+        let t0 = Instant::now();
+        g.begin_capture();
+        assert_eq!(g.step(t0, true), Some(TrayAction::Hide));
+        assert_eq!(g.step(at(t0, 100), true), None);
+        assert_eq!(g.confirmed_epoch(), 1, "step-created hide: icon grace");
     }
 
     #[tokio::test]
@@ -517,6 +629,7 @@ mod tests {
     async fn wait_confirmed_is_bounded_when_never_confirmed() {
         // 20 ms timeout, nothing steps the gate: the wait gives up.
         let g = TrayGate::with_durations(
+            Duration::from_secs(1),
             Duration::from_secs(1),
             Duration::from_secs(1),
             Duration::from_secs(1),
