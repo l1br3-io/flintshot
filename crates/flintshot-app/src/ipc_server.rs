@@ -701,6 +701,7 @@ mod tests {
         Arc::new(TrayGate::with_durations(
             std::time::Duration::from_millis(30),
             std::time::Duration::from_millis(30),
+            std::time::Duration::from_millis(30),
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(2),
         ))
@@ -755,6 +756,7 @@ mod tests {
         // must still arrive (the worker proceeds regardless; worst
         // case the icon made it into the shot — pre-fix behaviour).
         let gate = Arc::new(TrayGate::with_durations(
+            std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),

@@ -1706,9 +1706,10 @@ dispatch-pinned, verified live here).
 
 ---
 
-## Hide tray during captures — the icon never lands in the shot
+## Hide tray during captures — the icon and its menu never land in the shot
 
-Effort: `hide-tray-for-capture` (ADR-0036). Applies to **every**
+Effort: `hide-tray-for-capture` (ADR-0036, ADR-0037). Applies to
+**every**
 daemon-dispatched capture: tray menu, hotkeys, CLI delegation, COSMIC
 applet, desktop actions, and daemon-spawned `--standalone` workers.
 The state machine, IPC interception, and worker guard are unit-pinned
@@ -1731,10 +1732,13 @@ grace, acks, and safety restore each log.
 
 Click the tray icon → *Capture region*. Expected: the icon vanishes
 **at the click**; the editor/overlay opens on a frozen frame
-**without the icon**; the icon is back in the panel by the time the
-session is interactable (it must NOT stay hidden while you annotate).
+**without the icon and without the menu popup** (the menu grace,
+600 ms from the click, covers the panel's popup close + animation —
+ADR-0037; if a mid-fade menu ghosts, that platform's grace needs a
+bump); the icon is back in the panel by the time the session is
+interactable (it must NOT stay hidden while you annotate).
 The frozen frame keeps every *other* panel item — only flintshot's
-own icon hides.
+own icon (and its menu) hide.
 
 **2. Other triggers (rows 2–4).**
 
@@ -1778,6 +1782,8 @@ X11 session; the visibility flip must not disturb registration
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 | Tray capture: icon vanishes at the click; frame is icon-free |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Tray capture: the dismissed menu popup is absent (no mid-fade ghost) | | | | | | N/A | N/A | N/A | N/A |
+| Tray capture: click-to-grab ≈ 600–700 ms (menu grace) — feels intentional, not laggy | | | | | | N/A | N/A | N/A | N/A |
 | Fullscreen / per-monitor / hotkey captures: icon-free frame  |    |    |    |    |    |    |    |    |    |
 | CLI-delegated `region` (daemon up): icon-free frame          |    |    |    |    |    |    |    |    |    |
 | Applet / desktop action captures: icon-free frame            |    |    |    |    |    | N/A | N/A | N/A | N/A |
@@ -1791,9 +1797,15 @@ X11 session; the visibility flip must not disturb registration
 
 ### Known caveats
 
-- **~250–400 ms click-to-grab on daemon captures** (the propagation
-  grace + poll cadence): the guarantee's price. A shorter grace
-  risks freezing the icon's ghost mid-fade.
+- **~600–700 ms click-to-grab on tray-menu captures** (menu grace,
+  ADR-0037); ~250–400 ms on other daemon triggers (icon grace). The
+  guarantee's price: a shorter grace risks freezing the icon's ghost
+  or the menu mid-fade. `MENU_GRACE` is one const if a platform
+  needs more.
+- **The COSMIC applet's own popup and desktop-action menus are not
+  covered** — those captures arrive over IPC with no origin marker,
+  so the daemon cannot target them (ADR-0037's open edge). Report if
+  it bites.
 - **A killed worker ghosts the icon up to 30 s** (safety bound,
   logged). The bound deliberately encloses a dawdled first-capture
   portal dialog rather than re-icing the icon into that capture.

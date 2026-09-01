@@ -7,3 +7,5 @@
 - [x] 003: Worker handshake — bounded-wait helper + RAII guard around
       the grab in `capture_and_dispatch`
 - [x] 004: Docs — ADR-0036, CHANGELOG, TEST_MATRIX, spec closeout
+- [x] 005: Menu grace — tray-launched captures wait out the panel's
+      popup close (per-origin hide grace, click-anchored); ADR-0037

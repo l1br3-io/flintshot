@@ -46,3 +46,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0034 | [Build the editor without eframe's accesskit feature](ADR-0034-editor-without-accesskit.md) |
 | ADR-0035 | [Selection-first editor phase for `region` captures](ADR-0035-selection-first-editor-fallback.md) |
 | ADR-0036 | [Worker-driven tray hiding for the capture grab window](ADR-0036-hide-tray-for-capture.md) |
+| ADR-0037 | [Click-anchored menu grace for tray-launched captures](ADR-0037-menu-grace-for-tray-launches.md) |
