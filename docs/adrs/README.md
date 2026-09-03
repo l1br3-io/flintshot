@@ -47,3 +47,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0035 | [Selection-first editor phase for `region` captures](ADR-0035-selection-first-editor-fallback.md) |
 | ADR-0036 | [Worker-driven tray hiding for the capture grab window](ADR-0036-hide-tray-for-capture.md) |
 | ADR-0037 | [Click-anchored menu grace for tray-launched captures](ADR-0037-menu-grace-for-tray-launches.md) |
+| ADR-0038 | [Unregister the tray item to close the panel's menu](ADR-0038-unregister-tray-to-close-panel-menu.md) |

@@ -40,11 +40,12 @@ use std::time::{Duration, Instant};
 const HIDE_GRACE: Duration = Duration::from_millis(250);
 
 /// Grace for **tray-menu-launched** captures, anchored at the click:
-/// the panel's popup close is a `DBusMenu` round trip plus a spring
-/// animation that outlasts the icon repaint, and nothing observable
-/// says when the popup is actually gone — so the ack waits this out
-/// blind (ADR-0037). Only the icon-grace applies to hotkey / IPC /
-/// applet launches (no menu involved), and only tray clicks pay it.
+/// the popup's removal is causal on Linux (the hide unregisters the
+/// item and the panel destroys the popup, ADR-0038) but its completion
+/// is still unobservable — no API queries another process's popup
+/// state — so the ack waits this out blind (ADR-0037). Only the
+/// icon-grace applies to hotkey / IPC / applet launches (no menu
+/// involved), and only tray clicks pay it.
 const MENU_GRACE: Duration = Duration::from_millis(600);
 
 /// How long a pre-hidden tray stays hidden with no handshake
@@ -67,11 +68,14 @@ const CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Side effect the daemon's main loop applies after a
 /// [`TrayGate::step`] transition. The gate decides *when*; the
-/// daemon owns *how* (`TrayIcon::set_visible` + the `GLib` pump on
-/// Linux, ADR-0031).
+/// daemon owns *how* — on Linux `Hide` unregisters the SNI item
+/// (dropping the `TrayIcon`, which also closes the panel's menu
+/// popup, ADR-0038) and `Show`/`ForceShow` re-register it; on
+/// macOS/Windows these are `set_visible` flips plus the `GLib` pump
+/// on Linux (ADR-0031).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrayAction {
-    /// Set the icon invisible (SNI `Passive`).
+    /// Remove the tray (SNI unregister on Linux; invisible elsewhere).
     Hide,
     /// Set the icon visible again (SNI `Active`).
     Show,

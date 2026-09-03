@@ -1730,15 +1730,15 @@ grace, acks, and safety restore each log.
 
 **1. Tray-initiated region (rows 1, 5).**
 
-Click the tray icon → *Capture region*. Expected: the icon vanishes
-**at the click**; the editor/overlay opens on a frozen frame
-**without the icon and without the menu popup** (the menu grace,
-600 ms from the click, covers the panel's popup close + animation —
-ADR-0037; if a mid-fade menu ghosts, that platform's grace needs a
-bump); the icon is back in the panel by the time the session is
-interactable (it must NOT stay hidden while you annotate).
-The frozen frame keeps every *other* panel item — only flintshot's
-own icon (and its menu) hide.
+Click the tray icon → *Capture region*. Expected: the tray vanishes
+**at the click** (on Linux the item unregisters — the panel destroys
+its still-open menu popup and drops the icon, ADR-0038); the
+editor/overlay opens on a frozen frame **without the icon and without
+the menu popup** (the menu grace, 600 ms from the click, waits out the
+destroy's propagation — ADR-0037); the tray is back in the panel by
+the time the session is interactable (it must NOT stay hidden while
+you annotate). The frozen frame keeps every *other* panel item — only
+flintshot's own icon (and its menu) hide.
 
 **2. Other triggers (rows 2–4).**
 
@@ -1762,7 +1762,8 @@ icon still returns (the restore report fires on error paths too).
 pkill -9 -f 'flintshot region'
 ```
 
-Expected: the icon returns within ~30 s (the safety bound) with a
+Expected: the tray returns within ~30 s (the safety bound — on
+Linux a full re-register, ADR-0038) with a
 `tray stayed hidden past the safety bound` warning in the log; the
 next capture works normally.
 
@@ -1799,20 +1800,26 @@ X11 session; the visibility flip must not disturb registration
 
 - **~600–700 ms click-to-grab on tray-menu captures** (menu grace,
   ADR-0037); ~250–400 ms on other daemon triggers (icon grace). The
-  guarantee's price: a shorter grace risks freezing the icon's ghost
-  or the menu mid-fade. `MENU_GRACE` is one const if a platform
-  needs more.
+  guarantee's price: the unregister→popup-destroy propagation is
+  unobservable, so the ack waits it out blind.
+- **On Linux every daemon-dispatched capture unregisters and
+  re-registers the SNI item** (ADR-0038) — the panel destroys the
+  popup only on unregistration, and COSMIC's status area never
+  closes it on activation (upstream `TODO`). The icon flickers out
+  at the trigger and returns after the grab; a failed re-register
+  (logged) defers the icon to the next capture or a daemon restart.
+  macOS/Windows use plain `set_visible` flips.
 - **The COSMIC applet's own popup and desktop-action menus are not
   covered** — those captures arrive over IPC with no origin marker,
   so the daemon cannot target them (ADR-0037's open edge). Report if
   it bites.
-- **A killed worker ghosts the icon up to 30 s** (safety bound,
+- **A killed worker ghosts the tray up to 30 s** (safety bound,
   logged). The bound deliberately encloses a dawdled first-capture
   portal dialog rather than re-icing the icon into that capture.
 - **Grace is one constant across platforms**; native-tray repaint
   (macOS/Windows) is faster than the SNI round trip — tune per
   platform if a cell ever shows a ghost.
-- Only flintshot's own icon hides. Other panels' icons (and any
+- Only flintshot's own tray hides. Other panels' icons (and any
   other app's) remain in the shot by design.
 
 ---
