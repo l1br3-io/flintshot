@@ -20,6 +20,22 @@ Categories used below:
 
 ### Fixed
 
+- The tray **menu popup** still landed in *every* tray-launched
+  capture on COSMIC despite the ADR-0037 menu grace (L5, 2026-09-03):
+  `cosmic-applet-status-area` never closes an SNI menu popup on item
+  activation (an upstream `TODO`), and it ignores SNI `NewStatus`, so
+  no wait duration or status flip could remove it. On Linux the
+  capture-time hide is now an **unregister / re-register cycle**
+  (ADR-0038): dropping the `TrayIcon` unregisters the SNI item, which
+  is the one lever that makes the panel destroy its (possibly
+  still-open) popup *and* reliably remove the icon; the restore side
+  rebuilds the tray behind the same watcher barrier startup uses.
+  macOS/Windows keep `set_visible` flips (native menus close on
+  activation). Visible behaviour is unchanged in rhythm — the tray
+  vanishes at the trigger and returns after the grab — but the
+  popup's removal is now causal instead of hoped-for, and the frozen
+  frame carries neither the icon nor the menu on SNI panels.
+
 - The daemon's own tray icon — and the tray **menu** the click
   dismissed — landed in every daemon-dispatched capture's frozen
   frame (tray clicks, hotkeys, CLI delegation, applet / desktop

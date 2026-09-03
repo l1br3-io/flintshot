@@ -12,12 +12,16 @@
 //! See ADR-0018 for the bridge rationale. Event delivery is
 //! per-source: `global-hotkey` hands events to a static crossbeam
 //! receiver, so raw polling suffices for that half — but the
-//! GTK-backed tray half (SNI registration via libappindicator, muda
-//! menu-event delivery) only progresses while the default `GLib`
-//! main context is iterated, which no library thread does for us.
-//! [`pump_glib_context`] does it from the daemon loop each
-//! iteration (ADR-0031). macOS would need a run loop — recorded as
-//! a future-work note.
+//!    GTK-backed tray half (SNI registration via libappindicator, muda
+//!    menu-event delivery) only progresses while the default `GLib`
+//!    main context is iterated, which no library thread does for us.
+//!    [`pump_glib_context`] does it from the daemon loop each
+//!    iteration (ADR-0031). macOS would need a run loop — recorded as
+//!    a future-work note.
+//!
+//! The tray's capture-time hide is an unregister/re-register cycle on
+//! Linux — the panel, not us, owns the menu popup, and only item
+//! unregistration makes it close (ADR-0038).
 
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -131,22 +135,24 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     crate::sni_watchdog::ensure_watcher();
     #[cfg(all(feature = "tray", target_os = "linux"))]
     let sni_watchdog = crate::sni_watchdog::spawn();
-    // The icon handle rides in `DaemonTray` for the daemon's lifetime
-    // (dropping a `TrayIcon` removes it); the event loop drives its
-    // visibility through the tray gate (ADR-0036).
+    // The icon handle rides in `DaemonTray`; the event loop drives its
+    // visibility through the tray gate (ADR-0036). On Linux the gate's
+    // Hide action *unregisters* the item — dropping the handle — and
+    // restore rebuilds it (ADR-0038: only unregistration closes the
+    // panel's popup and reliably removes the icon on SNI panels).
     #[cfg(feature = "tray")]
-    let tray = match crate::tray::build(wayland) {
-        Ok(icon) => DaemonTray::from_opt(Some(icon)),
+    let mut tray = match crate::tray::build(wayland) {
+        Ok(icon) => DaemonTray::from_opt(Some(icon), wayland),
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "system tray unavailable; continuing without it (IPC + hotkeys still work)"
             );
-            DaemonTray::none()
+            DaemonTray::from_opt(None, wayland)
         }
     };
     #[cfg(not(feature = "tray"))]
-    let tray = DaemonTray::none();
+    let mut tray = DaemonTray::none();
     let hotkey_registry = if wayland {
         tracing::info!("Wayland session: global hotkeys via xdg-desktop-portal GlobalShortcuts");
         crate::hotkeys::HotkeyRegistry::empty()
@@ -184,7 +190,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         &hotkeys_shared,
         &bind_requested,
         &tray_gate,
-        &tray,
+        &mut tray,
     );
 
     // Wait for the tokio side to finish so we don't leak the runtime.
@@ -258,7 +264,7 @@ fn run_event_loop(
     hotkeys_shared: &crate::hotkeys_portal::SharedHotkeys,
     #[cfg_attr(not(feature = "tray"), allow(unused_variables))] bind_requested: &Notify,
     tray_gate: &TrayGate,
-    tray: &DaemonTray,
+    tray: &mut DaemonTray,
 ) {
     loop {
         // Before draining the tray: muda delivers menu events through
@@ -341,21 +347,46 @@ fn pump_glib_context() {
 /// the SNI item registered; the gate decides visibility, this type
 /// applies it. Exists in no-tray builds as an always-absent handle so
 /// the loop and drains keep one signature.
+///
+/// On Linux, "hide" means **unregister**: `set_visible(false)` only
+/// flips the SNI status to Passive, which panels need not observe —
+/// and the panel-owned menu popup stays open regardless (COSMIC's
+/// status area never closes it on activation, an upstream TODO).
+/// Unregistering the item makes the panel destroy the popup and drop
+/// the icon, so the capture freezes a frame with neither in it; the
+/// restore side rebuilds the whole tray. See ADR-0038.
 struct DaemonTray {
     #[cfg(feature = "tray")]
     icon: Option<tray_icon::TrayIcon>,
+    /// Session flavor the icon was built for — a rebuild must offer
+    /// the same menu (the Wayland-only *Bind shortcuts…* item).
+    #[cfg(feature = "tray")]
+    wayland: bool,
 }
 
 impl DaemonTray {
     #[cfg(feature = "tray")]
-    fn from_opt(icon: Option<tray_icon::TrayIcon>) -> Self {
-        Self { icon }
+    fn from_opt(icon: Option<tray_icon::TrayIcon>, wayland: bool) -> Self {
+        Self { icon, wayland }
     }
 
+    /// The always-absent handle: no-tray builds' only constructor,
+    /// and the headless tests' stand-in. Tray builds construct via
+    /// [`Self::from_opt`] (even on failure — the session flavor must
+    /// survive for a later rebuild).
+    #[cfg_attr(
+        all(feature = "tray", not(test)),
+        allow(
+            dead_code,
+            reason = "tray builds use from_opt; none() serves tests and no-tray builds"
+        )
+    )]
     fn none() -> Self {
         Self {
             #[cfg(feature = "tray")]
             icon: None,
+            #[cfg(feature = "tray")]
+            wayland: false,
         }
     }
 
@@ -376,14 +407,12 @@ impl DaemonTray {
     /// Apply a gate-decided visibility change. Failures are non-fatal
     /// (a compositor refusing the status flip must never wedge the
     /// loop); on Linux the `GLib` pump follows so libappindicator's
-    /// `DBus` call actually reaches the bus (ADR-0031).
+    /// `DBus` calls actually reach the bus (ADR-0031).
     #[cfg(feature = "tray")]
-    fn apply(&self, action: TrayAction) {
-        if let Some(icon) = &self.icon {
-            let visible = !matches!(action, TrayAction::Hide);
-            if let Err(e) = icon.set_visible(visible) {
-                tracing::warn!(error = %e, ?action, "tray visibility change failed");
-            }
+    fn apply(&mut self, action: TrayAction) {
+        match action {
+            TrayAction::Hide => self.hide(),
+            TrayAction::Show | TrayAction::ForceShow => self.restore(),
         }
         #[cfg(target_os = "linux")]
         pump_glib_context();
@@ -394,14 +423,79 @@ impl DaemonTray {
         clippy::unused_self,
         reason = "no-tray builds have no icon; the method exists so callers keep one signature"
     )]
-    fn apply(&self, _action: TrayAction) {}
+    fn apply(&mut self, _action: TrayAction) {}
+
+    /// Remove the tray from the panel for an imminent capture.
+    #[cfg(feature = "tray")]
+    fn hide(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            // Dropping the `TrayIcon` unregisters the SNI item: the
+            // panel destroys its (possibly still-open) menu popup and
+            // removes the icon — the only lever that reliably does
+            // either on SNI panels (ADR-0038). A Passive flip is
+            // unwatched on COSMIC and never touches the popup.
+            if self.icon.take().is_some() {
+                tracing::debug!("unregistered the tray item for an imminent capture");
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        if let Some(icon) = &self.icon {
+            // Native backends close their menu on activation, so a
+            // visibility flip is all the hide that is needed.
+            if let Err(e) = icon.set_visible(false) {
+                tracing::warn!(error = %e, "tray visibility change failed");
+            }
+        }
+    }
+
+    /// Return the tray after a capture. On Linux this may have to
+    /// rebuild the whole icon (the hide unregistered it).
+    #[cfg(feature = "tray")]
+    fn restore(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if self.icon.is_none() {
+                self.rebuild();
+                return;
+            }
+        }
+        if let Some(icon) = &self.icon {
+            if let Err(e) = icon.set_visible(true) {
+                tracing::warn!(error = %e, "tray visibility change failed");
+            }
+        }
+    }
+
+    /// Re-register the SNI item after a Linux hide dropped it. The
+    /// watcher barrier mirrors startup (ADR-0032): a healthy session
+    /// pays one probe, a dead watcher gets poked back before the
+    /// registration attempt rather than the icon going missing until
+    /// the watchdog's next sweep. A failure is logged, not retried
+    /// here — the next capture's hide/restore cycle retries by
+    /// construction.
+    #[cfg(all(feature = "tray", target_os = "linux"))]
+    fn rebuild(&mut self) {
+        crate::sni_watchdog::ensure_watcher();
+        match crate::tray::build(self.wayland) {
+            Ok(icon) => {
+                self.icon = Some(icon);
+                tracing::debug!("re-registered the tray item after the capture");
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not re-register the tray item after the capture; \
+                 it returns on the next capture or a daemon restart"
+            ),
+        }
+    }
 }
 
 /// One tray-gate tick: advance the state machine and apply whatever
 /// side effect it decided on. Runs every loop iteration (≤
 /// [`POLL_TIMEOUT`]), so hides owed to waiting workers land well
 /// inside their reply bound.
-fn service_tray_gate(gate: &TrayGate, tray: &DaemonTray) {
+fn service_tray_gate(gate: &TrayGate, tray: &mut DaemonTray) {
     if let Some(action) = gate.step(Instant::now(), tray.is_present()) {
         if action == TrayAction::ForceShow {
             tracing::warn!(
@@ -414,21 +508,22 @@ fn service_tray_gate(gate: &TrayGate, tray: &DaemonTray) {
     }
 }
 
-/// Pre-hide the tray icon for a dispatch that is about to spawn a
-/// capture worker (tray click / hotkey fire): hides at the interaction
-/// itself — instant feedback, and the handshake's grace counts from
-/// here — without touching the capture depth (the worker's
-/// `HideTrayForCapture` owns that; one capture, one count). The
-/// origin selects the grace: a tray click's popup is still
+/// Pre-hide the tray for a dispatch that is about to spawn a
+/// capture worker (tray click / hotkey fire): removes it at the
+/// interaction itself — instant feedback, and the handshake's grace
+/// counts from here — without touching the capture depth (the
+/// worker's `HideTrayForCapture` owns that; one capture, one count).
+/// The origin selects the grace: a tray click's popup is still
 /// mid-close and unobservable, so it waits out the menu grace too
-/// (ADR-0037). See ADR-0036.
+/// (ADR-0037). On Linux this *unregisters* the item, which is what
+/// closes the panel's popup (ADR-0038). See ADR-0036.
 fn pre_hide_for_capture(
     gate: &TrayGate,
-    tray: &DaemonTray,
+    tray: &mut DaemonTray,
     origin: crate::tray_gate::PreHideOrigin,
 ) {
     if gate.pre_hide(Instant::now(), tray.is_present(), origin) {
-        tracing::debug!("pre-hiding tray icon for an imminent capture");
+        tracing::debug!("hiding the tray for an imminent capture");
         tray.apply(TrayAction::Hide);
     }
 }
@@ -443,7 +538,7 @@ fn drain_tray_menu(
     state: &crate::worker::DispatchState,
     bind_requested: &Notify,
     tray_gate: &TrayGate,
-    tray: &DaemonTray,
+    tray: &mut DaemonTray,
 ) -> bool {
     use tray_icon::menu::MenuEvent;
 
@@ -452,11 +547,13 @@ fn drain_tray_menu(
         match crate::tray::action_for(&event) {
             Some(crate::tray::TrayAction::Request(request)) => {
                 // A capture dispatch is about to freeze the screen —
-                // start hiding our own icon now rather than waiting
-                // for the worker's handshake round trip. TrayMenu,
-                // not just for the icon: this click also dismissed
-                // the panel's popup, whose close the ack must wait
-                // out (ADR-0037).
+                // remove our own tray now rather than waiting for the
+                // worker's handshake round trip. TrayMenu, not just
+                // for the icon: this click also dismissed the panel's
+                // popup, whose close the ack must wait out
+                // (ADR-0037) — and on Linux the removal itself
+                // (unregistration) is what closes that popup
+                // (ADR-0038).
                 if crate::worker::spawns_capture_worker(&request) {
                     pre_hide_for_capture(
                         tray_gate,
@@ -576,13 +673,14 @@ fn editor_argv(value: &std::ffi::OsStr) -> Vec<std::ffi::OsString> {
 /// worker table (same path as tray/IPC). `Released` is ignored to avoid
 /// double-firing. A no-op when hotkeys are unavailable (the registry is
 /// empty). Hotkey captures pre-hide the tray like tray clicks do
-/// (ADR-0036) — the handshake that follows owns the depth.
+/// (ADR-0036) — on Linux that means unregistering the item, the same
+/// causal removal (ADR-0038); the handshake that follows owns the depth.
 fn drain_hotkeys(
     registry: &crate::hotkeys::HotkeyRegistry,
     bus: &crate::ipc_server::SubscriberBus,
     state: &crate::worker::DispatchState,
     tray_gate: &TrayGate,
-    tray: &DaemonTray,
+    tray: &mut DaemonTray,
 ) {
     use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 
@@ -936,7 +1034,7 @@ mod tests {
             let shared = Arc::new(Mutex::new(HotkeyConfig::default()));
             let bind_requested = Notify::new();
             let tray_gate = TrayGate::new();
-            let tray = DaemonTray::none();
+            let mut tray = DaemonTray::none();
 
             run_event_loop(
                 rx,
@@ -948,7 +1046,7 @@ mod tests {
                 &shared,
                 &bind_requested,
                 &tray_gate,
-                &tray,
+                &mut tray,
             );
 
             assert!(
