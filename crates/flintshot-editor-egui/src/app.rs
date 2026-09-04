@@ -226,10 +226,18 @@ impl EditorApp {
     /// from both crop sites (`logic`'s Enter dispatch and `ui`'s
     /// toolbar action) so the mask never paints on the crop's own
     /// frame. One-way by design: undo pops the snapshot, the latch
-    /// keeps the phase ended.
+    /// keeps the phase ended. On the latch, a still-`Select` tool
+    /// becomes `Move` — the phase force-armed `Select` at
+    /// construction, so this restores the edit-phase default (the
+    /// shell's own override, not the config-gated commit flip). A
+    /// tool the user picked mid-phase is their explicit choice and
+    /// stays put.
     fn end_phase_on_crop(&mut self) {
         if self.phase == SelectionPhase::Live && self.state.undo.iter().any(|s| s.image.is_some()) {
             self.phase = SelectionPhase::Ended;
+            if self.state.tool == Tool::Select {
+                self.state.tool = Tool::Move;
+            }
         }
     }
 
@@ -1793,6 +1801,38 @@ mod tests {
         assert!(
             !app.phase_active(),
             "the first Enter-crop must end the phase"
+        );
+    }
+
+    #[test]
+    fn phase_end_crop_flips_select_to_move() {
+        let mut app = phase_app(true);
+        drag_selection(&mut app.state, (10.0, 10.0), (40.0, 30.0));
+        let _ = app.state.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        app.end_phase_on_crop();
+        assert!(!app.phase_active(), "fixture: the crop ended the phase");
+        assert_eq!(
+            app.state.tool,
+            Tool::Move,
+            "the edit phase opens on Move, not the phase's armed Select"
+        );
+    }
+
+    #[test]
+    fn phase_end_keeps_user_picked_tool() {
+        let mut app = phase_app(true);
+        app.state.tool = Tool::Rect; // user switched tools mid-phase
+        app.state.selection = Some(Rect::from_xywh(8.0, 8.0, 32.0, 16.0));
+        app.state.confirm_selection(); // the "Crop · Enter" button's call
+        app.end_phase_on_crop();
+        assert!(!app.phase_active(), "fixture: the crop ended the phase");
+        assert_eq!(
+            app.state.tool,
+            Tool::Rect,
+            "an explicit mid-phase tool choice must survive the phase-end flip"
         );
     }
 

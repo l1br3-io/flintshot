@@ -662,9 +662,10 @@ fn run_overlay_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> R
 }
 
 /// Build an [`EditorState`] for a fresh capture with the persisted
-/// `[ui]` defaults (color / stroke / font) applied (Task 15).
-/// Shared by the editor-window and overlay shell paths so both
-/// sessions start from the same persisted tool settings.
+/// `[ui]` defaults (color / stroke / font / flip-to-move) applied
+/// (Task 15; prominent-move-tool Task 002). Shared by the
+/// editor-window and overlay shell paths so both sessions start
+/// from the same persisted tool settings.
 #[cfg(feature = "egui")]
 fn state_from_config(img: image::RgbaImage, cfg: &Config) -> flintshot_core::EditorState {
     let mut state = flintshot_core::EditorState::new(img);
@@ -672,6 +673,7 @@ fn state_from_config(img: image::RgbaImage, cfg: &Config) -> flintshot_core::Edi
     state.text_color = cfg.ui.default_text_color;
     state.stroke_width = cfg.ui.default_stroke_width;
     state.font_size = cfg.ui.default_font_size;
+    state.flip_to_move = cfg.ui.flip_to_move;
     state
 }
 
@@ -1860,5 +1862,19 @@ mod tests {
         // here — the overlay forces Select inside `OverlayApp::new`,
         // not in the shared builder.
         assert_eq!(state.tool, Tool::Move);
+    }
+
+    /// The persisted `[ui] flip-to-move` knob must reach the state
+    /// both ways — it gates the commit-flip policy for the session.
+    #[cfg(feature = "egui")]
+    #[test]
+    fn state_from_config_maps_flip_to_move_both_ways() {
+        let img = || image::RgbaImage::from_raw(2, 2, vec![255; 16]).expect("2×2×4 bytes");
+        let mut cfg = Config::default();
+        cfg.ui.flip_to_move = false;
+        let state = state_from_config(img(), &cfg);
+        assert!(!state.flip_to_move, "false config must reach the state");
+        let state = state_from_config(img(), &Config::default());
+        assert!(state.flip_to_move, "true config must reach the state");
     }
 }
