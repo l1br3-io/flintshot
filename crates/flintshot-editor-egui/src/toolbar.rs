@@ -1,6 +1,6 @@
 //! The editor toolbar: a two-row instrument panel.
 //!
-//! **Rail** (top, stable across tools): the ten tool chips,
+//! **Rail** (top, stable across tools): the tool chips,
 //! undo / redo, and the output actions — Save, Pin, Upload, and the
 //! ember Copy primary. **Bay** (bottom, per-tool): only the controls
 //! the active tool can use, plus a contextual hint on the right.
@@ -68,7 +68,7 @@ pub(crate) struct ToolSpec {
     pub(crate) glyph: Glyph,
 }
 
-/// The ten tool chips in rail order. Shared with the overlay's
+/// The tool chips in rail order. Shared with the overlay's
 /// floating rail.
 pub(crate) const TOOLS: &[ToolSpec] = &[
     ToolSpec {
@@ -76,6 +76,12 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
         name: "Select",
         key: "S",
         glyph: g_select,
+    },
+    ToolSpec {
+        tool: Tool::Move,
+        name: "Move",
+        key: "V",
+        glyph: g_move,
     },
     ToolSpec {
         tool: Tool::Rect,
@@ -136,7 +142,7 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
 /// Draw the whole toolbar (rail + bay) as the window's top panel.
 ///
 /// The horizontal scroll on the rail is the narrow-capture fallback:
-/// region captures can be far narrower than the ten chips + actions,
+/// region captures can be far narrower than the chips + actions,
 /// and a clipped toolbar hides actions; a scrollbar-less scroll keeps
 /// every control reachable via wheel / drag.
 pub(crate) fn show(ui: &mut egui::Ui, state: &mut EditorState, copied: bool) -> ToolbarAction {
@@ -229,6 +235,9 @@ fn draw_bay(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.horizontal(|ui| {
         match state.tool {
             Tool::Select => select_bay(ui, state),
+            // Move has no adjustable properties — nothing to grab,
+            // nothing to drag — so its bay is just the hint.
+            Tool::Move => {}
             Tool::Text => text_bay(ui, state),
             Tool::Blur => blur_bay(ui, state),
             Tool::Number => swatch_row(ui, &mut state.color),
@@ -394,6 +403,7 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 fn tool_hint(tool: Tool) -> &'static str {
     match tool {
         Tool::Select => "drag a region · Copy and Pin use it · Enter crops",
+        Tool::Move => "press an annotation and drag to reposition it",
         Tool::Text => "click to place the caret",
         Tool::Blur => "drag over what to hide",
         Tool::Number => "click to place the next number",
@@ -629,6 +639,27 @@ fn g_select(p: &egui::Painter, r: egui::Rect, c: Color32) {
     }
 }
 
+/// Four-direction move cross with mini chevrons — the universal
+/// "reposition object" idiom. The chevrons are deliberately smaller
+/// than `arrowhead`'s barbs so the cross reads as arrows without
+/// swamping the 28 px chip.
+fn g_move(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    seg(p, r, (0.0, -5.0), (0.0, 5.0), c, 2.0);
+    seg(p, r, (-5.0, 0.0), (5.0, 0.0), c, 2.0);
+    for (tip, dx, dy) in [
+        ((0.0, -5.0), -1.0, 1.0),
+        ((0.0, -5.0), 1.0, 1.0),
+        ((0.0, 5.0), -1.0, -1.0),
+        ((0.0, 5.0), 1.0, -1.0),
+        ((-5.0, 0.0), 1.0, -1.0),
+        ((-5.0, 0.0), 1.0, 1.0),
+        ((5.0, 0.0), -1.0, -1.0),
+        ((5.0, 0.0), -1.0, 1.0),
+    ] {
+        seg(p, r, tip, (tip.0 + dx * 2.6, tip.1 + dy * 2.6), c, 2.0);
+    }
+}
+
 fn g_rect(p: &egui::Painter, r: egui::Rect, c: Color32) {
     let rect = egui::Rect::from_min_size(pt(r, -6.0, -4.0), egui::vec2(12.0, 8.0));
     p.rect(
@@ -791,13 +822,14 @@ mod tests {
 
     #[test]
     fn tools_cover_every_variant_with_unique_keys() {
-        assert_eq!(TOOLS.len(), 10);
+        assert_eq!(TOOLS.len(), 11);
         let mut keys: Vec<&str> = TOOLS.iter().map(|t| t.key).collect();
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), TOOLS.len());
         for tool in [
             Tool::Select,
+            Tool::Move,
             Tool::Rect,
             Tool::Ellipse,
             Tool::Line,

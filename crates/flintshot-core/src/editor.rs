@@ -17,6 +17,8 @@ use crate::geom::{Color, Point, Rect, Stroke};
 pub enum Tool {
     /// Region select / crop.
     Select,
+    /// Move a committed annotation by dragging it.
+    Move,
     /// Rectangle outline.
     #[default]
     Rect,
@@ -216,6 +218,28 @@ impl Snapshot {
     }
 }
 
+/// An in-flight annotation move started by a Move-tool press on a
+/// committed annotation (see [`EditorState::moving`]).
+///
+/// The grab offset keeps the grabbed point under the cursor for the
+/// whole drag: every `update_move` positions the annotation's
+/// bounding-box `min` at `cursor - grab_offset`, so the annotation
+/// never snaps to the cursor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnnotationDrag {
+    /// Index into [`EditorState::anns`] of the grabbed annotation.
+    /// Stable for the whole drag — moving never reorders `anns`.
+    pub index: usize,
+    /// Press position minus the annotation's bounding-box `min`,
+    /// physical px. Preserved from the grab so the grab point tracks
+    /// the cursor.
+    pub grab_offset: Point,
+    /// Whether the drag has produced actual movement yet. The undo
+    /// snapshot is pushed lazily on the first movement, so a
+    /// click-without-drag leaves history untouched.
+    pub moved: bool,
+}
+
 /// Full editor state: source image + committed annotations + history +
 /// active tool settings.
 ///
@@ -279,9 +303,15 @@ pub struct EditorState {
     pub text_background: Option<Color>,
     /// Next number to assign for `Tool::Number`.
     pub next_number: u32,
-    /// Selected annotation index, if any (hit-testing result). Set by
-    /// the shell when the user clicks an existing annotation; not yet
-    /// wired into the dispatcher (Phase 2 select-and-move tool).
+    /// In-flight annotation move for `Tool::Move` (press on a
+    /// committed annotation). `None` when no move drag is active.
+    /// While set, Move-tool `PointerDrag`s translate the grabbed
+    /// annotation.
+    pub moving: Option<AnnotationDrag>,
+    /// Selected annotation index, if any. Set by the dispatcher when a
+    /// Move-tool press grabs an annotation for a move and cleared on
+    /// release / undo / crop. Shells may read it to render per-
+    /// annotation chrome (future); nothing renders it today.
     pub selected_index: Option<usize>,
     /// Insertion-point position within the in-flight `Tool::Text`
     /// draft, as a **char index** (not byte index) into
@@ -317,6 +347,7 @@ impl EditorState {
             text_outline: None,
             text_background: None,
             next_number: 1,
+            moving: None,
             selected_index: None,
             text_cursor: 0,
         }
@@ -336,8 +367,8 @@ impl EditorState {
     /// `Enter` / `Esc` (see [`dispatch_input`](Self::dispatch_input)'s
     /// text-editing branch).
     ///
-    /// Tools with a different input model (`Number`, `Select`) are
-    /// no-ops here; they have dedicated entry points.
+    /// Tools with a different input model (`Number`, `Select`,
+    /// `Move`) are no-ops here; they have dedicated entry points.
     ///
     /// If a `pending` annotation already exists it is replaced — the
     /// shell should `commit_annotation()` or `cancel_annotation()`
@@ -399,9 +430,9 @@ impl EditorState {
                 };
                 Annotation::text(at, "", style)
             }
-            // Number / Select have non-drag input models; their entry
-            // points are tool-specific (see method doc).
-            Tool::Number | Tool::Select => return,
+            // Number / Select / Move have non-drag input models; their
+            // entry points are tool-specific (see method doc).
+            Tool::Number | Tool::Select | Tool::Move => return,
         };
         if self.tool == Tool::Text {
             self.text_cursor = 0;
@@ -512,6 +543,74 @@ impl EditorState {
         }
     }
 
+    // --- Annotation move (Tool::Move) ---
+
+    /// Start moving the annotation at `index` from a press at `at`.
+    ///
+    /// Records the grab offset (press position minus bounding-box
+    /// `min`) so subsequent [`update_move`](Self::update_move) calls
+    /// keep the grab point under the cursor, and publishes
+    /// `selected_index`. Returns `false` — the press is a no-op —
+    /// when the annotation has no bounding box (e.g. an empty
+    /// polyline) and thus nothing to grab or move by.
+    fn begin_move(&mut self, index: usize, at: Point) -> bool {
+        let Some(grab_offset) = self.anns.get(index).and_then(|ann| {
+            ann.bounding_box()
+                .map(|bbox| Point::new(at.x - bbox.min.x, at.y - bbox.min.y))
+        }) else {
+            return false;
+        };
+        self.moving = Some(AnnotationDrag {
+            index,
+            grab_offset,
+            moved: false,
+        });
+        self.selected_index = Some(index);
+        true
+    }
+
+    /// Translate the annotation being moved so its bounding-box
+    /// `min` sits at `at - grab_offset`.
+    ///
+    /// Pushes the undo snapshot lazily: the first drag event with
+    /// actual movement snapshots the pre-move `anns` and clears
+    /// `redo`, so one move gesture is exactly one undo entry and a
+    /// click-without-drag records nothing.
+    fn update_move(&mut self, at: Point) {
+        let Some(drag) = self.moving else {
+            return;
+        };
+        let Some(bbox) = self.anns.get(drag.index).and_then(Annotation::bounding_box) else {
+            // The annotation vanished (crop raced the drag) or lost
+            // its bbox; the drag is over either way.
+            self.end_move();
+            return;
+        };
+        let dx = at.x - drag.grab_offset.x - bbox.min.x;
+        let dy = at.y - drag.grab_offset.y - bbox.min.y;
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        if !drag.moved {
+            self.undo
+                .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
+            self.redo.clear();
+            self.moving = Some(AnnotationDrag {
+                moved: true,
+                ..drag
+            });
+        }
+        self.anns[drag.index].translate(dx, dy);
+    }
+
+    /// Drop the in-flight move state (`moving` + `selected_index`)
+    /// without touching `anns` — the translation already applied
+    /// stays applied.
+    fn end_move(&mut self) {
+        self.moving = None;
+        self.selected_index = None;
+    }
+
     /// Confirm the current selection: crop the editor to the selected
     /// region, then clear the selection. No-op when no selection is
     /// active or the selection is degenerate (see [`crop`]).
@@ -537,9 +636,10 @@ impl EditorState {
     ///
     /// Pushes a [`Snapshot::full`] (pre-crop image + anns) onto `undo`
     /// and clears `redo`. Clears `pending` (an in-flight annotation
-    /// in the old coordinate space would be misleading after crop).
-    /// No-op when `rect` is degenerate (either normalized dimension
-    /// < 1 px) or the crop falls entirely outside the image.
+    /// in the old coordinate space would be misleading after crop)
+    /// and any in-flight move (its index refers to the pre-crop
+    /// list). No-op when `rect` is degenerate (either normalized
+    /// dimension < 1 px) or the crop falls entirely outside the image.
     pub fn crop(&mut self, rect: Rect) {
         let n = rect.normalized();
         if n.width().abs() < 1.0 || n.height().abs() < 1.0 {
@@ -554,6 +654,7 @@ impl EditorState {
         self.image = new_image;
         self.anns.retain_mut(|ann| ann.crop_and_translate(n));
         self.pending = None;
+        self.end_move();
         self.undo.push(snapshot);
         self.redo.clear();
     }
@@ -561,13 +662,17 @@ impl EditorState {
     /// Pop the last committed state from `undo` and swap it into `anns`.
     ///
     /// Also clears `pending` (Ctrl+Z mid-drag cancels the in-flight
-    /// annotation, matching typical editor behaviour). If the snapshot
-    /// carries an image (crop), the pre-crop image is restored too.
+    /// annotation, matching typical editor behaviour) and any
+    /// in-flight move (Ctrl+Z mid-move restores the pre-move
+    /// position the snapshot carries and the drag's index would
+    /// point into the swapped-out list). If the snapshot carries an
+    /// image (crop), the pre-crop image is restored too.
     /// `next_number` is always restored from the snapshot so undoing a
     /// Number placement decrements the counter. The current state is
     /// pushed onto `redo` before the swap. No-op when `undo` is empty.
     pub fn undo(&mut self) {
         self.pending = None;
+        self.end_move();
         let Some(prev) = self.undo.pop() else {
             return;
         };
@@ -590,12 +695,15 @@ impl EditorState {
 
     /// Pop the last undone state from `redo` and swap it into `anns`.
     ///
-    /// Mirrors [`undo`](Self::undo): if the redo snapshot carries an
-    /// image, it is restored; `next_number` is always restored. The
-    /// current state is pushed onto `undo` before the swap. No-op when
-    /// `redo` is empty (which is always the case immediately after a
-    /// commit or crop, since both clear `redo`).
+    /// Mirrors [`undo`](Self::undo): any in-flight move is dropped
+    /// for the same index-stability reason, and if the redo
+    /// snapshot carries an image, it is restored; `next_number` is
+    /// always restored. The current state is pushed onto `undo`
+    /// before the swap. No-op when `redo` is empty (which is always
+    /// the case immediately after a commit or crop, since both clear
+    /// `redo`).
     pub fn redo(&mut self) {
+        self.end_move();
         let Some(next) = self.redo.pop() else {
             return;
         };
@@ -690,7 +798,19 @@ impl EditorState {
             }
             InputEvent::PointerDown { pos } => {
                 if self.tool == Tool::Select {
+                    // Select owns region selection only — a press on a
+                    // committed annotation starts a fresh selection
+                    // drag over it (annotation moves belong to
+                    // `Tool::Move`).
                     self.begin_selection(*pos);
+                } else if self.tool == Tool::Move {
+                    // A press on a committed annotation grabs it for a
+                    // move; a miss is a no-op — Move never starts a
+                    // selection or an annotation. See `begin_move` for
+                    // the degenerate-bbox miss path.
+                    if let Some(index) = self.hit_test(*pos) {
+                        self.begin_move(index, *pos);
+                    }
                 } else if self.tool == Tool::Number {
                     // Number is click-to-place: a single PointerDown
                     // commits the bubble immediately (no pending, no
@@ -705,6 +825,8 @@ impl EditorState {
             InputEvent::PointerDrag { pos } => {
                 if self.tool == Tool::Select {
                     self.update_selection(*pos);
+                } else if self.tool == Tool::Move {
+                    self.update_move(*pos);
                 } else {
                     self.update_annotation(*pos);
                 }
@@ -713,6 +835,10 @@ impl EditorState {
             InputEvent::PointerUp => {
                 if self.tool == Tool::Select {
                     self.finish_selection();
+                } else if self.tool == Tool::Move {
+                    if self.moving.take().is_some() {
+                        self.selected_index = None;
+                    }
                 } else {
                     self.finish_pointer_up();
                 }
@@ -829,6 +955,10 @@ impl EditorState {
                 self.commit_text_draft();
                 if self.tool == Tool::Select {
                     self.begin_selection(*pos);
+                } else if self.tool == Tool::Move {
+                    if let Some(index) = self.hit_test(*pos) {
+                        self.begin_move(index, *pos);
+                    }
                 } else if self.tool == Tool::Number {
                     self.place_number(*pos);
                 } else {
@@ -1168,6 +1298,44 @@ impl Annotation {
                 pos.x -= dx;
                 pos.y -= dy;
                 true
+            }
+        }
+    }
+
+    /// Translate every geometry field by `(dx, dy)`, verbatim — no
+    /// clipping, no normalization change.
+    ///
+    /// The move-drag counterpart of
+    /// [`crop_and_translate`](Self::crop_and_translate)'s field
+    /// mapping (per-variant points / rects / polylines). Overflow
+    /// past a region or image edge is owned downstream: paint-time
+    /// canvas clip in the shells, and geometric clip / drop in
+    /// [`EditorState::crop`].
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        match self {
+            Annotation::Rect { rect, .. }
+            | Annotation::Ellipse { rect, .. }
+            | Annotation::Blur { rect, .. } => {
+                rect.min.x += dx;
+                rect.min.y += dy;
+                rect.max.x += dx;
+                rect.max.y += dy;
+            }
+            Annotation::Line { a, b, .. } | Annotation::Arrow { a, b, .. } => {
+                a.x += dx;
+                a.y += dy;
+                b.x += dx;
+                b.y += dy;
+            }
+            Annotation::Marker { points, .. } | Annotation::Pencil { points, .. } => {
+                for p in points {
+                    p.x += dx;
+                    p.y += dy;
+                }
+            }
+            Annotation::Text { pos, .. } | Annotation::Number { pos, .. } => {
+                pos.x += dx;
+                pos.y += dy;
             }
         }
     }
@@ -1684,14 +1852,15 @@ mod tests {
         assert!(!ann.contains(Point::new(50.0, -50.0)));
     }
 
-    /// `begin_annotation` for `Tool::Number` / `Select` is a no-op
-    /// (different input model — those tools have dedicated entry points).
+    /// `begin_annotation` for `Tool::Number` / `Select` / `Move` is a
+    /// no-op (different input model — those tools have dedicated entry
+    /// points).
     /// `Tool::Text` is NOT in this list as of Task 12: a click places
     /// a caret (see `dispatch_text_click_places_caret`).
     #[test]
     fn begin_annotation_skips_non_drag_tools() {
         let mut s = EditorState::new(blank_image());
-        for tool in [Tool::Number, Tool::Select] {
+        for tool in [Tool::Number, Tool::Select, Tool::Move] {
             s.tool = tool;
             s.begin_annotation(Point::new(1.0, 1.0));
             assert!(s.pending.is_none(), "{tool:?} should be a no-op");
@@ -2981,6 +3150,347 @@ mod tests {
                 assert_eq!(*n, 1);
             }
             other => panic!("expected Number at index 1, got {other:?}"),
+        }
+    }
+
+    // --- Annotation move (Tool::Move) tests ---
+
+    /// Helper: Move-tool state over 100×100 with one committed rect
+    /// annotation at (10,10)–(50,40).
+    fn move_state() -> EditorState {
+        let mut s = hundred_state();
+        s.tool = Tool::Move;
+        s.anns.push(rect_ann(10.0, 10.0, 50.0, 40.0));
+        s
+    }
+
+    /// Move press on a committed annotation grabs it for a move;
+    /// the drag translates it with the grab point tracking the
+    /// cursor; release clears the drag state.
+    #[test]
+    fn move_press_on_annotation_moves_it() {
+        let mut s = move_state();
+        // Press at the annotation's centre: grab offset = (20, 15).
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(30.0, 25.0),
+        });
+        assert!(s.moving.is_some(), "press on annotation starts a move");
+        assert_eq!(s.selected_index, Some(0));
+        assert!(s.selection.is_none(), "move does not start a selection");
+        // Drag so the cursor lands at (60, 45): bbox.min follows at
+        // cursor − grab offset = (40, 30).
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(60.0, 45.0),
+        });
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(rect.min, Point::new(40.0, 30.0));
+                assert_eq!(rect.max, Point::new(80.0, 60.0), "size preserved");
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.moving.is_none(), "release ends the move");
+        assert!(s.selected_index.is_none());
+    }
+
+    /// One move gesture is exactly one undo entry, no matter how
+    /// many pointer events it took; undo restores the pre-move
+    /// position and redo re-applies it.
+    #[test]
+    fn one_move_gesture_is_one_undo_entry() {
+        let mut s = move_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(30.0, 25.0),
+        });
+        for x in [35.0, 45.0, 55.0] {
+            s.dispatch_input(&InputEvent::PointerDrag {
+                pos: Point::new(x, 25.0),
+            });
+        }
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.undo.len(), 1, "one gesture = one snapshot");
+        s.undo();
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(rect.min, Point::new(10.0, 10.0), "undo restores position");
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+        s.redo();
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(rect.min, Point::new(35.0, 10.0), "redo re-applies the move");
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// A click-without-drag on an annotation records no history and
+    /// leaves it untouched.
+    #[test]
+    fn click_without_move_records_no_history() {
+        let mut s = move_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(30.0, 25.0),
+        });
+        // Same-position drag: zero movement, no snapshot.
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(30.0, 25.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.undo.is_empty(), "no movement = no snapshot");
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// Ctrl+Z mid-move cancels the drag and restores the pre-move
+    /// geometry; a subsequent drag does not resurrect the move.
+    #[test]
+    fn undo_mid_move_cancels_and_restores() {
+        let mut s = move_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(30.0, 25.0),
+        });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(60.0, 45.0),
+        });
+        assert!(s.moving.is_some());
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Char('z'),
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        });
+        assert!(s.moving.is_none(), "undo cancels the in-flight move");
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(rect.min, Point::new(10.0, 10.0), "undo restores position");
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+        // A stray drag after the cancel must not move anything.
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(90.0, 90.0),
+        });
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// Select press (on or off an annotation) always starts a fresh
+    /// region selection — annotation moves are `Tool::Move`'s job, so
+    /// Select never grabs.
+    #[test]
+    fn select_press_off_annotation_starts_selection() {
+        let mut s = move_state();
+        s.tool = Tool::Select;
+        // Off the annotation.
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(70.0, 70.0),
+        });
+        assert!(s.moving.is_none());
+        assert!(s.selection.is_some(), "empty-space press selects");
+        // The drag extends the selection, not the annotation.
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(90.0, 80.0),
+        });
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// Select press directly on an annotation also starts a selection
+    /// — the separation contract: Select selects, Move moves.
+    #[test]
+    fn select_press_on_annotation_starts_selection() {
+        let mut s = move_state();
+        s.tool = Tool::Select;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(30.0, 25.0),
+        });
+        assert!(s.moving.is_none(), "Select never grabs an annotation");
+        assert!(s.selection.is_some(), "press on annotation selects");
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// Line mid-segment grab (within the stroke + tolerance radius)
+    /// moves both endpoints by the drag delta.
+    #[test]
+    fn move_press_on_line_moves_endpoints() {
+        let mut s = hundred_state();
+        s.tool = Tool::Move;
+        s.anns.push(Annotation::Line {
+            a: Point::new(10.0, 10.0),
+            b: Point::new(90.0, 10.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+        });
+        // (50, 12) is 2 px off the segment — inside the 1.5 + 3.0
+        // hit radius.
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(50.0, 12.0),
+        });
+        assert!(s.moving.is_some(), "near-segment press grabs the line");
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(60.0, 32.0),
+        });
+        match &s.anns[0] {
+            Annotation::Line { a, b, .. } => {
+                assert_eq!(*a, Point::new(20.0, 30.0));
+                assert_eq!(*b, Point::new(100.0, 30.0), "both endpoints shift equally");
+            }
+            other => panic!("expected Line, got {other:?}"),
+        }
+    }
+
+    /// A Move-tool press on a degenerate annotation (empty polyline)
+    /// is a no-op — no move, no selection, nothing starts.
+    #[test]
+    fn move_press_on_degenerate_annotation_is_noop() {
+        let mut s = hundred_state();
+        s.tool = Tool::Move;
+        s.anns.push(Annotation::Pencil {
+            points: Vec::new(),
+            color: Color::RED,
+            width: 3.0,
+        });
+        assert!(!s.begin_move(0, Point::new(50.0, 50.0)));
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(50.0, 50.0),
+        });
+        assert!(s.moving.is_none());
+        assert!(s.selection.is_none(), "Move never starts a selection");
+    }
+
+    /// A Move-tool press that misses every annotation is a no-op —
+    /// the tool only repositions, it never selects or draws.
+    #[test]
+    fn move_press_on_empty_space_is_noop() {
+        let mut s = move_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(70.0, 70.0),
+        });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(90.0, 80.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.moving.is_none());
+        assert!(s.selection.is_none());
+        assert!(s.undo.is_empty());
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// `translate` shifts every variant's geometry verbatim.
+    #[test]
+    fn translate_shifts_every_variant() {
+        let cases: Vec<(Annotation, Annotation)> = vec![
+            (
+                Annotation::Ellipse {
+                    rect: Rect::new(Point::new(1.0, 2.0), Point::new(3.0, 4.0)),
+                    stroke: Stroke::new(Color::RED, 1.0),
+                    fill: None,
+                },
+                Annotation::Ellipse {
+                    rect: Rect::new(Point::new(11.0, 7.0), Point::new(13.0, 9.0)),
+                    stroke: Stroke::new(Color::RED, 1.0),
+                    fill: None,
+                },
+            ),
+            (
+                Annotation::Arrow {
+                    a: Point::new(1.0, 2.0),
+                    b: Point::new(3.0, 4.0),
+                    stroke: Stroke::new(Color::RED, 1.0),
+                    head_size: 10.0,
+                },
+                Annotation::Arrow {
+                    a: Point::new(11.0, 7.0),
+                    b: Point::new(13.0, 9.0),
+                    stroke: Stroke::new(Color::RED, 1.0),
+                    head_size: 10.0,
+                },
+            ),
+            (
+                Annotation::Marker {
+                    points: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)],
+                    color: Color::RED,
+                    width: 8.0,
+                },
+                Annotation::Marker {
+                    points: vec![Point::new(11.0, 7.0), Point::new(13.0, 9.0)],
+                    color: Color::RED,
+                    width: 8.0,
+                },
+            ),
+            (
+                Annotation::Text {
+                    pos: Point::new(1.0, 2.0),
+                    text: "hi".into(),
+                    font_size: 16.0,
+                    color: Color::RED,
+                    family: crate::text::FontFamily::default(),
+                    weight: crate::text::FontWeight::default(),
+                    style: crate::text::FontStyle::default(),
+                    align: crate::text::TextAlign::default(),
+                    line_spacing: crate::text::DEFAULT_LINE_SPACING,
+                    outline: None,
+                    background: None,
+                },
+                Annotation::Text {
+                    pos: Point::new(11.0, 7.0),
+                    text: "hi".into(),
+                    font_size: 16.0,
+                    color: Color::RED,
+                    family: crate::text::FontFamily::default(),
+                    weight: crate::text::FontWeight::default(),
+                    style: crate::text::FontStyle::default(),
+                    align: crate::text::TextAlign::default(),
+                    line_spacing: crate::text::DEFAULT_LINE_SPACING,
+                    outline: None,
+                    background: None,
+                },
+            ),
+            (
+                Annotation::Blur {
+                    rect: Rect::new(Point::new(1.0, 2.0), Point::new(30.0, 40.0)),
+                    kind: BlurKind::Pixelate,
+                    strength: 8,
+                },
+                Annotation::Blur {
+                    rect: Rect::new(Point::new(11.0, 7.0), Point::new(40.0, 45.0)),
+                    kind: BlurKind::Pixelate,
+                    strength: 8,
+                },
+            ),
+            (
+                Annotation::Number {
+                    pos: Point::new(1.0, 2.0),
+                    n: 1,
+                    color: Color::RED,
+                    diameter: 28.0,
+                },
+                Annotation::Number {
+                    pos: Point::new(11.0, 7.0),
+                    n: 1,
+                    color: Color::RED,
+                    diameter: 28.0,
+                },
+            ),
+        ];
+        for (mut before, after) in cases {
+            before.translate(10.0, 5.0);
+            assert_eq!(before, after);
         }
     }
 }

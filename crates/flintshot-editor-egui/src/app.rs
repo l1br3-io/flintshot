@@ -408,8 +408,12 @@ impl EditorApp {
     }
 }
 
-impl App for EditorApp {
-    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+impl EditorApp {
+    /// Headless-callable core of [`App::logic`](EditorApp) — the
+    /// `eframe::Frame` parameter is unused, so the split (mirroring
+    /// `OverlayApp`'s) lets the shell-side event translation be
+    /// unit-tested with a synthetic `egui::Context`.
+    fn logic_impl(&mut self, ctx: &Context) {
         // Translate egui's input events to the toolkit-agnostic
         // `InputEvent` and feed them through `state.dispatch_input`.
         // Per the Task 10 close-out's plan, this is the pure-dispatcher
@@ -417,9 +421,9 @@ impl App for EditorApp {
         // the dispatcher does all state mutation; the shell just
         // performs the side-effect the returned `DispatchOutcome`
         // names. Tested end-to-end by the dispatcher unit tests in
-        // `flintshot-core::editor`; the shell's only test surface is
-        // the translation itself (which is too thin to unit-test
-        // meaningfully without a synthetic `egui::Context`).
+        // `flintshot-core::editor` plus the translation tests below
+        // (the Enter-crop gap shipped because only the dispatcher
+        // side was tested — see `enter_key_crops_through_shell`).
         //
         // Key order: keyboard first, then pointer. A `Ctrl+S` mid-drag
         // should pre-empt the pointer-up that follows; the dispatcher's
@@ -452,62 +456,10 @@ impl App for EditorApp {
         // One key event per frame: egui's `key_pressed` reports the
         // most recent press. If multiple keys fire on the same frame
         // (unusual), only the last one dispatches — matches the
-        // existing Task 8 single-key behaviour.
-        let key_event = ctx.input(|i| {
-            // Order shortcuts by Phase 1 priority: Cancel > Save / Copy
-            // > Undo / Redo. egui reports each key independently so we
-            // can short-circuit on the first match.
-            if i.key_pressed(egui::Key::Escape) {
-                Some(InputEvent::Key {
-                    key: Key::Escape,
-                    modifiers,
-                })
-            } else if i.key_pressed(egui::Key::Z) {
-                Some(InputEvent::Key {
-                    key: Key::Char('z'),
-                    modifiers,
-                })
-            } else if i.key_pressed(egui::Key::Y) {
-                Some(InputEvent::Key {
-                    key: Key::Char('y'),
-                    modifiers,
-                })
-            } else if i.key_pressed(egui::Key::S) {
-                Some(InputEvent::Key {
-                    key: Key::Char('s'),
-                    modifiers,
-                })
-            } else if i.key_pressed(egui::Key::C) {
-                Some(InputEvent::Key {
-                    key: Key::Char('c'),
-                    modifiers,
-                })
-            } else {
-                None
-            }
-        });
-        if let Some(event) = key_event {
-            // `DispatchOutcome` is `#[non_exhaustive]`; future
-            // variants fall through to `matches!` returning `false`,
-            // which is the same behaviour as `Continue` for the shell
-            // (do nothing this frame).
-            let outcome = self.state.dispatch_input(&event);
-            if matches!(outcome, DispatchOutcome::Cancel) {
-                // Use `if_unset` so a prior copy (which published
-                // `CopiedToClipboard` and kept the window open) is
-                // honoured when the user eventually closes via Esc.
-                self.publish_outcome_if_unset(Ok(EditorOutcome::Cancelled));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
-            }
-            if matches!(outcome, DispatchOutcome::Save) {
-                self.handle_save(ctx);
-                return;
-            }
-            if matches!(outcome, DispatchOutcome::Copy) {
-                self.handle_copy(ctx);
-                return;
-            }
+        // existing Task 8 single-key behaviour. Outcome side effects
+        // (close / save / copy) end the frame.
+        if self.dispatch_shortcut_key(ctx, modifiers) {
+            return;
         }
 
         // Selection-first phase: the dispatcher's Enter-crop is one
@@ -599,6 +551,87 @@ impl App for EditorApp {
             // rather than silently dropping.
             let _ = self.state.dispatch_input(&event);
         }
+    }
+
+    /// Translate this frame's shortcut keypress (one per frame) and
+    /// perform its outcome side effect. Returns `true` when the
+    /// outcome ended the frame (close / save / copy), so
+    /// [`logic_impl`](Self::logic_impl) skips the pointer branch.
+    ///
+    /// Order: Cancel > Enter-crop / Save / Copy > Undo / Redo — egui
+    /// reports each key independently, so the first match wins.
+    /// Enter only forwards the key: the crop gate (Select tool +
+    /// live selection) lives in the dispatcher. Without this branch
+    /// the Enter-crop contract held only for the toolbar button (the
+    /// keyboard path never reached the dispatcher — the gap
+    /// `enter_key_crops_through_shell` pins).
+    fn dispatch_shortcut_key(&mut self, ctx: &Context, modifiers: Modifiers) -> bool {
+        let key_event = ctx.input(|i| {
+            if i.key_pressed(egui::Key::Escape) {
+                Some(InputEvent::Key {
+                    key: Key::Escape,
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::Enter) {
+                Some(InputEvent::Key {
+                    key: Key::Enter,
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::Z) {
+                Some(InputEvent::Key {
+                    key: Key::Char('z'),
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::Y) {
+                Some(InputEvent::Key {
+                    key: Key::Char('y'),
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::S) {
+                Some(InputEvent::Key {
+                    key: Key::Char('s'),
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::C) {
+                Some(InputEvent::Key {
+                    key: Key::Char('c'),
+                    modifiers,
+                })
+            } else {
+                None
+            }
+        });
+        let Some(event) = key_event else {
+            return false;
+        };
+        // `DispatchOutcome` is `#[non_exhaustive]`; future variants
+        // fall through to `matches!` returning `false`, which is the
+        // same behaviour as `Continue` for the shell (no side effect
+        // this frame).
+        let outcome = self.state.dispatch_input(&event);
+        if matches!(outcome, DispatchOutcome::Cancel) {
+            // Use `if_unset` so a prior copy (which published
+            // `CopiedToClipboard` and kept the window open) is
+            // honoured when the user eventually closes via Esc.
+            self.publish_outcome_if_unset(Ok(EditorOutcome::Cancelled));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return true;
+        }
+        if matches!(outcome, DispatchOutcome::Save) {
+            self.handle_save(ctx);
+            return true;
+        }
+        if matches!(outcome, DispatchOutcome::Copy) {
+            self.handle_copy(ctx);
+            return true;
+        }
+        false
+    }
+}
+
+impl App for EditorApp {
+    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.logic_impl(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1326,6 +1359,7 @@ fn parse_magnifier_key(name: &str) -> egui::Key {
 pub(crate) fn tool_for_key(key: egui::Key) -> Option<Tool> {
     match key {
         egui::Key::S => Some(Tool::Select),
+        egui::Key::V => Some(Tool::Move),
         egui::Key::R => Some(Tool::Rect),
         egui::Key::E => Some(Tool::Ellipse),
         egui::Key::A => Some(Tool::Arrow),
@@ -1357,6 +1391,7 @@ mod tests {
     fn tool_shortcuts_are_complete_and_injective() {
         let pairs = [
             (egui::Key::S, Tool::Select),
+            (egui::Key::V, Tool::Move),
             (egui::Key::R, Tool::Rect),
             (egui::Key::E, Tool::Ellipse),
             (egui::Key::A, Tool::Arrow),
@@ -1575,6 +1610,40 @@ mod tests {
         assert!(
             app.phase_active(),
             "Enter with no selection is a no-op, not a crop"
+        );
+    }
+
+    /// Regression: `logic`'s key translation never forwarded
+    /// `egui::Key::Enter`, so the dispatcher's Enter-crop branch was
+    /// reachable only through the toolbar button — with a live
+    /// selection, pressing Enter did nothing (reported on the
+    /// Wayland-demoted selection-first editor, 2026-09-03). This
+    /// drives the *shell translation* through a synthetic
+    /// `egui::Context`, not the dispatcher directly.
+    #[test]
+    fn enter_key_crops_through_shell() {
+        let mut app = phase_app(true);
+        drag_selection(&mut app.state, (8.0, 8.0), (40.0, 32.0));
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.logic_impl(ui.ctx()));
+        assert!(
+            !app.phase_active(),
+            "Enter through the shell translation must crop and end the phase"
+        );
+        assert_eq!(
+            app.state.image.dimensions(),
+            (32, 24),
+            "the crop actually replaced the image"
         );
     }
 
