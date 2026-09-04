@@ -3,8 +3,9 @@
 //!
 //! The editor window is an instrument, not a page — the toolbar
 //! recedes behind the screenshot it annotates. Everything is
-//! graphite; ember appears in exactly two places: the active tool
-//! chip and the Copy primary action. Nothing else gets color.
+//! graphite; ember appears in exactly three places: the active tool
+//! chip, the Copy primary action, and the grabbed-annotation outline
+//! under the Move tool. Nothing else gets color.
 
 use egui::{Color32, Context, CornerRadius, Stroke};
 
@@ -18,11 +19,33 @@ pub(crate) const GRAPHITE_500: Color32 = Color32::from_rgb(0x34, 0x39, 0x41);
 pub(crate) const CHALK: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xEE);
 /// Secondary text (slate) — hints, dims readouts.
 pub(crate) const SLATE: Color32 = Color32::from_rgb(0x9A, 0xA1, 0xAC);
-/// The ember accent: active tool chip and Copy button fill only.
+/// The ember accent: active tool chip, Copy button fill, and the
+/// grabbed-annotation outline under Move — the three "this is the
+/// active thing" surfaces.
 pub(crate) const EMBER: Color32 = Color32::from_rgb(0xFF, 0x8C, 0x42);
 /// Glyph color on ember fills (matches the panel graphite so
 /// selected chips read as "cut out" of the toolbar).
 pub(crate) const INK: Color32 = GRAPHITE_900;
+
+/// Move-tool hover outline (see `crate::chrome`): 1 px dashed chalk —
+/// the "grab me" invitation, deliberately subordinate to the solid
+/// white selection chrome.
+pub(crate) const MOVE_HOVER_STROKE: Stroke = Stroke {
+    width: 1.0,
+    color: Color32::from_rgba_unmultiplied_const(0xE8, 0xEA, 0xEE, 170),
+};
+/// Move-tool grab outline: 2 px solid ember — the active-object
+/// emphasis while a move drag is live.
+pub(crate) const MOVE_GRAB_STROKE: Stroke = Stroke {
+    width: 2.0,
+    color: EMBER,
+};
+/// Dash / gap rhythm of the hover outline, logical px.
+pub(crate) const MOVE_DASH: f32 = 4.0;
+pub(crate) const MOVE_GAP: f32 = 3.0;
+/// Padding between an annotation's bbox and its move chrome, logical
+/// px — keeps the outline off the annotation's own ink.
+pub(crate) const MOVE_CHROME_PAD: f32 = 3.0;
 
 /// Annotation color presets shown as swatches in the toolbar bay.
 /// Signal red leads (the classic annotation default); ink earns its

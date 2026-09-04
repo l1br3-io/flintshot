@@ -705,6 +705,13 @@ pub(crate) struct OverlayApp {
     /// toolbar clicks start drags / dispatch `PointerDown`s). `None`
     /// whenever the toolbar is hidden.
     toolbar_rect: Option<egui::Rect>,
+    /// This frame's Move-tool object chrome (see [`crate::chrome`]):
+    /// the hovered / grabbed annotation's bbox plus its kind, in
+    /// canvas-physical px. Computed at the end of
+    /// [`Self::pointer_and_chrome`] (where the gating inputs live),
+    /// painted by `ui_impl` over the shared render output. `None`
+    /// whenever no affordance applies.
+    move_chrome: Option<(Rect, crate::chrome::MoveChromeKind)>,
     /// Last measured toolbar size, fed to [`toolbar_anchor`] for the
     /// flip/clamp decision. Seeded zero (the anchor fn tolerates it);
     /// one frame behind the layout, which is invisible in practice
@@ -759,6 +766,7 @@ impl OverlayApp {
             gesture: Gesture::None,
             magnifier: Magnifier::new(),
             toolbar_rect: None,
+            move_chrome: None,
             toolbar_size: egui::Vec2::ZERO,
             clipboard: None,
             clipboard_out,
@@ -916,6 +924,10 @@ impl OverlayApp {
             )
         });
         let Some(pos) = pointer else {
+            // No pointer this frame (left the window / touch lift):
+            // stand down the hover affordance — the grab variant
+            // clears the same way on the drag's release frame.
+            self.move_chrome = None;
             return;
         };
         let at = to_canvas_physical(pos, panel, ppp);
@@ -1021,6 +1033,19 @@ impl OverlayApp {
                 ctx.set_cursor_icon(icon);
             }
         }
+
+        // Move-tool object chrome (prominent-move spec), gated exactly
+        // like a press that would grab an annotation: no drag or
+        // gesture in flight, not over the toolbar, and the position
+        // itself must be press-allowed. A live dispatcher move drag
+        // (checked inside `move_chrome`) overrides the hover either
+        // way and keeps the grab outline tracking through the drag.
+        let hover_at = (!self.drag_active
+            && self.gesture.is_none()
+            && !over_toolbar
+            && annotation_press_allowed(Tool::Move, self.state.selection, at))
+        .then_some(at);
+        self.move_chrome = crate::chrome::move_chrome(&self.state, hover_at);
     }
 
     /// Cursor icon for the current hover position when no gesture is
@@ -1362,6 +1387,16 @@ impl OverlayApp {
             painter.rect_filled(band, egui::CornerRadius::ZERO, mask_color());
         }
 
+        // Move-tool object chrome (prominent-move spec): dashed hover
+        // outline / solid ember grab outline, painted under the
+        // selection handles and badge so the region chrome stays
+        // legible over it. Computed in `pointer_and_chrome` this
+        // frame; `None` paints nothing.
+        if let Some((r, kind)) = self.move_chrome {
+            let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
+            crate::chrome::paint_move_chrome(&painter, rect, kind);
+        }
+
         // Grab handles: visible only while they're actually
         // interactive — Select tool active and no fresh
         // dispatcher-driven selection drag in progress (during a
@@ -1436,6 +1471,7 @@ impl App for OverlayApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flintshot_core::Annotation;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -1462,6 +1498,142 @@ mod tests {
             Tool::Select,
             "the first drag must draw a selection, not a rect annotation"
         );
+    }
+
+    // --- Move-tool hover / grab chrome (prominent-move) ---
+
+    /// Overlay state on the Move tool with one committed rect at
+    /// (10,10)-(50,40). Construction forces Select, so the fixture
+    /// re-arms Move like a user pressing `V` would.
+    fn move_overlay_app() -> OverlayApp {
+        let mut state = blank_state(64, 64);
+        state.pending = Some(Annotation::Rect {
+            rect: Rect::from_xywh(10.0, 10.0, 40.0, 30.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+            fill: None,
+        });
+        state.commit_annotation();
+        let mut app = OverlayApp::new(
+            state,
+            &egui::Context::default(),
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        app.state.tool = Tool::Move;
+        app
+    }
+
+    /// One overlay frame with the given pointer events (screen ==
+    /// canvas-physical; ppp is 1 in a synthetic context).
+    fn pointer_frame(ctx: &egui::Context, app: &mut OverlayApp, t: f64, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(64.0, 64.0),
+            )),
+            time: Some(t),
+            events,
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+    }
+
+    #[test]
+    fn overlay_move_hover_yields_hover_chrome() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        // Frame 1: layout (caches the panel rect); frame 2: hover.
+        idle_frame(&ctx, &mut app, 0.0);
+        pointer_frame(
+            &ctx,
+            &mut app,
+            1.0 / 60.0,
+            vec![egui::Event::PointerMoved(egui::pos2(30.0, 25.0))],
+        );
+        let (rect, kind) = app.move_chrome.expect("hover hit must yield chrome");
+        assert_eq!(kind, crate::chrome::MoveChromeKind::Hover);
+        assert_eq!(rect.min, Point::new(10.0, 10.0), "chrome tracks the bbox");
+        assert_eq!(rect.max, Point::new(50.0, 40.0));
+    }
+
+    #[test]
+    fn overlay_move_hover_miss_clears_chrome() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        idle_frame(&ctx, &mut app, 0.0);
+        pointer_frame(
+            &ctx,
+            &mut app,
+            1.0 / 60.0,
+            vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0))],
+        );
+        assert!(app.move_chrome.is_none(), "empty canvas → no chrome");
+    }
+
+    #[test]
+    fn overlay_move_grab_press_yields_grab_chrome() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        idle_frame(&ctx, &mut app, 0.0);
+        let press = egui::pos2(30.0, 25.0);
+        pointer_frame(
+            &ctx,
+            &mut app,
+            1.0 / 60.0,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(app.state.moving.is_some(), "press grabbed the annotation");
+        let (rect, kind) = app.move_chrome.expect("live drag must yield chrome");
+        assert_eq!(kind, crate::chrome::MoveChromeKind::Grab);
+        assert_eq!(rect.min, Point::new(10.0, 10.0));
+        assert_eq!(rect.max, Point::new(50.0, 40.0));
+    }
+
+    #[test]
+    fn overlay_move_grab_chrome_tracks_through_drag() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        idle_frame(&ctx, &mut app, 0.0);
+        let press = egui::pos2(30.0, 25.0);
+        pointer_frame(
+            &ctx,
+            &mut app,
+            1.0 / 60.0,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        // Drag to (36,29) — the grabbed annotation follows and the
+        // chrome rect must track it (dispatcher moved the ann by
+        // (6,4)).
+        pointer_frame(
+            &ctx,
+            &mut app,
+            2.0 / 60.0,
+            vec![egui::Event::PointerMoved(egui::pos2(36.0, 29.0))],
+        );
+        assert!(app.state.moving.is_some(), "drag is still live");
+        let (rect, kind) = app.move_chrome.expect("drag frame keeps chrome");
+        assert_eq!(kind, crate::chrome::MoveChromeKind::Grab);
+        assert_eq!(rect.min, Point::new(16.0, 14.0), "chrome tracks the drag");
+        assert_eq!(rect.max, Point::new(56.0, 44.0));
     }
 
     #[test]
