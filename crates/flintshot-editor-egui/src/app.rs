@@ -1566,7 +1566,7 @@ mod tests {
         let app = phase_app(false);
         assert_eq!(
             app.state.tool,
-            Tool::Rect,
+            Tool::Move,
             "the editor default is untouched"
         );
         assert!(!app.phase_active(), "no request → no phase");

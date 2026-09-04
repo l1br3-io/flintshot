@@ -82,6 +82,13 @@ pub struct UiConfig {
     /// value survives re-saves.
     #[serde(default = "default_interaction_mode")]
     pub interaction_mode: String,
+    /// When `true` (default), committing an annotation flips the
+    /// active tool to Move so the next press repositions what was
+    /// just drawn. `false` restores sticky tools for rapid
+    /// multi-draw workflows. Read once per editor session (matching
+    /// the magnifier precedent).
+    #[serde(default = "default_flip_to_move")]
+    pub flip_to_move: bool,
 }
 
 impl Default for UiConfig {
@@ -94,6 +101,7 @@ impl Default for UiConfig {
             magnifier_modifier: default_magnifier_modifier(),
             magnifier_always_on: false,
             interaction_mode: default_interaction_mode(),
+            flip_to_move: default_flip_to_move(),
         }
     }
 }
@@ -253,6 +261,10 @@ fn default_interaction_mode() -> String {
     "editor".into()
 }
 
+fn default_flip_to_move() -> bool {
+    true
+}
+
 fn default_include_cursor() -> bool {
     true
 }
@@ -370,41 +382,7 @@ impl Config {
         ensure_table(&mut doc, "upload");
 
         if let Some(ui) = doc.get_mut("ui").and_then(|i| i.as_table_mut()) {
-            set_value(
-                ui,
-                "default-color",
-                toml_edit::Value::from(format_color(&self.ui.default_color)),
-            );
-            set_value(
-                ui,
-                "default-text-color",
-                toml_edit::Value::from(format_color(&self.ui.default_text_color)),
-            );
-            set_value(
-                ui,
-                "default-stroke-width",
-                toml_edit::Value::from(f64::from(self.ui.default_stroke_width)),
-            );
-            set_value(
-                ui,
-                "default-font-size",
-                toml_edit::Value::from(f64::from(self.ui.default_font_size)),
-            );
-            set_value(
-                ui,
-                "magnifier-modifier",
-                toml_edit::Value::from(self.ui.magnifier_modifier.as_str()),
-            );
-            set_value(
-                ui,
-                "magnifier-always-on",
-                toml_edit::Value::from(self.ui.magnifier_always_on),
-            );
-            set_value(
-                ui,
-                "interaction-mode",
-                toml_edit::Value::from(self.ui.interaction_mode.as_str()),
-            );
+            self.merge_ui(ui);
         }
         if let Some(cap) = doc.get_mut("capture").and_then(|i| i.as_table_mut()) {
             set_value(
@@ -456,6 +434,50 @@ impl Config {
         }
 
         Ok(doc.to_string())
+    }
+
+    /// Write every `[ui]` field into the existing `ui` table.
+    fn merge_ui(&self, ui: &mut toml_edit::Table) {
+        set_value(
+            ui,
+            "default-color",
+            toml_edit::Value::from(format_color(&self.ui.default_color)),
+        );
+        set_value(
+            ui,
+            "default-text-color",
+            toml_edit::Value::from(format_color(&self.ui.default_text_color)),
+        );
+        set_value(
+            ui,
+            "default-stroke-width",
+            toml_edit::Value::from(f64::from(self.ui.default_stroke_width)),
+        );
+        set_value(
+            ui,
+            "default-font-size",
+            toml_edit::Value::from(f64::from(self.ui.default_font_size)),
+        );
+        set_value(
+            ui,
+            "magnifier-modifier",
+            toml_edit::Value::from(self.ui.magnifier_modifier.as_str()),
+        );
+        set_value(
+            ui,
+            "magnifier-always-on",
+            toml_edit::Value::from(self.ui.magnifier_always_on),
+        );
+        set_value(
+            ui,
+            "interaction-mode",
+            toml_edit::Value::from(self.ui.interaction_mode.as_str()),
+        );
+        set_value(
+            ui,
+            "flip-to-move",
+            toml_edit::Value::from(self.ui.flip_to_move),
+        );
     }
 }
 
@@ -863,6 +885,63 @@ include-cursor = true  # hide cursor when capturing presentations
             written.contains("interaction-mode = \"hologram\""),
             "save must preserve the user's (unknown) value verbatim:\n{written}"
         );
+    }
+
+    #[test]
+    fn flip_to_move_defaults_true_when_absent() {
+        let cfg = Config::load_from(&{
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            fs::write(&path, "[ui]\ndefault-color = \"#000000\"\n").unwrap();
+            path
+        })
+        .unwrap();
+        assert!(cfg.ui.flip_to_move, "absent field must default true");
+        assert!(UiConfig::default().flip_to_move, "Default impl matches");
+    }
+
+    #[test]
+    fn flip_to_move_false_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.ui.flip_to_move = false;
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("flip-to-move = false"),
+            "flip-to-move not persisted:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert!(!back.ui.flip_to_move);
+    }
+
+    #[test]
+    fn flip_to_move_preserves_existing_comment_on_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let existing = "\
+[ui]
+# keep tools sticky while batching rects
+flip-to-move = false
+";
+        fs::write(&path, existing).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.ui.flip_to_move = false;
+        cfg.save_to(&path).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("# keep tools sticky while batching rects"),
+            "comment on flip-to-move lost:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert!(!back.ui.flip_to_move, "user value must survive re-save");
     }
 
     #[test]
