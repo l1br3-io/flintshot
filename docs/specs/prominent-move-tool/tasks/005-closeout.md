@@ -8,18 +8,18 @@ per-session config reads over cross-process live reload.
 
 **Acceptance criteria:**
 
-- [ ] `docs/adrs/ADR-0040-flip-to-move-after-commit.md` written
+- [x] `docs/adrs/ADR-0040-flip-to-move-after-commit.md` written
       (Context · Decision · Consequences): flip policy + ownership
       guard, `flip-to-move` default-on gate, per-session config
       read rationale; `docs/adrs/README.md` index line added
-- [ ] `CHANGELOG.md` under `## [Unreleased]`: flip-to-Move (with
+- [x] `CHANGELOG.md` under `## [Unreleased]`: flip-to-Move (with
       config knob), Move default edit-phase tool, labeled rail
       chip, hover affordances
-- [ ] `docs/TEST_MATRIX.md` rows for the new behaviors (flip on /
+- [x] `docs/TEST_MATRIX.md` rows for the new behaviors (flip on /
       off, phase-end tool, hover chrome, labeled chip)
-- [ ] Manual pass through spec exit criteria 1–6 recorded (both
+- [x] Manual pass through spec exit criteria 1–6 recorded (both
       shells; `cargo run -- region` and a plain editor capture)
-- [ ] Standing gates green:
+- [x] Standing gates green:
       `cargo fmt --all --check`;
       `cargo clippy --workspace --all-targets -- -D warnings`;
       `cargo test --workspace --all-targets`;
@@ -27,9 +27,12 @@ per-session config reads over cross-process live reload.
 
 **Verification:**
 
-- [ ] All four gate commands exit 0
-- [ ] Spec exit-criteria checklist walked end-to-end with the
-      running binary
+- [x] All four gate commands exit 0
+- [x] Spec exit-criteria checklist walked end-to-end with the
+      running binary (scripted on a synthetic Xvfb display, TEST
+      MATRIX platform XV1: editor shell + overlay shell, pixel-
+      level assertions; details + caveats in the TEST_MATRIX
+      section)
 
 **Dependencies:** Tasks 001–004
 
