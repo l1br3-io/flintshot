@@ -1,6 +1,7 @@
 ---
-status: draft
+status: shipped
 started: 2026-09-04
+shipped: 2026-09-04
 ---
 
 # Spec — Prominent move tool: make repositioning discoverable
