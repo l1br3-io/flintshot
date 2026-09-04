@@ -10,17 +10,19 @@ use crate::geom::{Color, Point, Rect, Stroke};
 
 /// Available annotation tools.
 ///
-/// `Default` is [`Tool::Rect`] so the editor opens with a useful tool
-/// active; `flintshot-app` overrides this from config.
+/// `Default` is [`Tool::Move`] — every eligible commit flips the tool
+/// to Move (see [`EditorState::flip_to_move`]), so the editor opens
+/// on the tool annotations land on for repositioning;
+/// `flintshot-app` overrides this from config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Tool {
     /// Region select / crop.
     Select,
     /// Move a committed annotation by dragging it.
+    #[default]
     Move,
     /// Rectangle outline.
-    #[default]
     Rect,
     /// Ellipse outline.
     Ellipse,
@@ -273,6 +275,13 @@ pub struct EditorState {
     pub selection: Option<Rect>,
     /// Currently-active tool.
     pub tool: Tool,
+    /// Policy: committing an eligible annotation flips `tool` to
+    /// [`Tool::Move`] so the next press can reposition what was just
+    /// drawn. Defaults to `true`; plumbed from `[ui] flip-to-move` at
+    /// editor-session start (read-once, like the magnifier config).
+    /// The flip itself never creates an undo entry — history stays
+    /// purely about annotations.
+    pub flip_to_move: bool,
     /// Active annotation color.
     pub color: Color,
     /// Active stroke width.
@@ -334,6 +343,7 @@ impl EditorState {
             pending: None,
             selection: None,
             tool: Tool::default(),
+            flip_to_move: true,
             color: Color::RED,
             stroke_width: 3.0,
             blur_kind: BlurKind::default(),
@@ -470,13 +480,17 @@ impl EditorState {
     /// Commit the in-flight annotation to `anns`.
     ///
     /// Pushes a snapshot of the current `anns` onto `undo`, clears
-    /// `redo`, normalizes the pending annotation's rect (if any), then
-    /// appends it to `anns`. No-op when `pending` is `None`.
+    /// `redo`, normalizes the pending annotation's rect (if any),
+    /// then appends it to `anns`. When the [`flip_to_move`](Self::flip_to_move)
+    /// policy is on and the committing tool owns the pending
+    /// annotation, the active tool switches to [`Tool::Move`] (no
+    /// undo entry). No-op when `pending` is `None`.
     pub fn commit_annotation(&mut self) {
         let Some(mut ann) = self.pending.take() else {
             return;
         };
         normalize_rects(&mut ann);
+        let owner = owning_tool(&ann);
         // Clone-then-push: snapshot must capture pre-commit `anns`
         // (without the new annotation). `mem::take` here would wipe
         // `self.anns` and lose prior annotations.
@@ -484,6 +498,14 @@ impl EditorState {
             .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
         self.redo.clear();
         self.anns.push(ann);
+        // Ownership guard: flip only when the committing tool still
+        // owns the pending annotation. A Text draft flushed because
+        // the user already switched tools (the shell's
+        // toolbar-switch flush runs after `tool` changed) must not
+        // flip — the explicit tool choice wins.
+        if self.flip_to_move && is_flip_eligible(owner) && owner == self.tool {
+            self.tool = Tool::Move;
+        }
     }
 
     /// Drop the in-flight annotation without committing.
@@ -1185,6 +1207,40 @@ fn normalize_rects(ann: &mut Annotation) {
     }
 }
 
+/// Tool that owns (would produce) `ann`. Feeds the flip-to-move
+/// ownership guard in [`EditorState::commit_annotation`].
+fn owning_tool(ann: &Annotation) -> Tool {
+    match ann {
+        Annotation::Rect { .. } => Tool::Rect,
+        Annotation::Ellipse { .. } => Tool::Ellipse,
+        Annotation::Line { .. } => Tool::Line,
+        Annotation::Arrow { .. } => Tool::Arrow,
+        Annotation::Marker { .. } => Tool::Marker,
+        Annotation::Pencil { .. } => Tool::Pencil,
+        Annotation::Text { .. } => Tool::Text,
+        Annotation::Blur { .. } => Tool::Blur,
+        Annotation::Number { .. } => Tool::Number,
+    }
+}
+
+/// Whether committing `tool`'s annotation flips the active tool to
+/// Move. Number is exempt — its click-to-place-the-next-number input
+/// model exists for rapid sequential labeling; Select / Move produce
+/// no pending annotations.
+fn is_flip_eligible(tool: Tool) -> bool {
+    matches!(
+        tool,
+        Tool::Rect
+            | Tool::Ellipse
+            | Tool::Line
+            | Tool::Arrow
+            | Tool::Marker
+            | Tool::Pencil
+            | Tool::Blur
+            | Tool::Text
+    )
+}
+
 impl Annotation {
     /// Build the [`crate::text::TextStyle`] describing how a `Text`
     /// variant should be rendered.
@@ -1572,7 +1628,6 @@ mod tests {
         assert!(s.undo.is_empty());
         assert!(s.redo.is_empty());
         assert!(s.pending.is_none());
-        assert_eq!(s.tool, Tool::Rect);
         assert_eq!(s.color, Color::RED);
         assert_eq!(s.stroke_width, 3.0);
         assert_eq!(s.blur_kind, BlurKind::Gaussian);
@@ -1580,6 +1635,8 @@ mod tests {
         assert_eq!(s.next_number, 1);
         assert!(s.selected_index.is_none());
         assert!(s.selection.is_none(), "selection rect starts None");
+        assert_eq!(s.tool, Tool::Move, "Move is the default tool");
+        assert!(s.flip_to_move, "flip policy defaults on");
     }
 
     #[test]
@@ -1589,8 +1646,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_default_is_rect() {
-        assert_eq!(Tool::default(), Tool::Rect);
+    fn tool_default_is_move() {
+        assert_eq!(Tool::default(), Tool::Move);
     }
 
     #[test]
@@ -1755,10 +1812,133 @@ mod tests {
         assert_eq!(s.anns.len(), 2);
     }
 
+    // --- flip-to-move policy (prominent-move-tool) ---
+
+    /// Full pointer drag through the dispatcher with the active tool,
+    /// committing a non-degenerate annotation on release.
+    fn drag_commit(s: &mut EditorState, from: Point, to: Point) {
+        s.dispatch_input(&InputEvent::PointerDown { pos: from });
+        s.dispatch_input(&InputEvent::PointerDrag { pos: to });
+        s.dispatch_input(&InputEvent::PointerUp);
+    }
+
+    #[test]
+    fn commit_flips_each_drag_tool_to_move() {
+        for tool in [
+            Tool::Rect,
+            Tool::Ellipse,
+            Tool::Line,
+            Tool::Arrow,
+            Tool::Marker,
+            Tool::Pencil,
+            Tool::Blur,
+        ] {
+            let mut s = EditorState::new(blank_image());
+            s.tool = tool;
+            drag_commit(&mut s, Point::new(10.0, 10.0), Point::new(50.0, 40.0));
+            assert_eq!(s.anns.len(), 1, "{tool:?} drag must commit");
+            assert_eq!(s.tool, Tool::Move, "{tool:?} commit must flip to Move");
+        }
+    }
+
+    #[test]
+    fn text_enter_commit_flips_to_move() {
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::TextInput('h'));
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.anns.len(), 1);
+        assert_eq!(s.tool, Tool::Move, "Enter commit must flip to Move");
+    }
+
+    #[test]
+    fn commit_flip_off_keeps_tool_sticky() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Rect;
+        s.flip_to_move = false;
+        drag_commit(&mut s, Point::new(10.0, 10.0), Point::new(50.0, 40.0));
+        assert_eq!(s.anns.len(), 1);
+        assert_eq!(s.tool, Tool::Rect, "policy off → tool stays");
+    }
+
+    #[test]
+    fn commit_flip_requires_owning_tool_active() {
+        // The shell's toolbar-switch flush changes `tool` before
+        // calling `commit_text_draft`; the explicit tool choice must
+        // win over the flip.
+        let mut s = text_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::TextInput('h'));
+        s.tool = Tool::Rect;
+        s.commit_text_draft();
+        assert_eq!(s.anns.len(), 1, "draft still commits");
+        assert_eq!(s.tool, Tool::Rect, "stale-tool flush must not flip");
+    }
+
+    #[test]
+    fn number_placement_does_not_flip() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Number;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        assert_eq!(s.anns.len(), 1);
+        assert_eq!(s.tool, Tool::Number, "Number never flips");
+    }
+
+    #[test]
+    fn degenerate_cancel_does_not_flip() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Rect;
+        // Click without drag → zero-extent → cancel path, no commit.
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.anns.is_empty(), "degenerate rect cancels");
+        assert_eq!(s.tool, Tool::Rect, "cancel must not flip");
+    }
+
+    #[test]
+    fn flip_adds_no_undo_entry_and_undo_keeps_move() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Rect;
+        drag_commit(&mut s, Point::new(10.0, 10.0), Point::new(50.0, 40.0));
+        assert_eq!(
+            s.undo.len(),
+            1,
+            "exactly the commit snapshot, no flip entry"
+        );
+        s.undo();
+        assert!(s.anns.is_empty(), "undo removed the committed annotation");
+        assert_eq!(s.tool, Tool::Move, "undo does not touch the flipped tool");
+    }
+
+    #[test]
+    fn commit_with_move_already_active_never_flips_other_tool() {
+        // A hand-injected pending whose owning tool differs from the
+        // active tool (unreachable via normal input, defensive) must
+        // not flip — the ownership guard blocks it.
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Move;
+        s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
+        s.commit_annotation();
+        assert_eq!(s.anns.len(), 1);
+        assert_eq!(s.tool, Tool::Move, "guard blocks non-owning commit");
+    }
+
     /// TODO Task 7 acceptance: pending is None after cancel.
     #[test]
     fn cancel_drops_pending() {
         let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Rect;
         s.begin_annotation(Point::new(1.0, 1.0));
         assert!(s.pending.is_some());
         s.cancel_annotation();
@@ -2037,6 +2217,7 @@ mod tests {
     #[test]
     fn dispatch_pointer_down_begins_annotation() {
         let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Rect;
         assert_eq!(
             s.dispatch_input(&InputEvent::PointerDown {
                 pos: Point::new(5.0, 5.0)
@@ -2049,6 +2230,7 @@ mod tests {
     #[test]
     fn dispatch_pointer_down_drag_up_commits_rect() {
         let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Rect;
         s.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(10.0, 10.0),
         });
@@ -2597,11 +2779,13 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_text_pointer_commits_and_repositions() {
-        // Flameshot-like behaviour: clicking elsewhere while a draft is
-        // active commits the current draft and places a new caret at
-        // the clicked position. An empty draft is cancelled (not
-        // committed), so the annotation list stays clean.
+    fn dispatch_text_pointer_commits_and_flips_to_move() {
+        // Clicking elsewhere while a draft is active commits the
+        // current draft. With the flip policy on (default), the tool
+        // switches to Move — the click's own follow-up action then
+        // belongs to Move (here: a miss on the freshly committed
+        // text, so nothing begins). The old behavior placed a new
+        // caret; that now requires staying on Text via a re-press.
         let mut s = text_state();
         s.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(10.0, 10.0),
@@ -2611,15 +2795,9 @@ mod tests {
         s.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(50.0, 50.0),
         });
-        // Previous draft committed (non-empty), new caret at (50,50).
         assert_eq!(s.anns.len(), 1, "previous draft committed");
-        match &s.pending {
-            Some(Annotation::Text { pos, text, .. }) => {
-                assert_eq!(*pos, Point::new(50.0, 50.0), "new caret at click position");
-                assert!(text.is_empty(), "new draft starts empty");
-            }
-            other => panic!("expected new pending Text, got {other:?}"),
-        }
+        assert!(s.pending.is_none(), "no new caret after the flip");
+        assert_eq!(s.tool, Tool::Move, "commit flipped the tool to Move");
         match &s.anns[0] {
             Annotation::Text { pos, text, .. } => {
                 assert_eq!(*pos, Point::new(10.0, 10.0));
