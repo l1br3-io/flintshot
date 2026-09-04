@@ -25,6 +25,12 @@ const ID_QUIT: &str = "flintshot.quit";
 /// Per-monitor submenu items use this prefix + the monitor index, e.g.
 /// `flintshot.fullscreen-monitor.2`.
 const ID_FULLSCREEN_MONITOR_PREFIX: &str = "flintshot.fullscreen-monitor.";
+/// Stable `TrayIcon` id. Without it, `TrayIconBuilder::new()` mints a
+/// fresh `{pid}-{counter}` id per build, which becomes the SNI object
+/// path — so any second registration (a stray re-`build` in the same
+/// process) would surface as a *second* panel item instead of
+/// replacing this one (ADR-0039).
+const TRAY_ID: &str = "flintshot";
 
 /// What a tray menu click resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,9 +77,13 @@ pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
 /// *Bind shortcuts…* item: it drives the xdg-desktop-portal bind
 /// dialog, which only exists on Wayland portal sessions — an X11 tray
 /// must not grow a dead item (there hotkeys re-register from
-/// `[hotkeys]` directly). The returned [`TrayIcon`] must be held alive
-/// for the daemon's lifetime; muda retains the menu items itself
-/// (they're reference-counted), so they can drop here.
+/// `[hotkeys]` directly). The returned [`TrayIcon`] must be held
+/// alive for the daemon's **whole** lifetime — exactly one
+/// registration per process (a dropped handle never unregisters the
+/// SNI item, and a second build would duplicate it, ADR-0039);
+/// visibility is driven by `set_visible` flips. muda retains the
+/// menu items itself (they're reference-counted), so they can drop
+/// here.
 pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
     // libappindicator (tray-icon's Linux backend) touches GTK widgets
     // for the menu, so GTK must be initialized first — on the main
@@ -93,8 +103,10 @@ pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
 
     // Per-monitor submenu (Phase 2's multi-monitor UX). The list is
     // enumerated at build time — muda doesn't portably expose a
-    // submenu-open event, so hot-plugging a monitor mid-session needs a
-    // tray rebuild (future work); restarting the daemon refreshes it.
+    // submenu-open event, and rebuilding the tray to hot-plug a
+    // monitor is off the table (a second registration duplicates the
+    // panel item, ADR-0039) — so the list refreshes on daemon
+    // restart.
     let monitor_submenu = Submenu::with_id("flintshot.monitors", "Fullscreen on monitor", true);
     append_monitor_entries(&monitor_submenu)?;
 
@@ -118,6 +130,7 @@ pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
 
     let icon = icon()?;
     TrayIconBuilder::new()
+        .with_id(TRAY_ID)
         .with_tooltip("flintshot")
         .with_icon(icon)
         .with_menu(Box::new(menu))

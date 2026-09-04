@@ -15,6 +15,19 @@ shipped: 2026-08-31
 > [ADR-0028](../../adrs/ADR-0028-capture-then-overlay.md): "Wayland
 > users get the editor window until a layer-shell effort exists."
 
+## Post-ship correction (2026-09-03)
+
+Exit criterion "Enter crops" did not actually hold for the
+**keyboard**: `EditorApp::logic`'s translation chain forwarded only
+Esc / Z / Y / S / C, so the dispatcher's Enter-crops-selection
+branch was reachable solely through the toolbar's "Crop · Enter"
+button. Shipped because the task-001 unit tests dispatched
+`Key::Enter` directly into the dispatcher, never exercising the
+shell translation. Fixed alongside the annotation-move effort:
+Enter now forwards through `dispatch_shortcut_key`, and
+`enter_key_crops_through_shell` drives the translation layer via a
+synthetic `egui::Context` (verified to fail without the fix).
+
 ## Objective
 
 Make `flintshot region` land in a **selection-first** editor session

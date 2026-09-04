@@ -253,6 +253,9 @@ size: `ls -lh ./target/release/flintshot` — target under 25 MB.
 | `Ctrl+S` save via `rfd` writes correct PNG              |    |    |    |    |    |    |    |    |    |
 | `Ctrl+C` copies image to clipboard                     |    |    |    |    |    |    |    |    |    |
 | `Ctrl+Z` / `Ctrl+Y` undo/redo                           |    |    |    |    |    |    |    |    |    |
+| Annotation move: with `S` active, drag a committed annotation (rect, arrow, text, blur); it moves, grab point tracking the cursor |    |    |    |    |    |    |    |    |    |
+| Annotation move: `Ctrl+Z` restores pre-move position, `Ctrl+Y` re-applies; one gesture = one undo entry |    |    |    |    |    |    |    |    |    |
+| Annotation move: Select press on empty canvas still starts a fresh selection drag |    |    |    |    |    |    |    |    |    |
 | `Esc` cancels and closes editor without saving          |    |    |    |    |    |    |    |    |    |
 | HiDPI / fractional-scale display captures sharp image   |    |    |    |    |    |    |    |    |    |
 | Cold-start-to-capture under 200 ms (commodity HW)       |    |    |    |    |    |    |    |    |    |
@@ -1685,6 +1688,7 @@ dispatch-pinned, verified live here).
 | Wayland: config `overlay` demoted → selection-first editor; log names fallback | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 | Wayland: tray / daemon-delegated `region` lands selection-first; `fullscreen` demotes plain | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
 | X11 / macOS / Windows: `interaction-mode = "overlay"` opens the true overlay (unregressed) |    | N/A | N/A | N/A | N/A |    |    |    |    |
+| Overlay: Select press on an annotation moves it (dispatcher-owned); empty-region press still moves the region; handles still resize |    | N/A | N/A | N/A | N/A |    |    |    |    |
 
 ### Known caveats
 
@@ -1731,14 +1735,18 @@ grace, acks, and safety restore each log.
 **1. Tray-initiated region (rows 1, 5).**
 
 Click the tray icon → *Capture region*. Expected: the tray vanishes
-**at the click** (on Linux the item unregisters — the panel destroys
-its still-open menu popup and drops the icon, ADR-0038); the
-editor/overlay opens on a frozen frame **without the icon and without
-the menu popup** (the menu grace, 600 ms from the click, waits out the
-destroy's propagation — ADR-0037); the tray is back in the panel by
-the time the session is interactable (it must NOT stay hidden while
-you annotate). The frozen frame keeps every *other* panel item — only
-flintshot's own icon (and its menu) hide.
+**at the click** (SNI status flip to `Passive` — one registration for
+the daemon's whole life, ADR-0039); the editor/overlay opens on a
+frozen frame **without the icon** (the menu grace, 600 ms from the
+click, waits out the panel's popup close where the panel performs it
+— ADR-0037); the tray is back in the panel by the time the session
+is interactable (it must NOT stay hidden while you annotate). The
+frozen frame keeps every *other* panel item — only flintshot's own
+icon hides. On panels that never close popups on activation (COSMIC,
+upstream `TODO`) the popup may still appear in the frame — known
+limitation (ADR-0039), no daemon-side lever exists. **After the
+capture, exactly one flintshot icon + menu remain in the panel** (no
+duplicates, however many captures run).
 
 **2. Other triggers (rows 2–4).**
 
@@ -1762,8 +1770,8 @@ icon still returns (the restore report fires on error paths too).
 pkill -9 -f 'flintshot region'
 ```
 
-Expected: the tray returns within ~30 s (the safety bound — on
-Linux a full re-register, ADR-0038) with a
+Expected: the tray returns within ~30 s (the safety bound — a
+visibility flip, ADR-0039) with a
 `tray stayed hidden past the safety bound` warning in the log; the
 next capture works normally.
 
@@ -1789,6 +1797,7 @@ X11 session; the visibility flip must not disturb registration
 | CLI-delegated `region` (daemon up): icon-free frame          |    |    |    |    |    |    |    |    |    |
 | Applet / desktop action captures: icon-free frame            |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Icon returns right after the grab (not held for the session) |    |    |    |    |    |    |    |    |    |
+| Repeated captures / daemon exit: exactly one tray item, no duplicates (ADR-0039) | | | | | | N/A | N/A | N/A | N/A |
 | Esc-cancel capture: icon back, exit 0                       |    |    |    |    |    |    |    |    |    |
 | Failed capture (permission denied): icon still returns      |    |    |    |    |    |    |    |    |    |
 | `kill -9` worker mid-grab: icon back ≤ ~30 s + warn logged   |    |    |    |    |    |    |    |    |    |
@@ -1800,15 +1809,19 @@ X11 session; the visibility flip must not disturb registration
 
 - **~600–700 ms click-to-grab on tray-menu captures** (menu grace,
   ADR-0037); ~250–400 ms on other daemon triggers (icon grace). The
-  guarantee's price: the unregister→popup-destroy propagation is
-  unobservable, so the ack waits it out blind.
-- **On Linux every daemon-dispatched capture unregisters and
-  re-registers the SNI item** (ADR-0038) — the panel destroys the
-  popup only on unregistration, and COSMIC's status area never
-  closes it on activation (upstream `TODO`). The icon flickers out
-  at the trigger and returns after the grab; a failed re-register
-  (logged) defers the icon to the next capture or a daemon restart.
-  macOS/Windows use plain `set_visible` flips.
+  guarantee's price: the panel's popup close (where it happens at
+  all) is unobservable, so the ack waits it out blind.
+- **One tray registration per daemon run** (ADR-0039): the hide is a
+  `Passive`/`Active` status flip on the single long-lived icon —
+  never a drop/rebuild, which cannot unregister the SNI item (SNI has
+  no unregistration method; watchers remove items only when the
+  owning process exits) and would strand a duplicated icon + menu
+  per capture.
+- **COSMIC never closes an SNI menu popup on activation** (upstream
+  `TODO`), and it ignores SNI `NewStatus` for the popup — the popup
+  may appear in tray-launched captures' frames there. Accepted
+  limitation (ADR-0039): no daemon-side lever exists; the icon itself
+  still hides via the status flip.
 - **The COSMIC applet's own popup and desktop-action menus are not
   covered** — those captures arrive over IPC with no origin marker,
   so the daemon cannot target them (ADR-0037's open edge). Report if

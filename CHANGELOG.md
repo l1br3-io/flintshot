@@ -18,23 +18,68 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- **Move tool** (`V`, a dedicated toolbar chip in both the editor
+  window and the fullscreen overlay): pressing on a committed
+  annotation grabs it and dragging repositions it, for every
+  annotation type. The grab point tracks the cursor; size, style,
+  and z-order are untouched. One move gesture is exactly one undo
+  entry (the snapshot is taken on first actual movement, so a
+  click-without-drag records nothing); `Ctrl+Z` restores the
+  pre-move position, `Ctrl+Y` re-applies it, and undo / crop
+  mid-drag cancels cleanly. Selecting and moving are separate
+  tools: the Select tool (`S`) now only drags region selections
+  (a press on an annotation starts a fresh selection over it), and
+  all annotation repositioning happens through Move. In the
+  overlay, a Move press always reaches the dispatcher so
+  annotation grabs work anywhere, while region handles and
+  interior drags remain Select-owned (spec:
+  `docs/specs/annotation-move/`).
+
 ### Fixed
+
+- **`Enter` did nothing after selecting a region in the
+  selection-first editor window** (the Wayland demotion path of
+  `flintshot region`): `EditorApp::logic`'s key translation chain
+  forwarded only `Esc` / `Z` / `Y` / `S` / `C`, so the dispatcher's
+  Enter-crops-selection branch was reachable solely through the
+  toolbar's "Crop · Enter" button — the shipped tests dispatched
+  `Key::Enter` directly into the dispatcher and never caught the
+  missing shell translation. Enter now forwards to the dispatcher
+  (gated there on Select tool + live selection), and a synthetic-
+  `egui::Context` regression test drives the translation layer
+  itself. This also restores the Phase 1 Select-tool contract
+  (`S`-select + `Enter` crop in the plain editor), which had the
+  same gap. The X11 overlay is unaffected (it intercepts Enter
+  before dispatch with accept-as-copy semantics).
+
+- **The tray menu duplicated after a capture** (every capture session
+  left one more flintshot icon + menu in the panel, clearing only on
+  daemon exit). The ADR-0038 unregister/re-register hide could never
+  work: `tray-icon`'s Linux drop only flips the appindicator to
+  `Passive` (the GObject leaks, nothing unregisters), SNI has no
+  unregistration method — COSMIC's watcher removes an item only when
+  the owning process's bus name disappears — and each rebuild mints a
+  fresh `{pid}-{counter}` object path, so every hide/restore cycle
+  registered one *more* permanent panel item. The daemon now holds
+  exactly **one** `TrayIcon` for its whole life under a stable id, and
+  the gate drives it with `set_visible` (`Active`/`Passive`) flips;
+  the ADR-0036/0037 handshake timings are unchanged (ADR-0039). The
+  never-closing COSMIC menu popup is accepted as an upstream
+  `cosmic-applets` limitation — no daemon-side lever exists for it.
 
 - The tray **menu popup** still landed in *every* tray-launched
   capture on COSMIC despite the ADR-0037 menu grace (L5, 2026-09-03):
   `cosmic-applet-status-area` never closes an SNI menu popup on item
   activation (an upstream `TODO`), and it ignores SNI `NewStatus`, so
-  no wait duration or status flip could remove it. On Linux the
-  capture-time hide is now an **unregister / re-register cycle**
-  (ADR-0038): dropping the `TrayIcon` unregisters the SNI item, which
-  is the one lever that makes the panel destroy its (possibly
-  still-open) popup *and* reliably remove the icon; the restore side
-  rebuilds the tray behind the same watcher barrier startup uses.
-  macOS/Windows keep `set_visible` flips (native menus close on
-  activation). Visible behaviour is unchanged in rhythm — the tray
-  vanishes at the trigger and returns after the grab — but the
-  popup's removal is now causal instead of hoped-for, and the frozen
-  frame carries neither the icon nor the menu on SNI panels.
+  no wait duration or status flip could remove it. ADR-0038's
+  unregister/re-register attempt to close it causally proved
+  impossible (see the bullet above / ADR-0039): the popup's presence
+  in tray-launched captures on COSMIC is an upstream limitation; on
+  panels that close popups on activation (native macOS/Windows
+  backends, conforming SNI panels) the ADR-0037 grace already covered
+  the close.
 
 - The daemon's own tray icon — and the tray **menu** the click
   dismissed — landed in every daemon-dispatched capture's frozen
