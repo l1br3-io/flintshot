@@ -7,6 +7,8 @@
 //!   `impl Canvas` (background primitives live here).
 //! - [`app`] — the internal `EditorApp` (`impl eframe::App`) that
 //!   drives the per-frame render loop.
+//! - `chrome` (private) — the Move-tool hover / grab outline shared
+//!   by the editor window and the overlay (see `crate::chrome`).
 //! - [`magnifier`] — the toolkit-owned pixel-zoom inset widget (no
 //!   core abstraction; reads `EditorState::image` directly).
 //! - [`overlay`] (private) — the internal `OverlayApp` (`impl
@@ -35,6 +37,7 @@
 
 mod app;
 mod canvas;
+mod chrome;
 mod magnifier;
 mod overlay;
 mod pin;

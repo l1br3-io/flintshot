@@ -406,6 +406,39 @@ impl EditorApp {
             ppp,
         );
     }
+
+    /// Paint the Move-tool hover / grab outline (see
+    /// [`crate::chrome`]) over the shared render output. The hover
+    /// variant is gated exactly like the cursor in [`Self::logic_impl`]
+    /// — pointer inside the canvas (never the toolbar: it sits outside
+    /// `canvas_rect`), no drag in flight — so outline and cursor can
+    /// never disagree. The grab variant needs no gate: a live
+    /// `moving` drag is its own condition and must keep tracking
+    /// through the whole drag.
+    fn paint_move_chrome_if_any(&self, ctx: &Context, painter: &egui::Painter) {
+        let Some(canvas_rect) = self.canvas_rect else {
+            return;
+        };
+        let ppp = ctx.pixels_per_point();
+        let pos = ctx.input(|i| i.pointer.latest_pos());
+        let hover_at = pos
+            .filter(|p| canvas_rect.contains(*p) && !self.canvas_drag_active)
+            .map(|p| {
+                // Screen-logical → canvas-physical, matching `logic_impl`.
+                let local = p - canvas_rect.min;
+                Point::new(local.x * ppp, local.y * ppp)
+            });
+        let Some((rect, kind)) = crate::chrome::move_chrome(&self.state, hover_at) else {
+            return;
+        };
+        let to_logical =
+            |p: Point| egui::pos2(canvas_rect.min.x + p.x / ppp, canvas_rect.min.y + p.y / ppp);
+        crate::chrome::paint_move_chrome(
+            painter,
+            egui::Rect::from_two_pos(to_logical(rect.min), to_logical(rect.max)),
+            kind,
+        );
+    }
 }
 
 impl EditorApp {
@@ -551,6 +584,17 @@ impl EditorApp {
             // rather than silently dropping.
             let _ = self.state.dispatch_input(&event);
         }
+
+        // Move-tool hover / grab cursor: the editor window's first
+        // hover cursor (prominent-move spec). Follows the same
+        // condition as the chrome paint — a hover hit or a live move
+        // drag — so cursor and outline can never disagree. Empty
+        // canvas under Move sets nothing (egui falls back to the
+        // default arrow for the frame).
+        let hover_at = (canvas_rect.contains(pos) && !self.canvas_drag_active).then_some(at);
+        if crate::chrome::move_chrome(&self.state, hover_at).is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::Move);
+        }
     }
 
     /// Translate this frame's shortcut keypress (one per frame) and
@@ -635,6 +679,15 @@ impl App for EditorApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.ui_impl(ui);
+    }
+}
+
+impl EditorApp {
+    /// Headless-callable core of [`App::ui`](EditorApp) — the split
+    /// (mirroring `logic_impl` / `OverlayApp`) lets the frame body be
+    /// exercised with a synthetic `egui::Context` in tests.
+    fn ui_impl(&mut self, ui: &mut egui::Ui) {
         // Toolbar. Must come before CentralPanel so egui reserves the
         // horizontal strip at the top. The rail + bay layout, chips,
         // swatches, and popups live in `crate::toolbar`; the plain
@@ -707,6 +760,11 @@ impl App for EditorApp {
         // during text-editing so the trigger key doesn't pop the
         // loupe over the caret.
         self.paint_magnifier_if_active(ui.ctx(), ui.painter());
+
+        // Move-tool object chrome (prominent-move spec): dashed hover
+        // outline / solid ember grab outline, under the magnifier —
+        // the overlay's chrome ordering.
+        self.paint_move_chrome_if_any(ui.ctx(), ui.painter());
 
         // Handle toolbar actions outside the toolbar drawing code so
         // we can borrow `&self.outcome` cleanly. Each handler runs the
@@ -1376,7 +1434,7 @@ pub(crate) fn tool_for_key(key: egui::Key) -> Option<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flintshot_core::EditorState;
+    use flintshot_core::{Annotation, EditorState};
 
     /// Construct an all-white `EditorState` of the given pixel size.
     fn blank_state(w: u32, h: u32) -> EditorState {
@@ -1570,6 +1628,157 @@ mod tests {
             "the editor default is untouched"
         );
         assert!(!app.phase_active(), "no request → no phase");
+    }
+
+    // --- Move-tool hover / grab chrome (prominent-move) ---
+
+    /// One eframe-shaped frame for the editor window: `logic_impl`
+    /// then `ui_impl` inside a single egui pass over the given extra
+    /// input events. Screen is 200×200 so the toolbar strip leaves
+    /// the 64×64 canvas room to breathe.
+    fn editor_frame(ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(200.0, 200.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+    }
+
+    /// An editor state on the default Move tool with one committed
+    /// rect annotation at (10,10)-(50,40) — something to hover.
+    fn move_state_with_ann() -> EditorState {
+        let mut state = blank_state(64, 64);
+        state.pending = Some(Annotation::Rect {
+            rect: Rect::from_xywh(10.0, 10.0, 40.0, 30.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+            fill: None,
+        });
+        state.commit_annotation();
+        assert_eq!(state.tool, Tool::Move, "fixture: tool stays Move");
+        state
+    }
+
+    /// Run one logic pass with the pointer parked at canvas-local
+    /// (phys) — ppp is 1 in a synthetic context — and return the
+    /// frame's cursor icon.
+    fn cursor_after_hover(
+        ctx: &egui::Context,
+        app: &mut EditorApp,
+        phys: (f32, f32),
+    ) -> egui::CursorIcon {
+        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(200.0, 200.0),
+            )),
+            events: vec![egui::Event::PointerMoved(egui::pos2(
+                canvas.min.x + phys.0,
+                canvas.min.y + phys.1,
+            ))],
+            ..egui::RawInput::default()
+        };
+        let mut icon = egui::CursorIcon::Default;
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            icon = ui.ctx().output(|o| o.cursor_icon);
+        });
+        icon
+    }
+
+    #[test]
+    fn move_hover_over_annotation_sets_move_cursor() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            move_state_with_ann(),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        editor_frame(&ctx, &mut app, vec![]);
+        assert!(
+            app.canvas_rect.is_some(),
+            "fixture: first frame caches the canvas rect"
+        );
+        assert_eq!(
+            cursor_after_hover(&ctx, &mut app, (30.0, 25.0)),
+            egui::CursorIcon::Move,
+            "hovering the annotation under Move must show the grab cursor"
+        );
+    }
+
+    #[test]
+    fn move_hover_over_empty_canvas_sets_no_cursor() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            move_state_with_ann(),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        editor_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            cursor_after_hover(&ctx, &mut app, (5.0, 5.0)),
+            egui::CursorIcon::Default,
+            "empty canvas under Move must leave the default cursor"
+        );
+    }
+
+    #[test]
+    fn move_grab_drag_keeps_move_cursor_and_live_chrome() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            move_state_with_ann(),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        editor_frame(&ctx, &mut app, vec![]);
+        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+        // Press on the annotation, drag a little, release not yet.
+        let press = egui::pos2(canvas.min.x + 30.0, canvas.min.y + 25.0);
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(app.state.moving.is_some(), "press grabbed the annotation");
+        let mut icon = egui::CursorIcon::Default;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(200.0, 200.0),
+            )),
+            events: vec![egui::Event::PointerMoved(egui::pos2(
+                canvas.min.x + 36.0,
+                canvas.min.y + 29.0,
+            ))],
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            icon = ui.ctx().output(|o| o.cursor_icon);
+        });
+        assert!(
+            app.state.moving.is_some(),
+            "drag keeps the grab live (no release yet)"
+        );
+        assert_eq!(icon, egui::CursorIcon::Move);
     }
 
     #[test]
