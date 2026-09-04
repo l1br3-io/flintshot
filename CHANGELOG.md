@@ -20,6 +20,32 @@ Categories used below:
 
 ### Added
 
+- **Flip to Move after every annotation commit** (prominent-move
+  effort, ADR-0040): releasing a drawn annotation (Rect / Ellipse /
+  Line / Arrow / Marker / Pencil / Blur, and Text on modal commit)
+  switches the tool to Move, so the very next press can reposition
+  what was just drawn — draw, release, drag it better, no tool
+  switch, no undo. Re-press the tool's hotkey (`R`, `E`, `A`, …) to
+  draw again. Number is exempt (rapid sequential labeling), Select
+  and Move produce no commits, degenerate (discarded zero-extent)
+  strokes never flip, and the flip itself creates no undo entry —
+  `Ctrl+Z` after a flip restores annotation state while the tool
+  stays Move. Controlled by the new `[ui] flip-to-move` config key
+  (`true` by default; `false` restores sticky tools for rapid
+  multi-draw). The flag is read once per editor session (magnifier
+  precedent): a toggle applies to the next capture's editor, not a
+  live session. An ownership guard keeps the flip from clobbering a
+  deliberate tool switch: a text draft flushed *because* the user
+  already changed tools does not flip.
+- **Hover affordances under Move, in both shells**: hovering a
+  committed annotation with Move active shows the Move cursor plus a
+  thin dashed bounding-box outline (from `Annotation::bounding_box`,
+  whose doc promised exactly this); a live grab adds a solid ember
+  outline tracking the dragged annotation. Hovering empty canvas
+  shows neither; hovers are read-only queries that never touch the
+  dispatcher or history. The editor window gains hover cursors at
+  all (the Move grab cursor is its first). See
+  `docs/specs/prominent-move-tool/`.
 - **Move tool** (`V`, a dedicated toolbar chip in both the editor
   window and the fullscreen overlay): pressing on a committed
   annotation grabs it and dragging repositions it, for every
@@ -36,6 +62,19 @@ Categories used below:
   annotation grabs work anywhere, while region handles and
   interior drags remain Select-owned (spec:
   `docs/specs/annotation-move/`).
+
+### Changed
+
+- **Move is the default edit-phase tool**: `Tool::default()` is now
+  Move, so a plain editor window (`fullscreen`, `open`, …) opens on
+  it, and the edit phase after a region capture's crop lands on Move
+  (shell-side: the region-selection phase still opens on Select per
+  the region-first contract, then flips Select → Move when the phase
+  ends — a tool the user picked mid-phase survives). The rail in
+  both the editor toolbar and the overlay's floating toolbar now
+  leads with Move, rendered as a **labeled chip** (glyph + "Move"
+  text, the Copy primary's glyph+label pattern) so the tool teaches
+  itself without a tooltip.
 
 ### Fixed
 
