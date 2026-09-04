@@ -69,19 +69,21 @@ pub(crate) struct ToolSpec {
 }
 
 /// The tool chips in rail order. Shared with the overlay's
-/// floating rail.
+/// floating rail. Move leads (labeled) because it is the resting
+/// tool the editor lands on after every commit — the rail teaches
+/// the tool's existence without a tooltip.
 pub(crate) const TOOLS: &[ToolSpec] = &[
-    ToolSpec {
-        tool: Tool::Select,
-        name: "Select",
-        key: "S",
-        glyph: g_select,
-    },
     ToolSpec {
         tool: Tool::Move,
         name: "Move",
         key: "V",
         glyph: g_move,
+    },
+    ToolSpec {
+        tool: Tool::Select,
+        name: "Select",
+        key: "S",
+        glyph: g_select,
     },
     ToolSpec {
         tool: Tool::Rect,
@@ -172,13 +174,26 @@ fn draw_rail(ui: &mut egui::Ui, state: &mut EditorState, copied: bool) -> Toolba
                 for spec in TOOLS {
                     let selected = state.tool == spec.tool;
                     let tooltip = format!("{} · {}", spec.name, spec.key);
-                    let resp = chip(
-                        ui,
-                        egui::Id::new(("tool", spec.key)),
-                        tooltip.as_str(),
-                        selected,
-                        spec.glyph,
-                    );
+                    // Move renders labeled (rail emphasis); ids stay
+                    // key-derived so tooltips and clicks are unchanged.
+                    let resp = if spec.tool == Tool::Move {
+                        labeled_chip(
+                            ui,
+                            egui::Id::new(("tool", spec.key)),
+                            tooltip.as_str(),
+                            selected,
+                            spec.name,
+                            spec.glyph,
+                        )
+                    } else {
+                        chip(
+                            ui,
+                            egui::Id::new(("tool", spec.key)),
+                            tooltip.as_str(),
+                            selected,
+                            spec.glyph,
+                        )
+                    };
                     if resp.clicked() {
                         state.tool = spec.tool;
                     }
@@ -462,6 +477,81 @@ pub(crate) fn chip(
         theme::SLATE
     };
     glyph(ui.painter(), rect, color);
+    resp
+}
+
+/// Glyph square edge inside a labeled chip — identical to a plain
+/// chip so adjacent glyphs align on the rail.
+const LABEL_GLYPH_EDGE: f32 = 28.0;
+
+/// Gap between the glyph square and the label text, logical px.
+const LABEL_GAP: f32 = 4.0;
+
+/// Trailing padding after the label text, logical px.
+const LABEL_TRAILING: f32 = 10.0;
+
+/// Width of a labeled chip for a measured label width. Pure so the
+/// never-narrower-than-a-glyph-chip guarantee is unit-testable
+/// without a live egui `Ui`.
+fn labeled_chip_width(label_width: f32) -> f32 {
+    LABEL_GLYPH_EDGE + LABEL_GAP + label_width + LABEL_TRAILING
+}
+
+/// A labeled tool chip — [`chip`]'s glyph plus text, following the
+/// Copy-primary's glyph+label pattern (`copy_chip`): 28 px tall,
+/// galley-measured width, same rest / hover / selected visuals as
+/// `chip` (ember selected, graphite otherwise). The label is the
+/// emphasis, not new color. Renders the Move chip in both rails.
+pub(crate) fn labeled_chip(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    tooltip: &str,
+    selected: bool,
+    label: &str,
+    glyph: Glyph,
+) -> egui::Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), FontId::proportional(13.0), theme::CHALK);
+    let galley_size = galley.size();
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(labeled_chip_width(galley_size.x), 28.0),
+        Sense::hover(),
+    );
+    let resp = ui.interact(rect, id, Sense::click()).on_hover_text(tooltip);
+    let fill = if selected {
+        theme::EMBER
+    } else if resp.hovered() {
+        theme::GRAPHITE_500
+    } else {
+        theme::GRAPHITE_700
+    };
+    let border = if selected {
+        Stroke::NONE
+    } else {
+        Stroke::new(1.0, theme::GRAPHITE_500)
+    };
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(6),
+        fill,
+        border,
+        StrokeKind::Middle,
+    );
+    let color = if selected {
+        theme::INK
+    } else if resp.hovered() {
+        theme::CHALK
+    } else {
+        theme::SLATE
+    };
+    let glyph_rect = egui::Rect::from_min_size(rect.min, egui::vec2(LABEL_GLYPH_EDGE, 28.0));
+    glyph(ui.painter(), glyph_rect, color);
+    let pos = egui::pos2(
+        glyph_rect.right() + LABEL_GAP,
+        rect.center().y - galley_size.y / 2.0,
+    );
+    ui.painter().galley(pos, galley, color);
     resp
 }
 
@@ -845,6 +935,26 @@ mod tests {
                 "missing rail chip for {tool:?}"
             );
         }
+    }
+
+    #[test]
+    fn move_leads_the_rail_with_select_second() {
+        assert!(
+            TOOLS.first().is_some_and(|t| t.tool == Tool::Move),
+            "Move must be the first rail chip"
+        );
+        assert!(
+            TOOLS.get(1).is_some_and(|t| t.tool == Tool::Select),
+            "Select must be the second rail chip"
+        );
+        assert_eq!(TOOLS[0].name, "Move", "the label reads Move");
+    }
+
+    #[test]
+    fn labeled_chip_is_never_narrower_than_a_glyph_chip() {
+        assert!(labeled_chip_width(0.0) >= 28.0);
+        // A realistic "Move" label widens the chip further.
+        assert!(labeled_chip_width(32.0) > 28.0);
     }
 
     #[test]

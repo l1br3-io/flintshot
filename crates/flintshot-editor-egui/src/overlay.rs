@@ -554,13 +554,27 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
     for spec in TOOLS {
         let selected = state.tool == spec.tool;
         let tooltip = format!("{} · {}", spec.name, spec.key);
-        let resp = toolbar::chip(
-            ui,
-            egui::Id::new(("overlay_tool", spec.key)),
-            tooltip.as_str(),
-            selected,
-            spec.glyph,
-        );
+        // Move renders labeled (rail emphasis), matching the editor
+        // rail; the wider chip simply widens the measured toolbar
+        // size that drives `toolbar_anchor`.
+        let resp = if spec.tool == Tool::Move {
+            toolbar::labeled_chip(
+                ui,
+                egui::Id::new(("overlay_tool", spec.key)),
+                tooltip.as_str(),
+                selected,
+                spec.name,
+                spec.glyph,
+            )
+        } else {
+            toolbar::chip(
+                ui,
+                egui::Id::new(("overlay_tool", spec.key)),
+                tooltip.as_str(),
+                selected,
+                spec.glyph,
+            )
+        };
         if resp.clicked() {
             state.tool = spec.tool;
         }
