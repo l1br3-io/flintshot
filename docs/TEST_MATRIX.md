@@ -37,6 +37,7 @@ verified, or open an issue and link it in the cell.
 | M2  | macOS 15 (Sequoia)                                | Quartz              | Intel             |
 | W1  | Windows 11 23H2                                   | DWM                 | bare metal        |
 | W2  | Windows 10 22H2                                   | DWM                 | VM                |
+| XV1 | Xvfb (`-noreset`, 2560×1440, X11)                 | X11 (synthetic)     | Linux bare metal  |
 
 Add a row when you start testing on something new. Don't delete rows
 when a platform is dropped — mark **DEPRECATED** and the date.
@@ -1834,6 +1835,116 @@ X11 session; the visibility flip must not disturb registration
   platform if a cell ever shows a ghost.
 - Only flintshot's own tray hides. Other panels' icons (and any
   other app's) remain in the shot by design.
+
+---
+
+## Prominent Move tool — flip-on-commit, Move default, labeled chip, hover affordances
+
+Effort: `prominent-move-tool` (ADR-0040). Applies to **both** shells
+(editor window and live overlay). The flip policy, exemptions,
+ownership guard, no-undo semantics, `flip-to-move` config roundtrip,
+phase-end tool, rail order, and hover-hit math are unit-pinned in
+`flintshot-core`, `flintshot-app`, and `flintshot-editor-egui`; the
+rows below verify what tests can't — the live gesture chain and
+chrome rendering on real displays.
+
+### Test setup
+
+```sh
+cargo build --release
+cargo test --workspace --all-targets   # gates green before manual
+flintshot region                       # or: flintshot fullscreen / open
+```
+
+XV1 note: this pass ran scriptedly — Xvfb + `-noreset` (the server
+resets on last-client-disconnect otherwise, wiping the painted root),
+XTest synthetic input, and pixel-level assertions on the editor
+window's own pixels (ember-cluster position in the rail = active
+chip; dash-run pattern = the hover outline). Reproduce with
+`Xvfb :99 -screen 0 2560x1440x24 +extension GLX -noreset -s 0` and
+`env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE DISPLAY=:99` (xcap routes
+to the portal when `XDG_SESSION_TYPE=wayland`, ignoring `$DISPLAY`).
+
+### Test script
+
+**1. Phase-end + rail (rows 1–2).**
+
+`flintshot region` → drag a region → `Enter`. Expected: the edit
+phase opens on **Move** — the first rail chip is the labeled one
+(glyph + "Move" text, ember when active). Same labeled-first rail in
+the overlay's floating toolbar (`--overlay` on X11, or
+`interaction-mode = "overlay"`). A plain `flintshot fullscreen` /
+`flintshot open <path>` opens on Move directly (no selection phase).
+
+**2. Flip-on-commit gesture chain (row 3).**
+
+Press `R`, draw a rect, release → the active tool is Move (the
+Move chip is lit). Press-drag the fresh rect → it repositions.
+`Ctrl+Z` → the rect snaps back while the tool **stays** Move.
+Repeat with `E` (ellipse), `A` (arrow), `L` (line), `M` (marker),
+`P` (pencil), `B` (blur), and `T` (type text, `Enter` commits) —
+every commit flips to Move. Verify in the overlay too (draw inside
+the selection, release → Move).
+
+**3. Exemptions + degenerates (row 4).**
+
+Press `N`, click three times → three numbered bubbles, tool still
+Number after each. `S` still arms Select. Draw with `R` but release
+without moving (degenerate) → no annotation, no flip (tool stays
+Rect).
+
+**4. Config gate (rows 5–6).**
+
+```sh
+$EDITOR ~/.config/flintshot/config.toml   # under [ui]: flip-to-move = false
+flintshot region                          # after crop, draw a rect, release
+```
+
+Expected: the tool **stays Rect** after commit (sticky, pre-effort
+behavior) in this and every editor session until re-enabled;
+re-enabling restores the flip on the **next** capture (per-session
+read — a live editor session started before the toggle keeps its
+policy). Confirm `flintshot config` lists `flip-to-move = true`
+under `[ui]` on a fresh config.
+
+**5. Hover affordances (row 7).**
+
+With Move active: hover a committed annotation → cursor becomes the
+Move cursor and a thin **dashed** outline hugs the annotation's
+bounding box; press and drag → the outline turns solid ember and
+tracks the object. Hover empty canvas → neither appears. `Ctrl+Z`
+after hover-only interaction → no history entry consumed. Verify in
+both the editor window and the overlay.
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| `region` edit phase (post-crop) opens on Move; plain editor captures open on Move | | | | | | | | | | PASS a0a4ae6 2026-09-04 |
+| Rail leads with the labeled Move chip (editor toolbar + overlay floating rail) | | | | | | | | | | PASS a0a4ae6 2026-09-04 |
+| Draw any tool (incl. Text via Enter), release → tool is Move; drag repositions; `Ctrl+Z` restores position, tool stays Move | | | | | | | | | | PASS a0a4ae6 2026-09-04 (Rect; others unit-pinned) |
+| Number stays active across placements; `S` untouched; degenerate stroke doesn't flip | | | | | | | | | | PASS a0a4ae6 2026-09-04 |
+| `[ui] flip-to-move = false` → sticky tools; `flintshot config` shows the key (default `true`) | | | | | | | | | | PASS a0a4ae6 2026-09-04 |
+| Re-enabled flag applies on the next editor session, not a live one | | | | | | | | | | PASS a0a4ae6 2026-09-04 (flip-on/flip-off in consecutive sessions; per-session read also unit-pinned) |
+| Move hover: cursor + dashed bbox on hit, solid ember while grabbed, neither on empty canvas, no history entries (both shells) | | | | | | | | | | PASS a0a4ae6 2026-09-04 (dashed bbox pixel-verified in both shells incl. 4 px dash runs; cursor icon unit-pinned — window pixels don't include the X cursor) |
+
+### Known caveats
+
+- **Text's dashed hover outline is coarse** — `bounding_box` for
+  Text is a width-estimated rect (see its doc); the outline may sit
+  loose around short or styled strings. Accepted (spec, Task 004).
+- **The flip is per-session config, not live reload** (ADR-0040):
+  toggling `flip-to-move` mid-editor does nothing to that session.
+- **Hover cursors exist only for Move in the editor window** —
+  other tools show the default cursor (explicitly out of scope).
+- **XV1 rows are scripted, not eyeballed**: the labeled chip was
+  verified geometrically (first rail chip is ~73 px wide vs ~28 px
+  glyph chips — the glyph+label pattern), not by reading the
+  rendered text; the hover *cursor icon* is unit-pinned, not
+  pixel-seen. The overlay ran windowed (800×600) because a WM-less
+  Xvfb cannot grant fullscreen — rail/flip/hover logic is
+  viewport-independent, but the fullscreen placement itself is only
+  exercised on real platforms (Phase 5 rows).
 
 ---
 
