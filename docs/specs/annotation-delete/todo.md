@@ -4,4 +4,4 @@
 - [x] 002 toolbar delete chip on both rails (`flintshot-editor-egui/src/toolbar.rs` + action arms)
 - [x] 003 editor window delete UX (`flintshot-editor-egui/src/{app,chrome,theme,toolbar}.rs`)
 - [x] 004 overlay delete UX (`flintshot-editor-egui/src/overlay.rs`)
-- [ ] 005 closeout — CHANGELOG, TEST_MATRIX, ADR-0044, standing gates
+- [x] 005 closeout — CHANGELOG, TEST_MATRIX, ADR-0044, standing gates

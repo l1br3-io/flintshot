@@ -2061,6 +2061,130 @@ both the editor window and the overlay.
 
 ---
 
+## Annotation delete — select-then-delete for one annotation
+
+Effort: `annotation-delete` (ADR-0044). Applies to **both** shells
+(editor window and live overlay). The selection lifecycle
+(release-keeps-selection, mutation-kills-it, `set_tool` deselection),
+`delete_selected`'s undo snapshot discipline, key dispatch, chip
+enable predicates, and Esc layering are unit-pinned in
+`flintshot-core` and `flintshot-editor-egui`; the rows below verify
+what tests can't — the visible outline, the greyed/enabled chip, and
+the live delete/undo gesture chain on real displays.
+
+### Test setup
+
+```sh
+cargo build --release
+cargo test --workspace --all-targets   # gates green before manual
+flintshot fullscreen                   # or: flintshot region / open
+flintshot region --overlay             # overlay rows (X11 / macOS / Windows)
+```
+
+XV1 note: this pass ran scripted, select-first-tool-lock style — the
+shared `Xvfb :99` (1000×800, XTEST, software EGL; another app lives
+on it, so the harness only accepts *newly mapped* windows) with
+synthetic input and pixel assertions on the app window's pixels:
+dashed-ember ring around a drawn rect = selection, pure-red clusters
+= paint. The WM-less overlay maps at its **800×600 default**, so
+every overlay gesture and the pointer park stay inside that rect
+(the 1000×800 editor window is unaffected). Annotation coordinates
+are recovered from the *painted* pixels, so the toolbar offset never
+has to be known; modifier chords are held across event-loop frames
+(a chord sent within one egui batch reads end-of-batch modifiers —
+a bare key).
+
+### Test script
+
+**1. Select (row 1).**
+
+`flintshot fullscreen` → draw a rect (`R` + drag; the commit flips
+to Move) → click inside it. Expected: a dashed ember bounding-box
+outline appears and **stays after pointer release**. Repeat as a
+move-drag: press on the rect, drag it elsewhere, release → still
+selected. Clicking a second annotation moves the selection (last
+click wins).
+
+**2. Delete + undo symmetry (row 2).**
+
+With the rect selected: `Del` → it is gone; `Ctrl+Z` → exactly it
+returns; `Ctrl+Shift+Z` → gone again. `Backspace` behaves as `Del`.
+With two annotations drawn, deleting one leaves the other and the
+Number counter untouched (numbers keep their gaps — renumbering is
+history-hostile).
+
+**3. Rail button (row 3).**
+
+The Delete chip beside Undo/Redo: with nothing selected it renders
+greyed and clicks do nothing; select an annotation → it lights up
+and clicking it deletes (same dispatch as `Del`). Verify on both the
+editor toolbar and the overlay's floating rail.
+
+**4. Deselect paths (row 4).**
+
+Select → click empty canvas → outline gone. Select → switch tool
+(any chip or hotkey) → gone. Select → `Esc` deselects only (editor
+stays open); a second `Esc` cancels the session. `Esc` with no
+selection cancels immediately (today's behaviour).
+
+**5. Mutation invalidators (row 5).**
+
+With an older annotation selected: `Ctrl+Z` / `Ctrl+Y` / crop each
+drop the outline (no dangling selection into the new state).
+
+**6. Text draft safety (row 6).**
+
+Draw a rect, then `T` + click elsewhere and type; `Backspace` edits
+the draft — the committed rect must survive every draft keystroke.
+
+**7. Selection-first phase (row 7).**
+
+`flintshot region` → before cropping: `Del` inert, the Delete chip
+greyed with the rest of the rail; the phase behaves exactly as
+ADR-0043 otherwise.
+
+**8. Both shells + unregressed commands (row 8).**
+
+Repeat 1–7 in the overlay (`--overlay` on X11 / macOS / Windows);
+`flintshot fullscreen` / `flintshot open <path>` are today's editors
+plus the affordance.
+
+**9. Chrome-free output (row 9).**
+
+With a selection outline on screen: Save → re-open the PNG (and
+Copy → paste) — no outline in the output, ever (ADR-0044:
+chrome-only by construction; this verifies it live).
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Move click selects: dashed ember bbox persists after release (click + post-move release); re-click replaces | | | | | | | | | | PASS 5993239 2026-09-08 (editor ring 0→488 px, overlay 0→357; post-move release keeps it; replace-on-click unit-pinned) |
+| `Del` / `Backspace` deletes; `Ctrl+Z` restores exactly it; `Ctrl+Shift+Z` re-deletes; siblings + counter untouched | | | | | | | | | | PASS 5993239 2026-09-08 (undo restores the same bbox ±0 px; sibling rect survives; `next_number` preservation unit-pinned) |
+| Rail Delete chip: greyed + inert with no selection, enabled + deletes with one (editor toolbar **and** overlay rail) | | | | | | | | | | PASS 5993239 2026-09-08 (chip located by strip diff — (494,5) editor, (555,492) overlay; enabled click deletes, greyed click inert) |
+| Deselect paths: empty-canvas click / tool switch / `Esc` deselects (second `Esc` cancels; selection-less `Esc` cancels immediately) | | | | | | | | | | PASS 5993239 2026-09-08 (all four paths in both shells; second-Esc close and immediate cancel exit 0) |
+| Undo / redo / crop drop the selection (no dangling outline) | | | | | | | | | | PASS 5993239 2026-09-08 (undo/redo scripted — annotation restored with no ring; crop clearing unit-pinned) |
+| `Backspace` inside a text draft edits text; committed annotations untouched | | | | | | | | | | PASS 5993239 2026-09-08 (5 backspaces past draft start leave the committed rect painted; Esc cancels draft only) |
+| Selection-first phase: `Del` + Delete chip inert mid-phase (ADR-0043 behaviour otherwise unchanged) | | | | | | | | | | PASS 5993239 2026-09-08 (Del/Backspace leave the strip byte-identical; Esc still cancels cleanly) |
+| Both shells identical (editor window + X11 overlay); `fullscreen` / `open` unregressed plus the affordance | | | | | | | | | | PASS 5993239 2026-09-08 (`fullscreen` editor + X11 overlay both scripted; `open` shares the editor path; region phase unregressed) |
+| Selection outline never in saved / copied output (chrome-only) | | | | | | | | | | |
+
+### Known caveats
+
+- **Row 9 (chrome-free output) is pinned by construction** (ADR-0044):
+  the outline lives in the shells' post-`render()` paint pass, which
+  `compose_for_save` / `compose_final` never run — but the live
+  Save / Copy gesture needs a native `rfd` dialog, so its cells
+  await a real-platform pass (the XV1 harness cannot drive it).
+- **Selection is Move-tool-scoped** (ADR-0044): leaving Move
+  deselects; there is no cross-tool selected state.
+- **Number gaps are kept** when deleting a middle bubble
+  (renumbering would silently rewrite history — spec decision).
+- **`Backspace` is Mac's delete**: it aliases `Del` everywhere
+  outside a live text draft, where the modal text mode owns it.
+
+---
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).
