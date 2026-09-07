@@ -75,9 +75,9 @@
 //! to the selection — below its bottom-left, flipped above when the
 //! space below is short, clamped into the viewport (plan decision
 //! 4). Row 1 reuses the editor toolbar's tool chips plus
-//! undo / redo; row 2 holds ✓ accept, ✕ cancel, Save / Pin / Upload,
-//! and the ember Copy primary (Copy is Enter-equivalent: the spec
-//! pins Enter = Copy). The toolbar shows only while a usable
+//! undo / redo / delete; row 2 holds ✓ accept, ✕ cancel, Save /
+//! Pin / Upload, and the ember Copy primary (Copy is
+//! Enter-equivalent: the spec pins Enter = Copy). The toolbar shows only while a usable
 //! selection exists and no fresh region drag runs, and swallows
 //! pointer presses before chrome interception so chip clicks never
 //! reach the dispatcher; the hover cursor and magnifier stand down
@@ -545,10 +545,11 @@ pub(crate) fn toolbar_anchor(sel: egui::Rect, panel: egui::Rect, size: egui::Vec
 }
 
 /// The floating toolbar's compact rail row: the shared tool
-/// chips plus undo / redo (plan decision 4 — the editor rail's
-/// chips and glyph language, new layout only). Tool clicks switch
-/// `state.tool` directly, the same editor-rail semantics; history
-/// clicks return as actions for the caller to replay.
+/// chips plus undo / redo / delete (plan decision 4 — the editor
+/// rail's chips and glyph language, new layout only). Tool clicks
+/// switch `state.tool` directly, the same editor-rail semantics;
+/// history and delete clicks return as actions for the caller to
+/// replay.
 fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction {
     let mut action = ToolbarAction::None;
     for spec in TOOLS {
@@ -605,6 +606,20 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
     .clicked()
     {
         action = ToolbarAction::Redo;
+    }
+    // Enabled iff an annotation is selected (persistent selection,
+    // task 001); disabled reads greyed / hover-only.
+    if toolbar::chip(
+        ui,
+        egui::Id::new("overlay_delete"),
+        "Delete · Del",
+        false,
+        toolbar::g_trash,
+        state.selected_index.is_some(),
+    )
+    .clicked()
+    {
+        action = ToolbarAction::Delete;
     }
     action
 }
@@ -1109,9 +1124,9 @@ impl OverlayApp {
     ///
     /// Layout (plan decision 4: compact rail + accept row, reused
     /// chips, new layout only): row 1 is the tool chips plus
-    /// undo / redo; row 2 is ✓ accept (Enter semantics), ✕ cancel
-    /// (Esc semantics), Save / Pin / Upload, and the ember Copy
-    /// primary. Copy is Enter-equivalent (spec: Enter = Copy).
+    /// undo / redo / delete; row 2 is ✓ accept (Enter semantics),
+    /// ✕ cancel (Esc semantics), Save / Pin / Upload, and the ember
+    /// Copy primary. Copy is Enter-equivalent (spec: Enter = Copy).
     fn show_toolbar(
         &mut self,
         ctx: &Context,
@@ -1170,10 +1185,10 @@ impl OverlayApp {
         self.apply_toolbar_action(ctx, action);
     }
 
-    /// Act on a floating-toolbar action. History chips replay the
-    /// same dispatches a Ctrl+Z / Ctrl+Y keypress would produce (the
-    /// editor window's rail handlers, verbatim); Copy is
-    /// Enter-equivalent (the same accept-copy pipeline Enter
+    /// Act on a floating-toolbar action. History + Delete chips
+    /// replay the same dispatches a Ctrl+Z / Ctrl+Y / Del keypress
+    /// would produce (the editor window's rail handlers, verbatim);
+    /// Copy is Enter-equivalent (the same accept-copy pipeline Enter
     /// triggers); Save / Pin / Upload run their output pipelines
     /// (Task 006) — the editor window's handlers' overlay twins.
     fn apply_toolbar_action(&mut self, ctx: &Context, action: ToolbarAction) {
@@ -1195,6 +1210,12 @@ impl OverlayApp {
                         ctrl: true,
                         ..Modifiers::default()
                     },
+                });
+            }
+            ToolbarAction::Delete => {
+                let _ = self.state.dispatch_input(&InputEvent::Key {
+                    key: Key::Delete,
+                    modifiers: Modifiers::default(),
                 });
             }
             ToolbarAction::Save => self.handle_save(ctx),
@@ -2697,5 +2718,81 @@ mod tests {
                 "degenerate bands must not grow past the panel"
             );
         }
+    }
+
+    // --- Delete chip (annotation-delete Task 002) ---
+
+    /// Drive the overlay rail row through a synthetic context: pass 1
+    /// lays out (registering the chip rects by id), pass 2 clicks the
+    /// Delete chip's centre. Returns the row's collected action.
+    fn overlay_action_after_delete_click(state: &mut EditorState) -> ToolbarAction {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = overlay_rail_row(ui, state);
+        });
+        let del = ctx
+            .read_response(egui::Id::new("overlay_delete"))
+            .expect("pass 1 registered the overlay Delete chip");
+        let at = del.rect.center();
+        let click = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..egui::RawInput::default()
+        };
+        let mut action = ToolbarAction::None;
+        let _ = ctx.run_ui(click, |ui| {
+            action = overlay_rail_row(ui, state);
+        });
+        action
+    }
+
+    #[test]
+    fn overlay_delete_chip_emits_delete_with_selection() {
+        let mut app = move_overlay_app();
+        app.state.selected_index = Some(0);
+        assert_eq!(
+            overlay_action_after_delete_click(&mut app.state),
+            ToolbarAction::Delete,
+            "a selected annotation makes the chip live and clicking it emits Delete"
+        );
+    }
+
+    #[test]
+    fn overlay_delete_chip_inert_without_selection() {
+        let mut state = blank_state(64, 64);
+        assert_eq!(
+            overlay_action_after_delete_click(&mut state),
+            ToolbarAction::None,
+            "no selection: the chip must render greyed / hover-only and stay inert"
+        );
+    }
+
+    #[test]
+    fn overlay_delete_action_removes_selected_annotation() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        app.state.selected_index = Some(0);
+        app.apply_toolbar_action(&ctx, ToolbarAction::Delete);
+        assert!(
+            app.state.anns.is_empty(),
+            "the Delete action's Del replay removes exactly the selected annotation"
+        );
+        assert!(
+            app.state.undo.last().is_some_and(|s| s.anns.len() == 1 && s.image.is_none()),
+            "the delete pushed an anns-only snapshot of the pre-delete state (fixture commit aside)"
+        );
     }
 }
