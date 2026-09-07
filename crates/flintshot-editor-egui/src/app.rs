@@ -238,15 +238,17 @@ impl EditorApp {
     /// construction, so this restores the edit-phase default (the
     /// shell's own override, not the config-gated commit flip). The
     /// still-`Select` guard is defensive: the input gates (rail
-    /// lock, hotkey, pointer) keep the tool `Select` for the
-    /// phase's whole lifetime, so a non-Select tool at latch time
-    /// can only arrive via direct state mutation — and it stays put
-    /// rather than being silently flipped.
+    /// lock, hotkey, pointer) keep the tool `Select` for the phase's
+    /// whole lifetime, so a non-Select tool at latch time can only
+    /// arrive via direct state mutation — and it stays put rather
+    /// than being silently flipped. The flip routes through core
+    /// `set_tool` so the persistent selection (if any state arrived
+    /// that way) obeys the same lifecycle as every other switch.
     fn end_phase_on_crop(&mut self) {
         if self.phase == SelectionPhase::Live && self.state.undo.iter().any(|s| s.image.is_some()) {
             self.phase = SelectionPhase::Ended;
             if self.state.tool == Tool::Select {
-                self.state.tool = Tool::Move;
+                self.state.set_tool(Tool::Move);
             }
         }
     }
@@ -457,6 +459,33 @@ impl EditorApp {
             kind,
         );
     }
+
+    /// Paint the persistent-selection outline (annotation-delete
+    /// spec): the selected annotation's bbox as a dashed ember rect
+    /// over the shared render output, painted after the move chrome
+    /// so a grab's solid ember outline visually wins over the dashed
+    /// selection outline of the same annotation. A selection that
+    /// yields no chrome while Move is active (degenerate bbox /
+    /// stale index) deselects instead of rendering — the selection
+    /// must never point at something unoutlinable.
+    fn paint_selected_chrome_if_any(&mut self, ctx: &Context, painter: &egui::Painter) {
+        let Some(rect) = crate::chrome::selected_chrome(&self.state) else {
+            if self.state.tool == Tool::Move && self.state.selected_index.is_some() {
+                self.state.selected_index = None;
+            }
+            return;
+        };
+        let Some(canvas_rect) = self.canvas_rect else {
+            return;
+        };
+        let ppp = ctx.pixels_per_point();
+        let to_logical =
+            |p: Point| egui::pos2(canvas_rect.min.x + p.x / ppp, canvas_rect.min.y + p.y / ppp);
+        crate::chrome::paint_selected_chrome(
+            painter,
+            egui::Rect::from_two_pos(to_logical(rect.min), to_logical(rect.max)),
+        );
+    }
 }
 
 impl EditorApp {
@@ -527,7 +556,8 @@ impl EditorApp {
         // While the selection-first phase is live, every mapping
         // except Select is ignored — selection is the phase's only
         // job (S stays harmless: Select is what the phase armed).
-        // Post-crop the keys work again.
+        // Post-crop the keys work again. Switches route through core
+        // `set_tool`: leaving Move drops the persistent selection.
         if let Some(tool) = ctx.input(|i| {
             i.raw.events.iter().rev().find_map(|e| match e {
                 egui::Event::Key {
@@ -540,7 +570,7 @@ impl EditorApp {
             })
         }) {
             if !self.phase_active() || tool == Tool::Select {
-                self.state.tool = tool;
+                self.state.set_tool(tool);
             }
         }
 
@@ -635,14 +665,26 @@ impl EditorApp {
     /// outcome ended the frame (close / save / copy), so
     /// [`logic_impl`](Self::logic_impl) skips the pointer branch.
     ///
-    /// Order: Cancel > Enter-crop / Save / Copy > Undo / Redo — egui
-    /// reports each key independently, so the first match wins.
-    /// Enter only forwards the key: the crop gate (Select tool +
-    /// live selection) lives in the dispatcher. Without this branch
-    /// the Enter-crop contract held only for the toolbar button (the
+    /// Order: Cancel > Enter-crop / Save / Copy > Undo / Redo >
+    /// Delete — egui reports each key independently, so the first
+    /// match wins. Enter only forwards the key: the crop gate (Select
+    /// tool + live selection) lives in the dispatcher. Without this
+    /// branch the Enter-crop contract held only for the toolbar button (the
     /// keyboard path never reached the dispatcher — the gap
     /// `enter_key_crops_through_shell` pins).
+    ///
+    /// Esc layering (annotation-delete spec): with a persistent
+    /// selection, the first Esc clears it and consumes the frame —
+    /// no Cancel, the outcome slot untouched, the window stays open.
+    /// Only with nothing selected does Esc forward to the dispatcher
+    /// as today's Cancel. Shell-side by design: the dispatcher's Esc
+    /// → `Cancel` contract stays stable for future shells.
     fn dispatch_shortcut_key(&mut self, ctx: &Context, modifiers: Modifiers) -> bool {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && self.state.selected_index.take().is_some()
+        {
+            return true;
+        }
         let key_event = ctx.input(|i| {
             if i.key_pressed(egui::Key::Escape) {
                 Some(InputEvent::Key {
@@ -672,6 +714,19 @@ impl EditorApp {
             } else if i.key_pressed(egui::Key::C) {
                 Some(InputEvent::Key {
                     key: Key::Char('c'),
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::Delete) {
+                Some(InputEvent::Key {
+                    key: Key::Delete,
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::Backspace) {
+                // Only reachable outside text-editing mode — the
+                // modal text branch in `logic_impl` owns Backspace
+                // during a draft and returns before this runs.
+                Some(InputEvent::Key {
+                    key: Key::Backspace,
                     modifiers,
                 })
             } else {
@@ -799,6 +854,12 @@ impl EditorApp {
         // outline / solid ember grab outline, under the magnifier —
         // the overlay's chrome ordering.
         self.paint_move_chrome_if_any(ui.ctx(), ui.painter());
+
+        // Persistent-selection outline (annotation-delete spec):
+        // dashed ember bbox of the selected annotation, last among
+        // the chrome. Chrome-only by construction — it lives in the
+        // shell's paint pass, never in `render()` / composed output.
+        self.paint_selected_chrome_if_any(ui.ctx(), ui.painter());
 
         // Handle toolbar actions outside the toolbar drawing code so
         // we can borrow `&self.outcome` cleanly. Each handler runs the
@@ -2377,6 +2438,143 @@ mod tests {
         assert!(
             app.state.undo.last().is_some_and(|s| s.anns.len() == 1 && s.image.is_none()),
             "the delete pushed an anns-only snapshot of the pre-delete state (fixture commit aside)"
+        );
+    }
+
+    // --- Editor window delete UX (annotation-delete Task 003) ---
+
+    /// An editor app on the Move tool with one committed, selected
+    /// annotation — the delete UX's starting state.
+    fn app_with_selected_ann() -> (egui::Context, EditorApp) {
+        let ctx = egui::Context::default();
+        let mut state = move_state_with_ann();
+        state.selected_index = Some(0);
+        let app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        (ctx, app)
+    }
+
+    /// Regression shape: the Del key must flow through the *shell*
+    /// translation (`dispatch_shortcut_key`), not just the core
+    /// dispatcher — the Enter-crop gap's lesson applied upfront.
+    #[test]
+    fn del_key_through_shell_deletes_selected_annotation() {
+        let (ctx, mut app) = app_with_selected_ann();
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Delete)]);
+        assert!(app.state.anns.is_empty(), "Del through the shell deletes");
+        assert_eq!(app.state.selected_index, None, "delete drops the selection");
+        assert!(
+            app.state
+                .undo
+                .last()
+                .is_some_and(|s| s.anns.len() == 1 && s.image.is_none()),
+            "the delete pushed an anns-only snapshot for Ctrl+Z"
+        );
+    }
+
+    /// Backspace aliases Del (Mac keyboards label it "delete"); the
+    /// text-editing modal mode owns it during a draft, so this
+    /// translation is collision-free outside text mode.
+    #[test]
+    fn backspace_key_through_shell_deletes_selected_annotation() {
+        let (ctx, mut app) = app_with_selected_ann();
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Backspace)]);
+        assert!(
+            app.state.anns.is_empty(),
+            "Backspace through the shell deletes the selection"
+        );
+    }
+
+    /// Esc layering: with a selection, the first Esc clears it and
+    /// consumes the key — the outcome slot is untouched (the window
+    /// stays open); a second Esc, with nothing selected, keeps
+    /// today's Cancel.
+    #[test]
+    fn esc_with_selection_deselects_then_esc_cancels() {
+        let (ctx, mut app) = app_with_selected_ann();
+        let slot = app.outcome.clone();
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Escape)]);
+        assert_eq!(
+            app.state.selected_index, None,
+            "first Esc clears the selection"
+        );
+        assert!(
+            slot.borrow().is_none(),
+            "the outcome slot is untouched — the window stays open"
+        );
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Escape)]);
+        assert!(
+            matches!(*slot.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "second Esc after the deselect cancels the editor"
+        );
+    }
+
+    /// Selection-first phase: no annotation selection can exist
+    /// mid-phase (Select is the only tool), so Esc keeps the standing
+    /// Cancel even with a live region selection.
+    #[test]
+    fn esc_during_selection_first_phase_cancels_through_shell() {
+        let ctx = egui::Context::default();
+        let slot: OutcomeSlot = Rc::new(RefCell::new(None));
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, slot.clone(), true);
+        editor_frame(&ctx, &mut app, vec![]);
+        drag_selection(&mut app.state, (5.0, 5.0), (30.0, 25.0));
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Escape)]);
+        assert!(
+            matches!(*slot.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "phase Esc cancels — the deselect layer can't intercept (nothing selectable)"
+        );
+    }
+
+    /// Del mid-phase is inert: nothing is selectable while the
+    /// selection-first phase is live, so the delete must not fire,
+    /// snapshot, or change the phase's behaviour.
+    #[test]
+    fn del_during_selection_first_phase_is_inert() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::new(RefCell::new(None)), true);
+        editor_frame(&ctx, &mut app, vec![]);
+        drag_selection(&mut app.state, (5.0, 5.0), (30.0, 25.0));
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Delete)]);
+        assert!(app.phase_active(), "Del must not end the phase");
+        assert!(app.state.undo.is_empty(), "an inert Del pushes no snapshot");
+        assert!(
+            app.state.selected_index.is_none(),
+            "nothing is selectable mid-phase"
+        );
+    }
+
+    /// Hotkey tool switches route through core `set_tool`: leaving
+    /// Move must drop the persistent selection (the invariant lives
+    /// in the core method, not at each shell call site).
+    #[test]
+    fn tool_switch_away_from_move_deselects_through_shell() {
+        let (ctx, mut app) = app_with_selected_ann();
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::R)]);
+        assert_eq!(app.state.tool, Tool::Rect, "fixture: R armed Rect");
+        assert_eq!(
+            app.state.selected_index, None,
+            "leaving Move via hotkey drops the selection"
+        );
+    }
+
+    /// A selected annotation whose bbox is degenerate (nothing to
+    /// outline) deselects at paint time instead of rendering — the
+    /// selection must never point at something unoutlinable.
+    #[test]
+    fn degenerate_selected_bbox_deselects_at_paint_time() {
+        let ctx = egui::Context::default();
+        let mut state = blank_state(64, 64);
+        state.anns.push(Annotation::Pencil {
+            points: vec![],
+            color: flintshot_core::Color::RED,
+            width: 2.0,
+        });
+        state.selected_index = Some(0);
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.state.selected_index, None,
+            "a degenerate bbox deselects instead of rendering"
         );
     }
 }

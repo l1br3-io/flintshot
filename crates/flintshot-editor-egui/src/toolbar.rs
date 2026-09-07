@@ -244,7 +244,10 @@ fn draw_rail(
                         )
                     };
                     if resp.clicked() {
-                        state.tool = spec.tool;
+                        // Core `set_tool` owns the "the selection is
+                        // Move-tool chrome" invariant: leaving Move
+                        // drops the persistent selection.
+                        state.set_tool(spec.tool);
                     }
                 }
                 ui.separator();
@@ -519,7 +522,7 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 fn tool_hint(tool: Tool) -> &'static str {
     match tool {
         Tool::Select => "drag a region · Copy and Pin use it · Enter crops",
-        Tool::Move => "press an annotation and drag to reposition it",
+        Tool::Move => "press an annotation and drag to reposition · Del removes",
         Tool::Text => "click to place the caret",
         Tool::Blur => "drag over what to hide",
         Tool::Number => "click to place the next number",
@@ -1281,6 +1284,18 @@ mod tests {
             action_after_delete_click(&mut state),
             ToolbarAction::None,
             "no selection: the chip must render greyed / hover-only and stay inert"
+        );
+    }
+
+    // --- Move hint delete affordance (annotation-delete Task 003) ---
+
+    /// The user-approved copy (spec ask-first boundary): the Move
+    /// hint must advertise the Del affordance.
+    #[test]
+    fn move_hint_mentions_delete_affordance() {
+        assert_eq!(
+            tool_hint(Tool::Move),
+            "press an annotation and drag to reposition · Del removes"
         );
     }
 }

@@ -3,9 +3,10 @@
 //!
 //! The editor window is an instrument, not a page — the toolbar
 //! recedes behind the screenshot it annotates. Everything is
-//! graphite; ember appears in exactly three places: the active tool
-//! chip, the Copy primary action, and the grabbed-annotation outline
-//! under the Move tool. Nothing else gets color.
+//! graphite; ember appears in exactly four places: the active tool
+//! chip, the Copy primary action, the grabbed-annotation outline
+//! under the Move tool, and the selected-annotation outline. Nothing
+//! else gets color.
 
 use egui::{Color32, Context, CornerRadius, Stroke};
 
@@ -20,8 +21,8 @@ pub(crate) const CHALK: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xEE);
 /// Secondary text (slate) — hints, dims readouts.
 pub(crate) const SLATE: Color32 = Color32::from_rgb(0x9A, 0xA1, 0xAC);
 /// The ember accent: active tool chip, Copy button fill, and the
-/// grabbed-annotation outline under Move — the three "this is the
-/// active thing" surfaces.
+/// grabbed- / selected-annotation outlines under Move — the "this is
+/// the active thing" surfaces.
 pub(crate) const EMBER: Color32 = Color32::from_rgb(0xFF, 0x8C, 0x42);
 /// Glyph color on ember fills (matches the panel graphite so
 /// selected chips read as "cut out" of the toolbar).
@@ -38,6 +39,13 @@ pub(crate) const MOVE_HOVER_STROKE: Stroke = Stroke {
 /// emphasis while a move drag is live.
 pub(crate) const MOVE_GRAB_STROKE: Stroke = Stroke {
     width: 2.0,
+    color: EMBER,
+};
+/// Persistent-selection outline (see `crate::chrome`): 1 px dashed
+/// ember on the move chrome's dash / pad rhythm — the "this one is
+/// selected" affordance the Del key acts on.
+pub(crate) const SELECTED_STROKE: Stroke = Stroke {
+    width: 1.0,
     color: EMBER,
 };
 /// Dash / gap rhythm of the hover outline, logical px.
