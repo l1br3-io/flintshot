@@ -30,7 +30,12 @@
 //!   semantics; in the overlay the selection defines the output
 //!   region and Enter means *accept*;
 //! - `Esc` closes as `Cancelled` (clean cancel: no file, no
-//!   clipboard write, no worker).
+//!   clipboard write, no worker) — except when a Move-tool selection
+//!   exists, when the first `Esc` only deselects (annotation-delete
+//!   spec; the layering lives at the `close_from_input` call site);
+//! - `Del` / `Backspace` forward to the dispatcher, which deletes the
+//!   persistent selection (no-modifier chord; text drafts own
+//!   Backspace via the modal branch above).
 //!
 //! ## Output flows (Task 006, plan decision 6)
 //!
@@ -579,7 +584,10 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
             )
         };
         if resp.clicked() {
-            state.tool = spec.tool;
+            // Core `set_tool` owns the selection lifecycle: leaving
+            // Move drops the persistent selection (same reroute as
+            // the editor rail and the hotkey block).
+            state.set_tool(spec.tool);
         }
     }
     ui.separator();
@@ -1284,12 +1292,21 @@ impl OverlayApp {
         // dispatcher (its Enter path crops the editor — editor-window
         // semantics), and Esc closing here is equivalent to reacting
         // to the dispatcher's `Cancel` outcome one step later.
+        // Esc layering (annotation-delete spec): with a persistent
+        // selection, the first Esc clears it and consumes the frame —
+        // no close, the outcome slot untouched. Only with nothing
+        // selected does Esc keep today's Cancel. The layering lives
+        // here, at the call site; `close_from_input`'s pure contract
+        // is unchanged.
         let (esc, enter) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Escape),
                 i.key_pressed(egui::Key::Enter),
             )
         });
+        if esc && self.state.selected_index.take().is_some() {
+            return;
+        }
         if let Some(close) = close_from_input(esc, enter) {
             self.perform_close(ctx, close);
             return;
@@ -1297,10 +1314,15 @@ impl OverlayApp {
 
         // History + output chords through the dispatcher (Ctrl+Z
         // undo, Ctrl+Shift+Z / Ctrl+Y redo, Ctrl+S save, Ctrl+C
-        // copy). The dispatcher is the single chord recognizer — the
-        // shell reacts to the returned outcome exactly as
+        // copy), plus Del / Backspace deleting the persistent
+        // selection. The dispatcher is the single chord recognizer —
+        // the shell reacts to the returned outcome exactly as
         // `EditorApp::logic` does; unmodified letters return
-        // `Continue` and fall through to tool selection below.
+        // `Continue` and fall through to tool selection below. The
+        // modifiers ride along verbatim, so the dispatcher's
+        // no-modifier gate spoils Ctrl+Del itself. Backspace only
+        // reaches this block outside text mode — the modal branch
+        // above owns it during a draft.
         let key_event = ctx.input(|i| {
             if i.key_pressed(egui::Key::Z) {
                 Some(InputEvent::Key {
@@ -1320,6 +1342,16 @@ impl OverlayApp {
             } else if i.key_pressed(egui::Key::C) {
                 Some(InputEvent::Key {
                     key: Key::Char('c'),
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::Delete) {
+                Some(InputEvent::Key {
+                    key: Key::Delete,
+                    modifiers,
+                })
+            } else if i.key_pressed(egui::Key::Backspace) {
+                Some(InputEvent::Key {
+                    key: Key::Backspace,
                     modifiers,
                 })
             } else {
@@ -1354,7 +1386,9 @@ impl OverlayApp {
         // rail only renders and annotation presses only flow once a
         // usable region exists, so arming an annotation tool before
         // that would be invisible state; Select — the region-drawing
-        // tool — stays armable at all times.
+        // tool — stays armable at all times. Switches route through
+        // core `set_tool`: leaving Move drops the persistent
+        // selection.
         if let Some(tool) = ctx.input(|i| {
             i.raw.events.iter().rev().find_map(|e| match e {
                 egui::Event::Key {
@@ -1367,7 +1401,7 @@ impl OverlayApp {
             })
         }) {
             if tool == Tool::Select || usable_selection(self.state.selection).is_some() {
-                self.state.tool = tool;
+                self.state.set_tool(tool);
             }
         }
 
@@ -1445,6 +1479,21 @@ impl OverlayApp {
         if let Some((r, kind)) = self.move_chrome {
             let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
             crate::chrome::paint_move_chrome(&painter, rect, kind);
+        }
+
+        // Persistent-selection outline (annotation-delete spec): the
+        // selected annotation's bbox as a dashed ember rect, right
+        // after the move chrome in the overlay's chrome order — the
+        // editor window's ordering. Chrome-only by construction (the
+        // shell's paint pass, never the clipped render / composed
+        // output). A selection with no paintable bbox while Move is
+        // active (degenerate annotation / stale index) deselects
+        // instead of rendering.
+        if let Some(r) = crate::chrome::selected_chrome(&self.state) {
+            let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
+            crate::chrome::paint_selected_chrome(&painter, rect);
+        } else if self.state.tool == Tool::Move && self.state.selected_index.is_some() {
+            self.state.selected_index = None;
         }
 
         // Grab handles: visible only while they're actually
@@ -2793,6 +2842,216 @@ mod tests {
         assert!(
             app.state.undo.last().is_some_and(|s| s.anns.len() == 1 && s.image.is_none()),
             "the delete pushed an anns-only snapshot of the pre-delete state (fixture commit aside)"
+        );
+    }
+
+    // --- Overlay delete UX (annotation-delete Task 004) ---
+
+    /// The overlay's key block must forward `Del` to the dispatcher —
+    /// the chip replay alone is not the keyboard path.
+    #[test]
+    fn overlay_del_key_deletes_selected_annotation() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        app.state.selected_index = Some(0);
+        key_frame(&ctx, &mut app, 0.0, egui::Key::Delete);
+        assert!(app.state.anns.is_empty(), "Del through the overlay deletes");
+        assert_eq!(app.state.selected_index, None, "delete drops the selection");
+        assert!(
+            app.state
+                .undo
+                .last()
+                .is_some_and(|s| s.anns.len() == 1 && s.image.is_none()),
+            "the delete pushed an anns-only snapshot for Ctrl+Z"
+        );
+    }
+
+    /// Backspace aliases Del (the Mac "delete" key); the text-editing
+    /// modal branch owns it during a draft (pinned below).
+    #[test]
+    fn overlay_backspace_key_deletes_selected_annotation() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        app.state.selected_index = Some(0);
+        key_frame(&ctx, &mut app, 0.0, egui::Key::Backspace);
+        assert!(
+            app.state.anns.is_empty(),
+            "Backspace through the overlay deletes the selection"
+        );
+    }
+
+    /// Any modifier spoils the Del chord (Ctrl combos reserved) — the
+    /// dispatcher's own gate, reached because the shell forwards the
+    /// frame's modifiers verbatim.
+    #[test]
+    fn overlay_del_key_with_modifier_is_inert() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        app.state.selected_index = Some(0);
+        // egui tracks the held modifiers as a top-level RawInput
+        // field (egui-winit fills it from the OS modifier state);
+        // what real Ctrl-hold delivers on Linux — ctrl plus
+        // `command`, the cross-platform chord field
+        // `translate_modifiers` maps onto our `ctrl`.
+        let raw = egui::RawInput {
+            modifiers: egui::Modifiers {
+                ctrl: true,
+                command: true,
+                ..egui::Modifiers::NONE
+            },
+            events: vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+        assert_eq!(
+            app.state.anns.len(),
+            1,
+            "Ctrl+Del must not delete — the chord is reserved"
+        );
+    }
+
+    /// Esc layering: with a selection the first Esc clears it and the
+    /// overlay stays open (outcome slot untouched); without one, Esc
+    /// keeps today's Cancel. `close_from_input` itself stays pure —
+    /// the layering lives at its call site.
+    #[test]
+    fn overlay_esc_with_selection_deselects_then_esc_cancels() {
+        let ctx = egui::Context::default();
+        let slot: OutcomeSlot = Rc::new(RefCell::new(None));
+        let mut app = OverlayApp::new(
+            {
+                let mut s = blank_state(64, 64);
+                s.pending = Some(Annotation::Rect {
+                    rect: Rect::from_xywh(10.0, 10.0, 40.0, 30.0),
+                    stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+                    fill: None,
+                });
+                s.commit_annotation();
+                s.tool = Tool::Move;
+                s.selected_index = Some(0);
+                s
+            },
+            &ctx,
+            slot.clone(),
+            Rc::new(RefCell::new(None)),
+        );
+        key_frame(&ctx, &mut app, 0.0, egui::Key::Escape);
+        assert_eq!(
+            app.state.selected_index, None,
+            "first Esc clears the selection"
+        );
+        assert!(
+            slot.borrow().is_none(),
+            "the outcome slot is untouched — the overlay stays open"
+        );
+        key_frame(&ctx, &mut app, 1.0 / 60.0, egui::Key::Escape);
+        assert!(
+            matches!(*slot.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "second Esc after the deselect cancels the overlay"
+        );
+    }
+
+    /// Overlay hotkey tool switches route through core `set_tool`:
+    /// leaving Move drops the persistent selection.
+    #[test]
+    fn overlay_tool_switch_away_from_move_deselects() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        // The overlay's selection-first lock: annotation tools arm
+        // only with a usable region.
+        app.state.selection = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
+        app.state.selected_index = Some(0);
+        key_frame(&ctx, &mut app, 0.0, egui::Key::R);
+        assert_eq!(app.state.tool, Tool::Rect, "fixture: R armed Rect");
+        assert_eq!(
+            app.state.selected_index, None,
+            "leaving Move via hotkey drops the selection"
+        );
+    }
+
+    /// The persistent selection survives idle frames (the outline
+    /// keeps painting), while a selection with no paintable bbox
+    /// deselects at paint time instead of rendering.
+    #[test]
+    fn overlay_selection_survives_frames_and_degenerate_deselects() {
+        let ctx = egui::Context::default();
+        let mut app = move_overlay_app();
+        app.state.selected_index = Some(0);
+        idle_frame(&ctx, &mut app, 0.0);
+        idle_frame(&ctx, &mut app, 1.0 / 60.0);
+        assert_eq!(
+            app.state.selected_index,
+            Some(0),
+            "a healthy selection must persist across frames"
+        );
+
+        let mut degenerate = move_overlay_app();
+        degenerate.state.anns[0] = Annotation::Pencil {
+            points: vec![],
+            color: flintshot_core::Color::RED,
+            width: 2.0,
+        };
+        degenerate.state.selected_index = Some(0);
+        idle_frame(&ctx, &mut degenerate, 0.0);
+        assert_eq!(
+            degenerate.state.selected_index, None,
+            "a degenerate bbox deselects at paint time"
+        );
+    }
+
+    /// Backspace during a text draft edits the draft — the modal
+    /// branch runs before the new key block, so a committed
+    /// annotation is never deleted by a draft's Backspace.
+    #[test]
+    fn overlay_backspace_edits_draft_not_committed_anns() {
+        let ctx = egui::Context::default();
+        // Constructed with the frames' own ctx: the draft renders
+        // through the canvas (font layout on its captured context),
+        // unlike the chrome-only fixtures above.
+        let mut app = OverlayApp::new(
+            {
+                let mut s = blank_state(64, 64);
+                s.pending = Some(Annotation::Rect {
+                    rect: Rect::from_xywh(10.0, 10.0, 40.0, 30.0),
+                    stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+                    fill: None,
+                });
+                s.commit_annotation();
+                s
+            },
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        // Place a caret and type "hi" (direct dispatch — fixture
+        // setup, the path under test is the Backspace frame below).
+        app.state.selection = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
+        app.state.tool = Tool::Text;
+        let _ = app.state.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 20.0),
+        });
+        let _ = app.state.dispatch_input(&InputEvent::TextInput('h'));
+        let _ = app.state.dispatch_input(&InputEvent::TextInput('i'));
+        key_frame(&ctx, &mut app, 0.0, egui::Key::Backspace);
+        match &app.state.pending {
+            Some(Annotation::Text { text, .. }) => {
+                assert_eq!(text, "h", "Backspace must edit the draft");
+            }
+            other => panic!("draft still active after Backspace, got {other:?}"),
+        }
+        assert_eq!(
+            app.state.anns.len(),
+            1,
+            "the committed annotation must survive a draft's Backspace"
         );
     }
 }
