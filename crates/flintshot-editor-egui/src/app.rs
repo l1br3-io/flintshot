@@ -236,9 +236,12 @@ impl EditorApp {
     /// keeps the phase ended. On the latch, a still-`Select` tool
     /// becomes `Move` — the phase force-armed `Select` at
     /// construction, so this restores the edit-phase default (the
-    /// shell's own override, not the config-gated commit flip). A
-    /// tool the user picked mid-phase is their explicit choice and
-    /// stays put.
+    /// shell's own override, not the config-gated commit flip). The
+    /// still-`Select` guard is defensive: the input gates (rail
+    /// lock, hotkey, pointer) keep the tool `Select` for the
+    /// phase's whole lifetime, so a non-Select tool at latch time
+    /// can only arrive via direct state mutation — and it stays put
+    /// rather than being silently flipped.
     fn end_phase_on_crop(&mut self) {
         if self.phase == SelectionPhase::Live && self.state.undo.iter().any(|s| s.image.is_some()) {
             self.phase = SelectionPhase::Ended;
@@ -521,6 +524,10 @@ impl EditorApp {
         // the *event's own* modifiers so Ctrl+S / Ctrl+Shift+Z chords
         // keep their dispatcher meanings; text-editing mode returned
         // early above, so typed letters can't switch tools mid-draft.
+        // While the selection-first phase is live, every mapping
+        // except Select is ignored — selection is the phase's only
+        // job (S stays harmless: Select is what the phase armed).
+        // Post-crop the keys work again.
         if let Some(tool) = ctx.input(|i| {
             i.raw.events.iter().rev().find_map(|e| match e {
                 egui::Event::Key {
@@ -532,7 +539,9 @@ impl EditorApp {
                 _ => None,
             })
         }) {
-            self.state.tool = tool;
+            if !self.phase_active() || tool == Tool::Select {
+                self.state.tool = tool;
+            }
         }
 
         // Pointer dispatch: translate egui's screen-logical coords to
@@ -590,7 +599,16 @@ impl EditorApp {
         } else {
             None
         };
-        if let Some(event) = pointer_event {
+        // Selection-first phase drag gate: a live phase with a
+        // non-Select tool skips pointer dispatch entirely — the
+        // phase is annotation-proof by drag as well as by chip and
+        // hotkey. Unreachable through input today (the rail lock and
+        // the hotkey gate above keep the tool Select); this is the
+        // backstop for state that got to a non-Select tool by other
+        // means. `canvas_drag_active` above still tracks press /
+        // release, so no stale drag state survives the gate.
+        let annotation_gated = self.phase_active() && self.state.tool != Tool::Select;
+        if let Some(event) = pointer_event.filter(|_| !annotation_gated) {
             // Outcome is always `Continue` for pointer events today
             // (no current tool produces a side-effecting outcome via
             // pointer). Match exhaustively so future outcomes that
@@ -1850,9 +1868,13 @@ mod tests {
     }
 
     #[test]
-    fn phase_end_keeps_user_picked_tool() {
+    fn phase_end_keeps_non_select_tool_against_flip() {
         let mut app = phase_app(true);
-        app.state.tool = Tool::Rect; // user switched tools mid-phase
+        // Direct state mutation — with the input gates live, no
+        // keyboard / chip / drag path can leave Select mid-phase.
+        // The latch's still-Select guard is defensive for exactly
+        // this state, and must not clobber it.
+        app.state.tool = Tool::Rect;
         app.state.selection = Some(Rect::from_xywh(8.0, 8.0, 32.0, 16.0));
         app.state.confirm_selection(); // the "Crop · Enter" button's call
         app.end_phase_on_crop();
@@ -1860,7 +1882,7 @@ mod tests {
         assert_eq!(
             app.state.tool,
             Tool::Rect,
-            "an explicit mid-phase tool choice must survive the phase-end flip"
+            "a non-Select tool at latch (direct mutation only) must survive the flip"
         );
     }
 
@@ -1927,7 +1949,10 @@ mod tests {
     #[test]
     fn annotation_commit_keeps_phase() {
         let mut app = phase_app(true);
-        app.state.tool = Tool::Rect; // user switches tools mid-phase
+        // Direct state mutation (input is phase-gated): a non-Select
+        // drag through the dispatcher commits an anns-only snapshot,
+        // which must not read as a crop.
+        app.state.tool = Tool::Rect;
         drag_selection(&mut app.state, (5.0, 5.0), (20.0, 20.0));
         assert_eq!(app.state.anns.len(), 1, "fixture: one annotation committed");
         app.end_phase_on_crop();
@@ -2085,6 +2110,207 @@ mod tests {
             live.into_raw(),
             after.into_raw(),
             "live-selection Save is pixel-identical to crop-then-Save"
+        );
+    }
+
+    // --- Editor input gates (select-first-tool-lock Task 002) ---
+
+    /// An unmodified key press — the shape `logic_impl`'s
+    /// tool-switch scan consumes.
+    fn key_press(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Drive a full pointer gesture (press → drag → release) between
+    /// canvas-local physical points `from` / `to`, one editor frame
+    /// per gesture phase. Requires a prior frame so `canvas_rect` is
+    /// cached; ppp is 1 in a synthetic context.
+    ///
+    /// GOTCHA: `logic_impl` translates pointer coords with the
+    /// *current* frame's `canvas_rect`, and the toolbar's height is
+    /// tool-dependent (annotation tools render a style bay). A test
+    /// that mutates `state.tool` must run an empty settle frame
+    /// before gesturing, or the drag lands skewed by the height
+    /// delta (observed: 4px between Move and Rect).
+    fn canvas_drag(ctx: &egui::Context, app: &mut EditorApp, from: (f32, f32), to: (f32, f32)) {
+        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+        let press = egui::pos2(canvas.min.x + from.0, canvas.min.y + from.1);
+        editor_frame(
+            ctx,
+            app,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        let drag = egui::pos2(canvas.min.x + to.0, canvas.min.y + to.1);
+        editor_frame(ctx, app, vec![egui::Event::PointerMoved(drag)]);
+        editor_frame(
+            ctx,
+            app,
+            vec![egui::Event::PointerButton {
+                pos: drag,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+    }
+
+    #[test]
+    fn tool_key_gated_during_phase_arms_after_crop() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::new(RefCell::new(None)), true);
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::P)]);
+        assert_eq!(
+            app.state.tool,
+            Tool::Select,
+            "phase live: P must not arm Pencil"
+        );
+        // Crop through the shell translation — the phase-ending
+        // path — then the same key must work.
+        drag_selection(&mut app.state, (4.0, 4.0), (60.0, 50.0));
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Enter)]);
+        assert!(!app.phase_active(), "fixture: the crop ended the phase");
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::P)]);
+        assert_eq!(
+            app.state.tool,
+            Tool::Pencil,
+            "post-crop: the same P arms Pencil"
+        );
+    }
+
+    #[test]
+    fn every_non_select_tool_key_is_gated_during_phase() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::new(RefCell::new(None)), true);
+        for key in [
+            egui::Key::V,
+            egui::Key::R,
+            egui::Key::E,
+            egui::Key::A,
+            egui::Key::L,
+            egui::Key::M,
+            egui::Key::P,
+            egui::Key::T,
+            egui::Key::B,
+            egui::Key::N,
+        ] {
+            editor_frame(&ctx, &mut app, vec![key_press(key)]);
+            assert_eq!(
+                app.state.tool,
+                Tool::Select,
+                "{key:?} is gated while the phase is live"
+            );
+        }
+    }
+
+    #[test]
+    fn select_key_is_harmless_during_phase() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::new(RefCell::new(None)), true);
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::S)]);
+        assert_eq!(
+            app.state.tool,
+            Tool::Select,
+            "S keeps arming Select — the phase's own armed tool"
+        );
+        assert!(app.phase_active());
+    }
+
+    #[test]
+    fn annotation_pointer_commits_nothing_during_phase() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::new(RefCell::new(None)), true);
+        editor_frame(&ctx, &mut app, vec![]); // first frame caches canvas_rect
+                                              // Direct mutation: with the rail lock and the hotkey gate,
+                                              // no input path can leave Select while the phase is live —
+                                              // the pointer gate is the backstop that keeps the phase
+                                              // drag-proof regardless of how state got here. The settle
+                                              // frame lets the toolbar re-layout at Rect's (taller) bay
+                                              // before the gesture — see the GOTCHA on `canvas_drag`.
+        app.state.tool = Tool::Rect;
+        editor_frame(&ctx, &mut app, vec![]);
+        canvas_drag(&ctx, &mut app, (10.0, 10.0), (40.0, 30.0));
+        assert!(
+            app.state.anns.is_empty(),
+            "no annotation committed through the gate"
+        );
+        assert!(
+            app.state.undo.is_empty(),
+            "no undo snapshot through the gate"
+        );
+        // Select drags are the phase's one job and keep flowing.
+        app.state.tool = Tool::Select;
+        editor_frame(&ctx, &mut app, vec![]); // settle at Select's rail
+        canvas_drag(&ctx, &mut app, (5.0, 5.0), (30.0, 25.0));
+        let sel = app
+            .state
+            .selection
+            .expect("the Select drag drew a selection")
+            .normalized();
+        assert_eq!(sel.min, Point::new(5.0, 5.0));
+        assert_eq!(sel.max, Point::new(30.0, 25.0));
+    }
+
+    #[test]
+    fn post_crop_pointer_flow_matches_plain_editor() {
+        // Identical gestures into a post-crop session and a plain
+        // (fullscreen-style) session must commit identical
+        // annotations — the gates lift with the phase.
+        let phased_ctx = egui::Context::default();
+        let mut phased = EditorApp::new(
+            blank_state(64, 64),
+            &phased_ctx,
+            Rc::new(RefCell::new(None)),
+            true,
+        );
+        editor_frame(&phased_ctx, &mut phased, vec![]);
+        drag_selection(&mut phased.state, (2.0, 2.0), (60.0, 52.0));
+        editor_frame(&phased_ctx, &mut phased, vec![key_press(egui::Key::Enter)]);
+        assert!(!phased.phase_active(), "fixture: the crop ended the phase");
+        phased.state.tool = Tool::Rect;
+        // Settle frame: the toolbar re-layouts at Rect's style bay
+        // before the gesture (see the GOTCHA on `canvas_drag`).
+        editor_frame(&phased_ctx, &mut phased, vec![]);
+
+        let plain_ctx = egui::Context::default();
+        let mut plain = EditorApp::new(
+            blank_state(64, 64),
+            &plain_ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        plain.state.tool = Tool::Rect;
+        editor_frame(&plain_ctx, &mut plain, vec![]);
+
+        canvas_drag(&phased_ctx, &mut phased, (10.0, 10.0), (40.0, 30.0));
+        canvas_drag(&plain_ctx, &mut plain, (10.0, 10.0), (40.0, 30.0));
+
+        let rect_of = |app: &EditorApp| match app.state.anns.as_slice() {
+            [Annotation::Rect { rect, .. }] => Some(*rect),
+            _ => None,
+        };
+        assert_eq!(
+            rect_of(&phased),
+            rect_of(&plain),
+            "post-crop pointer input must flow like a fullscreen session"
+        );
+        assert_eq!(
+            rect_of(&plain),
+            Some(Rect::from_xywh(10.0, 10.0, 30.0, 20.0)),
+            "fixture: the gesture committed the expected rect"
         );
     }
 }
