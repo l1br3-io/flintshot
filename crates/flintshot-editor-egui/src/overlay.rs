@@ -1329,7 +1329,11 @@ impl OverlayApp {
 
         // Single-key tool selection (unmodified S R E A L M P T B N),
         // guarded on the event's own modifiers so chords keep their
-        // dispatcher meanings.
+        // dispatcher meanings. Selection-first lock: the floating
+        // rail only renders and annotation presses only flow once a
+        // usable region exists, so arming an annotation tool before
+        // that would be invisible state; Select — the region-drawing
+        // tool — stays armable at all times.
         if let Some(tool) = ctx.input(|i| {
             i.raw.events.iter().rev().find_map(|e| match e {
                 egui::Event::Key {
@@ -1341,7 +1345,9 @@ impl OverlayApp {
                 _ => None,
             })
         }) {
-            self.state.tool = tool;
+            if tool == Tool::Select || usable_selection(self.state.selection).is_some() {
+                self.state.tool = tool;
+            }
         }
 
         // Pointer dispatch + selection-chrome interaction, gated on
@@ -1520,6 +1526,131 @@ mod tests {
             app.state.tool,
             Tool::Select,
             "the first drag must draw a selection, not a rect annotation"
+        );
+    }
+
+    // --- Selection-first keyboard gate (select-first-tool-lock) ---
+
+    /// One overlay frame carrying a single unmodified key press —
+    /// the exact path a real keystroke takes through `logic_impl`.
+    fn key_frame(ctx: &egui::Context, app: &mut OverlayApp, t: f64, key: egui::Key) {
+        pointer_frame(
+            ctx,
+            app,
+            t,
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+
+    /// Every `(key, tool)` pair `tool_for_key` admits besides Select.
+    fn annotation_key_pairs() -> Vec<(egui::Key, Tool)> {
+        vec![
+            (egui::Key::V, Tool::Move),
+            (egui::Key::R, Tool::Rect),
+            (egui::Key::E, Tool::Ellipse),
+            (egui::Key::A, Tool::Arrow),
+            (egui::Key::L, Tool::Line),
+            (egui::Key::M, Tool::Marker),
+            (egui::Key::P, Tool::Pencil),
+            (egui::Key::T, Tool::Text),
+            (egui::Key::B, Tool::Blur),
+            (egui::Key::N, Tool::Number),
+        ]
+    }
+
+    #[test]
+    fn overlay_tool_keys_inert_without_selection() {
+        let ctx = egui::Context::default();
+        let mut app = OverlayApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        let mut t = 0.0;
+        for (key, tool) in annotation_key_pairs() {
+            t += 1.0 / 60.0;
+            key_frame(&ctx, &mut app, t, key);
+            assert_eq!(
+                app.state.tool,
+                Tool::Select,
+                "{key:?} must not arm {tool:?} before any region exists"
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_tool_keys_inert_with_degenerate_selection() {
+        let ctx = egui::Context::default();
+        let mut app = OverlayApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        // Sub-pixel width: present but not usable — the rail and the
+        // press gate already treat this as "no selection".
+        app.state.selection = Some(Rect::from_xywh(10.0, 10.0, 0.5, 50.0));
+        let mut t = 0.0;
+        for (key, tool) in annotation_key_pairs() {
+            t += 1.0 / 60.0;
+            key_frame(&ctx, &mut app, t, key);
+            assert_eq!(
+                app.state.tool,
+                Tool::Select,
+                "{key:?} must not arm {tool:?} on a degenerate region"
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_tool_keys_arm_once_selection_usable() {
+        let ctx = egui::Context::default();
+        let mut app = OverlayApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        app.state.selection = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
+        let mut pairs = annotation_key_pairs();
+        pairs.push((egui::Key::S, Tool::Select));
+        let mut t = 0.0;
+        for (key, tool) in pairs {
+            t += 1.0 / 60.0;
+            key_frame(&ctx, &mut app, t, key);
+            assert_eq!(
+                app.state.tool, tool,
+                "usable region: {key:?} must arm {tool:?} exactly as before the gate"
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_select_key_always_arms() {
+        let ctx = egui::Context::default();
+        let mut app = OverlayApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        // Direct mutation: pre-selection no input path can leave
+        // Select (the rail is unrendered, other keys gated) — yet S
+        // must keep arming Select, so the tool has to start elsewhere
+        // for the press to be observable.
+        app.state.tool = Tool::Pencil;
+        key_frame(&ctx, &mut app, 0.0, egui::Key::S);
+        assert_eq!(
+            app.state.tool,
+            Tool::Select,
+            "S is the region-drawing tool and stays armable without a region"
         );
     }
 
