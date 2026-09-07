@@ -218,6 +218,13 @@ impl EditorApp {
         self.phase == SelectionPhase::Live
     }
 
+    /// The rail's tool gate for the current frame: the live
+    /// selection-first phase locks every non-Select chip (selection
+    /// is the only job), and the first crop restores the full set.
+    fn rail_gate(&self) -> toolbar::ToolGate {
+        rail_gate(self.phase_active())
+    }
+
     /// Latch the selection-first phase over once a crop lands. Crop
     /// detection rides the undo stack: [`EditorState::crop`] is the
     /// only mutation that pushes a `Snapshot` carrying an image, so a
@@ -701,7 +708,8 @@ impl EditorApp {
         // swatches, and popups live in `crate::toolbar`; the plain
         // call (no closure) keeps the borrow of `&mut self.state`
         // disjoint from `self.copied`.
-        let action = toolbar::show(ui, &mut self.state, self.copied);
+        let gate = self.rail_gate();
+        let action = toolbar::show(ui, &mut self.state, self.copied, gate);
 
         // Selection-first phase: the toolbar's "Crop · Enter" button
         // crops through `confirm_selection`, bypassing `logic` — so
@@ -1415,6 +1423,18 @@ fn parse_magnifier_key(name: &str) -> egui::Key {
     }
 }
 
+/// The rail's tool gate from the selection-first phase state: a
+/// live phase locks the rail to `Select`; an ended (or never
+/// requested) phase renders the full set. Pure so the phase→gate
+/// contract is testable without a live `Ui`.
+fn rail_gate(phase_active: bool) -> toolbar::ToolGate {
+    if phase_active {
+        toolbar::ToolGate::SelectOnly
+    } else {
+        toolbar::ToolGate::All
+    }
+}
+
 /// Map a single-key tool shortcut to its [`Tool`]. Only unmodified
 /// presses reach this fn (see the guard in `logic`); the chords over
 /// the same letters (Ctrl+S save, Ctrl+C copy, Ctrl+Z/Y history) are
@@ -1614,6 +1634,14 @@ mod tests {
             pos: Point::new(max.0, max.1),
         });
         let _ = state.dispatch_input(&InputEvent::PointerUp);
+    }
+
+    /// The rail gate follows the phase: live phase → Select-only
+    /// rail; ended / never-requested phase → full rail.
+    #[test]
+    fn rail_gate_tracks_phase() {
+        assert_eq!(rail_gate(true), toolbar::ToolGate::SelectOnly);
+        assert_eq!(rail_gate(false), toolbar::ToolGate::All);
     }
 
     #[test]

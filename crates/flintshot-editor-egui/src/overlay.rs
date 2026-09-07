@@ -565,6 +565,7 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
                 selected,
                 spec.name,
                 spec.glyph,
+                true,
             )
         } else {
             toolbar::chip(
@@ -573,6 +574,7 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
                 tooltip.as_str(),
                 selected,
                 spec.glyph,
+                true,
             )
         };
         if resp.clicked() {
@@ -586,6 +588,7 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
         "Undo · Ctrl+Z",
         false,
         toolbar::g_undo,
+        true,
     )
     .clicked()
     {
@@ -597,6 +600,7 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
         "Redo · Ctrl+Y",
         false,
         toolbar::g_redo,
+        true,
     )
     .clicked()
     {
@@ -619,6 +623,7 @@ fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>
         "Accept · Enter",
         false,
         toolbar::g_check,
+        true,
     )
     .clicked()
     {
@@ -630,6 +635,7 @@ fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>
         "Cancel · Esc",
         false,
         toolbar::g_x,
+        true,
     )
     .clicked()
     {
@@ -642,6 +648,7 @@ fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>
         "Save · Ctrl+S",
         false,
         toolbar::g_save,
+        true,
     )
     .clicked()
     {
@@ -653,6 +660,7 @@ fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>
         "Pin to desktop",
         false,
         toolbar::g_pin,
+        true,
     )
     .clicked()
     {
@@ -664,6 +672,7 @@ fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>
         "Upload",
         false,
         toolbar::g_upload,
+        true,
     )
     .clicked()
     {
