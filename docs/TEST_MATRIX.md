@@ -1714,6 +1714,101 @@ dispatch-pinned, verified live here).
 
 ---
 
+## Selection-phase tool lock — no annotating before the region is committed
+
+Effort: `select-first-tool-lock` (ADR-0043, revising ADR-0035).
+Applies to both shells: the editor window's selection-first phase
+(every platform — the default path for `flintshot region`) and the
+true overlay's keyboard path (X11 / macOS / Windows). The gate
+predicates, disabled-chip rendering, hotkey/pointer denial,
+post-crop restore, overlay key gating, and the
+fullscreen/open-never-gate pins are unit-pinned in
+`flintshot-editor-egui`; the rows below verify what tests can't —
+the visible chip state, tooltip copy, and the live unlock moment
+on real displays.
+
+### Test setup
+
+```sh
+cargo build --release
+cargo test --workspace --all-targets   # gates green before manual
+flintshot region                       # editor phase rows
+flintshot region --overlay             # overlay rows (X11 / macOS / Windows)
+```
+
+XV1 note: this pass ran scripted, prominent-move style — private
+`Xvfb :99` at 800×600 (the overlay window maps at its 800×600
+default without a WM, so the screen matches), XTest synthetic
+input with explicit `XSetInputFocus`, and pixel assertions on the
+app window (byte-order-agnostic pure-red paint detection; the blue
+selection-outline ring as the drag-works control). Env caveats:
+see the Prominent Move section below.
+
+### Test script
+
+**1. Editor phase live — everything but Select is inert
+(rows 1–4).**
+
+`flintshot region` → before any drag:
+
+- Every rail chip except Select renders greyed; hovering one shows
+  the tooltip "locked — Enter crops to unlock"; clicking it does
+  nothing (no tool switch).
+- Pressing each non-Select tool key (`V R E A L M P T B N`) does
+  nothing. `S` still arms Select.
+- Dragging with any pre-armed annotation tool (if state got there
+  synthetically) commits nothing; the only productive gesture is
+  the region drag.
+- Select, Esc-cancel, Enter-crop, Copy / Save / Pin / Upload, and
+  undo/redo keep their ADR-0035 phase behaviour.
+
+**2. Editor unlock on crop (row 5).**
+
+Drag a region → `Enter`. Expected: the cropped session's rail is
+fully live — chips clickable, hotkeys working, annotation draws
+committing — and never re-locks for the session.
+
+**3. Overlay keyboard gate (rows 6–7).**
+
+`flintshot region --overlay` → before any drag, press each
+non-Select tool key: nothing happens (no visible change; the
+floating rail is absent pre-selection, as before). Drag a usable
+region → the rail appears; now every tool key and chip works
+exactly as before the change.
+
+**4. Unregressed commands (row 8).**
+
+```sh
+flintshot fullscreen
+flintshot open /tmp/shot.png
+```
+
+Expected: both open the plain editor with the full rail live from
+the first frame — no greyed chips, no gating.
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Editor phase: non-Select chips greyed + lock tooltip; clicks inert |    |    |    |    |    |    |    |    |    |     |
+| Editor phase: non-Select tool hotkeys inert; `S` still arms Select |    |    |    |    |    |    |    |    |    | PASS 983fd27 2026-09-07 (hotkey inertness scripted — toolbar strip byte-identical across R/V/M/P with focus verified; S-arm unit-pinned) |
+| Editor phase: annotation pointer input denied (draw commits nothing); Select/Esc/Enter/outputs/undo unregressed |    |    |    |    |    |    |    |    |    | PASS 983fd27 2026-09-07 (pointer denial scripted with selection-creation control — the same drag drew the blue ring; phase-behaviour pins green in unit tests) |
+| Overlay: pre-selection tool keys inert (no invisible arming) |    | N/A | N/A | N/A | N/A |    |    |    |    | PASS 983fd27 2026-09-07 (M press, then inside-region drag leaves no tint; region drag itself verified) |
+| Overlay: usable selection → rail + all tool keys live exactly as before |    | N/A | N/A | N/A | N/A |    |    |    |    | PASS 983fd27 2026-09-07 (same M key after selection paints marker tint) |
+| Editor: crop unlocks the full rail / hotkeys / input permanently (no re-lock) |    |    |    |    |    |    |    |    |    | PASS 983fd27 2026-09-07 (post-crop R arms — strip changes — and R+drag commits a rect; no re-lock within the session) |
+| `flintshot fullscreen` / `flintshot open <path>`: plain editor, full rail live, no gating |    |    |    |    |    |    |    |    |    |     |
+
+### Known caveats
+
+- **The lock is hardcoded** (ADR-0043): no config key, matching
+  ADR-0035's v1 no-new-config philosophy; an opt-out follows the
+  ADR-0035 open-question shape if anyone asks.
+- **The overlay's pre-selection silence is not new**: the floating
+  rail always hid without a usable selection; this effort only
+  made its *keyboard* path match (no invisible tool arming).
+
+---
+
 ## Hide tray during captures — the icon and its menu never land in the shot
 
 Effort: `hide-tray-for-capture` (ADR-0036, ADR-0037, ADR-0042).
