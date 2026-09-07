@@ -1,9 +1,10 @@
 //! The editor toolbar: a two-row instrument panel.
 //!
 //! **Rail** (top, stable across tools): the tool chips,
-//! undo / redo, and the output actions — Save, Pin, Upload, and the
-//! ember Copy primary. **Bay** (bottom, per-tool): only the controls
-//! the active tool can use, plus a contextual hint on the right.
+//! undo / redo / delete, and the output actions — Save, Pin, Upload,
+//! and the ember Copy primary. **Bay** (bottom, per-tool): only the
+//! controls the active tool can use, plus a contextual hint on the
+//! right.
 //!
 //! The chips, glyphs, and `ToolSpec` table are shared with the Phase
 //! 5 overlay's floating toolbar (plan decision 4: reuse the chips,
@@ -47,6 +48,8 @@ pub(crate) enum ToolbarAction {
     Undo,
     /// Redo button — replay a Ctrl+Y dispatch.
     Redo,
+    /// Delete button — replay a Del (no modifiers) dispatch.
+    Delete,
 }
 
 /// Paint a glyph inside the chip rect. Coordinates are glyph-space:
@@ -269,6 +272,22 @@ fn draw_rail(
                 .clicked()
                 {
                     action = ToolbarAction::Redo;
+                }
+                // Enabled iff an annotation is selected (persistent
+                // selection, task 001); disabled reads greyed /
+                // hover-only via the same `enabled` path the locked
+                // tool chips use.
+                if chip(
+                    ui,
+                    egui::Id::new("delete"),
+                    "Delete · Del",
+                    false,
+                    g_trash,
+                    state.selected_index.is_some(),
+                )
+                .clicked()
+                {
+                    action = ToolbarAction::Delete;
                 }
                 let output = rail_actions(ui, copied);
                 if action == ToolbarAction::None {
@@ -957,6 +976,18 @@ fn arc_over_top(p: &egui::Painter, r: egui::Rect, c: Color32) {
     p.add(egui::Shape::line(points, Stroke::new(2.0, c)));
 }
 
+/// Trash can: full-width lid bar floating above an open-topped can
+/// with one centre slat. The inverse silhouette of Save's tray (lid
+/// up top vs tray at the bottom, no arrow) so the two stay distinct
+/// at 28 px.
+pub(crate) fn g_trash(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    seg(p, r, (-6.0, -5.0), (6.0, -5.0), c, 2.0);
+    seg(p, r, (-4.0, -3.0), (-4.0, 6.0), c, 2.0);
+    seg(p, r, (4.0, -3.0), (4.0, 6.0), c, 2.0);
+    seg(p, r, (-4.0, 6.0), (4.0, 6.0), c, 2.0);
+    seg(p, r, (-1.5, -1.0), (-1.5, 3.0), c, 2.0);
+}
+
 /// Arrow descending into a tray (download-to-disk).
 pub(crate) fn g_save(p: &egui::Painter, r: egui::Rect, c: Color32) {
     seg(p, r, (-6.0, 6.0), (6.0, 6.0), c, 2.0);
@@ -1176,6 +1207,80 @@ mod tests {
             tool_after_pen_click(ToolGate::All),
             Tool::Pencil,
             "control: the same click switches under All"
+        );
+    }
+
+    // --- Delete chip (annotation-delete Task 002) ---
+
+    /// State with one committed rect annotation kept selected (the
+    /// persistent-selection contract task 001 added: a Move-tool
+    /// click leaves `selected_index` set past release).
+    fn selected_state() -> EditorState {
+        let mut state = rail_state();
+        state.pending = Some(flintshot_core::Annotation::Rect {
+            rect: flintshot_core::Rect::from_xywh(10.0, 10.0, 40.0, 30.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+            fill: None,
+        });
+        state.commit_annotation();
+        state.selected_index = Some(0);
+        state
+    }
+
+    /// Drive the rail through a synthetic context and click the
+    /// Delete chip's centre — the `tool_after_pen_click` pattern
+    /// pointed at the new chip. Returns the collected action.
+    fn action_after_delete_click(state: &mut EditorState) -> ToolbarAction {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = show(ui, state, false, ToolGate::All);
+        });
+        let del = ctx
+            .read_response(egui::Id::new("delete"))
+            .expect("pass 1 registered the Delete chip");
+        let at = del.rect.center();
+        let click = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..egui::RawInput::default()
+        };
+        let mut action = ToolbarAction::None;
+        let _ = ctx.run_ui(click, |ui| {
+            action = show(ui, state, false, ToolGate::All);
+        });
+        action
+    }
+
+    #[test]
+    fn delete_chip_click_emits_delete_with_selection() {
+        let mut state = selected_state();
+        assert_eq!(
+            action_after_delete_click(&mut state),
+            ToolbarAction::Delete,
+            "a selected annotation makes the chip live and clicking it emits Delete"
+        );
+    }
+
+    #[test]
+    fn delete_chip_click_inert_without_selection() {
+        let mut state = rail_state();
+        assert_eq!(
+            action_after_delete_click(&mut state),
+            ToolbarAction::None,
+            "no selection: the chip must render greyed / hover-only and stay inert"
         );
     }
 }

@@ -811,9 +811,10 @@ impl EditorApp {
             ToolbarAction::Copy => self.handle_copy(ui.ctx()),
             ToolbarAction::Pin => self.handle_pin(ui.ctx()),
             ToolbarAction::Upload => self.handle_upload(ui.ctx()),
-            // Undo / Redo replay the same dispatch a Ctrl+Z / Ctrl+Y
-            // keypress would produce (the dispatcher owns all state
-            // mutation); their outcomes are always `Continue`.
+            // Undo / Redo / Delete replay the same dispatch a
+            // Ctrl+Z / Ctrl+Y / Del keypress would produce (the
+            // dispatcher owns all state mutation); their outcomes are
+            // always `Continue`.
             ToolbarAction::Undo => {
                 let _ = self.state.dispatch_input(&InputEvent::Key {
                     key: Key::Char('z'),
@@ -830,6 +831,12 @@ impl EditorApp {
                         ctrl: true,
                         ..Modifiers::default()
                     },
+                });
+            }
+            ToolbarAction::Delete => {
+                let _ = self.state.dispatch_input(&InputEvent::Key {
+                    key: Key::Delete,
+                    modifiers: Modifiers::default(),
                 });
             }
             ToolbarAction::None => {}
@@ -2311,6 +2318,65 @@ mod tests {
             rect_of(&plain),
             Some(Rect::from_xywh(10.0, 10.0, 30.0, 20.0)),
             "fixture: the gesture committed the expected rect"
+        );
+    }
+
+    // --- Delete chip (annotation-delete Task 002) ---
+
+    #[test]
+    fn delete_chip_removes_selected_annotation_through_shell() {
+        let ctx = egui::Context::default();
+        let mut state = move_state_with_ann();
+        state.selected_index = Some(0);
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        // The rail is ~470 px of chips inside a horizontal ScrollArea
+        // that only exists for narrow captures — a 200 px screen (the
+        // usual editor_frame size) scrolls the Delete chip out of the
+        // viewport, where no pointer can reach it. Wide screen so the
+        // whole rail is visible; positions are still canvas-derived.
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 200.0));
+        let frame = |ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            });
+        };
+        frame(&ctx, &mut app, vec![]);
+        let del = ctx
+            .read_response(egui::Id::new("delete"))
+            .expect("first frame registered the Delete chip");
+        let at = del.rect.center();
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(
+            app.state.anns.is_empty(),
+            "clicking Delete with a selection must remove the annotation via the Del replay"
+        );
+        assert!(
+            app.state.undo.last().is_some_and(|s| s.anns.len() == 1 && s.image.is_none()),
+            "the delete pushed an anns-only snapshot of the pre-delete state (fixture commit aside)"
         );
     }
 }
