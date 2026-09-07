@@ -141,20 +141,54 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
     },
 ];
 
+/// Which tools the rail may switch to this frame. Shells compute
+/// it from their own state (the editor's selection-first phase, a
+/// future overlay mode); the rail renders it — a gated-off chip
+/// greys out and turns hover-only instead of vanishing, keeping the
+/// layout stable and the tool set discoverable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolGate {
+    /// Every tool chip is live.
+    All,
+    /// Only `Tool::Select` is live; every other chip renders
+    /// disabled with a lock clause in its tooltip.
+    SelectOnly,
+}
+
+impl ToolGate {
+    /// Whether `tool`'s chip is clickable under this gate.
+    #[must_use]
+    pub(crate) fn contains(self, tool: Tool) -> bool {
+        match self {
+            ToolGate::All => true,
+            ToolGate::SelectOnly => tool == Tool::Select,
+        }
+    }
+}
+
+/// Lock clause appended to a gated-off chip's tooltip. Phrased for
+/// the editor's selection-first phase, the only gate user today.
+const LOCK_CLAUSE: &str = "locked — Enter crops to unlock";
+
 /// Draw the whole toolbar (rail + bay) as the window's top panel.
 ///
 /// The horizontal scroll on the rail is the narrow-capture fallback:
 /// region captures can be far narrower than the chips + actions,
 /// and a clipped toolbar hides actions; a scrollbar-less scroll keeps
 /// every control reachable via wheel / drag.
-pub(crate) fn show(ui: &mut egui::Ui, state: &mut EditorState, copied: bool) -> ToolbarAction {
+pub(crate) fn show(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    copied: bool,
+    gate: ToolGate,
+) -> ToolbarAction {
     let frame = egui::Frame::new()
         .fill(theme::GRAPHITE_900)
         .inner_margin(egui::Margin::symmetric(8, 5));
     egui::Panel::top("editor_toolbar")
         .frame(frame)
         .show(ui, |ui| {
-            let action = draw_rail(ui, state, copied);
+            let action = draw_rail(ui, state, copied, gate);
             draw_bay(ui, state);
             action
         })
@@ -165,33 +199,45 @@ pub(crate) fn show(ui: &mut egui::Ui, state: &mut EditorState, copied: bool) -> 
 // Rail
 // ------------------------------------------------------------------
 
-fn draw_rail(ui: &mut egui::Ui, state: &mut EditorState, copied: bool) -> ToolbarAction {
+fn draw_rail(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    copied: bool,
+    gate: ToolGate,
+) -> ToolbarAction {
     egui::ScrollArea::horizontal()
         .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 for spec in TOOLS {
+                    let enabled = gate.contains(spec.tool);
                     let selected = state.tool == spec.tool;
-                    let tooltip = format!("{} · {}", spec.name, spec.key);
+                    let tooltip = if enabled {
+                        format!("{} · {}", spec.name, spec.key)
+                    } else {
+                        format!("{} · {} · {LOCK_CLAUSE}", spec.name, spec.key)
+                    };
                     // Move renders labeled (rail emphasis); ids stay
                     // key-derived so tooltips and clicks are unchanged.
                     let resp = if spec.tool == Tool::Move {
                         labeled_chip(
                             ui,
                             egui::Id::new(("tool", spec.key)),
-                            tooltip.as_str(),
+                            &tooltip,
                             selected,
                             spec.name,
                             spec.glyph,
+                            enabled,
                         )
                     } else {
                         chip(
                             ui,
                             egui::Id::new(("tool", spec.key)),
-                            tooltip.as_str(),
+                            &tooltip,
                             selected,
                             spec.glyph,
+                            enabled,
                         )
                     };
                     if resp.clicked() {
@@ -200,10 +246,28 @@ fn draw_rail(ui: &mut egui::Ui, state: &mut EditorState, copied: bool) -> Toolba
                 }
                 ui.separator();
                 let mut action = ToolbarAction::None;
-                if chip(ui, egui::Id::new("undo"), "Undo · Ctrl+Z", false, g_undo).clicked() {
+                if chip(
+                    ui,
+                    egui::Id::new("undo"),
+                    "Undo · Ctrl+Z",
+                    false,
+                    g_undo,
+                    true,
+                )
+                .clicked()
+                {
                     action = ToolbarAction::Undo;
                 }
-                if chip(ui, egui::Id::new("redo"), "Redo · Ctrl+Y", false, g_redo).clicked() {
+                if chip(
+                    ui,
+                    egui::Id::new("redo"),
+                    "Redo · Ctrl+Y",
+                    false,
+                    g_redo,
+                    true,
+                )
+                .clicked()
+                {
                     action = ToolbarAction::Redo;
                 }
                 let output = rail_actions(ui, copied);
@@ -227,13 +291,31 @@ fn rail_actions(ui: &mut egui::Ui, copied: bool) -> ToolbarAction {
         if copy_chip(ui, copied).clicked() {
             action = ToolbarAction::Copy;
         }
-        if chip(ui, egui::Id::new("upload"), "Upload", false, g_upload).clicked() {
+        if chip(ui, egui::Id::new("upload"), "Upload", false, g_upload, true).clicked() {
             action = ToolbarAction::Upload;
         }
-        if chip(ui, egui::Id::new("pin"), "Pin to desktop", false, g_pin).clicked() {
+        if chip(
+            ui,
+            egui::Id::new("pin"),
+            "Pin to desktop",
+            false,
+            g_pin,
+            true,
+        )
+        .clicked()
+        {
             action = ToolbarAction::Pin;
         }
-        if chip(ui, egui::Id::new("save"), "Save · Ctrl+S", false, g_save).clicked() {
+        if chip(
+            ui,
+            egui::Id::new("save"),
+            "Save · Ctrl+S",
+            false,
+            g_save,
+            true,
+        )
+        .clicked()
+        {
             action = ToolbarAction::Save;
         }
     });
@@ -440,24 +522,37 @@ fn dims_label(rect: flintshot_core::Rect) -> String {
 /// A 28×28 icon chip: graphite at rest, lighter on hover, ember
 /// when selected. The selected glyph flips to ink, reading as a
 /// spark cut out of the panel — the toolbar's only color besides
-/// the Copy primary.
+/// the Copy primary. A disabled chip (`enabled == false`) drops
+/// its border, dims its glyph, and downgrades to hover-only so the
+/// tooltip (lock clause included) still explains itself.
 pub(crate) fn chip(
     ui: &mut egui::Ui,
     id: egui::Id,
     tooltip: &str,
     selected: bool,
     glyph: Glyph,
+    enabled: bool,
 ) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::hover());
-    let resp = ui.interact(rect, id, Sense::click()).on_hover_text(tooltip);
+    let resp = ui
+        .interact(
+            rect,
+            id,
+            if enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        )
+        .on_hover_text(tooltip);
     let fill = if selected {
         theme::EMBER
-    } else if resp.hovered() {
+    } else if enabled && resp.hovered() {
         theme::GRAPHITE_500
     } else {
         theme::GRAPHITE_700
     };
-    let border = if selected {
+    let border = if selected || !enabled {
         Stroke::NONE
     } else {
         Stroke::new(1.0, theme::GRAPHITE_500)
@@ -469,7 +564,9 @@ pub(crate) fn chip(
         border,
         StrokeKind::Middle,
     );
-    let color = if selected {
+    let color = if !enabled {
+        theme::SLATE.gamma_multiply(0.5)
+    } else if selected {
         theme::INK
     } else if resp.hovered() {
         theme::CHALK
@@ -502,6 +599,7 @@ fn labeled_chip_width(label_width: f32) -> f32 {
 /// galley-measured width, same rest / hover / selected visuals as
 /// `chip` (ember selected, graphite otherwise). The label is the
 /// emphasis, not new color. Renders the Move chip in both rails.
+/// Disabled state mirrors [`chip`]'s (no border, dimmed, hover-only).
 pub(crate) fn labeled_chip(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -509,6 +607,7 @@ pub(crate) fn labeled_chip(
     selected: bool,
     label: &str,
     glyph: Glyph,
+    enabled: bool,
 ) -> egui::Response {
     let galley =
         ui.painter()
@@ -518,15 +617,25 @@ pub(crate) fn labeled_chip(
         egui::vec2(labeled_chip_width(galley_size.x), 28.0),
         Sense::hover(),
     );
-    let resp = ui.interact(rect, id, Sense::click()).on_hover_text(tooltip);
+    let resp = ui
+        .interact(
+            rect,
+            id,
+            if enabled {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        )
+        .on_hover_text(tooltip);
     let fill = if selected {
         theme::EMBER
-    } else if resp.hovered() {
+    } else if enabled && resp.hovered() {
         theme::GRAPHITE_500
     } else {
         theme::GRAPHITE_700
     };
-    let border = if selected {
+    let border = if selected || !enabled {
         Stroke::NONE
     } else {
         Stroke::new(1.0, theme::GRAPHITE_500)
@@ -538,7 +647,9 @@ pub(crate) fn labeled_chip(
         border,
         StrokeKind::Middle,
     );
-    let color = if selected {
+    let color = if !enabled {
+        theme::SLATE.gamma_multiply(0.5)
+    } else if selected {
         theme::INK
     } else if resp.hovered() {
         theme::CHALK
@@ -979,5 +1090,92 @@ mod tests {
     fn color_conversions_round_trip() {
         let c = Color::rgb(0xFF, 0x8C, 0x42);
         assert_eq!(from_color32(to_color32(c)), c);
+    }
+
+    /// A minimal state whose tool the rail can switch.
+    fn rail_state() -> EditorState {
+        let img = image::RgbaImage::from_raw(64, 48, vec![255; 64 * 48 * 4])
+            .expect("raw buffer matches 64*48*4");
+        EditorState::new(img)
+    }
+
+    /// Drive the rail through a synthetic context: pass 1 lays out
+    /// (registering chip rects by id), pass 2 injects a primary
+    /// click at the Pencil chip's centre. Returns the tool after.
+    fn tool_after_pen_click(gate: ToolGate) -> Tool {
+        let mut state = rail_state();
+        state.tool = Tool::Select;
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = show(ui, &mut state, false, gate);
+        });
+        let pen = ctx
+            .read_response(egui::Id::new(("tool", "P")))
+            .expect("pass 1 registered the Pencil chip");
+        let at = pen.rect.center();
+        let click = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(click, |ui| {
+            let _ = show(ui, &mut state, false, gate);
+        });
+        state.tool
+    }
+
+    #[test]
+    fn toolgate_select_only_admits_exactly_select() {
+        assert!(ToolGate::All.contains(Tool::Select));
+        assert!(ToolGate::All.contains(Tool::Pencil));
+        assert!(ToolGate::SelectOnly.contains(Tool::Select));
+        for tool in [
+            Tool::Move,
+            Tool::Rect,
+            Tool::Ellipse,
+            Tool::Line,
+            Tool::Arrow,
+            Tool::Marker,
+            Tool::Pencil,
+            Tool::Text,
+            Tool::Blur,
+            Tool::Number,
+        ] {
+            assert!(
+                !ToolGate::SelectOnly.contains(tool),
+                "SelectOnly must disable {tool:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_only_click_cannot_switch_tool() {
+        assert_eq!(
+            tool_after_pen_click(ToolGate::SelectOnly),
+            Tool::Select,
+            "a gated-off chip must render hover-only and stay inert"
+        );
+    }
+
+    #[test]
+    fn all_gate_click_switches_tool() {
+        assert_eq!(
+            tool_after_pen_click(ToolGate::All),
+            Tool::Pencil,
+            "control: the same click switches under All"
+        );
     }
 }
