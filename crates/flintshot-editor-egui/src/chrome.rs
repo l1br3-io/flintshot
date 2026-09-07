@@ -78,6 +78,34 @@ pub(crate) fn paint_move_chrome(painter: &egui::Painter, rect: egui::Rect, kind:
     }
 }
 
+/// The persistent-selection chrome (annotation-delete spec): the
+/// selected annotation's bounding box in canvas-physical px.
+///
+/// `None` when the tool is not Move, nothing is selected, the index
+/// is stale, or the annotation's bbox is degenerate (nothing to
+/// outline). Read-only like the rest of this module — the shells own
+/// any deselect that follows a `None` (a degenerate selection must
+/// not survive to the next frame).
+#[must_use]
+pub(crate) fn selected_chrome(state: &EditorState) -> Option<Rect> {
+    if state.tool != Tool::Move {
+        return None;
+    }
+    let index = state.selected_index?;
+    state.anns.get(index)?.bounding_box()
+}
+
+/// Paint the persistent-selection outline (screen-logical,
+/// shell-transformed): 1 px dashed ember on the move chrome's dash /
+/// pad rhythm, over the shared render output with the other chrome —
+/// editor-only by construction, never in composed output.
+pub(crate) fn paint_selected_chrome(painter: &egui::Painter, rect: egui::Rect) {
+    let rect = rect.expand(theme::MOVE_CHROME_PAD);
+    for segment in dashed_rect_segments(rect, theme::MOVE_DASH, theme::MOVE_GAP) {
+        painter.line_segment(segment, theme::SELECTED_STROKE);
+    }
+}
+
 /// Dash segments along an axis-aligned rect's perimeter: each edge
 /// dashed independently (edges start on a dash; corners may end on a
 /// gap — the standard marching-ants look).
@@ -267,5 +295,54 @@ mod tests {
     fn dashed_edge_zero_length_yields_nothing() {
         let p = egui::pos2(5.0, 5.0);
         assert!(dashed_edge_segments(p, p, 4.0, 3.0).is_empty());
+    }
+
+    // --- Persistent-selection chrome (annotation-delete Task 003) ---
+
+    #[test]
+    fn selected_chrome_returns_selected_bbox_under_move() {
+        let mut s = state_with(Tool::Move, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
+        s.selected_index = Some(0);
+        let rect =
+            selected_chrome(&s).expect("a selected annotation under Move must yield its bbox");
+        assert_eq!(rect.min, Point::new(10.0, 10.0));
+        assert_eq!(rect.max, Point::new(50.0, 40.0));
+    }
+
+    #[test]
+    fn selected_chrome_requires_move_tool() {
+        let mut s = state_with(Tool::Rect, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
+        s.selected_index = Some(0);
+        assert!(
+            selected_chrome(&s).is_none(),
+            "non-Move tools get no selection chrome"
+        );
+    }
+
+    #[test]
+    fn selected_chrome_none_without_selection() {
+        let s = state_with(Tool::Move, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
+        assert!(selected_chrome(&s).is_none(), "no selection → no chrome");
+    }
+
+    #[test]
+    fn selected_chrome_none_for_degenerate_or_stale_selection() {
+        let mut degenerate = blank_state();
+        degenerate.tool = Tool::Move;
+        degenerate.anns.push(Annotation::Pencil {
+            points: vec![],
+            color: flintshot_core::Color::RED,
+            width: 2.0,
+        });
+        degenerate.selected_index = Some(0);
+        assert!(
+            selected_chrome(&degenerate).is_none(),
+            "an empty-points polyline has no bbox to outline"
+        );
+        degenerate.selected_index = Some(7);
+        assert!(
+            selected_chrome(&degenerate).is_none(),
+            "a stale out-of-range index has no annotation to outline"
+        );
     }
 }
