@@ -52,3 +52,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0040 | [Flip to Move after every annotation commit](ADR-0040-flip-to-move-after-commit.md) |
 | ADR-0041 | [The applet closes its own popup before capture requests](ADR-0041-applet-popup-closes-before-capture.md) |
 | ADR-0042 | [The tray as a helper process whose exit closes the panel's popup](ADR-0042-tray-helper-process.md) |
+| ADR-0043 | [Selection-phase tool lock — annotate only after the region is committed](ADR-0043-selection-phase-tool-lock.md) |

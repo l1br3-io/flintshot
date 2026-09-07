@@ -44,6 +44,20 @@ Categories used below:
 
 ### Added
 
+- **The selection phase now locks the annotation tools until the
+  region is committed** (select-first-tool-lock effort, ADR-0043,
+  revising ADR-0035): in the editor window's selection-first
+  phase, every rail chip except Select renders greyed and
+  unclickable with a "locked — Enter crops to unlock" tooltip,
+  tool-switch hotkeys are inert, and annotation presses anywhere
+  on the canvas are denied — the region is the phase's only job.
+  Cropping (Enter or the toolbar's *Crop*) unlocks the full rail,
+  hotkeys, and input permanently. In the overlay, pressing a
+  non-Select tool key before any usable selection now does
+  nothing (previously it invisibly armed the tool); once a
+  selection exists, keys and the floating rail work exactly as
+  before. `fullscreen`, `open`, `pin`, and post-crop editor
+  sessions are unregressed.
 - **Flip to Move after every annotation commit** (prominent-move
   effort, ADR-0040): releasing a drawn annotation (Rect / Ellipse /
   Line / Arrow / Marker / Pencil / Blur, and Text on modal commit)
