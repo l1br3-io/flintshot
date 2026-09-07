@@ -21,6 +21,8 @@ mod sni_watchdog;
 #[cfg(feature = "tray")]
 mod tray;
 mod tray_gate;
+#[cfg(feature = "tray")]
+mod tray_helper;
 mod upload;
 mod worker;
 
@@ -44,6 +46,8 @@ fn main() -> Result<()> {
         Some(Command::Upload(args)) => cli::run_upload(&args),
         Some(Command::Auth(args)) => cli::run_auth(&args),
         Some(Command::Hotkeys(args)) => cli::run_hotkeys(&args),
+        #[cfg(feature = "tray")]
+        Some(Command::Tray) => cli::run_tray_helper(),
         None => Ok(()),
     }
 }

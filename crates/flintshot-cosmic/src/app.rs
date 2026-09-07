@@ -51,6 +51,16 @@ const PANEL_ICON: &str = "camera-photo";
 /// future polish pass; 2 s is responsive without busy-looping.
 const RECONNECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Settle window between destroying the popup for a capture and
+/// sending the request: the popup's unmap round trip + COSMIC's close
+/// animation must finish before the daemon's worker grabs, or the
+/// applet's own popup lands in the shot. The IPC request carries no
+/// menu-origin marker, so the daemon applies only its 250 ms icon
+/// grace (ADR-0037's open edge) — the applet self-serves the menu
+/// grace here instead. With worker spawn + the icon grace,
+/// click-to-grab lands ≈ the tray path's ~600 ms (ADR-0041).
+const POPUP_CLOSE_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// The applet state: a COSMIC [`Core`] plus the current popup id (if
 /// the popup is open), the live status line, and whether the daemon is
 /// reachable. The panel button toggles `popup`.
@@ -129,15 +139,39 @@ impl cosmic::Application for App {
         match message {
             Message::Menu(menu_msg) => match menu::action_for(&menu_msg) {
                 menu::Action::Request(req) => {
-                    // Fire-and-forget: clone the Request, send it on the
-                    // runtime, log failures, yield a no-op when done.
-                    // The socket-path override is None → platform default.
-                    return cosmic::task::future(async move {
+                    // A capture is about to freeze the screen: destroy
+                    // the popup at the click and let the settle window
+                    // cover its unmap + close animation before the
+                    // request even reaches the daemon — otherwise the
+                    // applet's own popup lands in the grabbed frame
+                    // (ADR-0041). Other requests keep the popup open:
+                    // its live status line is the feedback for
+                    // pin/open/quit.
+                    let close = if menu::request_spawns_capture(&req) {
+                        self.popup
+                            .take()
+                            .map(|id| cosmic::task::message(Message::Surface(destroy_popup(id))))
+                    } else {
+                        None
+                    };
+                    let settle = close.is_some();
+                    let send = cosmic::task::future(async move {
+                        if settle {
+                            tokio::time::sleep(POPUP_CLOSE_SETTLE).await;
+                        }
+                        // Fire-and-forget: clone the Request, send it on
+                        // the runtime, log failures, yield a no-op when
+                        // done. The socket-path override is None →
+                        // platform default.
                         if let Err(e) = crate::ipc::send_request(None, &req).await {
                             tracing::warn!(error = %e, "applet: sending IPC request");
                         }
                         Message::Sent
                     });
+                    return match close {
+                        Some(close) => cosmic::task::batch([close, send]),
+                        None => send,
+                    };
                 }
                 menu::Action::OpenConfig => {
                     if let Err(e) = menu::open_config() {
@@ -441,5 +475,60 @@ async fn ignore_send(
 ) {
     if sender.send(msg).await.is_err() {
         tracing::debug!("subscription channel closed; applet shutting down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A headless `App`: `update` only touches `popup`/`status` and
+    /// builds lazy `Task`s (the send future — settle sleep included —
+    /// is never polled when the returned task is dropped unrun), so
+    /// no display or runtime is needed.
+    fn test_app(popup: Option<Id>) -> App {
+        App {
+            core: Core::default(),
+            popup,
+            status: "Idle".to_string(),
+            daemon_up: true,
+        }
+    }
+
+    #[test]
+    fn capture_menu_click_closes_the_popup() {
+        // The popup must be destroyed at the click — before the
+        // (settled) request leaves — or it lands in the grab
+        // (ADR-0041).
+        let mut app = test_app(Some(Id::unique()));
+        let _ = cosmic::Application::update(&mut app, Message::Menu(MenuMessage::CaptureRegion));
+        assert!(app.popup.is_none(), "capture click must destroy the popup");
+    }
+
+    #[test]
+    fn per_monitor_capture_click_closes_the_popup() {
+        let mut app = test_app(Some(Id::unique()));
+        let _ = cosmic::Application::update(
+            &mut app,
+            Message::Menu(MenuMessage::CaptureFullscreenMonitor(1)),
+        );
+        assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn non_capture_click_keeps_the_popup() {
+        // The popup's live status line is the feedback for
+        // pin/open/quit; only captures destroy it.
+        let mut app = test_app(Some(Id::unique()));
+        let _ = cosmic::Application::update(&mut app, Message::Menu(MenuMessage::PinLast));
+        assert!(app.popup.is_some());
+    }
+
+    #[test]
+    fn capture_click_without_a_popup_is_inert() {
+        let mut app = test_app(None);
+        let _ =
+            cosmic::Application::update(&mut app, Message::Menu(MenuMessage::CaptureFullscreen));
+        assert!(app.popup.is_none());
     }
 }

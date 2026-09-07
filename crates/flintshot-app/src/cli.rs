@@ -55,6 +55,12 @@ pub enum Command {
     Auth(AuthArgs),
     /// Manage global hotkeys (bind via the Wayland portal). [Phase 6]
     Hotkeys(HotkeysArgs),
+    /// Internal: the tray-helper process, spawned and supervised by
+    /// the daemon (ADR-0042). Hidden from `--help`; not for direct
+    /// use.
+    #[cfg(feature = "tray")]
+    #[command(hide = true)]
+    Tray,
 }
 
 /// Arguments for `flintshot daemon`.
@@ -1262,6 +1268,14 @@ pub fn run_hotkeys(args: &HotkeysArgs) -> Result<()> {
     match args.command {
         HotkeysCommand::Bind => run_hotkeys_bind(),
     }
+}
+
+/// `flintshot tray` — the daemon-supervised tray helper (ADR-0042).
+/// Runs until a capture/quit click exits it or the daemon goes away;
+/// the daemon respawns it. Not a user-facing subcommand (hidden).
+#[cfg(feature = "tray")]
+pub(crate) fn run_tray_helper() -> Result<()> {
+    crate::tray_helper::run()
 }
 
 /// `flintshot hotkeys bind` — ask the running daemon to open the

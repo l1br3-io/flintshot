@@ -18,6 +18,30 @@ Categories used below:
 
 ## [Unreleased]
 
+### Fixed
+
+- **The tray menu no longer appears in tray-launched screenshots on
+  COSMIC** (ADR-0042): the tray icon now lives in a supervised
+  helper process (hidden `flintshot tray` subcommand). Capture/quit
+  clicks — and every capture's hide handshake — **exit the helper**,
+  whose process exit is the only causal SNI unregistration, and the
+  one event that makes the panel destroy the open menu popup
+  (COSMIC never closes it on activation; upstream
+  `TODO: Close menu?`). The daemon respawns the helper right after
+  the grab. Timing semantics are unchanged (ADR-0036/0037 graces);
+  the hide action changed meaning from a `set_visible` flip to
+  stopping/respawning the helper. The daemon no longer links the
+  GTK/GLib tray path — the helper owns registration, the SNI
+  watchdog, and GLib pumping, and exits when the daemon dies.
+- **COSMIC applet popup no longer lands in applet-launched
+  captures** (ADR-0041): clicking *Capture region* / *Capture
+  fullscreen* / a *Fullscreen on monitor* entry in the applet popup
+  now destroys the popup at the click and waits a 250 ms settle
+  window before the request reaches the daemon, so the worker grabs
+  a popup-free frame (click-to-grab ≈ 600 ms, matching the tray
+  path). Non-capture clicks (pin/open/quit) keep the popup open for
+  their live status line.
+
 ### Added
 
 - **Flip to Move after every annotation commit** (prominent-move

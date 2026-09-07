@@ -80,6 +80,22 @@ pub fn action_for(message: &MenuMessage) -> Action {
     Action::Request(request)
 }
 
+/// Does acting on this [`Request`] spawn a capture worker (region /
+/// fullscreen — anything that freezes the screen)? Mirrors
+/// `flintshot_app::worker::spawns_capture_worker`; the applet cannot
+/// depend on the daemon's bin crate, so the match is replicated here
+/// and pinned to the same request set by test. For exactly these the
+/// applet destroys its popup and waits out the settle window in
+/// `app::POPUP_CLOSE_SETTLE` before sending, so its own popup never
+/// lands in the grabbed frame (ADR-0041).
+#[must_use]
+pub fn request_spawns_capture(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::CaptureRegion { .. } | Request::CaptureFullscreen { .. }
+    )
+}
+
 /// Human label for a monitor entry in the *Fullscreen on monitor →*
 /// submenu: `"<N> · <name>"`, or `"<N> · <name> (primary)"` for the
 /// primary monitor. Mirrors `flintshot-app::tray`'s label format
@@ -214,6 +230,35 @@ mod tests {
             action_for(&MenuMessage::Quit),
             Action::Request(Request::Quit)
         );
+    }
+
+    #[test]
+    fn request_spawns_capture_is_true_only_for_captures() {
+        let captures = [
+            Request::CaptureRegion {
+                monitor: None,
+                delay_ms: 0,
+            },
+            Request::CaptureRegion {
+                monitor: Some(2),
+                delay_ms: 500,
+            },
+            Request::CaptureFullscreen { monitor: None },
+            Request::CaptureFullscreen { monitor: Some(1) },
+        ];
+        for request in &captures {
+            assert!(
+                request_spawns_capture(request),
+                "{request:?} freezes the screen: the popup must close first"
+            );
+        }
+        let others = [Request::PinLast, Request::OpenLast, Request::Quit];
+        for request in &others {
+            assert!(
+                !request_spawns_capture(request),
+                "{request:?} never grabs the screen: the popup stays for its status line"
+            );
+        }
     }
 
     // ── monitor_label_parts: submenu text (pure, no MonitorInfo) ────

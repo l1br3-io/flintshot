@@ -1,32 +1,37 @@
-//! Daemon-side tray hiding for captures (ADR-0036).
+//! Daemon-side tray gating for captures (ADR-0036/0037/0042).
 //!
-//! A capture worker hides the daemon's own tray icon for exactly the
-//! grab window so the icon never lands in the frozen frame. The
-//! handshake is worker-driven — it is the only process that knows
-//! when the grab happens:
+//! A capture worker hides the daemon's tray for exactly the grab
+//! window. Since ADR-0042 the tray is a supervised helper process
+//! and "hide" means **stop it** — the process exit is the only
+//! causal SNI unregistration, which is what destroys the panel's
+//! open menu popup — while "show" respawns it. The handshake is
+//! worker-driven — it is the only process that knows when the grab
+//! happens:
 //!
 //! 1. Worker sends `Request::HideTrayForCapture`; the IPC layer
 //!    calls [`TrayGate::begin_capture`] and awaits the confirm epoch
 //!    ([`TrayGate::wait_confirmed`]).
 //! 2. The daemon's main loop steps the gate ([`TrayGate::step`]),
-//!    hides the icon, and — once a propagation grace has let the
-//!    panel re-render — bumps the epoch, releasing the ack.
+//!    stops the helper, and — once a propagation grace has let the
+//!    exit unregister and the panel re-render — bumps the epoch,
+//!    releasing the ack.
 //! 3. Worker sends `Request::ReportCaptured` after the grab
 //!    (success or failure); the last in-flight capture's report
-//!    restores the icon. A worker that dies between the two is
+//!    respawns the helper. A worker that dies between the two is
 //!    covered by the safety bound: the loop force-restores.
 //!
-//! Main-thread dispatch sites (tray menu, hotkeys) pre-hide at click
-//! time via [`TrayGate::pre_hide`] — side effect only, no depth: the
-//! worker's handshake owns the depth, so one capture is never
-//! counted twice. The pre-hide holds through a handshake window
-//! (spawn + connect latency) before a depth of zero restores it, so
-//! a click's hide survives until its worker's handshake arrives.
+//! The helper's own capture-click exits arrive as an unexpected
+//! child exit, which the supervisor feeds back as [`TrayGate::pre_hide`]
+//! — side effect only, no depth: the worker's handshake owns the
+//! depth, so one capture is never counted twice. The pre-hide holds
+//! through a handshake window (spawn + connect latency) before a
+//! depth of zero restores it, so a click's exit survives until its
+//! worker's handshake arrives.
 //!
 //! Decisions live in [`TrayVisibility`] — pure, injected-clock,
 //! unit-tested. [`TrayGate`] is the thread-safe shell (IPC thread +
-//! main loop) around it; GTK side effects are applied by the daemon
-//! from [`TrayAction`]s, never here.
+//! main loop) around it; process side effects are applied by the
+//! daemon from [`TrayAction`]s, never here.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -68,16 +73,18 @@ const CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Side effect the daemon's main loop applies after a
 /// [`TrayGate::step`] transition. The gate decides *when*; the
-/// daemon owns *how* — a `set_visible` flip on the one long-lived
-/// icon (`Active`/`Passive`) plus the `GLib` pump on Linux
-/// (ADR-0031). Dropping/rebuilding the icon is deliberately not an
-/// option: it never unregisters the SNI item, so every cycle would
-/// duplicate the panel entry (ADR-0039).
+/// daemon owns *how* — since ADR-0042 that is helper-process
+/// lifecycle, not visibility flips: `Hide` stops the `flintshot
+/// tray` helper (its exit unregisters the SNI item — the only
+/// causal way to close the panel's open popup) and `Show` respawns
+/// it (a fresh process = a fresh bus name, so no ADR-0039-style
+/// duplicate can accumulate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrayAction {
-    /// Hide the tray (SNI status → `Passive`).
+    /// Hide the tray: stop the helper process (SNI unregistration —
+    /// destroys the open popup and removes the icon).
     Hide,
-    /// Set the icon visible again (SNI `Active`).
+    /// Set the tray visible again: respawn the helper.
     Show,
     /// Safety-expired restore — like [`TrayAction::Show`], plus the
     /// daemon logs why (a capture worker likely died mid-grab).
@@ -88,13 +95,16 @@ pub(crate) enum TrayAction {
 /// grace the hide confirms under (see [`TrayVisibility::pre_hide`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PreHideOrigin {
-    /// A tray-menu click: the panel's popup is mid-close when the
-    /// capture launches, so the ack waits out [`MENU_GRACE`] too.
-    // No-tray builds never take this arm (the tray drain is
-    // feature-gated); tests keep it honest.
+    /// A tray-menu click: the helper exited at the click, and the
+    /// exit → unregistration → popup-destroy chain (plus any panel
+    /// close animation) is unobservable, so the ack waits out
+    /// [`MENU_GRACE`] anchored at the observed exit (ADR-0037/0042).
+    // No-tray builds never take this arm (there is no helper to
+    // exit); tests keep it honest.
     #[cfg_attr(not(feature = "tray"), allow(dead_code))]
     TrayMenu,
-    /// Hotkey / anything menu-less: only the icon repaint matters.
+    /// Hotkey / anything menu-less: only the icon removal chain
+    /// matters, so the icon grace suffices.
     Other,
 }
 
