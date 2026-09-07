@@ -2,13 +2,16 @@
 //!
 //! The menu offers *Capture region*, *Capture fullscreen*, *Open
 //! config*, and *Quit* — plus *Bind shortcuts…* on Wayland sessions
-//! (the portal hotkey path, Phase 6). Clicks arrive on
-//! [`tray_icon::menu::MenuEvent`]'s
+//! (the portal hotkey path, Phase 6). Since ADR-0042 this icon is
+//! built by the **tray helper** process (`flintshot tray`,
+//! [`crate::tray_helper`]), spawned and supervised by the daemon:
+//! the helper's process-exit is the only causal SNI unregistration,
+//! which is what closes the panel's open popup before a grab. Clicks
+//! arrive on [`tray_icon::menu::MenuEvent`]'s
 //! global receiver (muda pumps the OS internally and hands events to a
-//! static crossbeam channel); the daemon's main loop drains it via
-//! [`action_for`] and routes each click through the same dispatch path
-//! the IPC server uses (Task 006), so a tray-initiated capture reaches
-//! IPC subscribers and vice versa.
+//! static crossbeam channel); the helper's loop drains it via
+//! [`action_for`] and forwards each click to the daemon over IPC, so
+//! a tray-initiated capture reaches IPC subscribers and vice versa.
 
 use color_eyre::eyre;
 use flintshot_core::ipc::Request;

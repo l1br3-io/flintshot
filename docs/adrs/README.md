@@ -50,3 +50,5 @@ Format: **Context · Decision · Consequences**.
 | ADR-0038 | [Unregister the tray item to close the panel's menu](ADR-0038-unregister-tray-to-close-panel-menu.md) |
 | ADR-0039 | [One long-lived tray registration — no drop/rebuild cycle](ADR-0039-one-tray-registration-no-rebuild.md) |
 | ADR-0040 | [Flip to Move after every annotation commit](ADR-0040-flip-to-move-after-commit.md) |
+| ADR-0041 | [The applet closes its own popup before capture requests](ADR-0041-applet-popup-closes-before-capture.md) |
+| ADR-0042 | [The tray as a helper process whose exit closes the panel's popup](ADR-0042-tray-helper-process.md) |

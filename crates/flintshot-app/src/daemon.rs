@@ -2,27 +2,20 @@
 //!
 //! This module proves the hardest integration in Phase 2: running a
 //! tokio runtime (future IPC server + config watcher) in a background
-//! thread while the platform event sources `tray-icon` and
-//! `global-hotkey` need main-thread attention. The bridge is a plain
-//! [`std::sync::mpsc`] channel: the tokio side forwards heartbeats
-//! (and, later, IPC-derived actions) to the main thread, which also
-//! drains `tray-icon` / `global-hotkey`'s crossbeam receivers and
-//! forwards every event to a single [`ActionHandler`].
+//! thread while the platform event source `global-hotkey` needs
+//! main-thread attention. The bridge is a plain [`std::sync::mpsc`]
+//! channel: the tokio side forwards heartbeats (and, later,
+//! IPC-derived actions) to the main thread, which also drains
+//! `global-hotkey`'s crossbeam receiver and forwards every event to a
+//! single [`ActionHandler`].
 //!
-//! See ADR-0018 for the bridge rationale. Event delivery is
-//! per-source: `global-hotkey` hands events to a static crossbeam
-//! receiver, so raw polling suffices for that half — but the
-//!    GTK-backed tray half (SNI registration via libappindicator, muda
-//!    menu-event delivery) only progresses while the default `GLib`
-//!    main context is iterated, which no library thread does for us.
-//!    [`pump_glib_context`] does it from the daemon loop each
-//!    iteration (ADR-0031). macOS would need a run loop — recorded as
-//!    a future-work note.
-//!
-//! The tray's capture-time hide is a status flip (`Active` ↔
-//! `Passive`) on one icon held for the daemon's whole life — the
-//! panel, not us, owns the menu popup, and no in-process lever
-//! removes a registered SNI item (ADR-0039).
+//! See ADR-0018 for the bridge rationale. Since ADR-0042 the tray
+//! icon lives in a supervised **helper process** (`flintshot tray`),
+//! not in this loop: the helper's process-exit is the only causal
+//! unregistration SNI supports, which is what closes the panel's
+//! open menu popup before a grab. [`TraySupervisor`] here only
+//! spawns/stops that process on the tray gate's orders — no GTK
+//! here, and menu clicks arrive as ordinary IPC requests.
 
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -39,15 +32,9 @@ use crate::tray_gate::{TrayAction, TrayGate};
 /// channel works; not a performance-sensitive path.
 const TICK_INTERVAL: Duration = Duration::from_millis(500);
 /// Max time the main loop blocks on the tokio channel before polling
-/// tray/hotkey again. Caps click/hotkey latency at this value.
+/// hotkeys (and the tray helper's lifecycle) again. Caps hotkey
+/// latency and exit-observation delay at this value.
 const POLL_TIMEOUT: Duration = Duration::from_millis(100);
-
-/// Hard cap on `GLib` iterations per [`pump_glib_context`] call. Bounds
-/// the worst case — a pathological always-ready source — so one pump
-/// can never wedge the daemon loop; leftover work spreads over later
-/// ticks.
-#[cfg(all(feature = "tray", target_os = "linux"))]
-const MAX_GLIB_PUMP_ITERATIONS: usize = 64;
 
 /// Run the daemon: acquire the single-instance lock, start the tokio
 /// side thread, set up the tray (if built with `--features tray`) and a
@@ -121,39 +108,20 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         })
         .map_err(|e| eyre::eyre!("spawning tokio side thread: {e}"))?;
 
-    // 3. Platform sources on the main thread. The tray's
-    // "Bind shortcuts…" item exists only where it works: Wayland
-    // portal sessions.
-    // Startup barrier first: ensure the SNI watcher is up (activate
-    // it if dead) *before* the tray is built, so libappindicator's
-    // first registration attempt finds a host. Fire-and-forget lost
-    // that race live (2026-08-30): the poke-activated watcher
-    // appeared during appindicator init, the NameOwnerChanged event
-    // was missed, and the icon never registered. Bounded ≤ ~2 s and
-    // failure-tolerant; the watchdog thread still owns mid-session
-    // liveness.
-    #[cfg(all(feature = "tray", target_os = "linux"))]
-    crate::sni_watchdog::ensure_watcher();
-    #[cfg(all(feature = "tray", target_os = "linux"))]
-    let sni_watchdog = crate::sni_watchdog::spawn();
-    // The icon handle rides in `DaemonTray` for the daemon's lifetime
-    // (one registration; a second `tray::build` would register a
-    // *second* SNI item that panels only drop at process exit —
-    // ADR-0039); the event loop drives its visibility through the
-    // tray gate (ADR-0036).
+    // 3. Platform sources on the main thread. The tray lives in a
+    //    supervised helper process since ADR-0042: its process-exit
+    //    is the only causal SNI unregistration (the panel destroys
+    //    the open menu popup on it), which no in-process lever can
+    //    achieve — libappindicator's wrapper never unrefs the
+    //    GObject, and dropping a `TrayIcon` merely leaks a registered
+    //    item (ADR-0039). The supervisor stops it for the grab window
+    //    and respawns after; the watcher barrier and GLib pumping
+    //    moved into the helper with the registration.
     #[cfg(feature = "tray")]
-    let mut tray = match crate::tray::build(wayland) {
-        Ok(icon) => DaemonTray::from_opt(Some(icon)),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "system tray unavailable; continuing without it (IPC + hotkeys still work)"
-            );
-            DaemonTray::from_opt(None)
-        }
-    };
+    let mut tray = TraySupervisor::start();
     #[cfg(not(feature = "tray"))]
-    let mut tray = DaemonTray::none();
+    let mut tray = TraySupervisor;
+
     let hotkey_registry = if wayland {
         tracing::info!("Wayland session: global hotkeys via xdg-desktop-portal GlobalShortcuts");
         crate::hotkeys::HotkeyRegistry::empty()
@@ -175,10 +143,11 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         );
 
     // 4. Block on the event loop. Ctrl-C (caught in the tokio side)
-    //    drops the channel sender → the loop exits cleanly. A tray
-    //    *Quit* breaks the loop from this side instead; the loop takes
-    //    `rx` by value so returning drops it, which is the tokio
-    //    side's stop signal (its next heartbeat `send` fails).
+    //    drops the channel sender → the loop exits cleanly; an IPC
+    //    `Request::Quit` (tray click, `--replace`) does the same from
+    //    the tokio side. The loop takes `rx` by value so returning
+    //    drops it, which is the tokio side's stop signal (its next
+    //    heartbeat `send` fails).
     tracing::info!("daemon event loop running; press Ctrl-C to exit");
     let mut hotkey_registry = hotkey_registry;
     run_event_loop(
@@ -189,7 +158,6 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         config_watcher.as_ref(),
         wayland,
         &hotkeys_shared,
-        &bind_requested,
         &tray_gate,
         &mut tray,
     );
@@ -197,11 +165,6 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     // Wait for the tokio side to finish so we don't leak the runtime.
     let _ = tokio_join.join();
 
-    // Watchdog stops with the daemon; bounded by one in-flight poke.
-    #[cfg(all(feature = "tray", target_os = "linux"))]
-    if let Some(watchdog) = sni_watchdog {
-        watchdog.shutdown();
-    }
     tracing::info!("daemon exited cleanly");
     Ok(())
 }
@@ -230,63 +193,52 @@ fn replace_running_daemon() -> eyre::Result<()> {
     Ok(())
 }
 
-/// The main event loop: drain tray menu + hotkey receivers, then block
-/// (briefly) on the tokio heartbeat channel. Tray capture/quit clicks
-/// and hotkey fires route through the worker dispatch table (same path
-/// as IPC); the heartbeat just keeps the loop polling.
+/// The main event loop: poll the tray helper's lifecycle, drain the
+/// hotkey receiver, then block (briefly) on the tokio heartbeat
+/// channel. Hotkey fires route through the worker dispatch table
+/// (same path as IPC); the heartbeat just keeps the loop polling.
 ///
-/// Returns when the tokio side drops its sender (Ctrl-C / IPC `Quit`)
-/// or a tray *Quit* is clicked. The receiver is **owned** so both exits
-/// drop it: without the drop, a tray *Quit* would leave `run` holding
-/// `rx` alive, the tokio side's heartbeat `send`s would keep
-/// succeeding, and `run`'s `join()` would wait forever on a thread that
-/// no longer has a reason to stop — the daemon hung on-screen with a
-/// dead tray (every later click silently dropped, L5 2026-08-31).
+/// Returns when the tokio side drops its sender (Ctrl-C / IPC `Quit`).
+/// The receiver is **owned** so both exits drop it: without the drop,
+/// `run` would hold `rx` alive, the tokio side's heartbeat `send`s
+/// would keep succeeding, and `run`'s `join()` would wait forever on a
+/// thread that no longer has a reason to stop — the daemon hung
+/// on-screen with a dead tray (every later click silently dropped,
+/// L5 2026-08-31).
 //
-// Ten wiring params by design: this loop is the daemon's integration
+// Nine wiring params by design: this loop is the daemon's integration
 // point, and each param is a distinct event source or shared state; a
 // context struct would only relocate the list, not shrink it.
 #[allow(clippy::too_many_arguments)]
 // Owned on purpose: dropping the receiver on return is the tokio
-// side's stop signal on the tray-Quit path (see the doc comment);
-// a `&Receiver` here is exactly the hung-daemon bug.
+// side's stop signal (see the doc comment); a `&Receiver` here is
+// exactly the hung-daemon bug.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "ownership is the shutdown contract; the body only reads it"
 )]
 fn run_event_loop(
     rx: mpsc::Receiver<()>,
-    #[cfg_attr(not(feature = "tray"), allow(unused_variables))]
     bus: &crate::ipc_server::SubscriberBus,
     state: &crate::worker::DispatchState,
     hotkeys: &mut crate::hotkeys::HotkeyRegistry,
     config_watcher: Option<&crate::config_watcher::ConfigWatcher>,
     wayland: bool,
     hotkeys_shared: &crate::hotkeys_portal::SharedHotkeys,
-    #[cfg_attr(not(feature = "tray"), allow(unused_variables))] bind_requested: &Notify,
     tray_gate: &TrayGate,
-    tray: &mut DaemonTray,
+    tray: &mut TraySupervisor,
 ) {
     loop {
-        // Before draining the tray: muda delivers menu events through
-        // the default GLib context, so without this the crossbeam
-        // receiver below would never see them (nor would the SNI
-        // item ever register).
-        #[cfg(all(feature = "tray", target_os = "linux"))]
-        pump_glib_context();
+        // Helper lifecycle first: a self-exit (capture/quit click, or
+        // a crash) is the ADR-0042 pre-hide — arm the gate's
+        // menu-anchored hold before anything waits on its graces.
+        tray.poll(tray_gate);
 
-        // Tray-gate tick first: apply any hide the IPC layer owes a
-        // waiting capture worker before that worker's own reply bound
-        // expires, and restore icons whose captures have reported.
+        // Tray-gate tick: apply any stop/respawn a waiting capture
+        // worker is owed before that worker's own reply bound
+        // expires, and restart helpers whose captures have reported.
         service_tray_gate(tray_gate, tray);
 
-        #[cfg(feature = "tray")]
-        if drain_tray_menu(bus, state, bind_requested, tray_gate, tray) {
-            // Tray *Quit*: stop polling. `run` then returns, the lock
-            // is released, and the daemon exits.
-            tracing::info!("tray Quit clicked; exiting event loop");
-            break;
-        }
         drain_hotkeys(hotkeys, bus, state, tray_gate, tray);
 
         // Config hot-reload: re-read on change; re-register hotkeys only
@@ -322,110 +274,156 @@ fn run_event_loop(
     }
 }
 
-/// Drain the process-default `GLib` main context: up to
-/// [`MAX_GLIB_PUMP_ITERATIONS`] non-blocking `iteration(false)` calls,
-/// stopping early once nothing is pending.
-///
-/// Why: on Linux the tray stack (libappindicator behind `tray-icon`,
-/// plus muda's menu plumbing) drives from `GLib` sources on the default
-/// context — `RegisterStatusNotifierItem` and menu-event delivery only
-/// happen while that context is iterated. The daemon owns no `GLib` main
-/// loop, so without this pump the SNI object is exported on the bus but
-/// never registers with the `StatusNotifierWatcher` (`TEST_MATRIX`
-/// finding 3; full rationale: ADR-0031).
-#[cfg(all(feature = "tray", target_os = "linux"))]
-fn pump_glib_context() {
-    let context = gtk::glib::MainContext::default();
-    for _ in 0..MAX_GLIB_PUMP_ITERATIONS {
-        if !context.iteration(false) {
-            break;
-        }
-    }
+/// The daemon's handle on the tray-helper process (ADR-0042). The
+/// helper owns the SNI registration; this supervisor applies the tray
+/// gate's actions as process lifecycle — `Hide` stops the helper
+/// (its exit unregisters the item, which is what causally closes the
+/// panel's open popup), `Show` respawns it (a fresh process gets a
+/// fresh bus name, so the re-registration cannot duplicate — the
+/// ADR-0039 drop/rebuild leak). Exists in no-tray builds as an inert
+/// placeholder so the loop keeps one signature.
+#[cfg(feature = "tray")]
+struct TraySupervisor {
+    /// The live helper, if one is running. Reaped lazily by [`Self::poll`].
+    child: Option<std::process::Child>,
+    /// We asked for the current child's stop (gate `Hide`); its exit
+    /// is expected and must not re-arm the click pre-hide.
+    stop_initiated: bool,
 }
 
-/// The daemon's tray icon for the event loop to drive, when one was
-/// built (and the `tray` feature is on). Holding the `TrayIcon` keeps
-/// the SNI item registered; the gate decides visibility, this type
-/// applies it as a status flip. Exists in no-tray builds as an
-/// always-absent handle so the loop and drains keep one signature.
-///
-/// One daemon run owns exactly one registration: a dropped/rebuilt
-/// `TrayIcon` does **not** unregister the old item — the appindicator
-/// object leaks (the binding never unrefs it) and SNI watchers only
-/// remove items when the owning process's bus name disappears — so
-/// every rebuild would strand a duplicate icon + menu in the panel
-/// for the rest of the session (ADR-0039). Visibility is therefore
-/// `set_visible` flips on the one handle, never drop/rebuild.
-struct DaemonTray {
-    #[cfg(feature = "tray")]
-    icon: Option<tray_icon::TrayIcon>,
-}
-
-impl DaemonTray {
-    #[cfg(feature = "tray")]
-    fn from_opt(icon: Option<tray_icon::TrayIcon>) -> Self {
-        Self { icon }
+#[cfg(feature = "tray")]
+impl TraySupervisor {
+    /// Spawn the first helper. A spawn failure is logged, not fatal —
+    /// the gate's restore cycle retries by construction.
+    fn start() -> Self {
+        let mut supervisor = Self {
+            child: None,
+            stop_initiated: false,
+        };
+        supervisor.apply(TrayAction::Show);
+        supervisor
     }
 
-    /// The always-absent handle: no-tray builds' only constructor,
-    /// and the headless tests' stand-in.
-    #[cfg_attr(
-        all(feature = "tray", not(test)),
-        allow(
-            dead_code,
-            reason = "tray builds use from_opt; none() serves tests and no-tray builds"
-        )
-    )]
-    fn none() -> Self {
-        Self {
-            #[cfg(feature = "tray")]
-            icon: None,
+    /// Reap an exited helper and teach the gate about exits we did
+    /// not order. A self-exit is by design a capture/quit click (the
+    /// helper exits to unregister; ADR-0042) or a crash — either way
+    /// the item is already gone, so the pre-hide has no side effect
+    /// to apply: it only anchors the gate's menu grace here and
+    /// holds a respawn through the handshake window.
+    fn poll(&mut self, gate: &TrayGate) {
+        let Some(child) = &mut self.child else {
+            return;
+        };
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                self.child = None;
+                if !self.stop_initiated {
+                    tracing::info!(
+                        "tray helper exited on its own (capture/quit click, or a crash)"
+                    );
+                    let _ = gate.pre_hide(
+                        Instant::now(),
+                        true,
+                        crate::tray_gate::PreHideOrigin::TrayMenu,
+                    );
+                }
+                self.stop_initiated = false;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "polling the tray helper"),
         }
     }
 
-    #[cfg(feature = "tray")]
-    fn is_present(&self) -> bool {
-        self.icon.is_some()
+    /// Apply a gate-decided lifecycle change. Failures are non-fatal
+    /// and logged — a wedged helper must never wedge the daemon loop.
+    fn apply(&mut self, action: TrayAction) {
+        match action {
+            TrayAction::Hide => {
+                if let Some(child) = &mut self.child {
+                    match child.kill() {
+                        Ok(()) => self.stop_initiated = true,
+                        // Already-exited (or otherwise unkillable):
+                        // `poll` classifies the exit; the gate is
+                        // already `Hidden` by its own transition.
+                        Err(e) => tracing::warn!(error = %e, "stopping the tray helper"),
+                    }
+                }
+            }
+            TrayAction::Show | TrayAction::ForceShow => {
+                if let Some(mut old) = self.child.take() {
+                    let _ = old.kill();
+                    let _ = old.wait();
+                }
+                match spawn_helper() {
+                    Ok(child) => {
+                        tracing::debug!("tray helper spawned");
+                        self.child = Some(child);
+                    }
+                    Err(e) => tracing::warn!(error = %e, "spawning the tray helper"),
+                }
+            }
+        }
     }
 
-    #[cfg(not(feature = "tray"))]
+    /// Whether a tray is supposed to exist — with the feature on,
+    /// always (the supervisor owns the respawn, so "down" is a
+    /// transient state the gate already knows about).
     #[allow(
         clippy::unused_self,
-        reason = "no-tray builds have no icon; the method exists so callers keep one signature"
+        reason = "mirrors the no-tray arm; a per-instance answer is meaningless"
+    )]
+    fn is_present(&self) -> bool {
+        true
+    }
+}
+
+/// Launch `flintshot tray` (this binary) as the helper. stderr is
+/// inherited so helper logs land wherever the daemon's do; stdout is
+/// null (the helper prints only config-path fallbacks).
+#[cfg(feature = "tray")]
+fn spawn_helper() -> std::io::Result<std::process::Child> {
+    let exe = std::env::current_exe().map_err(|e| {
+        std::io::Error::other(format!("resolving current_exe for the tray helper: {e}"))
+    })?;
+    std::process::Command::new(exe)
+        .arg("tray")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+}
+
+/// The no-tray-build placeholder: nothing to supervise.
+#[cfg(not(feature = "tray"))]
+struct TraySupervisor;
+
+#[cfg(not(feature = "tray"))]
+impl TraySupervisor {
+    #[allow(
+        clippy::unused_self,
+        reason = "no-tray builds have no helper; the method exists so callers keep one signature"
+    )]
+    fn poll(&mut self, _gate: &TrayGate) {}
+
+    #[allow(
+        clippy::unused_self,
+        reason = "no-tray builds have no helper; the method exists so callers keep one signature"
+    )]
+    fn apply(&mut self, _action: TrayAction) {}
+
+    #[allow(
+        clippy::unused_self,
+        reason = "no-tray builds have no helper; the method exists so callers keep one signature"
     )]
     fn is_present(&self) -> bool {
         false
     }
-
-    /// Apply a gate-decided visibility change. Failures are non-fatal
-    /// (a compositor refusing the status flip must never wedge the
-    /// loop); on Linux the `GLib` pump follows so libappindicator's
-    /// `DBus` call actually reaches the bus (ADR-0031).
-    #[cfg(feature = "tray")]
-    fn apply(&mut self, action: TrayAction) {
-        if let Some(icon) = &self.icon {
-            let visible = !matches!(action, TrayAction::Hide);
-            if let Err(e) = icon.set_visible(visible) {
-                tracing::warn!(error = %e, ?action, "tray visibility change failed");
-            }
-        }
-        #[cfg(target_os = "linux")]
-        pump_glib_context();
-    }
-
-    #[cfg(not(feature = "tray"))]
-    #[allow(
-        clippy::unused_self,
-        reason = "no-tray builds have no icon; the method exists so callers keep one signature"
-    )]
-    fn apply(&mut self, _action: TrayAction) {}
 }
 
 /// One tray-gate tick: advance the state machine and apply whatever
 /// side effect it decided on. Runs every loop iteration (≤
-/// [`POLL_TIMEOUT`]), so hides owed to waiting workers land well
+/// [`POLL_TIMEOUT`]), so stops owed to waiting workers land well
 /// inside their reply bound.
-fn service_tray_gate(gate: &TrayGate, tray: &mut DaemonTray) {
+fn service_tray_gate(gate: &TrayGate, tray: &mut TraySupervisor) {
     if let Some(action) = gate.step(Instant::now(), tray.is_present()) {
         if action == TrayAction::ForceShow {
             tracing::warn!(
@@ -438,90 +436,23 @@ fn service_tray_gate(gate: &TrayGate, tray: &mut DaemonTray) {
     }
 }
 
-/// Pre-hide the tray for a dispatch that is about to spawn a
-/// capture worker (tray click / hotkey fire): flips it Passive at
-/// the interaction itself — instant feedback, and the handshake's
-/// grace counts from here — without touching the capture depth (the
-/// worker's `HideTrayForCapture` owns that; one capture, one count).
-/// The origin selects the grace: a tray click's popup is still
-/// mid-close and unobservable, so it waits out the menu grace too
-/// (ADR-0037). See ADR-0036/0039.
+/// Pre-hide the tray for a dispatch that is about to spawn a capture
+/// worker (hotkey fire): stops the helper at the interaction itself —
+/// instant feedback, and the handshake's grace counts from here —
+/// without touching the capture depth (the worker's
+/// `HideTrayForCapture` owns that; one capture, one count). Hotkeys
+/// close no menu, so the icon grace applies (ADR-0037); the helper
+/// exit itself covers any popup left open elsewhere. See
+/// ADR-0036/0037/0042.
 fn pre_hide_for_capture(
     gate: &TrayGate,
-    tray: &mut DaemonTray,
+    tray: &mut TraySupervisor,
     origin: crate::tray_gate::PreHideOrigin,
 ) {
     if gate.pre_hide(Instant::now(), tray.is_present(), origin) {
-        tracing::debug!("hiding the tray for an imminent capture");
+        tracing::debug!("stopping the tray helper for an imminent capture");
         tray.apply(TrayAction::Hide);
     }
-}
-
-/// Drain pending tray menu clicks, routing each through the worker
-/// dispatch table (capture → spawn + `CaptureStarted`/`EditorOpened`;
-/// quit → shutdown) or opening the config. Returns `true` if *Quit* was
-/// clicked. Best-effort: a no-op if no tray was built.
-#[cfg(feature = "tray")]
-fn drain_tray_menu(
-    bus: &crate::ipc_server::SubscriberBus,
-    state: &crate::worker::DispatchState,
-    bind_requested: &Notify,
-    tray_gate: &TrayGate,
-    tray: &mut DaemonTray,
-) -> bool {
-    use tray_icon::menu::MenuEvent;
-
-    let rx = MenuEvent::receiver();
-    while let Ok(event) = rx.try_recv() {
-        match crate::tray::action_for(&event) {
-            Some(crate::tray::TrayAction::Request(request)) => {
-                // A capture dispatch is about to freeze the screen —
-                // flip our own tray to Passive now rather than
-                // waiting for the worker's handshake round trip
-                // (ADR-0036). The panel's popup is the panel's
-                // business: no in-process lever closes it
-                // (ADR-0039), the menu grace covers its animation.
-                if crate::worker::spawns_capture_worker(&request) {
-                    pre_hide_for_capture(
-                        tray_gate,
-                        tray,
-                        crate::tray_gate::PreHideOrigin::TrayMenu,
-                    );
-                }
-                match crate::worker::dispatch(
-                    &request,
-                    &crate::worker::CommandSpawner,
-                    state,
-                    &mut |ev| {
-                        bus.broadcast(ev);
-                    },
-                ) {
-                    Ok(crate::worker::DispatchOutcome::Shutdown) => return true,
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "tray dispatch failed"),
-                }
-            }
-            Some(crate::tray::TrayAction::BindShortcuts) => {
-                // Crosses into the portal session task (tokio side);
-                // the dialog itself opens over there. notify_one, not
-                // notify_waiters: the session task spends long windows
-                // outside select (startup awaits, an open dialog), and
-                // notify_waiters only wakes an already-parked waiter —
-                // a click in those windows would vanish silently.
-                // notify_one stores one permit, so the click survives
-                // until the loop re-enters select (repeat clicks
-                // collapse into that single queued bind).
-                bind_requested.notify_one();
-            }
-            Some(crate::tray::TrayAction::OpenConfig) => {
-                if let Err(e) = open_config_file() {
-                    tracing::warn!(error = %e, "opening config from tray");
-                }
-            }
-            None => {}
-        }
-    }
-    false
 }
 
 /// Pure check: did the `[hotkeys]` section change between two config
@@ -553,61 +484,18 @@ fn apply_wayland_hotkey_reload(
     }
 }
 
-/// Open `config.toml` in `$EDITOR` (fallback `$VISUAL`); print the path
-/// if neither is set.
-#[cfg(feature = "tray")]
-fn open_config_file() -> eyre::Result<()> {
-    use std::process::Command;
-
-    let path = flintshot_core::config_path()
-        .ok_or_else(|| eyre::eyre!("no platform config_dir available"))?;
-    if let Some(editor) = std::env::var_os("EDITOR").or_else(|| std::env::var_os("VISUAL")) {
-        let argv = editor_argv(&editor);
-        if argv.is_empty() {
-            println!("{}", path.display());
-            tracing::info!(path = %path.display(), "$EDITOR/$VISUAL is blank; printed config path");
-            return Ok(());
-        }
-        Command::new(&argv[0])
-            .args(&argv[1..])
-            .arg(&path)
-            .spawn()
-            .map_err(|e| eyre::eyre!("launching {editor:?} on {}: {e}", path.display()))?;
-        tracing::info!(editor = ?editor, path = %path.display(), "opened config");
-    } else {
-        println!("{}", path.display());
-        tracing::info!(path = %path.display(), "no $EDITOR/$VISUAL; printed config path");
-    }
-    Ok(())
-}
-
-/// Split an `$EDITOR`/`$VISUAL` value into program + leading args.
-/// Values like `code --wait` are common (and conventionally unquoted —
-/// shells do not expand the variable into words, but every editor
-/// launcher tolerates whitespace splitting); treating the whole value
-/// as one binary name makes `Command::new` look for a file literally
-/// named `code --wait` and the tray *Open config* click silently fail.
-#[cfg(feature = "tray")]
-fn editor_argv(value: &std::ffi::OsStr) -> Vec<std::ffi::OsString> {
-    value
-        .to_string_lossy()
-        .split_whitespace()
-        .map(std::ffi::OsString::from)
-        .collect()
-}
-
 /// Drain pending *pressed* hotkey events, dispatching each through the
 /// worker table (same path as tray/IPC). `Released` is ignored to avoid
 /// double-firing. A no-op when hotkeys are unavailable (the registry is
-/// empty). Hotkey captures pre-hide the tray like tray clicks do
-/// (ADR-0036) — a Passive flip on the one long-lived icon; the
-/// handshake that follows owns the depth.
+/// empty). Hotkey captures pre-hide the tray (ADR-0036) — the helper
+/// stops here, its exit unregistering the item; the handshake that
+/// follows owns the depth (ADR-0042).
 fn drain_hotkeys(
     registry: &crate::hotkeys::HotkeyRegistry,
     bus: &crate::ipc_server::SubscriberBus,
     state: &crate::worker::DispatchState,
     tray_gate: &TrayGate,
-    tray: &mut DaemonTray,
+    tray: &mut TraySupervisor,
 ) {
     use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 
@@ -838,174 +726,109 @@ mod tests {
         );
     }
 
-    // ── tray Open config: $EDITOR splitting ─────────────────────
+    // ── TraySupervisor: helper lifecycle under test ─────────────
 
-    #[cfg(feature = "tray")]
+    /// A helper we stopped via `apply(Hide)` is reaped without arming
+    /// the click pre-hide (`stop_initiated`): far past the hold
+    /// window the gate is still idle — an armed pre-hide would have
+    /// produced `Show` there. `Show` then respawns.
+    #[cfg(all(feature = "tray", unix))]
     #[test]
-    fn editor_value_with_args_splits_into_program_and_args() {
-        use std::ffi::OsStr;
-        let argv = editor_argv(OsStr::new("code --wait"));
-        assert_eq!(argv, ["code", "--wait"].map(std::ffi::OsString::from));
-    }
+    fn stopped_helper_exit_is_not_treated_as_a_click() {
+        let gate = TrayGate::new();
+        let mut supervisor = TraySupervisor {
+            child: Some(
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .unwrap(),
+            ),
+            stop_initiated: false,
+        };
 
-    #[cfg(feature = "tray")]
-    #[test]
-    fn plain_editor_value_is_a_single_word() {
-        use std::ffi::OsStr;
-        assert_eq!(
-            editor_argv(OsStr::new("vim")),
-            ["vim"].map(std::ffi::OsString::from)
+        supervisor.apply(TrayAction::Hide);
+        // SIGKILL is asynchronous — reap with a bounded spin.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while supervisor.child.is_some() && Instant::now() < deadline {
+            supervisor.poll(&gate);
+            if supervisor.child.is_some() {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        assert!(
+            supervisor.child.is_none(),
+            "the stopped child must be reaped"
         );
+        assert!(!supervisor.stop_initiated, "the flag resets on reap");
+        assert_eq!(
+            gate.step(Instant::now() + Duration::from_secs(1), true),
+            None,
+            "an ordered stop must not arm the click pre-hide (no Show owed)"
+        );
+
+        supervisor.apply(TrayAction::Show);
+        assert!(
+            supervisor.child.is_some(),
+            "Show respawns a helper (this test binary's `tray` arg — harmless)"
+        );
+        // Reap the spawned helper so the test leaves nothing behind.
+        supervisor.apply(TrayAction::Hide);
+        if let Some(mut child) = supervisor.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
-    #[cfg(feature = "tray")]
+    /// A helper that dies on its own (capture/quit click, or crash)
+    /// arms the gate's click-anchored pre-hide: a handshake landing
+    /// afterwards confirms only after the **menu** grace — the exit
+    /// started the popup-destruction chain, it did not finish it.
+    #[cfg(all(feature = "tray", unix))]
     #[test]
-    fn blank_editor_value_is_empty() {
-        use std::ffi::OsStr;
-        assert!(editor_argv(OsStr::new("   ")).is_empty());
-    }
+    fn self_exited_helper_arms_the_click_pre_hide() {
+        let gate = TrayGate::new();
+        let mut supervisor = TraySupervisor {
+            // `true` exits immediately.
+            child: Some(std::process::Command::new("true").spawn().unwrap()),
+            stop_initiated: false,
+        };
 
-    /// [`super::pump_glib_context`] tests. The default `GLib` context is
-    /// process-global and cargo runs `#[test]`s on parallel threads, so
-    /// every test that attaches sources to it (or iterates it) must hold
-    /// [`CONTEXT_LOCK`] — otherwise one test's pump would dispatch
-    /// another test's pending sources.
-    #[cfg(all(feature = "tray", target_os = "linux"))]
-    mod glib_pump {
-        use super::*;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::{Arc, Mutex, MutexGuard};
-        use std::time::{Duration, Instant};
-
-        use gtk::glib;
-        use gtk::glib::ControlFlow;
-
-        /// Serializes the tests in this module around the shared
-        /// default context.
-        static CONTEXT_LOCK: Mutex<()> = Mutex::new(());
-
-        fn context_lock() -> MutexGuard<'static, ()> {
-            // Poisoning would only mean a sibling test already failed;
-            // its panic is the real signal.
-            CONTEXT_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        }
-
-        #[test]
-        fn idle_source_never_fires_without_a_pump() {
-            let _serial = context_lock();
-            let fired = Arc::new(AtomicBool::new(false));
-            let flag = Arc::clone(&fired);
-            glib::idle_add(move || {
-                flag.store(true, Ordering::SeqCst);
-                ControlFlow::Break
-            });
-
-            // Bounded wait with no context iteration: however long the
-            // thread waits, GLib dispatches nothing — a source only runs
-            // when someone iterates its context. This is the RED
-            // condition the pump exists to fix.
-            let deadline = Instant::now() + Duration::from_millis(50);
-            while Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(5));
+        // Bounded spin: the exit may not be visible on the first poll.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while supervisor.child.is_some() && Instant::now() < deadline {
+            supervisor.poll(&gate);
+            if supervisor.child.is_some() {
+                thread::sleep(Duration::from_millis(10));
             }
-
-            assert!(
-                !fired.load(Ordering::SeqCst),
-                "idle source fired without any context iteration"
-            );
         }
+        assert!(supervisor.child.is_none(), "the exit was reaped");
 
-        #[test]
-        fn idle_source_fires_after_pumping() {
-            let _serial = context_lock();
-            let fired = Arc::new(AtomicBool::new(false));
-            let flag = Arc::clone(&fired);
-            glib::idle_add(move || {
-                flag.store(true, Ordering::SeqCst);
-                ControlFlow::Break
-            });
-
-            pump_glib_context();
-
-            assert!(
-                fired.load(Ordering::SeqCst),
-                "idle source should dispatch during the pump"
-            );
-        }
-
-        /// The wiring this branch exists for: [`super::run_event_loop`]
-        /// must pump the default context every iteration. Drive the
-        /// real loop headless (empty registry, no watcher, tray/hotkey
-        /// receivers idle) with a channel that carries one heartbeat
-        /// then disconnects; the idle source can only have fired if
-        /// the loop itself pumped the context.
-        #[test]
-        fn run_event_loop_pumps_the_default_context() {
-            let _serial = context_lock();
-            let fired = Arc::new(AtomicBool::new(false));
-            let flag = Arc::clone(&fired);
-            glib::idle_add(move || {
-                flag.store(true, Ordering::SeqCst);
-                ControlFlow::Break
-            });
-
-            let (tx, rx) = mpsc::channel::<()>();
-            tx.send(()).expect("send heartbeat");
-            drop(tx);
-
-            let bus = crate::ipc_server::SubscriberBus::new();
-            let state = crate::worker::DispatchState::new();
-            let mut hotkeys = crate::hotkeys::HotkeyRegistry::empty();
-            let shared = Arc::new(Mutex::new(HotkeyConfig::default()));
-            let bind_requested = Notify::new();
-            let tray_gate = TrayGate::new();
-            let mut tray = DaemonTray::none();
-
-            run_event_loop(
-                rx,
-                &bus,
-                &state,
-                &mut hotkeys,
-                None,
-                false,
-                &shared,
-                &bind_requested,
-                &tray_gate,
-                &mut tray,
-            );
-
-            assert!(
-                fired.load(Ordering::SeqCst),
-                "idle source dispatched only if the loop pumped the GLib context"
-            );
-        }
-
-        #[test]
-        fn self_rearming_source_cannot_run_the_pump_forever() {
-            // Every dispatch queues a successor, so the context is
-            // never empty — the cap is the only thing that ends this.
-            fn rearm_once(count: Arc<AtomicUsize>) {
-                glib::idle_add(move || {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    rearm_once(Arc::clone(&count));
-                    ControlFlow::Break
-                });
-            }
-
-            let _serial = context_lock();
-            let count = Arc::new(AtomicUsize::new(0));
-            rearm_once(Arc::clone(&count));
-
-            pump_glib_context();
-
-            let observed = count.load(Ordering::SeqCst);
-            assert!(
-                (1..=MAX_GLIB_PUMP_ITERATIONS).contains(&observed),
-                "pump dispatched {observed} time(s); expected the \
-                 MAX_GLIB_PUMP_ITERATIONS cap to bound it"
-            );
-        }
+        let t0 = Instant::now();
+        let baseline = gate.begin_capture(); // the worker's handshake lands
+        assert_eq!(
+            gate.step(t0, true),
+            None,
+            "hidden by the armed pre-hide; no new side effect"
+        );
+        assert_eq!(
+            gate.confirmed_epoch(),
+            baseline,
+            "icon grace (250 ms) alone must not confirm a click-anchored hide"
+        );
+        assert_eq!(
+            gate.step(t0 + Duration::from_millis(250), true),
+            None,
+            "icon-grace elapsed: still waiting the menu grace"
+        );
+        assert_eq!(
+            gate.confirmed_epoch(),
+            baseline,
+            "no ack before the menu grace (600 ms from the observed exit)"
+        );
+        gate.step(t0 + Duration::from_millis(600), true);
+        assert!(
+            gate.confirmed_epoch() > baseline,
+            "menu grace elapsed: the ack may leave (the popup is gone)"
+        );
     }
 }

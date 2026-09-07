@@ -644,10 +644,13 @@ the popup re-subscribes within ~2 s.
 | Popup *Capture fullscreen* sends `Request`, daemon spawns   |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Popup per-monitor submenu lists each monitor (from `monitors()`) | | | | | | N/A | N/A | N/A | N/A |
 | Per-monitor entry captures the right monitor                |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Popup capture: popup closes at the click; grabbed frame is popup-free (ADR-0041) | | | | | | N/A | N/A | N/A | N/A |
+| Popup capture: click-to-grab ≈ 600 ms (settle + icon grace), feels intentional | | | | | | N/A | N/A | N/A | N/A |
 | Popup *Pin last* sends `Request::PinLast`, pin window spawns |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Popup *Open last* sends `Request::OpenLast`, editor opens   |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Popup *Open config* opens `$EDITOR` on `config.toml`        |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Popup *Quit* sends `Request::Quit`, daemon exits cleanly    |    |    |    |    |    | N/A | N/A | N/A | N/A |
+| Non-capture clicks keep the popup open (status-line feedback) |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Event feed: status line updates (*Capturing… → Editor opened → Saved \<path\>*) | | | | | | N/A | N/A | N/A | N/A |
 | Event feed: `Event::Pinned { id }` shows *"Pinned #N"*      |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Event feed: `Event::Error` shows tinted-red error line      |    |    |    |    |    | N/A | N/A | N/A | N/A |
@@ -1713,41 +1716,47 @@ dispatch-pinned, verified live here).
 
 ## Hide tray during captures — the icon and its menu never land in the shot
 
-Effort: `hide-tray-for-capture` (ADR-0036, ADR-0037). Applies to
+Effort: `hide-tray-for-capture` (ADR-0036, ADR-0037, ADR-0042).
+Applies to
 **every**
 daemon-dispatched capture: tray menu, hotkeys, CLI delegation, COSMIC
 applet, desktop actions, and daemon-spawned `--standalone` workers.
-The state machine, IPC interception, and worker guard are unit-pinned
-(`tray_gate`, `ipc_server`, `cli` tests); the rows below verify what
-tests can't — the panel actually re-rendering, per-platform.
+The state machine, IPC interception, worker guard, and supervisor
+lifecycle are unit-pinned (`tray_gate`, `ipc_server`, `cli`,
+`daemon`, `tray_helper` tests); the rows below verify what tests
+can't — the panel actually unregistering and re-rendering,
+per-platform.
 
 ### Test setup
 
 ```sh
 cargo build --release --features tray
-flintshot daemon &            # tray icon visible
+flintshot daemon &            # spawns the tray helper; icon visible
+pgrep -af 'flintshot tray'    # the helper process is alive
 ```
 
 Watch the daemon log alongside (`RUST_LOG=flintshot=info`) — the
-grace, acks, and safety restore each log.
+helper spawn/stop/respawn, graces, acks, and safety restore each
+log.
 
 ### Test script
 
 **1. Tray-initiated region (rows 1, 5).**
 
 Click the tray icon → *Capture region*. Expected: the tray vanishes
-**at the click** (SNI status flip to `Passive` — one registration for
-the daemon's whole life, ADR-0039); the editor/overlay opens on a
-frozen frame **without the icon** (the menu grace, 600 ms from the
-click, waits out the panel's popup close where the panel performs it
-— ADR-0037); the tray is back in the panel by the time the session
-is interactable (it must NOT stay hidden while you annotate). The
+**at the click** — the helper process exits (its bus name drops;
+the panel unregisters the item and destroys the open popup,
+ADR-0042); the editor/overlay opens on a frozen frame **without the
+icon or the menu popup — including on COSMIC, whose panels never
+close popups on activation**; the menu grace (600 ms from the
+observed exit) still gates the worker's grab so the
+exit → unregister → destroy → unmap chain settles first. The tray is
+back in the panel within ~1 s of the grab (the supervisor respawns
+the helper; it must NOT stay missing while you annotate). The
 frozen frame keeps every *other* panel item — only flintshot's own
-icon hides. On panels that never close popups on activation (COSMIC,
-upstream `TODO`) the popup may still appear in the frame — known
-limitation (ADR-0039), no daemon-side lever exists. **After the
-capture, exactly one flintshot icon + menu remain in the panel** (no
-duplicates, however many captures run).
+icon hides. **After the capture, exactly one flintshot icon + menu
+remain in the panel** (no duplicates, however many captures run:
+each respawn is a fresh process with a fresh bus name).
 
 **2. Other triggers (rows 2–4).**
 
@@ -1772,7 +1781,7 @@ pkill -9 -f 'flintshot region'
 ```
 
 Expected: the tray returns within ~30 s (the safety bound — a
-visibility flip, ADR-0039) with a
+helper respawn, ADR-0042) with a
 `tray stayed hidden past the safety bound` warning in the log; the
 next capture works normally.
 
@@ -1784,49 +1793,58 @@ no-tray-feature daemon (`FEATURES='' just install-user`): delegated
 captures work and the handshake acks promptly (nothing to hide).
 
 **6. X11 regression (row 11).** Re-run the Phase 2 tray rows on an
-X11 session; the visibility flip must not disturb registration
-(ADR-0032 territory).
+X11 session; the helper's exit/respawn cycle must not disturb
+registration (ADR-0032 territory).
 
 ### Matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
 | Tray capture: icon vanishes at the click; frame is icon-free |    |    |    |    |    | N/A | N/A | N/A | N/A |
-| Tray capture: the dismissed menu popup is absent (no mid-fade ghost) | | | | | | N/A | N/A | N/A | N/A |
+| Tray capture: the menu popup is absent — including COSMIC (helper exit destroys it, ADR-0042) | | | | | | N/A | N/A | N/A | N/A |
 | Tray capture: click-to-grab ≈ 600–700 ms (menu grace) — feels intentional, not laggy | | | | | | N/A | N/A | N/A | N/A |
 | Fullscreen / per-monitor / hotkey captures: icon-free frame  |    |    |    |    |    |    |    |    |    |
 | CLI-delegated `region` (daemon up): icon-free frame          |    |    |    |    |    |    |    |    |    |
 | Applet / desktop action captures: icon-free frame            |    |    |    |    |    | N/A | N/A | N/A | N/A |
-| Icon returns right after the grab (not held for the session) |    |    |    |    |    |    |    |    |    |
-| Repeated captures / daemon exit: exactly one tray item, no duplicates (ADR-0039) | | | | | | N/A | N/A | N/A | N/A |
+| Helper respawned right after the grab (tray back ≤ ~1 s, not held for the session) | | | | | | N/A | N/A | N/A | N/A |
+| Repeated captures / daemon exit: exactly one tray item, no duplicates | | | | | | N/A | N/A | N/A | N/A |
+| Daemon exit/kill: helper follows within ~a poll (no stale icon) | | | | | | N/A | N/A | N/A | N/A |
 | Esc-cancel capture: icon back, exit 0                       |    |    |    |    |    |    |    |    |    |
 | Failed capture (permission denied): icon still returns      |    |    |    |    |    |    |    |    |    |
 | `kill -9` worker mid-grab: icon back ≤ ~30 s + warn logged   |    |    |    |    |    |    |    |    |    |
 | Standalone (no daemon): capture unchanged, no added latency  |    |    |    |    |    |    |    |    |    |
 | No-tray-feature daemon: delegated captures work, prompt ack  |    |    |    |    |    |    |    |    |    |
-| X11: tray registration/menu unregressed by the visibility flips | | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| X11: tray registration/menu unregressed by the helper cycle  |    | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 
 ### Known caveats
 
 - **~600–700 ms click-to-grab on tray-menu captures** (menu grace,
-  ADR-0037); ~250–400 ms on other daemon triggers (icon grace). The
-  guarantee's price: the panel's popup close (where it happens at
-  all) is unobservable, so the ack waits it out blind.
-- **One tray registration per daemon run** (ADR-0039): the hide is a
-  `Passive`/`Active` status flip on the single long-lived icon —
-  never a drop/rebuild, which cannot unregister the SNI item (SNI has
-  no unregistration method; watchers remove items only when the
-  owning process exits) and would strand a duplicated icon + menu
-  per capture.
+  ADR-0037, now anchored at the helper's observed exit); ~250–400 ms
+  on other daemon triggers (icon grace). The guarantee's price: the
+  exit → unregister → popup-destroy → unmap chain is unobservable,
+  so the ack waits it out blind — but causally: the panel destroys
+  the popup *because* the item unregistered, not in a race with an
+  animation (ADR-0042).
+- **Every capture respawns the tray helper** (ADR-0042): the icon
+  vanishes at the trigger and returns ~0.5–1 s after the grab via a
+  fresh SNI registration (fresh process = fresh bus name — the
+  ADR-0039 in-process drop/rebuild leak cannot occur). A dead SNI
+  watcher at respawn re-runs the ≤ ~2 s poke barrier (rare).
+- **Startup retry cadence**: the helper may spawn before the
+  daemon's IPC socket binds; its watch exits and the supervisor
+  retries at the ~500 ms hold cadence until the socket is up
+  (logged, self-healing).
 - **COSMIC never closes an SNI menu popup on activation** (upstream
-  `TODO`), and it ignores SNI `NewStatus` for the popup — the popup
-  may appear in tray-launched captures' frames there. Accepted
-  limitation (ADR-0039): no daemon-side lever exists; the icon itself
-  still hides via the status flip.
-- **The COSMIC applet's own popup and desktop-action menus are not
-  covered** — those captures arrive over IPC with no origin marker,
-  so the daemon cannot target them (ADR-0037's open edge). Report if
-  it bites.
+  `TODO: Close menu?`) — moot for captures since ADR-0042 (the
+  helper's exit destroys it), but non-capture clicks (pin/open)
+  still leave the popup open until dismissed; that is upstream's
+  behavior, not ours.
+- **The COSMIC applet's own popup closes at the click for captures**
+  (ADR-0041): the applet destroys it and waits out a 250 ms settle
+  before sending, on top of the daemon's icon grace — click-to-grab
+  ≈ 600 ms, and the popup is out of the frame. Desktop-action
+  launcher menus remain uncovered (no origin marker; no popup we
+  own).
 - **A killed worker ghosts the tray up to 30 s** (safety bound,
   logged). The bound deliberately encloses a dawdled first-capture
   portal dialog rather than re-icing the icon into that capture.
