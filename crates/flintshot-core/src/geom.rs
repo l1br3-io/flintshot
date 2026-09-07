@@ -222,6 +222,8 @@ pub enum Key {
     Enter,
     /// `Backspace`.
     Backspace,
+    /// `Delete` (forward delete).
+    Delete,
     /// `Tab`.
     Tab,
     /// `←` arrow.
