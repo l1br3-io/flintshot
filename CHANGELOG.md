@@ -44,6 +44,24 @@ Categories used below:
 
 ### Added
 
+- **Select-then-delete for a single annotation** (annotation-delete
+  effort, ADR-0044): with the Move tool, a click on a committed
+  annotation selects it — a dashed ember bounding-box outline that
+  stays after pointer release (click or post-move alike; a
+  re-grab of another annotation replaces it). `Del` (and
+  `Backspace` outside text editing) or the rail's new **Delete**
+  button — beside Undo/Redo on both the editor toolbar and the
+  overlay's floating rail, greyed until something is selected —
+  removes exactly that annotation: an `anns`-only undo snapshot,
+  so `Ctrl+Z` restores it and `Ctrl+Shift+Z` re-deletes, with
+  every other annotation and the number counter untouched.
+  Selection drops on empty-canvas click, `Esc` (first press
+  deselects, a second cancels the editor), tool switch, undo /
+  redo, and crop; the outline is editor chrome and never reaches
+  Save / Copy / Pin / Upload output. Deleting during a text draft
+  is impossible (the modal text mode owns `Backspace`), and the
+  selection-first phase leaves `Del` inert. See
+  `docs/specs/annotation-delete/`.
 - **The selection phase now locks the annotation tools until the
   region is committed** (select-first-tool-lock effort, ADR-0043,
   revising ADR-0035): in the editor window's selection-first
