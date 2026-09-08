@@ -9,6 +9,7 @@ use eframe::{AppCreator, NativeOptions};
 use flintshot_core::{EditorOutcome, EditorShell, EditorState, PinConfig, Rect};
 
 use crate::app::{eframe_err_to_flintshot, EditorApp, OutcomeSlot};
+use crate::home::{HomeApp, HomeBridge};
 use crate::overlay::{OverlayApp, OVERLAY_TITLE};
 use crate::pin::PinApp;
 
@@ -16,6 +17,11 @@ use crate::pin::PinApp;
 /// Matches the Phase 1 editor-window spec (`"flintshot — annotate"` with
 /// an em-dash).
 const WINDOW_TITLE: &str = "flintshot — annotate";
+
+/// Window title + WM class for the home (app) window — the
+/// capture-controls surface, distinct from the editor so WMs and
+/// `.desktop` `StartupWMClass` can route it separately.
+const HOME_WINDOW_TITLE: &str = "flintshot";
 
 /// Window title + WM class for a pin-to-desktop window. Distinct from
 /// the editor so WMs / compositors can route / style pins separately.
@@ -115,6 +121,39 @@ impl EguiShell {
     /// render failures.
     pub fn run_overlay(&self, state: EditorState) -> flintshot_core::Result<EditorOutcome> {
         run_overlay_blocking(state)
+    }
+
+    /// Open the home (app) window and block until the user closes
+    /// it. The window's outside world is entirely `bridge` — this
+    /// crate stays IPC-free (see [`HomeBridge`]).
+    ///
+    /// Concrete method, mirroring [`Self::run_overlay`]'s precedent.
+    ///
+    /// # Errors
+    /// Surfaces [`crate::FlintshotError`] for window-system or
+    /// render failures.
+    pub fn run_home(
+        &self,
+        bridge: Box<dyn HomeBridge>,
+        initial_status: String,
+    ) -> flintshot_core::Result<()> {
+        let viewport = egui::ViewportBuilder::default()
+            .with_title(HOME_WINDOW_TITLE)
+            .with_inner_size(egui::vec2(360.0, 300.0))
+            .with_resizable(false);
+
+        let options = NativeOptions {
+            viewport,
+            centered: true,
+            ..Default::default()
+        };
+
+        let app_creator: AppCreator<'_> =
+            Box::new(move |_cc| Ok(Box::new(HomeApp::new(bridge, initial_status))));
+
+        eframe::run_native(HOME_WINDOW_TITLE, options, app_creator)
+            .map_err(|e| eframe_err_to_flintshot(&e))?;
+        Ok(())
     }
 }
 
