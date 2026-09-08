@@ -21,7 +21,8 @@ use eframe::App;
 use egui::Context;
 use flintshot_core::{
     compose_final, compose_final_region, render::render, BlurCache, Config, DispatchOutcome,
-    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, Point, Rect, Tool,
+    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode, Point,
+    Rect, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -542,6 +543,13 @@ impl EditorApp {
             return;
         }
 
+        // Ctrl+N (new capture) — after the dispatcher's chords (it
+        // doesn't translate N) and before the tool keys, so plain N
+        // still switches tools while the chord starts a capture.
+        if self.new_capture_shortcut(ctx, modifiers) {
+            return;
+        }
+
         // Selection-first phase: the dispatcher's Enter-crop is one
         // of the two phase-ending sites (the other is `ui`'s toolbar
         // Crop button). Checked immediately after the dispatch so the
@@ -900,12 +908,41 @@ impl EditorApp {
                     modifiers: Modifiers::default(),
                 });
             }
+            ToolbarAction::NewCapture(mode) => self.handle_new_capture(mode, ui.ctx()),
             ToolbarAction::None => {}
         }
     }
 }
 
 impl EditorApp {
+    /// `+` chip / Ctrl+N handler: publish `NewCapture` and close —
+    /// the closing window is the not-in-the-shot guarantee for the
+    /// next grab. Uses `publish_outcome` (not `if_unset`): a prior
+    /// copy's outcome must not mask an explicit "start over" — the
+    /// clipboard side effect already happened either way.
+    fn handle_new_capture(&self, mode: NewCaptureMode, ctx: &Context) {
+        tracing::debug!(?mode, "new capture requested; closing editor");
+        self.publish_outcome(Ok(EditorOutcome::NewCapture { mode }));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Ctrl+N — new region capture, Win11's chord. Shell-side by
+    /// design: the core dispatcher owns annotation edits, not
+    /// session lifecycle. Must run past the text-draft branch (which
+    /// returns earlier in `logic_impl`), so a draft can't swallow the
+    /// chord.
+    fn new_capture_shortcut(&self, ctx: &Context, modifiers: Modifiers) -> bool {
+        let ctrl_only = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        if modifiers == ctrl_only && ctx.input(|i| i.key_pressed(egui::Key::N)) {
+            self.handle_new_capture(NewCaptureMode::Region, ctx);
+            return true;
+        }
+        false
+    }
+
     /// Save button / Ctrl+S handler: compose the image per the
     /// phase contract ([`compose_for_save`] — selection-aware while
     /// the selection-first phase is live), prompt for a path via
@@ -1987,6 +2024,60 @@ mod tests {
     /// Wayland-demoted selection-first editor, 2026-09-03). This
     /// drives the *shell translation* through a synthetic
     /// `egui::Context`, not the dispatcher directly.
+    /// Ctrl+N publishes `NewCapture { Region }` through the shell's
+    /// translation (mirrors `enter_key_crops_through_shell`'s
+    /// synthetic-context drive). Plain N must NOT: it stays a tool
+    /// key (Text).
+    /// egui-winit sets `command` alongside `ctrl` on Linux/Windows
+    /// (egui's own `Modifiers::CTRL` leaves it false), and the shell's
+    /// `translate_modifiers` reads `command` — synthesize the
+    /// platform-shaped state.
+    fn ctrl_as_winit_reports_it() -> egui::Modifiers {
+        egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..egui::Modifiers::NONE
+        }
+    }
+
+    #[test]
+    fn ctrl_n_publishes_new_capture_and_plain_n_does_not() {
+        let mut app = phase_app(false);
+        let ctx = egui::Context::default();
+        let key = |mods: egui::Modifiers| egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::N,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: mods,
+            }],
+            modifiers: mods,
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(key(egui::Modifiers::NONE), |ui| app.logic_impl(ui.ctx()));
+        assert!(
+            app.outcome.borrow().is_none(),
+            "plain N is a tool key, not a session action"
+        );
+        assert_ne!(app.state.tool, Tool::Text, "plain N armed the Text tool");
+
+        let _ = ctx.run_ui(key(ctrl_as_winit_reports_it()), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        let published = app.outcome.borrow();
+        assert!(
+            matches!(
+                published.as_ref(),
+                Some(Ok(EditorOutcome::NewCapture {
+                    mode: NewCaptureMode::Region
+                }))
+            ),
+            "Ctrl+N must publish the region recapture intent"
+        );
+        drop(published);
+    }
+
     #[test]
     fn enter_key_crops_through_shell() {
         let mut app = phase_app(true);

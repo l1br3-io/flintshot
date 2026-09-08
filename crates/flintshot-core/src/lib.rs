@@ -45,7 +45,7 @@ pub use render::{
     arrow_barbs, compose_final, compose_final_region, render, render_ann, BlurCache, Canvas,
     DrawCall, MockCanvas,
 };
-pub use shell::{EditorOutcome, EditorShell};
+pub use shell::{EditorOutcome, EditorShell, NewCaptureMode};
 pub use text::{
     FontFamily, FontStyle, FontWeight, TextAlign, TextMetrics, TextOutline, TextStyle,
     DEFAULT_LINE_SPACING,
