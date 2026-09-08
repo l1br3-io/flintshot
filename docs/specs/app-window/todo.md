@@ -8,5 +8,6 @@ Single status source; mirrors `plan.md`'s task index.
 - [x] Task 4: daemon + tray — `OpenApp` dispatch, reaper `SessionEnded`, tray *Open app window* (`tasks/004-daemon-tray.md`)
 - [x] Task 5: docs + packaging — desktop Exec revision, ADR-0045, CHANGELOG, TEST_MATRIX, AGENTS.md (`tasks/005-docs-packaging.md`)
 
-Remaining: manual TEST_MATRIX pass on a display session (rows are
-blank by design — the unit/integration surface is green).
+Remaining: real-platform TEST_MATRIX cells (L5: launcher entry,
+tray *Open app window*, multi-monitor picker; Wayland-session
+hide grace). The scripted XV1 pass is green — 18/18 at e5b12a0.
