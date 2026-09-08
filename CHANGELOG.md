@@ -18,6 +18,29 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- `flintshot app` — a Win11-Snipping-Tool-style app window: *Capture
+  region* / *Capture fullscreen* controls (plus a monitor picker and
+  a daemon status line). The window is an IPC client that
+  auto-starts the daemon when none is running, hides itself for the
+  grab, and restores when the capture session ends — including
+  crashed workers (`SessionEnded` is sourced from the daemon's
+  worker reaper). A second `flintshot app` (or the tray's new *Open
+  app window* item) focuses the existing window instead of stacking
+  another (ADR-0045, spec `docs/specs/app-window/`).
+- IPC: `Request::OpenApp`, `Event::SessionEnded`, `Event::AppFocus`
+  (appended enum variants; postcard wire bytes unchanged for
+  existing variants).
+
+### Changed
+
+- The `.desktop` launcher entry now runs `flintshot app` (was
+  `flintshot daemon`) — the window auto-starts the daemon, so
+  launching Flintshot from the app menu opens the capture home.
+  `StartupWMClass` updated to the app window's class
+  (`flintshot`). The autostart entry still launches the daemon.
+
 ### Fixed
 
 - **The tray menu no longer appears in tray-launched screenshots on
