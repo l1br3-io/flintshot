@@ -44,7 +44,9 @@ use crate::ipc_server::{decode_event, read_frame};
 /// the compositor has unmapped it before the worker freezes the
 /// screen. Matches the tray icon-grace bound's rationale
 /// (ADR-0036); best-effort on Wayland where unmap is asynchronous.
-const HIDE_GRACE_MS: u64 = 250;
+/// Shared by the editor's recapture loop (the closing window needs
+/// the same unmap headroom before the fresh grab).
+pub(crate) const HIDE_GRACE_MS: u64 = 250;
 
 /// How long the pump waits for an auto-started daemon to answer
 /// before giving up (status flips to the failure text; the window

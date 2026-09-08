@@ -619,6 +619,15 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
 /// `selection_first` opens the region landing phase (Select
 /// pre-armed, dim mask, hint line) — see [`selection_first_for`]; the
 /// `open` path always passes `false`.
+///
+/// A `NewCapture` outcome (the editor's `+` chip / Ctrl+N) loops:
+/// the window has closed — it cannot be in the next shot — so we
+/// wait out the unmap grace, grab a fresh monitor, and re-run the
+/// session. A region recapture re-enters selection-first;
+/// fullscreen stays plain (the whole monitor is the shot). Any other
+/// outcome ends the cycle. The worker process persists across
+/// recaptures, so the daemon's `SessionEnded` (and the app window's
+/// restore) waits for the whole chain, Win11-style.
 #[cfg(feature = "egui")]
 fn run_editor_with_config(
     img: image::RgbaImage,
@@ -626,6 +635,53 @@ fn run_editor_with_config(
     selection_first: bool,
     cfg: &Config,
 ) -> Result<()> {
+    let mut session = Some((img, selection_first));
+    while let Some((img, selection_first)) = session.take() {
+        let outcome = run_editor_session(img, mode, selection_first, cfg)?;
+        if let Some(mode) = recapture_request(&outcome) {
+            let fresh = recapture_image()?;
+            // A region recapture re-enters selection-first;
+            // fullscreen stays plain (the whole monitor is the shot).
+            let region = selection_first_for_recapture(mode);
+            session = Some((fresh, region));
+            tracing::info!(
+                selection_first = region,
+                "new capture from the editor; reopening"
+            );
+        } else {
+            report_editor_outcome(outcome);
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// The shared recapture step: the closed window needs the unmap
+/// grace before the fresh grab (same bound the app window's hide
+/// uses), then a monitor is captured with the tray hidden.
+#[cfg(feature = "egui")]
+fn recapture_image() -> Result<image::RgbaImage> {
+    std::thread::sleep(Duration::from_millis(crate::app_window::HIDE_GRACE_MS));
+    capture_with_tray_hidden(None, "recapture")
+        .with_context(|| "recapturing for a new editor session")
+}
+
+/// Whether a recapture of `mode` reopens selection-first (region
+/// does — the landing experience; fullscreen never does).
+#[cfg(feature = "egui")]
+fn selection_first_for_recapture(mode: flintshot_core::NewCaptureMode) -> bool {
+    matches!(mode, flintshot_core::NewCaptureMode::Region)
+}
+
+/// One editor window's blocking session (the pre-recapture body of
+/// [`run_editor_with_config`]).
+#[cfg(feature = "egui")]
+fn run_editor_session(
+    img: image::RgbaImage,
+    mode: &str,
+    selection_first: bool,
+    cfg: &Config,
+) -> Result<flintshot_core::EditorOutcome> {
     use flintshot_core::EditorShell;
 
     let state = state_from_config(img, cfg);
@@ -644,8 +700,23 @@ fn run_editor_with_config(
     .and_then(|ran| ran.map_err(|e| color_eyre::eyre::eyre!(e.to_string())))
     .with_context(|| format!("running editor for {mode} capture"))?;
 
-    report_editor_outcome(outcome);
-    Ok(())
+    Ok(outcome)
+}
+
+/// Which recapture an outcome asks for, if any. Pure so the loop's
+/// decision is unit-testable.
+#[cfg(feature = "egui")]
+#[allow(
+    clippy::wildcard_enum_match_arm,
+    reason = "EditorOutcome is #[non_exhaustive]; `_` is mandatory"
+)]
+fn recapture_request(
+    outcome: &flintshot_core::EditorOutcome,
+) -> Option<flintshot_core::NewCaptureMode> {
+    match outcome {
+        flintshot_core::EditorOutcome::NewCapture { mode } => Some(*mode),
+        _ => None,
+    }
 }
 
 /// Run the Phase 5 fullscreen frozen-capture overlay over an
@@ -655,19 +726,30 @@ fn run_editor_with_config(
 /// `OverlayApp`), so the first drag draws a region selection;
 /// `Esc` cancels, `Enter` accepts (Enter = Copy: the annotated
 /// region lands on the clipboard and the overlay closes; the shell
-/// lingers briefly to keep the X11 selection alive).
+/// lingers briefly to keep the X11 selection alive). A `NewCapture`
+/// outcome (the rail's `+` chip) loops like the editor's: fresh
+/// grab, fresh overlay.
 #[cfg(feature = "egui")]
 fn run_overlay_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Result<()> {
-    let state = state_from_config(img, cfg);
+    let mut next_image = Some(img);
+    while let Some(img) = next_image.take() {
+        let state = state_from_config(img, cfg);
 
-    // Guard mirrors `run_editor_with_config` (see `crate::ambient`).
-    let outcome = crate::ambient::with_ambient_runtime(|| {
-        flintshot_editor_egui::EguiShell::new().run_overlay(state)
-    })
-    .and_then(|ran| ran.map_err(|e| color_eyre::eyre::eyre!(e.to_string())))
-    .with_context(|| format!("running overlay for {mode} capture"))?;
+        // Guard mirrors `run_editor_with_config` (see `crate::ambient`).
+        let outcome = crate::ambient::with_ambient_runtime(|| {
+            flintshot_editor_egui::EguiShell::new().run_overlay(state)
+        })
+        .and_then(|ran| ran.map_err(|e| color_eyre::eyre::eyre!(e.to_string())))
+        .with_context(|| format!("running overlay for {mode} capture"))?;
 
-    report_editor_outcome(outcome);
+        if recapture_request(&outcome).is_some() {
+            next_image = Some(recapture_image()?);
+            tracing::info!("new capture from the overlay; reopening");
+        } else {
+            report_editor_outcome(outcome);
+            return Ok(());
+        }
+    }
     Ok(())
 }
 
@@ -1349,6 +1431,46 @@ fn render_bind_outcome(event: &flintshot_core::ipc::Event) -> Result<()> {
 #[allow(clippy::float_cmp, reason = "exact pixel coords, no arithmetic error")]
 mod tests {
     use super::*;
+
+    // ── Editor recapture loop decisions ─────────────────────────
+
+    #[cfg(feature = "egui")]
+    #[test]
+    fn recapture_request_maps_only_new_capture_outcomes() {
+        use flintshot_core::{EditorOutcome, NewCaptureMode};
+        assert_eq!(
+            recapture_request(&EditorOutcome::NewCapture {
+                mode: NewCaptureMode::Region
+            }),
+            Some(NewCaptureMode::Region)
+        );
+        assert_eq!(
+            recapture_request(&EditorOutcome::NewCapture {
+                mode: NewCaptureMode::Fullscreen
+            }),
+            Some(NewCaptureMode::Fullscreen)
+        );
+        for other in [
+            EditorOutcome::Cancelled,
+            EditorOutcome::CopiedToClipboard,
+            EditorOutcome::Pinned,
+            EditorOutcome::Uploaded(String::new()),
+            EditorOutcome::Saved(std::path::PathBuf::from("/tmp/x.png")),
+        ] {
+            assert!(
+                recapture_request(&other).is_none(),
+                "{other:?} must end the session, not loop"
+            );
+        }
+    }
+
+    #[cfg(feature = "egui")]
+    #[test]
+    fn region_recapture_reenters_selection_first_fullscreen_does_not() {
+        use flintshot_core::NewCaptureMode;
+        assert!(selection_first_for_recapture(NewCaptureMode::Region));
+        assert!(!selection_first_for_recapture(NewCaptureMode::Fullscreen));
+    }
 
     const fn geo(x: i32, y: i32, w: u32, h: u32) -> MonitorGeo {
         MonitorGeo {
