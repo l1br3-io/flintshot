@@ -2185,6 +2185,79 @@ chrome-only by construction; this verifies it live).
 
 ---
 
+## App window — `flintshot app` capture home (Win11-Snipping-Tool-style)
+
+Spec: `docs/specs/app-window/`; design: ADR-0045. Run on a session
+with a display (X11 and Wayland each).
+
+### Test setup
+
+```sh
+cargo build --release
+pkill -f flintshot || true   # start from no daemon, no window
+```
+
+### Test script
+
+1. **Auto-start**: `./target/release/flintshot app` → the window
+   opens ("connecting…" → "starting daemon…" → "connected"), and a
+   `flintshot daemon` process now exists.
+2. **Region round-trip**: click *Capture region* (or press `R`) →
+   the window hides; the frozen frame contains **no app window**;
+   the editor opens selection-first; close the editor (Esc) → the
+   app window returns, focused.
+3. **Fullscreen round-trip + monitor pick**: pick a monitor in the
+   combo, click *Capture fullscreen* (`F`) → same hide/freeze/
+   return cycle; the shot is the chosen monitor.
+4. **Crash restore**: start a region capture, `kill -9` the
+   `flintshot region --standalone` worker mid-edit → the window
+   still returns (reaper-sourced `SessionEnded`).
+5. **Daemon death**: with the window hidden mid-capture, kill the
+   daemon → the window returns with the "daemon connection lost"
+   status and stays clickable-but-degraded.
+6. **Single instance / focus ping**: run `flintshot app` again →
+   no second window; the existing one focuses. Same from the tray's
+   *Open app window* item.
+7. **Launcher**: `just install-user`, activate "Flintshot" in the
+   app menu → the app window opens (daemon auto-started);
+   right-click quick actions still capture.
+
+### Matrix
+
+| Behavior                                             | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ---------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Auto-start: no daemon → daemon started, status reaches "connected" | | | | | | | | | | PASS e5b12a0 2026-09-08 (daemon child spawned; "daemon event loop running" in the inherited log) |
+| Region round-trip: hide → no window in frame → editor → restore focused | | | | | | | | | | PASS e5b12a0 2026-09-08 (unmap on click; editor selection-first; frozen editor frame 0 ember px; Esc restores) |
+| Fullscreen round-trip with monitor picker             | | | | | | | | | | PASS e5b12a0 2026-09-08 (round-trip via `F`; picker combo not multi-monitor-exercised — Xvfb single-head) |
+| Crashed worker still restores the window              | | | | | | | | | | PASS e5b12a0 2026-09-08 (`kill -9` the region worker mid-editor; reaper SessionEnded restores) |
+| Daemon death restores with error status (degraded mode) | | | | | | | | | | PASS e5b12a0 2026-09-08 (SIGKILL daemon mid-capture; app survives; degraded click doesn't strand) |
+| Second `flintshot app` / tray *Open app window* focuses the existing window | | | | | | | | | | PASS e5b12a0 2026-09-08 (second invocation exits 0; window count 1→1; first stays. Tray item needs a real tray — L5) |
+| Launcher entry opens the window; desktop actions unregressed | | | | | | | | | | |
+
+### Known caveats
+
+- The 250 ms hide grace is best-effort on Wayland (unmap is
+  asynchronous); a pathologically slow compositor could still catch
+  the window mid-teardown.
+- After a daemon death the window stays degraded (status-only)
+  until restarted — no auto-reconnect in this effort.
+
+XV1 note: this pass ran scripted — private `Xvfb :99` (1280×800,
+WM-less), python-xlib XTest input with explicit `XSetInputFocus`,
+per-window `XGetImage` pixel assertions (root-level grabs BadMatch
+on mixed-depth children) and map-state checks for hide/restore.
+Env caveats: `WAYLAND_DISPLAY` must be unset and
+`WINIT_UNIX_BACKEND=x11` set, else winit ignores the Xvfb display;
+all flintshot processes got an isolated `XDG_RUNTIME_DIR` (own IPC
+socket — the single-instance abstract-socket locks are
+machine-global, and the harness refuses to start over a live
+flintshot). The ember button (13 482 px of theme EMBER) doubles as
+the window-present beacon; ≥ 3 000 px discriminates it from the
+editor's active-tool chip. The launcher row needs a real app menu;
+the tray half of row 6 needs a real tray — both await L5.
+
+---
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).
