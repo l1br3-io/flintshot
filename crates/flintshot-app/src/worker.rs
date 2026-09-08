@@ -100,8 +100,26 @@ pub trait Spawner {
 /// [`std::process::Child::wait`] so the worker is reaped when its editor
 /// closes rather than lingering as a zombie while the daemon runs
 /// (captures are infrequent, so a thread-per-worker is cheap).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct CommandSpawner;
+///
+/// With a [`SubscriberBus`] attached ([`Self::with_bus`]), the reaper
+/// also broadcasts [`Event::SessionEnded`] for capture workers — the
+/// crash-safe "capture session over" signal the app window restores
+/// on (a killed worker still exits, so it still "reports").
+#[derive(Default, Clone)]
+pub struct CommandSpawner {
+    /// Bus the reaper broadcasts `SessionEnded` on. `None` in tests
+    /// and no-bus call sites (plain `Default`).
+    bus: Option<crate::ipc_server::SubscriberBus>,
+}
+
+impl CommandSpawner {
+    /// Attach the subscriber bus the reaper broadcasts
+    /// [`Event::SessionEnded`] on (capture workers only).
+    #[must_use]
+    pub fn with_bus(bus: crate::ipc_server::SubscriberBus) -> Self {
+        Self { bus: Some(bus) }
+    }
+}
 
 impl Spawner for CommandSpawner {
     fn spawn(&self, argv: &[&str]) -> eyre::Result<()> {
@@ -119,16 +137,34 @@ impl Spawner for CommandSpawner {
             .spawn()
             .map_err(|e| eyre::eyre!("spawning worker {exe:?} {argv:?}: {e}"))?;
 
+        // Capture workers announce their exit session-wide. Decided
+        // before the argv slice's owner moves on.
+        let session_ended = is_capture_argv(argv);
+        let bus = self.bus.clone();
+
         // Reap when the worker exits. Dropping the JoinHandle detaches
         // the reaper thread itself (it ends as soon as wait returns).
         let _reaper = std::thread::Builder::new()
             .name("flintshot-worker-reaper".into())
             .spawn(move || {
                 let _ = child.wait();
+                if session_ended {
+                    if let Some(bus) = bus {
+                        bus.broadcast(Event::SessionEnded);
+                    }
+                }
             })
             .map_err(|e| eyre::eyre!("spawning worker reaper thread: {e}"))?;
         Ok(())
     }
+}
+
+/// Does this worker argv run a capture (and so owe a
+/// [`Event::SessionEnded`] when it exits)? The argv-side twin of
+/// [`spawns_capture_worker`]'s request-side check — keep both in
+/// sync when a capture mode is added.
+fn is_capture_argv(argv: &[&str]) -> bool {
+    matches!(argv.first(), Some(&"region" | &"fullscreen"))
 }
 
 /// Dispatch a [`Request`]: spawn the right worker (if any), emit the
@@ -220,6 +256,18 @@ pub fn dispatch(
             Ok(DispatchOutcome::Continue)
         }
         Request::Quit => Ok(DispatchOutcome::Shutdown),
+        // The app-window opener (app-window effort). Broadcast-first
+        // so an already-running window (which holds the app lock)
+        // shows and focuses itself; the spawned worker then exits
+        // promptly on that held lock. With no window running, the
+        // spawn is what creates one (and the broadcast lands on
+        // nobody — harmless).
+        Request::OpenApp => {
+            sink(Event::AppFocus);
+            let argv = app_argv();
+            spawn_argv(spawner, &argv)?;
+            Ok(DispatchOutcome::Continue)
+        }
         // ReportSaved / ReportUploaded are worker-originated state
         // updates. The IPC connection layer intercepts them (it owns the
         // subscriber bus + daemon state; dispatch does not). These
@@ -287,6 +335,14 @@ fn fullscreen_argv(monitor: Option<u32>) -> Vec<String> {
     argv
 }
 
+/// Build the `flintshot app` argv for [`Request::OpenApp`]. No
+/// `--standalone` flavor exists here: the worker takes the app lock
+/// and exits fast when a window is already running (the broadcast
+/// focused it); only a lock-free spawn becomes the window.
+fn app_argv() -> Vec<String> {
+    vec!["app".to_string()]
+}
+
 /// Built-in default backend id. When `Request::UploadLast`'s `backend`
 /// equals this, `--backend` is omitted from the worker argv — the worker
 /// resolves the same id from its own config. Tracks
@@ -343,6 +399,7 @@ fn variant_name(request: &Request) -> &'static str {
         Request::BindShortcuts => "bind-shortcuts",
         Request::HideTrayForCapture => "hide-tray-for-capture",
         Request::ReportCaptured => "report-captured",
+        Request::OpenApp => "open-app",
         _ => "request",
     }
 }
@@ -519,6 +576,79 @@ mod tests {
                 calls[0]
             );
         }
+    }
+
+    #[test]
+    fn open_app_broadcasts_focus_and_spawns_app_worker() {
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        let outcome = dispatch(
+            &Request::OpenApp,
+            &spawner,
+            &DispatchState::new(),
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert_eq!(
+            events,
+            vec![Event::AppFocus],
+            "the broadcast is what focuses an existing window"
+        );
+        assert_eq!(spawner.snapshot(), vec![vec!["app".to_string()]]);
+    }
+
+    #[test]
+    fn capture_argv_classification_matches_capture_requests() {
+        // The argv-side twin of `spawns_capture_worker`: every argv
+        // the request-side flags as a capture must classify true,
+        // and every non-capture worker argv must not.
+        let captures = [
+            vec!["region"],
+            vec!["region", "--standalone"],
+            vec!["fullscreen", "--monitor", "1", "--standalone"],
+        ];
+        for argv in captures {
+            assert!(is_capture_argv(&argv), "{argv:?} is a capture worker");
+        }
+        let others = [
+            vec!["app"],
+            vec!["pin", "/tmp/x.png"],
+            vec!["open", "/tmp/x.png"],
+            vec!["upload", "/tmp/x.png"],
+            vec![],
+        ];
+        for argv in others {
+            assert!(!is_capture_argv(&argv), "{argv:?} is not a capture worker");
+        }
+    }
+
+    /// The reaper's `SessionEnded` broadcast, exercised with a real
+    /// (short-lived) child. The spawned child is this test binary
+    /// run with `region --standalone` as libtest args — libtest
+    /// exits promptly whatever it makes of them; the reaper only
+    /// cares that the process ends.
+    #[test]
+    fn reaper_broadcasts_session_ended_for_capture_workers() {
+        let bus = crate::ipc_server::SubscriberBus::new();
+        let mut rx = bus.subscribe();
+        let spawner = CommandSpawner::with_bus(bus);
+
+        spawner
+            .spawn(&["region", "--standalone"])
+            .expect("spawning the stand-in worker");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let received = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await
+        });
+        assert!(
+            matches!(received, Ok(Ok(Event::SessionEnded))),
+            "expected SessionEnded, got {received:?}"
+        );
     }
 
     #[test]

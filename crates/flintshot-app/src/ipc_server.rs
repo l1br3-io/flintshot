@@ -137,7 +137,7 @@ impl SubscriberBus {
     }
 
     /// Subscribe, returning a receiver of the [`Event`] stream.
-    fn subscribe(&self) -> broadcast::Receiver<IpcEvent> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<IpcEvent> {
         self.tx.subscribe()
     }
 }
@@ -489,7 +489,7 @@ where
         // `unsupported` Error.
         let outcome = crate::worker::dispatch(
             &request,
-            &crate::worker::CommandSpawner,
+            &crate::worker::CommandSpawner::with_bus(bus.clone()),
             &state,
             &mut |event| {
                 bus.broadcast(event);

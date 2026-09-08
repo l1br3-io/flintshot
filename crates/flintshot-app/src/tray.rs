@@ -20,6 +20,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 // Stable string ids — `MenuEvent::id` is matched against these. Kept
 // short and namespaced so they don't collide with any muda defaults.
+const ID_OPEN_APP: &str = "flintshot.app";
 const ID_CAPTURE_REGION: &str = "flintshot.region";
 const ID_CAPTURE_FULLSCREEN: &str = "flintshot.fullscreen";
 const ID_BIND_SHORTCUTS: &str = "flintshot.bind-shortcuts";
@@ -62,6 +63,7 @@ pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
         }
     }
     match id {
+        ID_OPEN_APP => Some(TrayAction::Request(Request::OpenApp)),
         ID_CAPTURE_REGION => Some(TrayAction::Request(Request::CaptureRegion {
             monitor: None,
             delay_ms: 0,
@@ -98,6 +100,7 @@ pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
     }
 
     let menu = Menu::new();
+    let open_app = MenuItem::with_id(ID_OPEN_APP, "Open app window", true, None);
     let region = MenuItem::with_id(ID_CAPTURE_REGION, "Capture region", true, None);
     let fullscreen = MenuItem::with_id(ID_CAPTURE_FULLSCREEN, "Capture fullscreen", true, None);
     let bind_shortcuts = MenuItem::with_id(ID_BIND_SHORTCUTS, "Bind shortcuts…", true, None);
@@ -114,7 +117,8 @@ pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
     append_monitor_entries(&monitor_submenu)?;
 
     let mut appending = menu
-        .append(&region)
+        .append(&open_app)
+        .and_then(|()| menu.append(&region))
         .and_then(|()| menu.append(&fullscreen))
         .and_then(|()| menu.append(&monitor_submenu))
         .and_then(|()| menu.append(&PredefinedMenuItem::separator()));
@@ -222,6 +226,14 @@ mod tests {
         MenuEvent {
             id: MenuId::new(id),
         }
+    }
+
+    #[test]
+    fn open_app_maps_to_request() {
+        assert!(matches!(
+            action_for(&event(ID_OPEN_APP)),
+            Some(TrayAction::Request(Request::OpenApp))
+        ));
     }
 
     #[test]
