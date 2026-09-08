@@ -509,11 +509,14 @@ fn drain_hotkeys(
                 // Hotkey: no menu is closing, so the icon grace alone.
                 pre_hide_for_capture(tray_gate, tray, crate::tray_gate::PreHideOrigin::Other);
             }
-            if let Err(e) =
-                crate::worker::dispatch(request, &crate::worker::CommandSpawner, state, &mut |ev| {
+            if let Err(e) = crate::worker::dispatch(
+                request,
+                &crate::worker::CommandSpawner::with_bus(bus.clone()),
+                state,
+                &mut |ev| {
                     bus.broadcast(ev);
-                })
-            {
+                },
+            ) {
                 tracing::warn!(error = %e, "hotkey dispatch failed");
             }
         }

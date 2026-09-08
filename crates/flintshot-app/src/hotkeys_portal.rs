@@ -403,7 +403,7 @@ fn dispatch_activation(bus: &SubscriberBus, state: &DispatchState, id: &str) {
         Some(request) => {
             let outcome = crate::worker::dispatch(
                 &request,
-                &crate::worker::CommandSpawner,
+                &crate::worker::CommandSpawner::with_bus(bus.clone()),
                 state,
                 &mut |ev| bus.broadcast(ev),
             );
