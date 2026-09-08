@@ -55,3 +55,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0043 | [Selection-phase tool lock — annotate only after the region is committed](ADR-0043-selection-phase-tool-lock.md) |
 | ADR-0044 | [Persistent selection survives release, dies with every mutation — and is chrome-only](ADR-0044-persistent-selection-lifecycle.md) |
 | ADR-0045 | [The app window as a subscription client — reaper-sourced `SessionEnded`, lock+focus-ping single instance](ADR-0045-app-window.md) |
+| ADR-0046 | [New-capture from the editor re-captures in-process (the worker persists)](ADR-0046-editor-new-capture-inprocess.md) |
