@@ -20,7 +20,8 @@
 use egui::containers::scroll_area::ScrollBarVisibility;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Sense, Stroke, StrokeKind, Vec2};
 use flintshot_core::{
-    BlurKind, Color, EditorState, FontFamily, FontStyle, FontWeight, TextAlign, TextOutline, Tool,
+    BlurKind, Color, EditorState, FontFamily, FontStyle, FontWeight, NewCaptureMode, TextAlign,
+    TextOutline, Tool,
 };
 
 use crate::theme;
@@ -50,6 +51,9 @@ pub(crate) enum ToolbarAction {
     Redo,
     /// Delete button — replay a Del (no modifiers) dispatch.
     Delete,
+    /// `+` chip (or Ctrl+N) — start a fresh capture; the editor
+    /// closes for the new cycle.
+    NewCapture(NewCaptureMode),
 }
 
 /// Paint a glyph inside the chip rect. Coordinates are glyph-space:
@@ -213,6 +217,8 @@ fn draw_rail(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                let mut action = new_capture_chip(ui);
+                ui.separator();
                 for spec in TOOLS {
                     let enabled = gate.contains(spec.tool);
                     let selected = state.tool == spec.tool;
@@ -251,7 +257,6 @@ fn draw_rail(
                     }
                 }
                 ui.separator();
-                let mut action = ToolbarAction::None;
                 if chip(
                     ui,
                     egui::Id::new("undo"),
@@ -301,6 +306,37 @@ fn draw_rail(
             .inner
         })
         .inner
+}
+
+/// The Win11-style "new snip" affordance leading the rail. A popup
+/// (not an immediate action) so both capture kinds hang off one
+/// chip; Ctrl+N is the keyboard fast path for the region default.
+/// The editor closes on selection, which tears this popup down with
+/// it — no explicit close needed.
+fn new_capture_chip(ui: &mut egui::Ui) -> ToolbarAction {
+    let mut action = ToolbarAction::None;
+    let new_chip = chip(
+        ui,
+        egui::Id::new("new-capture"),
+        "New capture · Ctrl+N",
+        false,
+        g_plus,
+        true,
+    );
+    egui::Popup::from_toggle_button_response(&new_chip)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(160.0);
+            ui.vertical(|ui| {
+                if ui.button("Region · Ctrl+N").clicked() {
+                    action = ToolbarAction::NewCapture(NewCaptureMode::Region);
+                }
+                if ui.button("Fullscreen").clicked() {
+                    action = ToolbarAction::NewCapture(NewCaptureMode::Fullscreen);
+                }
+            });
+        });
+    action
 }
 
 /// Output actions, right-aligned: Save / Pin / Upload as quiet icon

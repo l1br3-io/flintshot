@@ -27,6 +27,26 @@ pub enum EditorOutcome {
     Pinned,
     /// User cancelled (`Esc`, window close, etc.).
     Cancelled,
+    /// User asked for a fresh capture from inside the editor (the
+    /// `+` chip / Ctrl+N, Win11-Snipping-Tool-style): the window has
+    /// closed — so it cannot be in the new shot — and the caller
+    /// should re-run the capture+editor cycle. Unsaved annotations
+    /// are discarded, Win11-style.
+    NewCapture {
+        /// Which capture kind to start next.
+        mode: NewCaptureMode,
+    },
+}
+
+/// What a "new capture" request targets (see
+/// [`EditorOutcome::NewCapture`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NewCaptureMode {
+    /// Interactive region selection over a fresh freeze-frame.
+    Region,
+    /// Whole-monitor grab.
+    Fullscreen,
 }
 
 /// Toolkit lifecycle: open the editor (or a pin window), block until the
