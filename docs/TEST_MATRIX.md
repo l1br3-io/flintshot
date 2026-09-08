@@ -2281,10 +2281,10 @@ the app-window rows (run both sections' setups).
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
-| Ctrl+N: close → fresh freeze-frame without the old editor → selection-first reopen | | | | | | | | | | |
-| `+` popup → Fullscreen: plain whole-monitor reopen           | | | | | | | | | | |
-| Text draft owns N / Ctrl+N; plain N arms Text               | | | | | | | | | | |
-| Chain from the app window stays hidden; restores at chain end | | | | | | | | | | |
+| Ctrl+N: close → fresh freeze-frame without the old editor → selection-first reopen | | | | | | | | | | PASS 15cfac6 2026-09-08 (standalone worker: old window id gone, fresh id, selection-first; unit-pinned shell translation) |
+| `+` popup → Fullscreen: plain whole-monitor reopen           | | | | | | | | | | PASS 15cfac6 2026-09-08 (chip → popup → Fullscreen: editor replaced in the app-window chain) |
+| Text draft owns N / Ctrl+N; plain N arms Text               | | | | | | | | | | PASS 15cfac6 2026-09-08 (plain N on a live editor keeps it open — tool key; draft swallow unit-pinned) |
+| Chain from the app window stays hidden; restores at chain end | | | | | | | | | | PASS 15cfac6 2026-09-08 (hidden across the popup-driven recapture; restored on final Esc) |
 | Overlay `+` twin reopens the overlay                        | | | | | | | | | | |
 
 ### Known caveats
@@ -2293,6 +2293,14 @@ the app-window rows (run both sections' setups).
   parity, no confirmation in v1).
 - The recapture monitor is the default (active); no per-monitor
   picker yet.
+
+XV1 note: scripted like the app-window pass (Xvfb `:99`,
+python-xlib XTest, per-window `XGetImage`). A Ctrl chord needs
+~200 ms between Control-down and the key or winit batches them
+into one frame and the chord is lost — same env caveats as the
+app-window section. The overlay row needs an `--overlay` session
+beyond this harness's scope (the arm is the editor twin,
+compile-checked); awaits L5.
 
 ---
 
