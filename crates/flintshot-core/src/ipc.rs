@@ -111,6 +111,13 @@ pub enum Request {
     /// the daemon tracks concurrent captures with a depth counter and
     /// restores the icon when the last one reports.
     ReportCaptured,
+    // app-window effort — appended (postcard variant-index rule):
+    /// Client → daemon: open the app window. The daemon broadcasts
+    /// [`Event::AppFocus`] (an already-running window shows and
+    /// focuses itself) and spawns the `app` worker (which exits
+    /// promptly when the app instance lock is held — the broadcast
+    /// did the real work). Net effect: one window, focused.
+    OpenApp,
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -178,6 +185,19 @@ pub enum Event {
     /// panel has re-rendered), so the worker may grab now. Reply-only
     /// — never broadcast to subscribers (see ADR-0036).
     TrayHidden,
+    // app-window effort — appended (postcard variant-index rule):
+    /// A capture worker process exited — any exit status, emitted by
+    /// the daemon's worker reaper. Crash-safe by construction: a
+    /// killed worker still "reports" (unlike a worker self-report,
+    /// which a crash would swallow). Subscribers that hide for grabs
+    /// (the app window) restore on this. Only `region` / `fullscreen`
+    /// workers emit it.
+    SessionEnded,
+    /// Someone asked the app window to come forward (tray *Open app*,
+    /// a second `flintshot app`, launcher entry). Broadcast on
+    /// [`Request::OpenApp`]; a subscribed app window shows and
+    /// focuses itself.
+    AppFocus,
 }
 
 /// One entry of an [`Event::ShortcutsBound`] reply: a bound shortcut's
