@@ -55,6 +55,10 @@ pub enum Command {
     Auth(AuthArgs),
     /// Manage global hotkeys (bind via the Wayland portal). [Phase 6]
     Hotkeys(HotkeysArgs),
+    /// Open the app window (the capture-controls home, in the spirit
+    /// of the Windows 11 Snipping Tool). Auto-starts the daemon when
+    /// none is running.
+    App,
     /// Internal: the tray-helper process, spawned and supervised by
     /// the daemon (ADR-0042). Hidden from `--help`; not for direct
     /// use.
@@ -1268,6 +1272,22 @@ pub fn run_hotkeys(args: &HotkeysArgs) -> Result<()> {
     match args.command {
         HotkeysCommand::Bind => run_hotkeys_bind(),
     }
+}
+
+/// `flintshot app` — open the capture home window. See
+/// [`crate::app_window`] for the process model (IPC client,
+/// daemon auto-start, hide/restore).
+#[cfg(feature = "egui")]
+pub fn run_app() -> Result<()> {
+    crate::app_window::run()
+}
+
+/// Headless-build fallback: the app window needs the `egui` feature.
+#[cfg(not(feature = "egui"))]
+pub fn run_app() -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "app window not built; this binary was compiled without the `egui` feature"
+    ))
 }
 
 /// `flintshot tray` — the daemon-supervised tray helper (ADR-0042).

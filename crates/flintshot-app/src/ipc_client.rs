@@ -38,11 +38,6 @@ pub(crate) fn delegate_to(
     override_path: Option<&Path>,
     request: &Request,
 ) -> eyre::Result<DelegateOutcome> {
-    let path = socket_path(override_path);
-    if !path.exists() {
-        return Ok(DelegateOutcome::NoDaemon);
-    }
-
     // A one-shot current-thread runtime — the CLI isn't otherwise in a
     // tokio context.
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -50,21 +45,63 @@ pub(crate) fn delegate_to(
         .build()
         .map_err(|e| eyre::eyre!("building delegation runtime: {e}"))?;
 
-    runtime.block_on(async move {
-        let name = socket_name(&path)?;
-        match <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name).await {
-            Ok(mut stream) => {
-                let bytes = encode_msg(request)?;
-                write_frame(&mut stream, &bytes).await?;
-                Ok(DelegateOutcome::Delegated)
-            }
-            Err(e) if is_no_daemon(&e) => Ok(DelegateOutcome::NoDaemon),
-            Err(e) => Err(eyre::eyre!(
-                "connecting to daemon at {}: {e}",
-                path.display()
-            )),
+    runtime.block_on(async move { delegate_async(override_path, request).await })
+}
+
+/// Async core of [`delegate_to`], for callers already inside a
+/// reactor (the app window's pump thread).
+pub(crate) async fn delegate_async(
+    override_path: Option<&Path>,
+    request: &Request,
+) -> eyre::Result<DelegateOutcome> {
+    let path = socket_path(override_path);
+    if !path.exists() {
+        return Ok(DelegateOutcome::NoDaemon);
+    }
+
+    let name = socket_name(&path)?;
+    match <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name).await {
+        Ok(mut stream) => {
+            let bytes = encode_msg(request)?;
+            write_frame(&mut stream, &bytes).await?;
+            Ok(DelegateOutcome::Delegated)
         }
-    })
+        Err(e) if is_no_daemon(&e) => Ok(DelegateOutcome::NoDaemon),
+        Err(e) => Err(eyre::eyre!(
+            "connecting to daemon at {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+/// Connect to the daemon at `override_path` (or the default socket),
+/// send `Subscribe`, and return the stream to read [`IpcEvent`]s
+/// from. The daemon sends no ack — the connection becomes a pure
+/// event sink, so the first `read_frame` blocks until the next
+/// broadcast. Returns `Ok(None)` when no daemon answers.
+///
+/// For the app window's long-lived pump thread; callers drive
+/// [`crate::ipc_server::read_frame`] on the returned stream inside
+/// their own reactor.
+pub(crate) async fn subscribe_to(override_path: Option<&Path>) -> eyre::Result<Option<Stream>> {
+    let path = socket_path(override_path);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let name = socket_name(&path)?;
+    match <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name).await {
+        Ok(mut stream) => {
+            let bytes = encode_msg(&Request::Subscribe)?;
+            write_frame(&mut stream, &bytes).await?;
+            Ok(Some(stream))
+        }
+        Err(e) if is_no_daemon(&e) => Ok(None),
+        Err(e) => Err(eyre::eyre!(
+            "connecting to daemon at {}: {e}",
+            path.display()
+        )),
+    }
 }
 
 /// Does this connect error mean "no daemon" (fall back) vs a real fault?

@@ -28,6 +28,11 @@ use std::time::Duration;
 /// (hashed namespace in the crate on macOS/Windows).
 const DAEMON_LOCK_NAME: &str = "flintshot-daemon";
 
+/// Lock name for the app-window role. Distinct from the daemon's so
+/// a daemon and an app window coexist (the window is a client, not
+/// the daemon).
+const APP_LOCK_NAME: &str = "flintshot-app";
+
 /// A held single-instance lock. Dropping it releases the OS resource.
 pub struct InstanceLock {
     // `_`-prefixed: held for Drop (the lock release), never read.
@@ -63,6 +68,20 @@ pub fn acquire_daemon_lock() -> eyre::Result<InstanceLock> {
     acquire_named(DAEMON_LOCK_NAME)
 }
 
+/// Try to acquire the app-window single-instance lock.
+///
+/// Returns `Ok(Some(lock))` for the first app window (held for its
+/// lifetime), `Ok(None)` when one is already running — the caller's
+/// cue to focus it (delegate `Request::OpenApp`) instead of opening a
+/// second window.
+///
+/// # Errors
+/// Only real lock-primitive failures; a held lock is `Ok(None)`, not
+/// an error.
+pub fn acquire_app_lock() -> eyre::Result<Option<InstanceLock>> {
+    try_acquire_named(APP_LOCK_NAME)
+}
+
 /// Acquire the daemon lock, retrying until `timeout` elapses. Used by
 /// `--replace`: after the old daemon releases its IPC socket there's a
 /// short window before its single-instance lock is freed, so a single
@@ -95,6 +114,18 @@ fn acquire_named_with_retry(name: &str, timeout: Duration) -> eyre::Result<Insta
 /// lock name. Tests pass a unique name per case to avoid cross-test
 /// interference under parallel `cargo test`.
 fn acquire_named(name: &str) -> eyre::Result<InstanceLock> {
+    match try_acquire_named(name)? {
+        Some(lock) => Ok(lock),
+        None => Err(eyre::eyre!(
+            "another flintshot daemon is already running (single-instance lock {name:?} held)"
+        )),
+    }
+}
+
+/// Lock-acquire core: `Ok(None)` means the name is held (the caller
+/// decides whether that is an error — the daemon treats it as one,
+/// the app window treats it as "focus the existing one").
+fn try_acquire_named(name: &str) -> eyre::Result<Option<InstanceLock>> {
     #[cfg(target_os = "linux")]
     {
         use std::os::linux::net::SocketAddrExt;
@@ -102,14 +133,12 @@ fn acquire_named(name: &str) -> eyre::Result<InstanceLock> {
         let addr = SocketAddr::from_abstract_name(name.as_bytes())
             .map_err(|e| eyre::eyre!("building abstract lock name {name:?}: {e}"))?;
         match UnixListener::bind_addr(&addr) {
-            Ok(listener) => Ok(InstanceLock {
+            Ok(listener) => Ok(Some(InstanceLock {
                 _inner: LinuxLock {
                     _listener: listener,
                 },
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(eyre::eyre!(
-                "another flintshot daemon is already running (single-instance lock {name:?} held)"
-            )),
+            })),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Ok(None),
             Err(e) => Err(eyre::eyre!("binding single-instance lock {name:?}: {e}")),
         }
     }
@@ -118,11 +147,9 @@ fn acquire_named(name: &str) -> eyre::Result<InstanceLock> {
         let instance = single_instance::SingleInstance::new(name)
             .map_err(|e| eyre::eyre!("creating single-instance lock {name:?}: {e}"))?;
         if instance.is_single() {
-            Ok(InstanceLock { _inner: instance })
+            Ok(Some(InstanceLock { _inner: instance }))
         } else {
-            Err(eyre::eyre!(
-                "another flintshot daemon is already running (single-instance lock {name:?} held)"
-            ))
+            Ok(None)
         }
     }
 }
@@ -144,7 +171,29 @@ mod tests {
     #[test]
     fn first_acquire_is_single() {
         let name = unique_name("first");
-        let _lock = acquire_named(&name).expect("first acquire should succeed");
+        let lock = try_acquire_named(&name).expect("first acquire should succeed");
+        assert!(lock.is_some(), "an unheld name must acquire");
+    }
+
+    #[test]
+    fn held_name_reports_none_not_error() {
+        let name = unique_name("held");
+        let _first = try_acquire_named(&name).expect("first acquire");
+        let second =
+            try_acquire_named(&name).expect("a held name is a state, not a transport error");
+        assert!(second.is_none(), "the second acquire must report None");
+    }
+
+    #[test]
+    fn daemon_style_acquire_errors_on_held_name() {
+        let name = unique_name("daemon-err");
+        let _first = acquire_named(&name).expect("first acquire");
+        // `InstanceLock` has no `Debug`, so `expect_err` is out; match.
+        let err = match acquire_named(&name) {
+            Ok(_) => panic!("held name must error"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("already running"), "message: {err}");
     }
 
     #[test]
