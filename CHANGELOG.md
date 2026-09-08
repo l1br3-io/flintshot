@@ -20,6 +20,15 @@ Categories used below:
 
 ### Added
 
+- **New capture from the editor** (Win11 Snipping Tool-style): a
+  `+` chip leading the editor/overlay toolbar rail (popup: *Region
+  · Ctrl+N* / *Fullscreen*) and the `Ctrl+N` chord start a fresh
+  capture from inside a session. The editor window closes first —
+  it can never be in the new shot — and the same worker process
+  re-captures and reopens (region re-enters selection-first), so
+  an app window hiding for the chain restores only when the whole
+  chain ends (ADR-0046, spec `docs/specs/editor-new-capture/`).
+
 - `flintshot app` — a Win11-Snipping-Tool-style app window: *Capture
   region* / *Capture fullscreen* controls (plus a monitor picker and
   a daemon status line). The window is an IPC client that

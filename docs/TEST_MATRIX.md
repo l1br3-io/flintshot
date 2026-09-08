@@ -2258,6 +2258,44 @@ the tray half of row 6 needs a real tray — both await L5.
 
 ---
 
+## Editor new-capture — the `+` chip / Ctrl+N (Win11-style)
+
+Spec: `docs/specs/editor-new-capture/`; design: ADR-0046. Extends
+the app-window rows (run both sections' setups).
+
+### Test script
+
+1. From the app window, start a region capture → editor opens.
+2. Press `Ctrl+N` (or click the rail's leading `+` chip →
+   *Region*): the editor closes, the screen re-freezes **without
+   the old editor**, a fresh selection-first editor opens.
+3. `+` → *Fullscreen*: same cycle, plain whole-monitor editor.
+4. Press `Ctrl+N` while a text draft is live: the draft owns the
+   keystroke (no capture); plain `N` still arms the Text tool.
+5. Chain: app window → editor → Ctrl+N → Esc. The app window
+   stays hidden through the whole chain and restores at the end.
+6. Overlay mode (`flintshot region --overlay`): the rail's `+`
+   reopens a fresh overlay.
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Ctrl+N: close → fresh freeze-frame without the old editor → selection-first reopen | | | | | | | | | | |
+| `+` popup → Fullscreen: plain whole-monitor reopen           | | | | | | | | | | |
+| Text draft owns N / Ctrl+N; plain N arms Text               | | | | | | | | | | |
+| Chain from the app window stays hidden; restores at chain end | | | | | | | | | | |
+| Overlay `+` twin reopens the overlay                        | | | | | | | | | | |
+
+### Known caveats
+
+- Unsaved annotations are discarded on a new capture (Win11
+  parity, no confirmation in v1).
+- The recapture monitor is the default (active); no per-monitor
+  picker yet.
+
+---
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).
