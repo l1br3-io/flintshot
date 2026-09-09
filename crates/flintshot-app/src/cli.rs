@@ -474,7 +474,10 @@ fn capture_and_dispatch(
         tracing::info!("{mode} worker superseded before its grab; exiting");
         return Ok(());
     }
-    let img = capture_with_tray_hidden(monitor, mode)?;
+    let Some(img) = capture_prepared(monitor, mode, &watch, None)? else {
+        tracing::info!("{mode} worker superseded during the prepare handshake; exiting");
+        return Ok(());
+    };
 
     if let Some(path) = &output.out {
         write_png(&img, path)?;
@@ -489,42 +492,59 @@ fn capture_and_dispatch(
     Ok(())
 }
 
-/// Grab the monitor with any daemon's tray icon hidden (ADR-0036):
-/// the hide handshake, the capture, and the restore report all sit
-/// inside the guard's scope, so the icon returns the instant the
-/// pixels are taken — success or failure — while the editor /
-/// overlay session beyond this function never holds it hostage.
-/// No daemon (standalone capture) costs one socket probe.
-fn capture_with_tray_hidden(monitor: Option<u32>, mode: &str) -> Result<image::RgbaImage> {
-    let _tray_hidden = TrayHiddenGuard::request_at(None);
+/// Grab the monitor with every flintshot surface cleared from the
+/// screen (smart-window-hiding; the ADR-0036 tray-hide generalized):
+/// the prepare handshake, the capture, and the restore report all sit
+/// inside the guard's scope, so the tray returns and pins respawn the
+/// instant the pixels are taken — success or failure — while the
+/// editor / overlay session beyond this function never holds anything
+/// hostage. No daemon (standalone capture) costs one socket probe.
+///
+/// `None` means a supersede arrived mid-handshake (Task 004's
+/// subscription flag): the capture is abandoned without grabbing —
+/// the newer capture owns the screen.
+fn capture_prepared(
+    monitor: Option<u32>,
+    mode: &str,
+    watch: &SupersedeWatch,
+    override_path: Option<&std::path::Path>,
+) -> Result<Option<image::RgbaImage>> {
+    let _prepared = CaptureGuard::request_at(override_path);
+    if watch.superseded() {
+        return Ok(None);
+    }
     capture_fullscreen(monitor)
+        .map(Some)
         .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
         .with_context(|| format!("capturing {mode} on monitor {monitor:?}"))
 }
 
-/// RAII tray-hide for one capture: on construction, asks a running
-/// daemon to hide its tray icon (so it never lands in the frozen
-/// frame); on drop, reports the grab finished so the icon returns.
-/// Best-effort end to end — a capture must never fail because the
-/// daemon was slow, absent, or hostile. See ADR-0036.
-struct TrayHiddenGuard {
-    /// The daemon registered our hide request, so a
+/// RAII screen-clear for one capture: on construction, asks a running
+/// daemon to clear every flintshot surface (app window, pins, tray)
+/// for the grab; on drop, reports the grab finished so the tray
+/// returns and closed pins respawn. Best-effort end to end — a
+/// capture must never fail because the daemon was slow, absent, or
+/// hostile. See ADR-0036 (extended by smart-window-hiding).
+struct CaptureGuard {
+    /// The daemon registered our prepare, so a
     /// [`Request::ReportCaptured`] is owed to release it.
     report_owed: bool,
 }
 
-impl TrayHiddenGuard {
+impl CaptureGuard {
     /// Testable seam: request against an explicit socket path.
     fn request_at(override_path: Option<&std::path::Path>) -> Self {
-        match crate::ipc_client::hide_tray_for_capture_to(override_path) {
-            Ok(crate::ipc_client::HideTrayOutcome::NoDaemon) => Self { report_owed: false },
+        match crate::ipc_client::prepare_capture_to(override_path) {
+            Ok(crate::ipc_client::PrepareCaptureOutcome::NoDaemon) => Self { report_owed: false },
             // The unacked case already warned inside the helper; the
             // report is owed either way (the daemon registered us).
-            Ok(crate::ipc_client::HideTrayOutcome::Registered { .. }) => Self { report_owed: true },
+            Ok(crate::ipc_client::PrepareCaptureOutcome::Registered { .. }) => {
+                Self { report_owed: true }
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "tray-hide handshake failed; capturing with the tray as-is"
+                    "prepare-capture handshake failed; capturing with flintshot chrome as-is"
                 );
                 Self { report_owed: false }
             }
@@ -532,7 +552,7 @@ impl TrayHiddenGuard {
     }
 }
 
-impl Drop for TrayHiddenGuard {
+impl Drop for CaptureGuard {
     fn drop(&mut self) {
         if self.report_owed {
             report_captured_to_daemon();
@@ -820,7 +840,11 @@ fn run_editor_with_config(
                 return Ok(());
             }
             SessionNext::Recapture(mode) => {
-                let fresh = recapture_image()?;
+                let Some(fresh) = recapture_image(watch)? else {
+                    tracing::info!("recapture superseded; ending the chain");
+                    report_editor_outcome(outcome);
+                    return Ok(());
+                };
                 // A region recapture re-enters selection-first;
                 // fullscreen stays plain (the whole monitor is the shot).
                 let region = selection_first_for_recapture(mode);
@@ -868,11 +892,12 @@ enum SessionNext {
 
 /// The shared recapture step: the closed window needs the unmap
 /// grace before the fresh grab (same bound the app window's hide
-/// uses), then a monitor is captured with the tray hidden.
+/// uses), then a monitor is captured with the screen prepared.
+/// `None` = superseded mid-handshake: abandon the chain.
 #[cfg(feature = "egui")]
-fn recapture_image() -> Result<image::RgbaImage> {
+fn recapture_image(watch: &SupersedeWatch) -> Result<Option<image::RgbaImage>> {
     std::thread::sleep(Duration::from_millis(crate::app_window::HIDE_GRACE_MS));
-    capture_with_tray_hidden(None, "recapture")
+    capture_prepared(None, "recapture", watch, None)
         .with_context(|| "recapturing for a new editor session")
 }
 
@@ -976,7 +1001,12 @@ fn run_overlay_with_config(
                 return Ok(());
             }
             SessionNext::Recapture(_) => {
-                next_image = Some(recapture_image()?);
+                let Some(fresh) = recapture_image(watch)? else {
+                    tracing::info!("overlay recapture superseded; ending the chain");
+                    report_editor_outcome(outcome);
+                    return Ok(());
+                };
+                next_image = Some(fresh);
                 tracing::info!("new capture from the overlay; reopening");
             }
             SessionNext::Report => {
@@ -1941,15 +1971,75 @@ mod tests {
     #[test]
     fn tray_hidden_guard_owes_no_report_without_a_daemon() {
         // Standalone capture: nothing was hidden, so Drop has nothing
-        // to report — and must not attempt a connection.
-        let guard = TrayHiddenGuard::request_at(Some(std::path::Path::new(
+        // to report — and must not attempt a connection. The helper
+        // behind the skew fallback keeps the same contract.
+        let outcome = crate::ipc_client::hide_tray_for_capture_to(Some(std::path::Path::new(
             "/this/does/not/exist/flintshot-test-guard.sock",
+        )))
+        .expect("absent socket is not an error");
+        assert_eq!(
+            outcome,
+            crate::ipc_client::HideTrayOutcome::NoDaemon,
+            "no daemon → no hide registered → no report owed"
+        );
+    }
+
+    // ── CaptureGuard (smart-window-hiding Task 007) ──────────────
+
+    #[test]
+    fn capture_guard_owes_no_report_without_a_daemon() {
+        let guard = CaptureGuard::request_at(Some(std::path::Path::new(
+            "/this/does/not/exist/flintshot-test-capture-guard.sock",
         )));
         assert!(
             !guard.report_owed,
-            "no daemon → no hide registered → no report owed"
+            "no daemon → vacuous prepare → no report owed"
         );
         drop(guard); // silent by contract
+    }
+
+    #[test]
+    fn capture_prepared_abandons_when_superseded_before_the_grab() {
+        // The flag may flip during the handshake wait (Task 004's
+        // subscription): the guard returns without grabbing — no
+        // display is ever touched.
+        let watch = SupersedeWatch::inert();
+        watch
+            .flag()
+            .store(true, std::sync::atomic::Ordering::Release);
+        let outcome = capture_prepared(
+            None,
+            "region",
+            &watch,
+            Some(std::path::Path::new(
+                "/this/does/not/exist/flintshot-test-superseded.sock",
+            )),
+        )
+        .expect("an abandoned grab is Ok(None), not an error");
+        assert!(outcome.is_none(), "superseded → no grab at all");
+    }
+
+    #[test]
+    fn capture_prepared_grabs_when_not_superseded() {
+        // Inert watch, no daemon: the vacuous prepare proceeds to the
+        // grab — which needs a display, so this runs only under a
+        // session. Headless CI asserts the abandonment path above.
+        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return; // headless: covered by capture_prepared_abandons
+        }
+        let watch = SupersedeWatch::inert();
+        let outcome = capture_prepared(
+            None,
+            "fullscreen",
+            &watch,
+            Some(std::path::Path::new(
+                "/this/does/not/exist/flintshot-test-grab.sock",
+            )),
+        );
+        assert!(
+            matches!(&outcome, Ok(Some(_)) | Err(_)),
+            "not superseded: the grab runs ({outcome:?})"
+        );
     }
 
     // ── Upload helpers ───────────────────────────────────────────
