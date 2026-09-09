@@ -44,6 +44,23 @@ Categories used below:
 
 ### Fixed
 
+- **No flintshot surface lands in a capture anymore, no matter who
+  triggered it** (ADR-0048): a grab now clears *every* flintshot
+  window first — the daemon's pre-grab handshake
+  (`PrepareCapture` → `CaptureReady`) closes the app window
+  (externally triggered captures included, closing the ADR-0047
+  gap), closes and re-spawns pinned images at their exact
+  position/size/opacity after the grab, and drives the tray hide
+  (ADR-0036). Previously only the *initiating* surface hid, so a
+  tray/hotkey capture with an editor, overlay, app window, or pin
+  on screen froze that window into the shot.
+- **Overlapping capture triggers no longer stack editor windows**
+  (ADR-0048): the daemon tracks live capture sessions
+  (process-exit truth, kill handles) and every new trigger
+  **supersedes** the in-flight one first — the old editor/overlay
+  closes gracefully (cancelled, no partial saves), a bounded wait
+  falls back to a hard kill, and only then does the new capture
+  spawn. One annotation surface at a time; newest intent wins.
 - **App-window captures no longer include the app window on
   Wayland** (ADR-0047): winit's Wayland `set_visible` is a no-op,
   so the hide-based strategy never worked there (reported live on
@@ -54,6 +71,13 @@ Categories used below:
 
 ### Changed
 
+- `Event::EditorOpened` is now a **real window-open signal**: the
+  worker that runs an editor/overlay window reports it just before
+  the window opens (one event per actual window — fresh capture,
+  recapture reopen, `open`; never for `--out` headless captures).
+  Previously the daemon broadcast it optimistically at worker
+  spawn, before any window existed (ADR-0048). IPC subscribers
+  (COSMIC applet) see the same event, at the truthful moment.
 - The `.desktop` launcher entry now runs `flintshot app` (was
   `flintshot daemon`) — the window auto-starts the daemon, so
   launching Flintshot from the app menu opens the capture home.

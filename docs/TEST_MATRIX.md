@@ -2307,6 +2307,70 @@ compile-checked); awaits L5.
 
 ---
 
+## Smart window hiding — capture self-exclusion + single-session replace
+
+Spec: `docs/specs/smart-window-hiding/`; design: ADR-0048. Runs on
+top of the app-window and recapture setups (daemon + tray running;
+`RUST_LOG=flintshot=debug` shows the supersede/prepare lines).
+
+### Test script
+
+1. **Editor superseded by tray**: start a region capture → editor
+   open (annotate something, don't save) → trigger a capture from
+   the **tray**: the old editor closes within ~1.5 s (graceful, no
+   kill log), the new frozen frame contains **zero** flintshot
+   chrome, exactly one editor remains afterwards.
+2. **App window hidden for an external capture**: open
+   `flintshot app` → press the **hotkey**: the window is absent
+   from the shot and returns when the session ends (status line
+   preserved). Tray *Open app* during the capture does not raise it.
+3. **Pins across captures**: save → `PinLast` (pin visible) → any
+   capture: the pin is absent from the shot and respawns at the
+   same position/size/opacity afterwards.
+4. **Double trigger**: fire two captures near-simultaneously (CLI
+   `flintshot region & flintshot fullscreen &`): one session
+   survives (latest wins), no stacked editors, no fork loop.
+5. **Kill -9 a straggler**: editor open → trigger a new capture →
+   `kill -9` the old worker mid-supersede: the session still ends
+   (reaper), the next capture proceeds, tray/app/pins all restore.
+6. **Standalone unchanged**: `flintshot region --standalone` with
+   no daemon: same behavior as before, one socket probe of latency.
+7. **`--out` headless**: `flintshot region --out /tmp/x.png` with a
+   subscriber attached: no `EditorOpened` is broadcast (nothing
+   opened); the file is written.
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Tray capture while editor open: graceful close, no chrome in shot, one editor | | | | | | | | | | |
+| Hotkey capture while app window open: window absent, returns after | | | | | | | | | | |
+| Pins absent from the shot; respawned at exact position/size/opacity | | | | | | | | | | |
+| Double trigger: serialized, latest wins, no stacked windows  | | | | | | | | | | |
+| Kill -9 mid-supersede: session ends, next capture proceeds   | | | | | | | | | | |
+| Standalone `--standalone`: unchanged behavior/latency        | | | | | | | | | | |
+| `--out` headless: no `EditorOpened`, file written            | | | | | | | | | | |
+
+### Known caveats
+
+- Unsaved annotations in a superseded editor are lost by design
+  (Replace policy, Win11-parity with the recapture loop).
+- Editor-**hosted** pins die with their superseded host and are
+  not restored (durable pins = follow-up; ADR-0048).
+- Pins that outlive a daemon restart are unknown to the new daemon
+  and can appear in captures (registry is daemon-lifetime).
+
+Unit/integration coverage while the manual rows pend: the supersede
+ordering (broadcast → graceful wait → kill → spawn, serialization,
+straggler bounds) and the spawner's register/reap cycle are pinned
+in `worker.rs`/`sessions.rs` tests (incl. a real-child kill);
+`PrepareCapture`/`ReportAppHidden`/pin-respawn interceptions in
+`ipc_server.rs` tests; the app-window hide/ack state machine in
+`app_window.rs` tests; the worker guard's skew fallback against a
+scripted old daemon in `ipc_client.rs` (ignored, real socket).
+
+---
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).
