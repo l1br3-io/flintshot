@@ -42,6 +42,16 @@ Categories used below:
   (appended enum variants; postcard wire bytes unchanged for
   existing variants).
 
+### Fixed
+
+- **App-window captures no longer include the app window on
+  Wayland** (ADR-0047): winit's Wayland `set_visible` is a no-op,
+  so the hide-based strategy never worked there (reported live on
+  COSMIC). The window now **closes** for the capture — surface
+  destruction is causal on every compositor — and the process
+  reopens it when the capture session ends (status line preserved,
+  uniform across all platforms).
+
 ### Changed
 
 - The `.desktop` launcher entry now runs `flintshot app` (was

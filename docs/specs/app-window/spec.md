@@ -59,9 +59,14 @@ flintshot instead of hunting the tray or remembering chords.
    `region` landing experience); the window's *hide* window covers
    the initial freeze-frame grab, and restore waits out the whole
    editor session.
-3. A ~250 ms grace between hiding the window and delegating the
-   capture is best-effort on Wayland (unmap is asynchronous);
-   TEST_MATRIX covers both session types.
+3. ~~A ~250 ms grace between hiding the window and delegating the
+   capture is best-effort on Wayland (unmap is asynchronous)~~
+   **Revised 2026-09-09 (ADR-0047)**: hiding never worked on
+   Wayland (winit's `set_visible` is a no-op there; reported live
+   on COSMIC). The window now *closes* for the capture — surface
+   destruction is causal everywhere — and the process reopens it
+   on `SessionEnded`. The grace now measures close-to-grab
+   teardown, uniform across platforms.
 
 ## Scope (in / out)
 
