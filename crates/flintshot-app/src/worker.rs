@@ -400,6 +400,9 @@ fn variant_name(request: &Request) -> &'static str {
         Request::HideTrayForCapture => "hide-tray-for-capture",
         Request::ReportCaptured => "report-captured",
         Request::OpenApp => "open-app",
+        Request::PrepareCapture => "prepare-capture",
+        Request::ReportAppHidden => "report-app-hidden",
+        Request::ReportEditorWindowOpened => "report-editor-window-opened",
         _ => "request",
     }
 }
@@ -1118,6 +1121,15 @@ mod tests {
                 "report-uploaded",
             ),
             (Request::BindShortcuts, "bind-shortcuts"),
+            (Request::HideTrayForCapture, "hide-tray-for-capture"),
+            (Request::ReportCaptured, "report-captured"),
+            (Request::OpenApp, "open-app"),
+            (Request::PrepareCapture, "prepare-capture"),
+            (Request::ReportAppHidden, "report-app-hidden"),
+            (
+                Request::ReportEditorWindowOpened,
+                "report-editor-window-opened",
+            ),
         ];
         for (request, expected) in cases {
             assert_eq!(
