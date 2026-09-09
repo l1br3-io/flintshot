@@ -7,16 +7,15 @@
 //! which the app crate implements (subscription pump + daemon
 //! delegation live there).
 //!
-//! Hide/restore contract: a control click sends
-//! [`egui::ViewportCommand::Visible(false)`] *then* asks the bridge
-//! to start the capture (the bridge waits out the hide grace before
-//! delegating). The bridge answers eventually with
-//! [`HomeDirective::Show`], polled every frame, which makes the
-//! window visible and focused again. While hidden the window
-//! receives no input events, so egui's reactive mode would stop
-//! calling `update` — a standing `request_repaint_after` keeps the
-//! directive pump alive (without it, a hidden window would never
-//! come back).
+//! Close/reopen contract (ADR-0047): a control click asks the
+//! bridge to start the capture and then sends
+//! [`egui::ViewportCommand::Close`] — a destroyed window cannot be
+//! captured, on every compositor (winit's Wayland `set_visible` is
+//! a hard no-op, so hiding is not a portable guarantee). The caller
+//! (which owns the process) waits out the unmap grace, delegates,
+//! and reopens a fresh window on [`HomeDirective::Show`]. While the
+//! window is open, a standing `request_repaint_after` keeps
+//! directives (status, focus pings) flowing even when idle.
 
 use std::time::Duration;
 
@@ -25,8 +24,8 @@ use egui::{Context, Key, KeyboardShortcut, Modifiers, ViewportCommand};
 
 use crate::theme;
 
-/// How often a hidden (or idle) home window re-polls directives.
-/// See the module doc for why polling must continue while hidden.
+/// How often an idle home window re-polls directives (status
+/// changes, focus pings arrive independent of input).
 const REPOLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One entry of the fullscreen monitor picker.
@@ -41,9 +40,11 @@ pub struct MonitorEntry {
 /// A directive from the app crate into the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HomeDirective {
-    /// Show and focus the window: the capture session ended, the
-    /// daemon went away, or someone asked for the window (focus
-    /// ping).
+    /// The window should be (re)opened / brought forward: the
+    /// capture session ended, the daemon went away, or someone
+    /// asked for the window (focus ping). While a window is open
+    /// this is just a focus; the caller's outer loop treats it as
+    /// the reopen signal when the window is closed (ADR-0047).
     Show,
     /// Replace the status line text (daemon/connection state).
     SetStatus(String),
@@ -52,8 +53,9 @@ pub enum HomeDirective {
 /// The home window's only seam to the outside world. Implemented by
 /// the app crate; every method runs on the UI thread.
 pub trait HomeBridge {
-    /// Start a region capture (the window has just hidden itself;
-    /// the implementation owns the hide grace + daemon delegation).
+    /// Start a region capture (the window closes itself right
+    /// after; the implementation owns the grace + delegation + the
+    /// reopen decision).
     fn request_capture_region(&mut self);
 
     /// Start a fullscreen capture of `monitor` (primary when
@@ -99,8 +101,6 @@ pub(crate) struct HomeApp {
 /// unit-testable without an egui context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HomeUiState {
-    /// Whether the window is (believed) hidden for a capture.
-    hidden: bool,
     /// Status line contents.
     status: String,
     /// Selected fullscreen monitor (`None` = primary/default).
@@ -110,12 +110,12 @@ struct HomeUiState {
 }
 
 impl HomeUiState {
-    /// Apply one directive. Returns whether the window should be
-    /// shown (polled by `update`; pure for tests).
+    /// Apply one directive (the status line is the only mutable
+    /// display state — visibility is the caller's close/reopen
+    /// business, per ADR-0047).
     fn apply(&mut self, directive: &HomeDirective) {
-        match directive {
-            HomeDirective::Show => self.hidden = false,
-            HomeDirective::SetStatus(text) => self.status.clone_from(text),
+        if let HomeDirective::SetStatus(text) = directive {
+            self.status.clone_from(text);
         }
     }
 }
@@ -129,7 +129,6 @@ impl HomeApp {
         Self {
             bridge,
             ui: HomeUiState {
-                hidden: false,
                 status: initial_status,
                 selected_monitor: None,
                 monitors,
@@ -139,19 +138,17 @@ impl HomeApp {
         }
     }
 
-    /// Hide the window and start a capture through the bridge.
-    /// Shared by the region button, the fullscreen button, and the
-    /// keyboard shortcuts.
+    /// Start a capture through the bridge and close the window —
+    /// the not-in-the-shot guarantee (ADR-0047). Shared by the
+    /// region button, the fullscreen button, and the keyboard
+    /// shortcuts. Order matters: the intent must be registered
+    /// before the close tears this app down.
     fn start_capture(&mut self, ctx: &Context, kind: CaptureKind) {
-        if self.ui.hidden {
-            return;
-        }
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-        self.ui.hidden = true;
         match kind {
             CaptureKind::Region => self.bridge.request_capture_region(),
             CaptureKind::Fullscreen(monitor) => self.bridge.request_capture_fullscreen(monitor),
         }
+        ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 }
 
@@ -166,39 +163,36 @@ impl App for HomeApp {
 }
 
 impl HomeApp {
-    /// Headless-callable core of `App::logic`: directive polling,
-    /// keyboard shortcuts, viewport visibility flips. Lives in
-    /// `logic` (not `ui`) because eframe calls it even while the
-    /// window is hidden — exactly when directives must still flow.
+    /// Headless-callable core of `App::logic`: directive polling and
+    /// keyboard shortcuts. Lives in `logic` (not `ui`) because eframe
+    /// calls it even without recent input.
     fn logic_impl(&mut self, ctx: &Context) {
-        // Keep polling while hidden: an unmapped window gets no input
-        // events, so without a standing repaint request `logic`
-        // would never run again and no directive could arrive.
+        // Directives (status changes, focus pings) arrive independent
+        // of input; keep a slow repaint heartbeat so they land.
         ctx.request_repaint_after(REPOLL_INTERVAL);
 
         while let Some(directive) = self.bridge.poll_directive() {
-            let refresh_monitors = matches!(directive, HomeDirective::Show);
+            let focus = matches!(directive, HomeDirective::Show);
             self.ui.apply(&directive);
-            if refresh_monitors {
+            if focus {
                 self.ui.monitors = self.bridge.monitors();
                 if let Some(sel) = self.ui.selected_monitor {
                     if !self.ui.monitors.iter().any(|m| m.index == sel) {
                         self.ui.selected_monitor = None;
                     }
                 }
-            }
-            if !self.ui.hidden {
+                // The window is open by construction here (a closed
+                // one has no frames to run); Show while open is the
+                // focus ping — raise and focus.
                 ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(ViewportCommand::Focus);
             }
         }
 
-        if !self.ui.hidden {
-            if ctx.input_mut(|i| i.consume_shortcut(&self.region_shortcut)) {
-                self.start_capture(ctx, CaptureKind::Region);
-            } else if ctx.input_mut(|i| i.consume_shortcut(&self.fullscreen_shortcut)) {
-                self.start_capture(ctx, CaptureKind::Fullscreen(self.ui.selected_monitor));
-            }
+        if ctx.input_mut(|i| i.consume_shortcut(&self.region_shortcut)) {
+            self.start_capture(ctx, CaptureKind::Region);
+        } else if ctx.input_mut(|i| i.consume_shortcut(&self.fullscreen_shortcut)) {
+            self.start_capture(ctx, CaptureKind::Fullscreen(self.ui.selected_monitor));
         }
     }
 
@@ -288,7 +282,6 @@ mod tests {
 
     fn ui_state() -> HomeUiState {
         HomeUiState {
-            hidden: false,
             status: "connected".into(),
             selected_monitor: None,
             monitors: vec![MonitorEntry {
@@ -299,24 +292,19 @@ mod tests {
     }
 
     #[test]
-    fn show_directive_clears_hidden() {
+    fn show_directive_leaves_display_state_alone() {
+        // Visibility is the caller's close/reopen business (ADR-0047);
+        // the UI only owns the status line.
         let mut ui = ui_state();
-        ui.hidden = true;
         ui.apply(&HomeDirective::Show);
-        assert!(!ui.hidden, "Show must clear the hidden flag");
+        assert_eq!(ui.status, "connected");
     }
 
     #[test]
-    fn status_directive_replaces_text_without_touching_visibility() {
+    fn status_directive_replaces_text() {
         let mut ui = ui_state();
         ui.apply(&HomeDirective::SetStatus("daemon went away".into()));
         assert_eq!(ui.status, "daemon went away");
-        assert!(!ui.hidden, "a status change must not touch visibility");
-
-        let mut hidden = ui_state();
-        hidden.hidden = true;
-        hidden.apply(&HomeDirective::SetStatus("x".into()));
-        assert!(hidden.hidden, "a status change must not reveal the window");
     }
 
     #[test]
