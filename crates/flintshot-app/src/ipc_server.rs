@@ -201,13 +201,16 @@ pub(crate) type Stream = interprocess::local_socket::tokio::Stream;
 
 /// The IPC server: owns the listener, the subscriber bus, the
 /// last-saved + pin-id dispatch state, the portal-bind handle, the
-/// tray gate (capture handshake, ADR-0036), and a shutdown signal.
+/// tray gate (capture handshake, ADR-0036), the capture dispatch
+/// context (supersede-before-spawn, smart-window-hiding), and a
+/// shutdown signal.
 pub struct IpcServer {
     listener: Listener,
     bus: SubscriberBus,
     state: crate::worker::DispatchState,
     portal: crate::hotkeys_portal::PortalHandle,
     gate: Arc<crate::tray_gate::TrayGate>,
+    capture: crate::worker::CaptureDispatch,
     shutdown: Arc<Notify>,
 }
 
@@ -235,6 +238,7 @@ impl IpcServer {
                 "portal bind is not wired in this IPC server instance",
             ),
             Arc::new(crate::tray_gate::TrayGate::new()),
+            crate::worker::CaptureDispatch::new(),
         )
     }
 
@@ -247,13 +251,15 @@ impl IpcServer {
     /// tray gate carries the capture handshake (`HideTrayForCapture`
     /// → ack, `ReportCaptured` → restore) between this tokio-side
     /// handler and the daemon's main loop, which alone may touch the
-    /// tray icon.
+    /// tray icon; the capture dispatch context serializes the
+    /// supersede-before-spawn Replace policy across every entry point.
     pub fn bind_with_bus(
         override_path: Option<&Path>,
         bus: SubscriberBus,
         state: crate::worker::DispatchState,
         portal: crate::hotkeys_portal::PortalHandle,
         gate: Arc<crate::tray_gate::TrayGate>,
+        capture: crate::worker::CaptureDispatch,
     ) -> eyre::Result<Self> {
         let path = socket_path(override_path);
         let name = socket_name(&path)?;
@@ -269,6 +275,7 @@ impl IpcServer {
             state,
             portal,
             gate,
+            capture,
             shutdown: Arc::new(Notify::new()),
         })
     }
@@ -317,6 +324,7 @@ impl IpcServer {
         let state = self.state.clone();
         let portal = self.portal.clone();
         let gate = Arc::clone(&self.gate);
+        let capture = self.capture.clone();
         let listener = self.listener;
         loop {
             tokio::select! {
@@ -337,9 +345,10 @@ impl IpcServer {
                     let state = state.clone();
                     let portal = portal.clone();
                     let gate = Arc::clone(&gate);
+                    let capture = capture.clone();
                     let shutdown = Arc::clone(&shutdown);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, bus, state, shutdown, portal, gate).await {
+                        if let Err(e) = handle_connection(stream, bus, state, shutdown, portal, gate, capture).await {
                             tracing::debug!(error = %e, "IPC connection ended");
                         }
                     });
@@ -357,9 +366,14 @@ impl IpcServer {
 /// `BindShortcuts` drives the daemon's portal session and writes the
 /// outcome back on this connection; `HideTrayForCapture` /
 /// `ReportCaptured` drive the tray gate (capture handshake,
-/// ADR-0036); `Quit` signals daemon shutdown;
-/// other requests route through the worker dispatch table.
+/// ADR-0036); `Quit` signals daemon shutdown; capture requests route
+/// through the supersede-then-spawn helper (Replace policy,
+/// `worker::dispatch_capture`) while everything else uses the worker
+/// dispatch table directly.
 #[allow(clippy::too_many_arguments)]
+// One arm per intercepted request kind plus the dispatch tail; the
+// routing table reads best as a single body.
+#[allow(clippy::too_many_lines)]
 async fn handle_connection<S>(
     mut stream: S,
     bus: SubscriberBus,
@@ -367,6 +381,7 @@ async fn handle_connection<S>(
     shutdown: Arc<Notify>,
     portal: crate::hotkeys_portal::PortalHandle,
     gate: Arc<crate::tray_gate::TrayGate>,
+    capture: crate::worker::CaptureDispatch,
 ) -> eyre::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -482,19 +497,34 @@ where
             continue;
         }
 
-        // Everything else routes through the worker dispatch table:
-        // capture requests spawn a `flintshot` child + broadcast
-        // CaptureStarted; PinLast/OpenLast read the last-saved state;
-        // Quit signals shutdown; unbuilt phases broadcast an
-        // `unsupported` Error.
-        let outcome = crate::worker::dispatch(
-            &request,
-            &crate::worker::CommandSpawner::with_bus(bus.clone()),
-            &state,
-            &mut |event| {
-                bus.broadcast(event);
-            },
-        )?;
+        // Everything else routes through the worker dispatch table.
+        // Capture requests take the supersede-then-spawn path first
+        // (Replace policy: the new capture replaces any live session,
+        // bounded waits on the blocking pool so this connection — and
+        // only this connection — is held); PinLast/OpenLast read the
+        // last-saved state; Quit signals shutdown; unbuilt phases
+        // broadcast an `unsupported` Error.
+        let outcome = if crate::worker::spawns_capture_worker(&request) {
+            crate::worker::dispatch_capture(
+                capture.clone(),
+                request.clone(),
+                state.clone(),
+                bus.clone(),
+            )
+            .await?
+        } else {
+            crate::worker::dispatch(
+                &request,
+                &crate::worker::CommandSpawner::with_bus_and_sessions(
+                    bus.clone(),
+                    capture.sessions(),
+                ),
+                &state,
+                &mut |event| {
+                    bus.broadcast(event);
+                },
+            )?
+        };
         if matches!(outcome, crate::worker::DispatchOutcome::Shutdown) {
             tracing::info!("IPC Request::Quit received; signalling daemon shutdown");
             // Wake every waiter (the IPC accept loop AND the daemon's
@@ -826,8 +856,9 @@ mod tests {
     }
 
     /// Spawn `handle_connection` on the server half of a duplex pair
-    /// with a fresh bus/state/shutdown, the given portal handle, and
-    /// the given tray gate. Returns the client half + the task handle.
+    /// with a fresh bus/state/shutdown, the given portal handle, tray
+    /// gate, and capture dispatch context. Returns the client half +
+    /// the task handle.
     fn bind_test_connection(
         portal: PortalHandle,
         gate: Arc<crate::tray_gate::TrayGate>,
@@ -836,8 +867,9 @@ mod tests {
         let bus = SubscriberBus::new();
         let state = crate::worker::DispatchState::new();
         let shutdown = Arc::new(Notify::new());
+        let capture = crate::worker::CaptureDispatch::new();
         let task = tokio::spawn(async move {
-            let _ = handle_connection(server, bus, state, shutdown, portal, gate).await;
+            let _ = handle_connection(server, bus, state, shutdown, portal, gate, capture).await;
         });
         (client, task)
     }

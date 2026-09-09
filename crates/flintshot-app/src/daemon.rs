@@ -88,6 +88,11 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     let bus = crate::ipc_server::SubscriberBus::new();
     let state = crate::worker::DispatchState::new();
     let tray_gate = Arc::new(TrayGate::new());
+    // Capture dispatch context: the session registry + the mutex
+    // serializing supersede-then-spawn across every entry point
+    // (IPC server, X11 hotkeys, portal hotkeys) — the Replace
+    // policy's home.
+    let capture = crate::worker::CaptureDispatch::new();
     // The live `[hotkeys]` section: written by the config hot-reload
     // below, read by the portal task at bind time (fresh suggestions
     // without a daemon restart). The tray's bind trigger crosses the
@@ -104,7 +109,19 @@ pub fn run(replace: bool) -> eyre::Result<()> {
             let hotkeys = Arc::clone(&hotkeys_shared);
             let bind_requested = Arc::clone(&bind_requested);
             let tray_gate = Arc::clone(&tray_gate);
-            move || run_tokio_side(tx, bus, state, wayland, hotkeys, bind_requested, tray_gate)
+            let capture = capture.clone();
+            move || {
+                run_tokio_side(
+                    tx,
+                    bus,
+                    state,
+                    wayland,
+                    hotkeys,
+                    bind_requested,
+                    tray_gate,
+                    capture,
+                );
+            }
         })
         .map_err(|e| eyre::eyre!("spawning tokio side thread: {e}"))?;
 
@@ -160,6 +177,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         &hotkeys_shared,
         &tray_gate,
         &mut tray,
+        &capture,
     );
 
     // Wait for the tokio side to finish so we don't leak the runtime.
@@ -206,7 +224,7 @@ fn replace_running_daemon() -> eyre::Result<()> {
 /// on-screen with a dead tray (every later click silently dropped,
 /// L5 2026-08-31).
 //
-// Nine wiring params by design: this loop is the daemon's integration
+// Ten wiring params by design: this loop is the daemon's integration
 // point, and each param is a distinct event source or shared state; a
 // context struct would only relocate the list, not shrink it.
 #[allow(clippy::too_many_arguments)]
@@ -227,6 +245,7 @@ fn run_event_loop(
     hotkeys_shared: &crate::hotkeys_portal::SharedHotkeys,
     tray_gate: &TrayGate,
     tray: &mut TraySupervisor,
+    capture: &crate::worker::CaptureDispatch,
 ) {
     loop {
         // Helper lifecycle first: a self-exit (capture/quit click, or
@@ -239,7 +258,7 @@ fn run_event_loop(
         // expires, and restart helpers whose captures have reported.
         service_tray_gate(tray_gate, tray);
 
-        drain_hotkeys(hotkeys, bus, state, tray_gate, tray);
+        drain_hotkeys(hotkeys, bus, state, tray_gate, tray, capture);
 
         // Config hot-reload: re-read on change; re-register hotkeys only
         // when [hotkeys] actually changed. A mid-write parse failure is
@@ -489,13 +508,17 @@ fn apply_wayland_hotkey_reload(
 /// double-firing. A no-op when hotkeys are unavailable (the registry is
 /// empty). Hotkey captures pre-hide the tray (ADR-0036) — the helper
 /// stops here, its exit unregistering the item; the handshake that
-/// follows owns the depth (ADR-0042).
+/// follows owns the depth (ADR-0042) — and take the
+/// supersede-then-spawn path (Replace policy): a new capture replaces
+/// any live session before spawning, serialized with every other entry
+/// point by the capture dispatch context.
 fn drain_hotkeys(
     registry: &crate::hotkeys::HotkeyRegistry,
     bus: &crate::ipc_server::SubscriberBus,
     state: &crate::worker::DispatchState,
     tray_gate: &TrayGate,
     tray: &mut TraySupervisor,
+    capture: &crate::worker::CaptureDispatch,
 ) {
     use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 
@@ -508,10 +531,25 @@ fn drain_hotkeys(
             if crate::worker::spawns_capture_worker(request) {
                 // Hotkey: no menu is closing, so the icon grace alone.
                 pre_hide_for_capture(tray_gate, tray, crate::tray_gate::PreHideOrigin::Other);
-            }
-            if let Err(e) = crate::worker::dispatch(
+                if let Err(e) = capture.dispatch_capture_blocking(
+                    request,
+                    &crate::worker::CommandSpawner::with_bus_and_sessions(
+                        bus.clone(),
+                        capture.sessions(),
+                    ),
+                    state,
+                    &mut |ev| {
+                        bus.broadcast(ev);
+                    },
+                ) {
+                    tracing::warn!(error = %e, "hotkey capture dispatch failed");
+                }
+            } else if let Err(e) = crate::worker::dispatch(
                 request,
-                &crate::worker::CommandSpawner::with_bus(bus.clone()),
+                &crate::worker::CommandSpawner::with_bus_and_sessions(
+                    bus.clone(),
+                    capture.sessions(),
+                ),
                 state,
                 &mut |ev| {
                     bus.broadcast(ev);
@@ -530,6 +568,9 @@ fn drain_hotkeys(
 /// (Ctrl-C or `Request::Quit` via `--replace`), the sender drops, the
 /// main loop's `recv_timeout` returns `Disconnected`, and the daemon
 /// exits.
+// Eight wiring params by design (mirrors `run_event_loop`): each is a
+// distinct event source or shared state crossing into the tokio side.
+#[allow(clippy::too_many_arguments)]
 fn run_tokio_side(
     tx: mpsc::Sender<()>,
     bus: crate::ipc_server::SubscriberBus,
@@ -538,6 +579,7 @@ fn run_tokio_side(
     hotkeys: crate::hotkeys_portal::SharedHotkeys,
     bind_requested: Arc<Notify>,
     tray_gate: Arc<TrayGate>,
+    capture: crate::worker::CaptureDispatch,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -557,7 +599,13 @@ fn run_tokio_side(
         // a permanently-unavailable handle so a stray bind request
         // gets a clear "portal-only" error instead of a hang.
         let portal = if wayland {
-            crate::hotkeys_portal::start(bus.clone(), state.clone(), hotkeys, bind_requested)
+            crate::hotkeys_portal::start(
+                bus.clone(),
+                state.clone(),
+                hotkeys,
+                bind_requested,
+                capture.clone(),
+            )
         } else {
             crate::hotkeys_portal::PortalHandle::unavailable(
                 "hotkeys bind is Wayland-portal-only; on X11/macOS/Windows configure \
@@ -567,9 +615,11 @@ fn run_tokio_side(
 
         // Bind the IPC server inside the reactor, sharing the daemon's
         // bus so tray/hotkey-initiated captures reach IPC subscribers,
-        // and the tray gate so worker handshakes reach the main loop.
+        // the tray gate so worker handshakes reach the main loop, and
+        // the capture dispatch context so every capture trigger runs
+        // the same serialized supersede-then-spawn.
         let (serve_handle, shutdown) = match crate::ipc_server::IpcServer::bind_with_bus(
-            None, bus, state, portal, tray_gate,
+            None, bus, state, portal, tray_gate, capture,
         ) {
             Ok(ipc) => {
                 let shutdown = ipc.shutdown_signal();
