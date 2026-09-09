@@ -288,18 +288,15 @@ pub fn dispatch(
             let argv = region_argv(*monitor, *delay_ms);
             sink(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
-            // The worker process is confirmed launched (spawn returned
-            // Ok). True "editor window opened" detection needs the
-            // worker to report back over IPC; until then we emit
-            // `EditorOpened` as a process-started proxy.
-            sink(Event::EditorOpened);
+            // No EditorOpened here: spawn does not imply a window —
+            // the worker reports one per actual window via
+            // `ReportEditorWindowOpened` (smart-window-hiding).
             Ok(DispatchOutcome::Continue)
         }
         Request::CaptureFullscreen { monitor } => {
             let argv = fullscreen_argv(*monitor);
             sink(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
-            sink(Event::EditorOpened);
             Ok(DispatchOutcome::Continue)
         }
         Request::PinLast => {
@@ -320,7 +317,7 @@ pub fn dispatch(
             if let Some(path) = state.last_saved.get() {
                 let argv = open_argv(&path);
                 spawn_argv(spawner, &argv)?;
-                sink(Event::EditorOpened);
+                // The open worker reports its own EditorOpened.
             } else {
                 sink(Event::Error {
                     code: "no-last-capture".to_string(),
@@ -690,8 +687,8 @@ mod tests {
         );
         assert_eq!(
             events,
-            vec![Event::CaptureStarted, Event::EditorOpened],
-            "CaptureStarted on receipt, EditorOpened once the worker is confirmed running"
+            vec![Event::CaptureStarted],
+            "CaptureStarted on receipt; EditorOpened is now the worker's own truthful report"
         );
     }
 
@@ -731,7 +728,7 @@ mod tests {
             spawner.snapshot(),
             vec![vec!["fullscreen".to_string(), "--standalone".into()]]
         );
-        assert_eq!(events, vec![Event::CaptureStarted, Event::EditorOpened]);
+        assert_eq!(events, vec![Event::CaptureStarted]);
     }
 
     #[test]
@@ -916,13 +913,10 @@ mod tests {
             &mut |ev| events.push(ev),
         );
         assert!(result.is_err(), "spawn failure must propagate");
-        // CaptureStarted was emitted "on receipt" (before spawn); the
-        // EditorOpened event is suppressed since the worker never ran.
-        assert_eq!(
-            events,
-            vec![Event::CaptureStarted],
-            "CaptureStarted on receipt; EditorOpened suppressed on spawn failure"
-        );
+        // CaptureStarted was emitted "on receipt" (before spawn);
+        // EditorOpened is the worker's own report, so it never comes
+        // from dispatch at all.
+        assert_eq!(events, vec![Event::CaptureStarted]);
     }
 
     #[test]
@@ -1116,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn open_last_with_saved_path_spawns_open_and_emits_editor_opened() {
+    fn open_last_with_saved_path_spawns_open_worker() {
         let spawner = RecordingSpawner::new();
         let state = DispatchState::new();
         state
@@ -1134,7 +1128,10 @@ mod tests {
             vec![vec!["open".to_string(), "/tmp/editor.png".into()]],
             "OpenLast spawns `flintshot open <last-saved>`"
         );
-        assert_eq!(events, vec![Event::EditorOpened]);
+        assert!(
+            events.is_empty(),
+            "the open worker reports its own EditorOpened once a window opens"
+        );
     }
 
     #[test]
@@ -1470,11 +1467,7 @@ mod tests {
         // Strict alternation: Superseded, Started, Superseded, Started.
         let kinds: Vec<&Event> = events
             .iter()
-            .filter(|e| {
-                matches!(e, Event::CaptureSuperseded)
-                    || matches!(e, Event::CaptureStarted)
-                    || matches!(e, Event::EditorOpened)
-            })
+            .filter(|e| matches!(e, Event::CaptureSuperseded) || matches!(e, Event::CaptureStarted))
             .collect();
         assert!(
             matches!(
@@ -1482,10 +1475,8 @@ mod tests {
                 [
                     Event::CaptureSuperseded,
                     Event::CaptureStarted,
-                    Event::EditorOpened,
                     Event::CaptureSuperseded,
-                    Event::CaptureStarted,
-                    Event::EditorOpened
+                    Event::CaptureStarted
                 ]
             ),
             "serialized units, never spawn-before-supersede: {kinds:?}"
