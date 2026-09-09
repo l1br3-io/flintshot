@@ -211,6 +211,7 @@ pub struct IpcServer {
     portal: crate::hotkeys_portal::PortalHandle,
     gate: Arc<crate::tray_gate::TrayGate>,
     capture: crate::worker::CaptureDispatch,
+    prepare: Arc<crate::prepare_gate::PrepareGate>,
     shutdown: Arc<Notify>,
 }
 
@@ -239,6 +240,7 @@ impl IpcServer {
             ),
             Arc::new(crate::tray_gate::TrayGate::new()),
             crate::worker::CaptureDispatch::new(),
+            Arc::new(crate::prepare_gate::PrepareGate::new()),
         )
     }
 
@@ -260,6 +262,7 @@ impl IpcServer {
         portal: crate::hotkeys_portal::PortalHandle,
         gate: Arc<crate::tray_gate::TrayGate>,
         capture: crate::worker::CaptureDispatch,
+        prepare: Arc<crate::prepare_gate::PrepareGate>,
     ) -> eyre::Result<Self> {
         let path = socket_path(override_path);
         let name = socket_name(&path)?;
@@ -276,6 +279,7 @@ impl IpcServer {
             portal,
             gate,
             capture,
+            prepare,
             shutdown: Arc::new(Notify::new()),
         })
     }
@@ -325,6 +329,7 @@ impl IpcServer {
         let portal = self.portal.clone();
         let gate = Arc::clone(&self.gate);
         let capture = self.capture.clone();
+        let prepare = Arc::clone(&self.prepare);
         let listener = self.listener;
         loop {
             tokio::select! {
@@ -346,9 +351,10 @@ impl IpcServer {
                     let portal = portal.clone();
                     let gate = Arc::clone(&gate);
                     let capture = capture.clone();
+                    let prepare = Arc::clone(&prepare);
                     let shutdown = Arc::clone(&shutdown);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, bus, state, shutdown, portal, gate, capture).await {
+                        if let Err(e) = handle_connection(stream, bus, state, shutdown, portal, gate, capture, prepare).await {
                             tracing::debug!(error = %e, "IPC connection ended");
                         }
                     });
@@ -382,6 +388,7 @@ async fn handle_connection<S>(
     portal: crate::hotkeys_portal::PortalHandle,
     gate: Arc<crate::tray_gate::TrayGate>,
     capture: crate::worker::CaptureDispatch,
+    prepare: Arc<crate::prepare_gate::PrepareGate>,
 ) -> eyre::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -488,12 +495,61 @@ where
             continue;
         }
 
+        // PrepareCapture (smart-window-hiding): the generalized
+        // pre-grab handshake. The connection layer broadcasts the
+        // hide, closes the pins, arms both gates (prepare + tray),
+        // and awaits both — every wait bounded, the reply going out
+        // even on timeout (a capture must never fail because a
+        // window was slow — ADR-0036, extended). Supersedes and
+        // internally includes HideTrayForCapture; the old request
+        // keeps working below (rolling-upgrade skew).
+        if matches!(request, IpcRequest::PrepareCapture) {
+            tracing::info!("PrepareCapture received; clearing flintshot surfaces");
+            bus.broadcast(IpcEvent::HideForCapture);
+            capture.sessions().close_all_pins();
+            let tray_baseline = gate.begin_capture();
+            prepare.begin(std::time::Instant::now());
+            let (prepared, tray_confirmed) = tokio::join!(prepare.wait_ready(), async {
+                gate.wait_confirmed(tray_baseline).await
+            });
+            if !matches!(
+                prepared,
+                Some(crate::prepare_gate::PrepareResolution::Ready)
+            ) {
+                tracing::warn!(
+                    "prepare handshake timed out (prepared={prepared:?}, \
+                     tray_confirmed={tray_confirmed}); replying anyway"
+                );
+            }
+            let bytes = encode_msg(&IpcEvent::CaptureReady)?;
+            write_frame(&mut stream, &bytes).await?;
+            continue;
+        }
+
+        // ReportAppHidden (smart-window-hiding): the app window's
+        // "window destroyed" ack for the handshake above.
+        // Fire-and-forget.
+        if matches!(request, IpcRequest::ReportAppHidden) {
+            tracing::debug!("app window reported hidden");
+            prepare.report_app_hidden();
+            continue;
+        }
+
         // ReportCaptured (ADR-0036): the grab finished (success or
         // failure), so this in-flight capture releases its hold — the
-        // icon returns when the last one reports. Fire-and-forget,
+        // icon returns when the last one reports — and any pins the
+        // prepare handshake closed come back at their exact
+        // position/size/opacity (best-effort respawns). Fire-and-forget,
         // never broadcast: only the daemon's tray cares.
         if matches!(request, IpcRequest::ReportCaptured) {
             gate.end_capture();
+            crate::worker::worker_respawn_queued_pins(
+                &capture.sessions(),
+                &crate::worker::CommandSpawner::with_bus_and_sessions(
+                    bus.clone(),
+                    capture.sessions(),
+                ),
+            );
             continue;
         }
 
@@ -757,6 +813,8 @@ mod tests {
         let (mut client, task) = bind_test_connection(
             crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
             Arc::clone(&gate),
+            None,
+            None,
         );
         write_frame(
             &mut client,
@@ -795,6 +853,8 @@ mod tests {
         let (mut client, task) = bind_test_connection(
             crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
             Arc::clone(&gate),
+            None,
+            None,
         );
         write_frame(
             &mut client,
@@ -820,6 +880,8 @@ mod tests {
         let (mut client, task) = bind_test_connection(
             crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
             Arc::clone(&gate),
+            None,
+            None,
         );
         write_frame(
             &mut client,
@@ -855,21 +917,188 @@ mod tests {
         stepper.abort();
     }
 
+    // ── PrepareCapture coordination (smart-window-hiding Task 005) ──
+
+    /// A prepare gate with a short bound and tiny grace, plus a
+    /// background "main loop" stepping it to clear conditions (the
+    /// stepper ends with the test runtime).
+    fn stepped_prepare_gate() -> Arc<crate::prepare_gate::PrepareGate> {
+        let gate = Arc::new(crate::prepare_gate::PrepareGate::with_durations(
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_millis(10),
+        ));
+        let stepper = {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move {
+                for _ in 0..600 {
+                    gate.step(std::time::Instant::now(), false, false, 0);
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+        };
+        tokio::spawn(async move {
+            let _ = stepper.await;
+        });
+        Arc::clone(&gate)
+    }
+
+    #[tokio::test]
+    async fn prepare_capture_replies_capture_ready_when_clear() {
+        let prepare = stepped_prepare_gate();
+        let tray = handshake_gate();
+        let tray_stepper = step_in_background(&tray, 2_000);
+        let (mut client, task) = bind_test_connection(
+            crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
+            tray,
+            None,
+            Some(Arc::clone(&prepare)),
+        );
+        write_frame(&mut client, &encode_msg(&Request::PrepareCapture).unwrap())
+            .await
+            .unwrap();
+
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .expect("the reply arrives once the gate is clear")
+                .unwrap();
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert!(
+            matches!(decoded, Event::CaptureReady),
+            "expected CaptureReady, got {decoded:?}"
+        );
+        task.abort();
+        tray_stepper.abort();
+    }
+
+    #[tokio::test]
+    async fn report_app_hidden_unblocks_the_prepare_wait() {
+        // A live app session means the gate waits for the ack: no
+        // reply until ReportAppHidden arrives on any connection.
+        let gate = Arc::new(crate::prepare_gate::PrepareGate::with_durations(
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_millis(10),
+        ));
+        let capture = crate::worker::CaptureDispatch::new();
+        capture
+            .sessions()
+            .register_app(4242, std::sync::Arc::new(std::sync::Mutex::new(None)));
+        let tray = handshake_gate();
+        let tray_stepper = step_in_background(&tray, 4_000);
+        let (mut client, task) = bind_test_connection(
+            crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
+            tray,
+            Some(capture),
+            Some(Arc::clone(&gate)),
+        );
+        write_frame(&mut client, &encode_msg(&Request::PrepareCapture).unwrap())
+            .await
+            .unwrap();
+
+        // No ack yet: the reply must not arrive inside a short
+        // window (well before the 2 s bound would bail us out).
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                read_frame(&mut client)
+            )
+            .await
+            .is_err(),
+            "alive app without an ack holds the reply"
+        );
+
+        // The main loop steps the gate; the ack unblocks it.
+        let acker = {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move {
+                for _ in 0..600 {
+                    gate.step(std::time::Instant::now(), true, false, 0);
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+        };
+        gate.report_app_hidden();
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .expect("the ack unblocks the reply")
+                .unwrap();
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert!(matches!(decoded, Event::CaptureReady));
+        task.abort();
+        acker.abort();
+        tray_stepper.abort();
+    }
+
+    #[tokio::test]
+    async fn prepare_capture_replies_after_the_bound_when_never_clear() {
+        // An app that never acks: the bounded handshake still replies
+        // (a capture must never fail because a window was slow).
+        let gate = Arc::new(crate::prepare_gate::PrepareGate::with_durations(
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(10),
+        ));
+        let capture = crate::worker::CaptureDispatch::new();
+        capture
+            .sessions()
+            .register_app(4243, std::sync::Arc::new(std::sync::Mutex::new(None)));
+        let tray = handshake_gate();
+        let tray_stepper = step_in_background(&tray, 4_000);
+        let (mut client, task) = bind_test_connection(
+            crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
+            tray,
+            Some(capture),
+            Some(Arc::clone(&gate)),
+        );
+        write_frame(&mut client, &encode_msg(&Request::PrepareCapture).unwrap())
+            .await
+            .unwrap();
+
+        // The main loop steps but the app never acks.
+        let stepper = {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move {
+                for _ in 0..600 {
+                    gate.step(std::time::Instant::now(), true, false, 0);
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+        };
+        let payload =
+            tokio::time::timeout(std::time::Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .expect("the bound still replies")
+                .unwrap();
+        let decoded: Event = postcard::from_bytes(&payload).unwrap();
+        assert!(
+            matches!(decoded, Event::CaptureReady),
+            "timeout still replies CaptureReady (warned), got {decoded:?}"
+        );
+        task.abort();
+        stepper.abort();
+        tray_stepper.abort();
+    }
+
     /// Spawn `handle_connection` on the server half of a duplex pair
     /// with a fresh bus/state/shutdown, the given portal handle, tray
-    /// gate, and capture dispatch context. Returns the client half +
-    /// the task handle.
+    /// gate, capture dispatch context, and prepare gate. Returns the
+    /// client half + the task handle.
+    #[allow(clippy::too_many_arguments)]
     fn bind_test_connection(
         portal: PortalHandle,
         gate: Arc<crate::tray_gate::TrayGate>,
+        capture: Option<crate::worker::CaptureDispatch>,
+        prepare: Option<Arc<crate::prepare_gate::PrepareGate>>,
     ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
         let (client, server) = tokio::io::duplex(8 * 1024);
         let bus = SubscriberBus::new();
         let state = crate::worker::DispatchState::new();
         let shutdown = Arc::new(Notify::new());
-        let capture = crate::worker::CaptureDispatch::new();
+        let capture = capture.unwrap_or_default();
+        let prepare = prepare.unwrap_or_else(|| Arc::new(crate::prepare_gate::PrepareGate::new()));
         let task = tokio::spawn(async move {
-            let _ = handle_connection(server, bus, state, shutdown, portal, gate, capture).await;
+            let _ = handle_connection(server, bus, state, shutdown, portal, gate, capture, prepare)
+                .await;
         });
         (client, task)
     }
@@ -888,8 +1117,12 @@ mod tests {
             }
         });
 
-        let (mut client, task) =
-            bind_test_connection(portal, Arc::new(crate::tray_gate::TrayGate::new()));
+        let (mut client, task) = bind_test_connection(
+            portal,
+            Arc::new(crate::tray_gate::TrayGate::new()),
+            None,
+            None,
+        );
         write_frame(&mut client, &encode_msg(&Request::BindShortcuts).unwrap())
             .await
             .unwrap();
@@ -924,8 +1157,12 @@ mod tests {
             }
         });
 
-        let (mut client, task) =
-            bind_test_connection(portal, Arc::new(crate::tray_gate::TrayGate::new()));
+        let (mut client, task) = bind_test_connection(
+            portal,
+            Arc::new(crate::tray_gate::TrayGate::new()),
+            None,
+            None,
+        );
         write_frame(&mut client, &encode_msg(&Request::BindShortcuts).unwrap())
             .await
             .unwrap();
@@ -946,8 +1183,12 @@ mod tests {
     #[tokio::test]
     async fn bind_shortcuts_with_unavailable_portal_replies_error() {
         let portal = PortalHandle::unavailable("no portal frontend");
-        let (mut client, task) =
-            bind_test_connection(portal, Arc::new(crate::tray_gate::TrayGate::new()));
+        let (mut client, task) = bind_test_connection(
+            portal,
+            Arc::new(crate::tray_gate::TrayGate::new()),
+            None,
+            None,
+        );
         write_frame(&mut client, &encode_msg(&Request::BindShortcuts).unwrap())
             .await
             .unwrap();

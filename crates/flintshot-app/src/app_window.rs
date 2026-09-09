@@ -53,8 +53,9 @@ use crate::ipc_server::{decode_event, read_frame};
 /// freezes the screen. Matches the tray icon-grace bound's
 /// rationale (ADR-0036). Shared by the editor's recapture loop
 /// (the closing window needs the same headroom before the fresh
-/// grab).
-pub(crate) const HIDE_GRACE_MS: u64 = 250;
+/// grab) and — as the canonical value — by the daemon's pre-grab
+/// handshake (`prepare_gate::UNMAP_GRACE_MS`).
+pub(crate) const HIDE_GRACE_MS: u64 = crate::prepare_gate::UNMAP_GRACE_MS;
 
 /// How long the pump waits for an auto-started daemon to answer
 /// before giving up (status flips to the failure text; the window

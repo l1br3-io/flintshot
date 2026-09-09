@@ -56,6 +56,10 @@ pub(crate) enum SessionKind {
     /// A pin worker: closed for a grab and respawned from its parked
     /// argv afterwards.
     Pin,
+    /// The app window worker: neither superseded nor respawned, but
+    /// tracked so the pre-grab handshake knows a window owes an ack
+    /// (its process outlives its hidden window).
+    App,
 }
 
 /// Side effect / phase signal of one [`SupersedeMachine`] step. The
@@ -282,6 +286,47 @@ impl CaptureSessions {
             .lock()
             .expect("session registry mutex poisoned")
             .live_captures()
+    }
+
+    /// How many pin workers are live (the pre-grab handshake waits
+    /// these out after closing them).
+    pub(crate) fn live_pins(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("session registry mutex poisoned")
+            .entries
+            .values()
+            .filter(|e| e.kind == SessionKind::Pin)
+            .count()
+    }
+
+    /// Whether the daemon-spawned app window process is live (its
+    /// process survives the window hiding — only exit clears this).
+    pub(crate) fn app_alive(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("session registry mutex poisoned")
+            .entries
+            .values()
+            .any(|e| e.kind == SessionKind::App)
+    }
+
+    /// Track a spawned app-window worker (no respawn payload: the app
+    /// window restores itself on `SessionEnded` / `in_flight`, and is
+    /// never killed by a supersede).
+    pub(crate) fn register_app(&self, pid: u32, handle: Arc<Mutex<Option<Child>>>) {
+        self.inner
+            .lock()
+            .expect("session registry mutex poisoned")
+            .entries
+            .insert(
+                pid,
+                SessionEntry {
+                    kind: SessionKind::App,
+                    handle,
+                    pin: None,
+                },
+            );
     }
 
     /// Pids of the live capture workers.
