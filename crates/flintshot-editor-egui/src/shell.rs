@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use eframe::{AppCreator, NativeOptions};
 use flintshot_core::{EditorOutcome, EditorShell, EditorState, PinConfig, Rect};
@@ -26,6 +27,60 @@ const HOME_WINDOW_TITLE: &str = "flintshot";
 /// Window title + WM class for a pin-to-desktop window. Distinct from
 /// the editor so WMs / compositors can route / style pins separately.
 const PIN_WINDOW_TITLE: &str = "flintshot — pin";
+
+/// Thread-safe handle for closing an egui window from **another
+/// thread** — the graceful-close seam for superseded capture workers
+/// (smart-window-hiding). The worker's IPC listener thread calls
+/// [`CloseHandle::close`]; the window's app creator installs the real
+/// context via [`CloseHandle::install`].
+///
+/// Thread-safety rationale: `egui::Context` is internally `Arc`'d and
+/// documented as the supported cross-thread channel —
+/// `send_viewport_cmd` + `request_repaint` from any thread are the
+/// blessed way to drive a viewport without the UI thread's
+/// cooperation. The `Mutex<Option<…>>` slot exists because the handle
+/// is created (and may be closed) before the window exists: `close`
+/// on an uninstalled handle is a no-op, and each recapture session's
+/// `install` replaces the previous window's context.
+#[derive(Clone, Default)]
+pub struct CloseHandle {
+    ctx: Arc<Mutex<Option<egui::Context>>>,
+}
+
+impl CloseHandle {
+    /// A handle with no window behind it yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Install (or replace) the context of the window this handle
+    /// closes. Called from the `app_creator` closure, the only place
+    /// the real context exists.
+    ///
+    /// # Panics
+    /// Only if the handle's mutex is poisoned (a previous close
+    /// panicked mid-fire) — not an expected runtime condition.
+    pub fn install(&self, ctx: &egui::Context) {
+        *self.ctx.lock().expect("close-handle mutex poisoned") = Some(ctx.clone());
+    }
+
+    /// Ask the installed window to close. No-op before the first
+    /// install. The window then exits through its normal path: the
+    /// outcome slot stays `None` and resolves to
+    /// [`EditorOutcome::Cancelled`] — no save, clean exit.
+    ///
+    /// # Panics
+    /// Only if the handle's mutex is poisoned (a previous close
+    /// panicked mid-fire) — not an expected runtime condition.
+    pub fn close(&self) {
+        let guard = self.ctx.lock().expect("close-handle mutex poisoned");
+        if let Some(ctx) = guard.as_ref() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            ctx.request_repaint();
+        }
+    }
+}
 
 /// egui implementation of the [`EditorShell`] trait.
 ///
@@ -54,6 +109,10 @@ pub struct EguiShell {
     /// mask, hint line — see `EditorApp::selection_first`). Set by
     /// the app crate's region path only.
     selection_first: bool,
+    /// Cross-thread close handle installed into the next editor /
+    /// overlay window (graceful supersede close). `None` keeps the
+    /// unclosable-from-outside behavior (open path, pins).
+    close: Option<CloseHandle>,
 }
 
 impl EguiShell {
@@ -63,6 +122,7 @@ impl EguiShell {
         Self {
             pin: PinConfig::default(),
             selection_first: false,
+            close: None,
         }
     }
 
@@ -93,11 +153,22 @@ impl EguiShell {
         self.selection_first = true;
         self
     }
+
+    /// Attach the cross-thread close handle installed into the next
+    /// editor / overlay window: the worker's supersede listener closes
+    /// the window through it (see [`CloseHandle`]). Mirrors the
+    /// [`with_pin_config`](Self::with_pin_config) side-channel
+    /// pattern — the [`EditorShell`] trait stays GUI-free.
+    #[must_use]
+    pub fn with_close_handle(mut self, handle: CloseHandle) -> Self {
+        self.close = Some(handle);
+        self
+    }
 }
 
 impl EditorShell for EguiShell {
     fn run_editor(&self, state: EditorState) -> flintshot_core::Result<EditorOutcome> {
-        run_editor_blocking(state, self.selection_first)
+        run_editor_blocking(state, self.selection_first, self.close.as_ref())
     }
 
     fn run_pin(&self, image: image::RgbaImage, rect: Rect) -> flintshot_core::Result<()> {
@@ -120,7 +191,7 @@ impl EguiShell {
     /// Surfaces [`crate::FlintshotError`] for window-system or
     /// render failures.
     pub fn run_overlay(&self, state: EditorState) -> flintshot_core::Result<EditorOutcome> {
-        run_overlay_blocking(state)
+        run_overlay_blocking(state, self.close.as_ref())
     }
 
     /// Open the home (app) window and block until the user closes
@@ -167,10 +238,13 @@ impl EguiShell {
 ///
 /// `selection_first` seeds the region-capture landing phase in
 /// [`EditorApp::new`] (Select pre-arm + mask + hint; see the app
-/// module for the phase lifecycle).
+/// module for the phase lifecycle). `close`, when present, is
+/// installed into the window so the worker's supersede listener can
+/// close it from another thread (see [`CloseHandle`]).
 fn run_editor_blocking(
     state: EditorState,
     selection_first: bool,
+    close: Option<&CloseHandle>,
 ) -> flintshot_core::Result<EditorOutcome> {
     let (img_w, img_h) = state.image.dimensions();
     // egui's `ViewportBuilder::with_inner_size` takes logical px.
@@ -201,6 +275,9 @@ fn run_editor_blocking(
     let outcome_for_app = Rc::clone(&outcome);
 
     let app_creator: AppCreator<'_> = Box::new(move |cc| {
+        if let Some(handle) = close {
+            handle.install(&cc.egui_ctx);
+        }
         let app = EditorApp::new(state, &cc.egui_ctx, outcome_for_app, selection_first);
         Ok(Box::new(app))
     });
@@ -230,8 +307,13 @@ fn run_editor_blocking(
 /// A copy-close hands the `arboard::Clipboard` handle to
 /// [`linger_for_clipboard`] before returning — the X11
 /// owner-clipboard rule adapted to the overlay's close-on-accept
-/// semantics (plan decision 6).
-fn run_overlay_blocking(state: EditorState) -> flintshot_core::Result<EditorOutcome> {
+/// semantics (plan decision 6). `close`, when present, is installed
+/// into the window for the worker's supersede listener (see
+/// [`CloseHandle`]).
+fn run_overlay_blocking(
+    state: EditorState,
+    close: Option<&CloseHandle>,
+) -> flintshot_core::Result<EditorOutcome> {
     let options = NativeOptions {
         viewport: crate::overlay::overlay_viewport(),
         ..Default::default()
@@ -243,6 +325,9 @@ fn run_overlay_blocking(state: EditorState) -> flintshot_core::Result<EditorOutc
     let clipboard_for_app = Rc::clone(&clipboard);
 
     let app_creator: AppCreator<'_> = Box::new(move |cc| {
+        if let Some(handle) = close {
+            handle.install(&cc.egui_ctx);
+        }
         let app = OverlayApp::new(state, &cc.egui_ctx, outcome_for_app, clipboard_for_app);
         Ok(Box::new(app))
     });
@@ -411,5 +496,57 @@ mod tests {
             .with_pin_config(PinConfig::default())
             .with_selection_first();
         assert!(shell.selection_first);
+    }
+
+    // --- CloseHandle (smart-window-hiding Task 004) ---
+
+    #[test]
+    fn close_before_install_is_a_noop() {
+        // The daemon's supersede broadcast can beat the window's
+        // first frame; close() on an uninstalled handle must be a
+        // silent no-op, not a panic.
+        CloseHandle::new().close();
+    }
+
+    #[test]
+    fn install_then_close_does_not_panic_on_a_default_context() {
+        // A `Context::default()` stands in for the real eframe
+        // context: the command queues, no display needed.
+        let handle = CloseHandle::new();
+        let ctx = egui::Context::default();
+        handle.install(&ctx);
+        handle.close();
+    }
+
+    #[test]
+    fn close_handle_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CloseHandle>();
+    }
+
+    #[test]
+    fn with_close_handle_stores_the_handle() {
+        let shell = EguiShell::new().with_close_handle(CloseHandle::new());
+        assert!(shell.close.is_some());
+    }
+
+    #[test]
+    fn reinstall_replaces_the_context() {
+        // Recapture chains reuse one handle across windows: each
+        // session's install overwrites the previous context.
+        let handle = CloseHandle::new();
+        let first = egui::Context::default();
+        handle.install(&first);
+        let second = egui::Context::default();
+        handle.install(&second);
+        handle.close();
+        let guard = handle.ctx.lock().expect("close-handle mutex poisoned");
+        let installed = guard.as_ref().expect("an install is present");
+        let installed_ptr = std::ptr::from_ref(installed);
+        assert_ne!(
+            installed_ptr,
+            std::ptr::from_ref(&first),
+            "the slot holds the most recent install"
+        );
     }
 }

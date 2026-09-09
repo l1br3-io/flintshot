@@ -49,4 +49,4 @@ mod toolbar;
 pub use canvas::{EguiCanvas, EguiTexture};
 pub use home::{HomeBridge, HomeDirective, MonitorEntry};
 pub use magnifier::{sample_zoomed_region, Magnifier};
-pub use shell::EguiShell;
+pub use shell::{CloseHandle, EguiShell};
