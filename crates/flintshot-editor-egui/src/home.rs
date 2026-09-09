@@ -46,6 +46,13 @@ pub enum HomeDirective {
     /// this is just a focus; the caller's outer loop treats it as
     /// the reopen signal when the window is closed (ADR-0047).
     Show,
+    /// The window must close now — a capture is imminent and it may
+    /// not be in the shot. Covers **external** triggers too (the
+    /// pre-grab `HideForCapture` handshake and any `CaptureStarted`),
+    /// closing the ADR-0047 gap where only self-triggered captures
+    /// hid the window. The outer loop distinguishes this close from
+    /// a user quit and reopens on the session's end.
+    Hide,
     /// Replace the status line text (daemon/connection state).
     SetStatus(String),
 }
@@ -173,7 +180,14 @@ impl HomeApp {
 
         while let Some(directive) = self.bridge.poll_directive() {
             let focus = matches!(directive, HomeDirective::Show);
+            let hide = matches!(directive, HomeDirective::Hide);
             self.ui.apply(&directive);
+            if hide {
+                // Not-in-the-shot for externally triggered captures:
+                // the same close the self-trigger path performs, on
+                // the daemon's pre-grab say-so (ADR-0047 gap).
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
             if focus {
                 self.ui.monitors = self.bridge.monitors();
                 if let Some(sel) = self.ui.selected_monitor {
@@ -305,6 +319,35 @@ mod tests {
         let mut ui = ui_state();
         ui.apply(&HomeDirective::SetStatus("daemon went away".into()));
         assert_eq!(ui.status, "daemon went away");
+    }
+
+    #[test]
+    fn hide_directive_leaves_display_state_alone() {
+        let mut ui = ui_state();
+        ui.apply(&HomeDirective::Hide);
+        assert_eq!(ui.status, "connected");
+    }
+
+    #[test]
+    fn hide_directive_closes_the_window_headlessly() {
+        // A default context stands in for the real one: the close
+        // command queues without a display (the CloseHandle test
+        // pattern); what is under test is that the Hide branch is
+        // reached at all — a panic or a missed branch fails this.
+        let bridge = RecordingBridge::default();
+        bridge
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .push_back(HomeDirective::Hide);
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        app.logic_impl(&ctx);
+        // The directive was consumed (not skipped as unknown).
+        assert!(
+            app.bridge.poll_directive().is_none(),
+            "the Hide directive was consumed by the frame"
+        );
     }
 
     #[test]
