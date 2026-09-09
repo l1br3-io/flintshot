@@ -41,31 +41,31 @@ Spec: `docs/specs/smart-window-hiding/spec.md`.
 ## Task index
 
 ### Phase 1 — Foundation (Replace policy, kill-path first)
-- [ ] Task 001: IPC schema variants → `tasks/001-ipc-schema.md`
-- [ ] Task 002: Capture session registry (`sessions.rs`) → `tasks/002-session-registry.md`
-- [ ] Task 003: Supersede-before-spawn at dispatch entry points → `tasks/003-supersede-dispatch.md`
+- [x] Task 001: IPC schema variants → `tasks/001-ipc-schema.md`
+- [x] Task 002: Capture session registry (`sessions.rs`) → `tasks/002-session-registry.md`
+- [x] Task 003: Supersede-before-spawn at dispatch entry points → `tasks/003-supersede-dispatch.md`
 
 ### Checkpoint A — Replace works (kill path)
-- [ ] `cargo test --workspace --all-targets` + clippy/fmt/doc gates green
-- [ ] Manual: editor open + tray capture → old editor killed, one new editor
+- [x] `cargo test --workspace --all-targets` + clippy/fmt/doc gates green
+- [x] Manual: editor open + tray capture → old editor killed, one new editor
 
 ### Phase 2 — Graceful close + surface exclusion
-- [ ] Task 004: Worker subscription + graceful editor/overlay close → `tasks/004-graceful-worker-close.md`
-- [ ] Task 005: `PrepareCapture` daemon coordination (app-ack, pins, tray) → `tasks/005-prepare-capture-daemon.md`
-- [ ] Task 006: App window hides for any capture + acks → `tasks/006-app-window-hide-ack.md`
-- [ ] Task 007: Worker `CaptureGuard` (PrepareCapture → grab → ReportCaptured) → `tasks/007-worker-capture-guard.md`
+- [x] Task 004: Worker subscription + graceful editor/overlay close → `tasks/004-graceful-worker-close.md`
+- [x] Task 005: `PrepareCapture` daemon coordination (app-ack, pins, tray) → `tasks/005-prepare-capture-daemon.md`
+- [x] Task 006: App window hides for any capture + acks → `tasks/006-app-window-hide-ack.md`
+- [x] Task 007: Worker `CaptureGuard` (PrepareCapture → grab → ReportCaptured) → `tasks/007-worker-capture-guard.md`
 
 ### Checkpoint B — Both user scenarios pass
-- [ ] Gates green
-- [ ] Manual: tray capture while editor open → no flintshot chrome in shot, one editor
-- [ ] Manual: app window open + hotkey capture → app window absent, returns after
+- [x] Gates green
+- [x] Manual: tray capture while editor open → no flintshot chrome in shot, one editor
+- [x] Manual: app window open + hotkey capture → app window absent, returns after
 
 ### Phase 3 — Polish
-- [ ] Task 008: Real `EditorOpened` (worker-reported) → `tasks/008-real-editor-opened.md`
-- [ ] Task 009: Docs — ADR-0048, CHANGELOG, TEST_MATRIX → `tasks/009-docs.md`
+- [x] Task 008: Real `EditorOpened` (worker-reported) → `tasks/008-real-editor-opened.md`
+- [x] Task 009: Docs — ADR-0048, CHANGELOG, TEST_MATRIX → `tasks/009-docs.md`
 
 ### Checkpoint C — Done
-- [ ] Spec exit criteria 1–8 verified; ready for review/merge
+- [x] Spec exit criteria 1–8 verified; ready for review/merge
 
 ## Risks and mitigations
 
