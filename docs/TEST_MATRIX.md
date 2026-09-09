@@ -2236,9 +2236,12 @@ pkill -f flintshot || true   # start from no daemon, no window
 
 ### Known caveats
 
-- The 250 ms hide grace is best-effort on Wayland (unmap is
-  asynchronous); a pathologically slow compositor could still catch
-  the window mid-teardown.
+- ~~The 250 ms hide grace is best-effort on Wayland~~ **Revised
+  2026-09-09 (ADR-0047)**: the window *closes* for the capture on
+  every platform (winit's Wayland `set_visible` is a no-op — the
+  hide strategy never worked there; reported live on COSMIC as
+  "the window is still in the shot"). The 250 ms grace now
+  measures close-to-grab teardown.
 - After a daemon death the window stays degraded (status-only)
   until restarted — no auto-reconnect in this effort.
 
