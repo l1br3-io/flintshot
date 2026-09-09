@@ -65,6 +65,11 @@ const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(10);
 /// Retry cadence while waiting for the daemon's socket to answer.
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long the pump waits for the window to die after a
+/// `HideForCapture` before skipping the ack: the daemon's handshake
+/// bound dwarfs this, so a wedged UI costs the ack, not the capture.
+const HIDE_ACK_WINDOW: Duration = Duration::from_millis(1500);
+
 /// A capture intent crossing UI → pump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PumpCommand {
@@ -100,22 +105,42 @@ struct Shared {
 }
 
 #[derive(Default)]
+// Four independent rendezvous flags, each with its own producer and
+// consumer; a state enum would couple unrelated lifecycles.
+#[allow(clippy::struct_excessive_bools)]
 struct SharedInner {
     directives: std::collections::VecDeque<HomeDirective>,
     status: String,
     pending_capture: Option<PumpCommand>,
+    /// The window closed for a hide directive (not a user quit): the
+    /// outer loop must wait for the reopen instead of exiting.
+    hide_requested: bool,
+    /// The window was just destroyed: the outer loop marks it after
+    /// every close; the pump consumes it before acking a hide.
+    window_destroyed: bool,
     should_open: bool,
     pump_dead: bool,
 }
 
 impl Shared {
     /// Push one directive for the (open) window and/or the outer
-    /// loop. `Show` additionally arms the reopen flag; `SetStatus`
-    /// updates the remembered status a reopened window starts from.
+    /// loop. `Show` additionally arms the reopen flag — and drains
+    /// any stale `Hide` (one queued while the window was closed by
+    /// the very capture this Show ends; left in, it would close the
+    /// freshly reopened window). `Hide` arms the outer loop's
+    /// wait-for-reopen. `SetStatus` updates the remembered status a
+    /// reopened window starts from.
     fn push_directive(&self, directive: HomeDirective) {
         let mut guard = self.lock();
         match &directive {
-            HomeDirective::Show => guard.should_open = true,
+            HomeDirective::Show => {
+                guard.should_open = true;
+                guard.hide_requested = false;
+                guard
+                    .directives
+                    .retain(|d| !matches!(d, HomeDirective::Hide));
+            }
+            HomeDirective::Hide => guard.hide_requested = true,
             HomeDirective::SetStatus(text) => guard.status.clone_from(text),
         }
         guard.directives.push_back(directive);
@@ -137,6 +162,42 @@ impl Shared {
     /// Take the capture intent, if the window closed for one.
     fn take_pending_capture(&self) -> Option<PumpCommand> {
         self.lock().pending_capture.take()
+    }
+
+    /// Take the hide request (the outer loop's close classification).
+    fn take_hide_requested(&self) -> bool {
+        std::mem::take(&mut self.lock().hide_requested)
+    }
+
+    /// The window was destroyed (the outer loop marks this after
+    /// every close). Consumed by the pump's hide-ack.
+    fn mark_window_destroyed(&self) {
+        self.lock().window_destroyed = true;
+        self.changed.notify_all();
+    }
+
+    /// Block (bounded) until the window was destroyed, then consume
+    /// the mark. The pump uses this to ack only after the pixels are
+    /// actually gone (the window closed) — ack-then-grace, the
+    /// ADR-0047 lesson.
+    fn wait_window_destroyed(&self, bound: Duration) -> bool {
+        let deadline = std::time::Instant::now() + bound;
+        let mut guard = self.lock();
+        loop {
+            if guard.window_destroyed {
+                guard.window_destroyed = false;
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (g, _timeout) = self
+                .changed
+                .wait_timeout(guard, deadline - now)
+                .expect("shared mutex poisoned");
+            guard = g;
+        }
     }
 
     /// The status a freshly (re)opened window should show.
@@ -180,6 +241,12 @@ struct HomeCore {
     /// that began before we subscribed clamps at 0 (documented
     /// edge in the spec).
     in_flight: u32,
+    /// A supersede was seen and its replacement capture has not
+    /// started yet: restores are held (the superseded worker's
+    /// `SessionEnded` would otherwise reopen the window straight
+    /// into the new capture's grab — the flicker the Replace policy
+    /// must not cause).
+    supersede_pending: bool,
 }
 
 impl HomeCore {
@@ -199,6 +266,20 @@ impl HomeCore {
         match event {
             IpcEvent::CaptureStarted => {
                 self.in_flight += 1;
+                self.supersede_pending = false;
+                // Any capture must not find this window on screen —
+                // self-triggered or not (the ADR-0047 gap).
+                self.hidden = true;
+                Some(HomeDirective::Hide)
+            }
+            IpcEvent::HideForCapture => {
+                // The pre-grab handshake's nudge; idempotent with the
+                // arm above (whichever arrives first hides).
+                self.hidden = true;
+                Some(HomeDirective::Hide)
+            }
+            IpcEvent::CaptureSuperseded => {
+                self.supersede_pending = true;
                 None
             }
             IpcEvent::SessionEnded => {
@@ -214,7 +295,7 @@ impl HomeCore {
     /// already-visible idle window is the ping's whole point — but
     /// never raise it over a live capture session.
     fn app_focus(&mut self) -> Option<HomeDirective> {
-        if self.in_flight == 0 {
+        if self.in_flight == 0 && !self.supersede_pending {
             self.hidden = false;
             Some(HomeDirective::Show)
         } else {
@@ -223,9 +304,11 @@ impl HomeCore {
     }
 
     /// Restore when the last in-flight capture finished and we were
-    /// hiding.
+    /// hiding — unless a supersede's replacement capture is still
+    /// coming (it will hide again immediately; reopening in between
+    /// would put the window in the new grab).
     fn maybe_show(&mut self) -> Option<HomeDirective> {
-        if self.hidden && self.in_flight == 0 {
+        if self.hidden && self.in_flight == 0 && !self.supersede_pending {
             self.force_show()
         } else {
             None
@@ -285,7 +368,8 @@ pub(crate) fn run() -> eyre::Result<()> {
     // One iteration = one window lifetime. A capture intent closes
     // the window; the grace + delegation + the wait-for-Show live
     // here (the window is gone, so blocking this thread is free).
-    // Any other close is the user quitting.
+    // A hide-by-event close (external capture) waits for the same
+    // reopen. Any other close is the user quitting.
     loop {
         let status = shared.status();
         let initial_status = if status.is_empty() {
@@ -307,20 +391,35 @@ pub(crate) fn run() -> eyre::Result<()> {
             break;
         }
 
-        let Some(command) = shared.take_pending_capture() else {
-            break; // the user closed the window — done
-        };
-        // The window is destroyed; the grace covers the compositor
-        // finishing the teardown before the worker freezes the
-        // screen.
-        std::thread::sleep(Duration::from_millis(HIDE_GRACE_MS));
-        if let Err(e) = cmd_tx.blocking_send(command) {
-            tracing::warn!(error = %e, "app pump is gone; capture request dropped");
-            break;
-        }
-        if !shared.wait_for_reopen() {
-            tracing::warn!("app pump died before the capture session ended");
-            break;
+        // The window is destroyed — the pump's hide-ack waits on
+        // this mark, and every close reason below assumes it.
+        shared.mark_window_destroyed();
+
+        match close_reason(&shared) {
+            CloseReason::UserQuit => break,
+            CloseReason::CaptureIntent(command) => {
+                // The window is destroyed; the grace covers the compositor
+                // finishing the teardown before the worker freezes the
+                // screen.
+                std::thread::sleep(Duration::from_millis(HIDE_GRACE_MS));
+                if let Err(e) = cmd_tx.blocking_send(command) {
+                    tracing::warn!(error = %e, "app pump is gone; capture request dropped");
+                    break;
+                }
+                if !shared.wait_for_reopen() {
+                    tracing::warn!("app pump died before the capture session ended");
+                    break;
+                }
+            }
+            CloseReason::HiddenByEvent => {
+                // An externally triggered capture hid us (HideForCapture
+                // / CaptureStarted): not a user quit. The pump acked the
+                // hide; reopen when the session ends.
+                if !shared.wait_for_reopen() {
+                    tracing::warn!("app pump died while hidden for a capture");
+                    break;
+                }
+            }
         }
     }
 
@@ -328,6 +427,30 @@ pub(crate) fn run() -> eyre::Result<()> {
     let _ = pump.join();
 
     result
+}
+
+/// Why the window closed — the outer loop's post-close decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseReason {
+    /// The user closed the window: exit the process.
+    UserQuit,
+    /// A capture the window itself requested (grace + delegate).
+    CaptureIntent(PumpCommand),
+    /// A hide directive (external capture / pre-grab handshake):
+    /// wait for the reopen, not a quit.
+    HiddenByEvent,
+}
+
+/// Classify a window close: a pending capture command wins, then a
+/// hide request, else the user quit. Consumes exactly one flag.
+fn close_reason(shared: &Shared) -> CloseReason {
+    if let Some(command) = shared.take_pending_capture() {
+        return CloseReason::CaptureIntent(command);
+    }
+    if shared.take_hide_requested() {
+        return CloseReason::HiddenByEvent;
+    }
+    CloseReason::UserQuit
 }
 
 /// The lock is held by a live window: ask the daemon to focus it and
@@ -479,8 +602,29 @@ async fn connected_loop(
             frame = read_frame(&mut stream) => {
                 let decoded = frame.and_then(|payload| decode_event(&payload));
                 if let Ok(event) = decoded {
+                    let hide_requested = matches!(event, IpcEvent::HideForCapture);
                     if let Some(directive) = core.on_event(&event) {
                         shared.push_directive(directive);
+                    }
+                    if hide_requested {
+                        // The daemon's pre-grab handshake is armed and
+                        // waiting for our ack. Ack only once the window
+                        // is actually destroyed — ack-then-grace, the
+                        // ADR-0047 lesson — best-effort end to end.
+                        if shared.wait_window_destroyed(HIDE_ACK_WINDOW) {
+                            if let Err(e) = crate::ipc_client::delegate_async(
+                                None,
+                                &Request::ReportAppHidden,
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %e, "reporting the app window hidden");
+                            }
+                        } else {
+                            tracing::warn!(
+                                "window did not close in time; skipping the hide ack"
+                            );
+                        }
                     }
                 } else {
                     tracing::warn!("daemon subscription died");
@@ -626,7 +770,11 @@ mod tests {
     fn capture_round_trip_shows_on_session_end() {
         let mut core = HomeCore::default();
         core.capture_requested();
-        assert_eq!(core.on_event(&IpcEvent::CaptureStarted), None);
+        assert_eq!(
+            core.on_event(&IpcEvent::CaptureStarted),
+            Some(HomeDirective::Hide),
+            "any capture — even one we requested — must close this window"
+        );
         assert_eq!(
             core.on_event(&IpcEvent::SessionEnded),
             Some(HomeDirective::Show),
@@ -636,13 +784,110 @@ mod tests {
     }
 
     #[test]
+    fn external_capture_started_hides_visible_window() {
+        // The ADR-0047 gap: a hotkey/tray capture while the app window
+        // is open. CaptureStarted now hides it, not just self-triggers.
+        let mut core = HomeCore::default();
+        assert_eq!(
+            core.on_event(&IpcEvent::CaptureStarted),
+            Some(HomeDirective::Hide)
+        );
+        assert!(core.hidden, "hidden for an externally triggered capture");
+        assert_eq!(
+            core.on_event(&IpcEvent::SessionEnded),
+            Some(HomeDirective::Show),
+            "and restores when it ends"
+        );
+    }
+
+    #[test]
+    fn hide_for_capture_is_idempotent_with_capture_started() {
+        // The pre-grab nudge may repeat or trail CaptureStarted; each
+        // application hides, none reopens, none panics.
+        let mut core = HomeCore::default();
+        assert_eq!(
+            core.on_event(&IpcEvent::CaptureStarted),
+            Some(HomeDirective::Hide)
+        );
+        assert_eq!(
+            core.on_event(&IpcEvent::HideForCapture),
+            Some(HomeDirective::Hide)
+        );
+        assert_eq!(
+            core.on_event(&IpcEvent::HideForCapture),
+            Some(HomeDirective::Hide)
+        );
+        assert!(core.hidden);
+    }
+
+    #[test]
+    fn hide_for_capture_on_a_visible_window_hides_and_restores() {
+        let mut core = HomeCore::default();
+        assert_eq!(
+            core.on_event(&IpcEvent::HideForCapture),
+            Some(HomeDirective::Hide)
+        );
+        // No capture ever started (e.g. the worker died pre-grab):
+        // nothing restores by event, so the window stays hidden —
+        // the daemon's tray-gate safety bound covers the straggler,
+        // and the next Show (AppFocus) surfaces it again.
+        assert!(core.hidden);
+        assert_eq!(core.in_flight, 0);
+        assert_eq!(
+            core.on_event(&IpcEvent::AppFocus),
+            Some(HomeDirective::Show)
+        );
+    }
+
+    #[test]
+    fn supersede_does_not_flicker_the_window_open() {
+        // Replace policy event order: CaptureSuperseded → (old
+        // worker's SessionEnded) → new CaptureStarted. The SessionEnded
+        // would otherwise reopen the window right before the new
+        // capture hides it again — a flicker the new capture could
+        // grab. The supersede flag holds the window closed through it.
+        let mut core = HomeCore::default();
+        core.on_event(&IpcEvent::CaptureStarted); // the old capture
+        assert_eq!(
+            core.on_event(&IpcEvent::CaptureSuperseded),
+            None,
+            "the supersede itself is not a directive"
+        );
+        assert_eq!(
+            core.on_event(&IpcEvent::SessionEnded),
+            None,
+            "the superseded worker's exit must not reopen the window"
+        );
+        assert!(core.hidden, "still hidden: a capture is coming");
+        assert_eq!(
+            core.on_event(&IpcEvent::CaptureStarted),
+            Some(HomeDirective::Hide),
+            "the new capture clears the supersede hold"
+        );
+        assert_eq!(
+            core.on_event(&IpcEvent::SessionEnded),
+            Some(HomeDirective::Show),
+            "and its end restores normally"
+        );
+    }
+
+    #[test]
     fn session_ended_without_request_does_not_show() {
         // A tray/hotkey capture completing while our window is
         // visible must not steal focus.
         let mut core = HomeCore::default();
-        assert_eq!(core.on_event(&IpcEvent::CaptureStarted), None);
-        assert_eq!(core.on_event(&IpcEvent::SessionEnded), None);
-        assert!(!core.hidden, "nothing to restore");
+        assert_eq!(
+            core.on_event(&IpcEvent::CaptureStarted),
+            Some(HomeDirective::Hide)
+        );
+        // Restoring is the Hide flow's business; a second event with
+        // nothing pending is quiet.
+        let mut quiet = HomeCore::default();
+        quiet.on_event(&IpcEvent::CaptureStarted);
+        quiet.on_event(&IpcEvent::SessionEnded);
+        assert_eq!(quiet.on_event(&IpcEvent::SessionEnded), None);
+        let fresh = HomeCore::default();
+        assert!(!fresh.hidden, "nothing to restore");
     }
 
     #[test]
@@ -655,6 +900,75 @@ mod tests {
         assert_eq!(
             core.on_event(&IpcEvent::SessionEnded),
             Some(HomeDirective::Show)
+        );
+    }
+
+    #[test]
+    fn close_reason_distinguishes_quit_intent_and_hide() {
+        // The outer loop's post-close decision: a pending capture
+        // command wins, then a hide request, else the user quit.
+        let shared = Shared::default();
+        assert_eq!(
+            close_reason(&shared),
+            CloseReason::UserQuit,
+            "a plain close is the user quitting"
+        );
+        shared.push_directive(HomeDirective::Hide);
+        assert_eq!(close_reason(&shared), CloseReason::HiddenByEvent);
+        shared.set_pending_capture(PumpCommand::Region);
+        shared.push_directive(HomeDirective::Hide);
+        assert!(matches!(
+            close_reason(&shared),
+            CloseReason::CaptureIntent(PumpCommand::Region)
+        ));
+    }
+
+    #[test]
+    fn hide_request_is_taken_exactly_once() {
+        let shared = Shared::default();
+        shared.push_directive(HomeDirective::Hide);
+        assert!(shared.take_hide_requested());
+        assert!(
+            !shared.take_hide_requested(),
+            "the second close after one hide is a real user quit"
+        );
+    }
+
+    #[test]
+    fn show_drops_stale_hide_directives_and_flags() {
+        // The Hide directive queued while the window was closed (the
+        // CaptureStarted of the capture that hid us) must not close
+        // the freshly reopened window: Show — which always ends a
+        // hide cycle — drains it.
+        let shared = Shared::default();
+        shared.push_directive(HomeDirective::Hide);
+        shared.push_directive(HomeDirective::SetStatus("mid-capture".into()));
+        shared.push_directive(HomeDirective::Show);
+        let mut drained = Vec::new();
+        while let Some(d) = shared.poll_directive() {
+            drained.push(d);
+        }
+        assert!(
+            !drained.contains(&HomeDirective::Hide),
+            "stale Hide dropped on Show: {drained:?}"
+        );
+        assert!(!shared.take_hide_requested(), "and the hide flag cleared");
+    }
+
+    #[test]
+    fn window_destroyed_mark_is_consumed_once() {
+        // The pump's ack waits on this mark; the outer loop sets it
+        // after every window close.
+        let shared = Shared::default();
+        assert!(
+            !shared.wait_window_destroyed(Duration::from_millis(10)),
+            "nothing marked: the bounded wait gives up"
+        );
+        shared.mark_window_destroyed();
+        assert!(shared.wait_window_destroyed(Duration::from_secs(1)));
+        assert!(
+            !shared.wait_window_destroyed(Duration::from_millis(10)),
+            "consumed by the first ack wait"
         );
     }
 
