@@ -155,7 +155,11 @@ pub enum Request {
 pub enum Event {
     /// A capture was initiated (worker spawned).
     CaptureStarted,
-    /// The editor window opened over the capture.
+    /// An annotation window (editor or overlay) actually opened —
+    /// reported by the worker that runs it (one
+    /// [`Request::ReportEditorWindowOpened`] per window: fresh
+    /// capture, recapture reopen, or `open`; never for `--out`
+    /// headless captures, never at spawn time).
     EditorOpened,
     /// The user saved an annotated image to `path`.
     Saved {

@@ -456,6 +456,17 @@ where
             continue;
         }
 
+        // ReportEditorWindowOpened (smart-window-hiding): a worker's
+        // truthful "an annotation window is about to run" — one
+        // report per actual window (fresh capture, recapture reopen,
+        // `open`), replacing the old spawn-time proxy broadcast.
+        // Fire-and-forget relay, mirroring ReportSaved.
+        if matches!(request, IpcRequest::ReportEditorWindowOpened) {
+            tracing::info!("worker reported an editor/overlay window opening");
+            bus.broadcast(IpcEvent::EditorOpened);
+            continue;
+        }
+
         // BindShortcuts (Phase 6): binding belongs to the daemon's
         // portal session, so the connection layer drives it — the
         // worker dispatch table never sees it. Awaiting the user's
@@ -1077,6 +1088,56 @@ mod tests {
         task.abort();
         stepper.abort();
         tray_stepper.abort();
+    }
+
+    // ── Real EditorOpened (smart-window-hiding Task 008) ─────────
+
+    #[tokio::test]
+    async fn report_editor_window_opened_broadcasts_editor_opened() {
+        // The worker's truthful window report replaces the spawn-time
+        // proxy: each report fans out exactly one EditorOpened.
+        let bus = SubscriberBus::new();
+        let mut subscriber = bus.subscribe();
+        let (client, server) = tokio::io::duplex(8 * 1024);
+        let state = crate::worker::DispatchState::new();
+        let shutdown = Arc::new(Notify::new());
+        let capture = crate::worker::CaptureDispatch::new();
+        let prepare = Arc::new(crate::prepare_gate::PrepareGate::new());
+        let task = tokio::spawn(async move {
+            let _ = handle_connection(
+                server,
+                bus,
+                state,
+                shutdown,
+                crate::hotkeys_portal::PortalHandle::unavailable("unused"),
+                Arc::new(crate::tray_gate::TrayGate::new()),
+                capture,
+                prepare,
+            )
+            .await;
+        });
+
+        let mut client = client;
+        write_frame(
+            &mut client,
+            &encode_msg(&Request::ReportEditorWindowOpened).unwrap(),
+        )
+        .await
+        .unwrap();
+        write_frame(
+            &mut client,
+            &encode_msg(&Request::ReportEditorWindowOpened).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let first =
+            tokio::time::timeout(std::time::Duration::from_secs(2), subscriber.recv()).await;
+        assert_eq!(first, Ok(Ok(Event::EditorOpened)), "one per report");
+        let second =
+            tokio::time::timeout(std::time::Duration::from_secs(2), subscriber.recv()).await;
+        assert_eq!(second, Ok(Ok(Event::EditorOpened)));
+        task.abort();
     }
 
     /// Spawn `handle_connection` on the server half of a duplex pair

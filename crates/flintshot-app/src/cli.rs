@@ -923,6 +923,10 @@ fn run_editor_session(
 
     let state = state_from_config(img, cfg);
 
+    // One report per actual window: this session (fresh capture,
+    // recapture reopen, or `open`) is about to open one.
+    report_editor_window_opened_to_daemon();
+
     // Under the ambient-runtime guard: accesskit → zbus 5 needs a
     // reactor on this thread for the window to come up (see
     // `crate::ambient`). Dropped before `report_editor_outcome`.
@@ -984,6 +988,10 @@ fn run_overlay_with_config(
     let mut next_image = Some(img);
     while let Some(img) = next_image.take() {
         let state = state_from_config(img, cfg);
+
+        // One report per actual window (the overlay session about to
+        // run — fresh or recapture reopen).
+        report_editor_window_opened_to_daemon();
 
         // Guard mirrors `run_editor_with_config` (see `crate::ambient`).
         let outcome = crate::ambient::with_ambient_runtime(|| {
@@ -1155,6 +1163,35 @@ fn report_saved_to_daemon_at(
 /// standalone). Extends ADR-0023's worker-reports-back pattern.
 fn report_uploaded_to_daemon(url: &str, delete_handle: Option<&str>) {
     report_uploaded_to_daemon_at(None, url, delete_handle);
+}
+
+/// Tell a running daemon an annotation window is about to run, so it
+/// broadcasts `Event::EditorOpened` — the truthful window signal, one
+/// report per actual window (fresh capture, recapture reopen, `open`;
+/// never for `--out`). Best-effort: a missing daemon is a silent
+/// no-op (the worker may be standalone). Mirrors
+/// [`report_saved_to_daemon`].
+fn report_editor_window_opened_to_daemon() {
+    report_editor_window_opened_to_daemon_at(None);
+}
+
+/// Testable seam for [`report_editor_window_opened_to_daemon`]:
+/// report against an explicit socket path.
+fn report_editor_window_opened_to_daemon_at(override_path: Option<&std::path::Path>) {
+    match crate::ipc_client::delegate_to(override_path, &Request::ReportEditorWindowOpened) {
+        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {
+            tracing::debug!("reported an editor/overlay window opening");
+        }
+        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {
+            tracing::debug!("no daemon running; skipping the window-open report");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not report the window opening; ignoring"
+            );
+        }
+    }
 }
 
 /// Testable seam for [`report_uploaded_to_daemon`]: report against an
@@ -1965,6 +2002,16 @@ mod tests {
         // must not error (or even log above debug) reporting done.
         report_captured_to_daemon_at(Some(std::path::Path::new(
             "/this/does/not/exist/flintshot-test-captured.sock",
+        )));
+    }
+
+    #[test]
+    fn report_editor_window_opened_is_silent_when_no_daemon() {
+        // Same contract: a standalone worker reports nothing, errors
+        // nothing. The `--out` headless path never calls this at all
+        // (it never opens a shell).
+        report_editor_window_opened_to_daemon_at(Some(std::path::Path::new(
+            "/this/does/not/exist/flintshot-test-window-opened.sock",
         )));
     }
 
