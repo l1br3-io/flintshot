@@ -9,6 +9,8 @@
 //! [`EguiShell::run_editor`]: flintshot_editor_egui::EguiShell::run_editor
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
@@ -457,20 +459,32 @@ fn delegate_to_daemon(
 /// [`run_fullscreen`]; `mode` is just the log label ("region" /
 /// "fullscreen"). `interaction` is the resolved CLI-flag override, if
 /// any — the config value joins in [`run_capture_shell`].
+///
+/// The worker subscribes to daemon events for its whole lifetime: a
+/// supersede before the shell opens cancels the worker instead
+/// (never open a window the replacing capture would grab through).
 fn capture_and_dispatch(
     monitor: Option<u32>,
     mode: &str,
     output: &OutputArgs,
     interaction: Option<InteractionMode>,
 ) -> Result<()> {
+    let watch = SupersedeWatch::subscribe_at(None);
+    if watch.superseded() {
+        tracing::info!("{mode} worker superseded before its grab; exiting");
+        return Ok(());
+    }
     let img = capture_with_tray_hidden(monitor, mode)?;
 
-    match &output.out {
-        Some(path) => {
-            write_png(&img, path)?;
-            tracing::info!(path = %path.display(), "{mode} capture saved");
+    if let Some(path) = &output.out {
+        write_png(&img, path)?;
+        tracing::info!(path = %path.display(), "{mode} capture saved");
+    } else {
+        if watch.superseded() {
+            tracing::info!("{mode} worker superseded before the shell; exiting cancelled");
+            return Ok(());
         }
-        None => run_capture_shell(img, mode, interaction)?,
+        run_capture_shell(img, mode, interaction, &watch)?;
     }
     Ok(())
 }
@@ -526,6 +540,151 @@ impl Drop for TrayHiddenGuard {
     }
 }
 
+/// The close-hook cell shared with the supersede listener thread.
+type CloseHookSlot = Arc<std::sync::Mutex<Option<Box<dyn Fn() + Send>>>>;
+
+/// A capture worker's session-long subscription to daemon events,
+/// narrowed to the one thing the worker cares about outside its own
+/// window: [`Event::CaptureSuperseded`] — a newer capture replaced
+/// this session, so close the window gracefully and exit cancelled
+/// (see the Replace policy, smart-window-hiding).
+///
+/// A listener thread owns the subscription stream; [`Self::superseded`]
+/// is the flag it sets, [`Self::set_close_hook`] installs the
+/// window-closing callback fired at the same moment (the egui
+/// `CloseHandle` closes the window through its context — the
+/// documented thread-safe path). No daemon (standalone capture):
+/// inert — no listener, the flag never fires, today's behavior.
+/// One socket probe is the whole cost.
+///
+/// The thread is detached by design: it ends when the stream closes
+/// (daemon shutdown) or the worker process exits; nothing in the
+/// worker blocks on it.
+struct SupersedeWatch {
+    /// Set the moment `CaptureSuperseded` arrives.
+    flag: Arc<AtomicBool>,
+    /// Window-close callback, fired once at supersede time (or
+    /// immediately on registration if the supersede already arrived).
+    close_hook: CloseHookSlot,
+}
+
+impl SupersedeWatch {
+    /// An inert watch (standalone / no daemon): never superseded.
+    fn inert() -> Self {
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            close_hook: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Subscribe to the daemon at `override_path` (or the default
+    /// socket). Failure to connect degrades to [`Self::inert`] —
+    /// graceful close is an optimization the hard kill backstops.
+    /// One socket probe is the whole standalone cost.
+    fn subscribe_at(override_path: Option<&std::path::Path>) -> Self {
+        let watch = Self::inert();
+        let flag = Arc::clone(&watch.flag);
+        let close_hook = Arc::clone(&watch.close_hook);
+        // Owned for the thread: connect and pump must share one
+        // reactor (a stream registered on a dropped runtime is dead).
+        let path = override_path.map(std::path::PathBuf::from);
+        if std::thread::Builder::new()
+            .name("flintshot-supersede-watch".into())
+            .spawn(move || watch_supersede(path.as_deref(), flag, close_hook))
+            .is_err()
+        {
+            tracing::warn!("spawning the supersede watch; continuing without graceful close");
+        }
+        watch
+    }
+
+    /// Whether a newer capture superseded this session.
+    fn superseded(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+
+    /// The flag cell itself (test seam).
+    #[cfg(test)]
+    fn flag(&self) -> &Arc<AtomicBool> {
+        &self.flag
+    }
+
+    /// Install the window-close callback. If the supersede already
+    /// arrived, the hook fires immediately — the window may have
+    /// opened after the broadcast (recapture chains).
+    fn set_close_hook(&self, hook: Box<dyn Fn() + Send>) {
+        let mut slot = self
+            .close_hook
+            .lock()
+            .expect("supersede hook mutex poisoned");
+        if self.flag.load(Ordering::Acquire) {
+            drop(slot);
+            hook();
+        } else {
+            *slot = Some(hook);
+        }
+    }
+}
+
+/// The listener thread body: subscribe, then read the stream until
+/// `CaptureSuperseded` (fire the flag + hook, one shot) or the
+/// stream ends. Connect and read share one reactor — a stream moved
+/// off the runtime it connected on is unusable.
+fn watch_supersede(
+    override_path: Option<&std::path::Path>,
+    flag: Arc<AtomicBool>,
+    close_hook: CloseHookSlot,
+) {
+    use flintshot_core::ipc::Event;
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::warn!(error = %e, "supersede watch runtime; graceful close disabled");
+            return;
+        }
+    };
+    runtime.block_on(async move {
+        let stream = match crate::ipc_client::subscribe_to(override_path).await {
+            Ok(Some(stream)) => stream,
+            Ok(None) => return, // no daemon: inert
+            Err(e) => {
+                tracing::warn!(error = %e, "subscribing for supersede; continuing without");
+                return;
+            }
+        };
+        let mut stream = stream;
+        loop {
+            // Daemon gone (or frame corrupt): nothing more to hear.
+            let Ok(frame) = crate::ipc_server::read_frame(&mut stream).await else {
+                break;
+            };
+            let event = match crate::ipc_server::decode_event(&frame) {
+                Ok(event) => event,
+                Err(e) => {
+                    tracing::debug!(error = %e, "skipping undecodable event");
+                    continue;
+                }
+            };
+            if matches!(event, Event::CaptureSuperseded) {
+                tracing::info!("capture superseded by a newer one; closing gracefully");
+                flag.store(true, Ordering::Release);
+                let hook = close_hook
+                    .lock()
+                    .expect("supersede hook mutex poisoned")
+                    .take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+                break;
+            }
+        }
+    });
+}
+
 /// Tell a running daemon this capture's grab finished so it can
 /// restore its tray icon (pairs the hide handshake, ADR-0036).
 /// Best-effort fire-and-forget, mirroring [`report_saved_to_daemon`].
@@ -558,11 +717,14 @@ fn report_captured_to_daemon_at(override_path: Option<&std::path::Path>) {
 /// `[ui] interaction-mode` > platform fallback — see
 /// [`resolve_interaction_mode`]), log the decision, and open the
 /// matching shell: the Phase 5 fullscreen overlay or the Phase 1
-/// editor window.
+/// editor window. `watch` is the worker's session subscription —
+/// passed down so the shell's windows register their close handles
+/// and the recapture loops honor a supersede between sessions.
 fn run_capture_shell(
     img: image::RgbaImage,
     mode: &str,
     interaction: Option<InteractionMode>,
+    watch: &SupersedeWatch,
 ) -> Result<()> {
     let cfg = match Config::load() {
         Ok(c) => c,
@@ -587,8 +749,8 @@ fn run_capture_shell(
         "{mode} capture interaction mode resolved"
     );
     match resolved {
-        InteractionMode::Overlay => run_overlay_with_config(img, mode, &cfg),
-        InteractionMode::Editor => run_editor_with_config(img, mode, selection_first, &cfg),
+        InteractionMode::Overlay => run_overlay_with_config(img, mode, &cfg, watch),
+        InteractionMode::Editor => run_editor_with_config(img, mode, selection_first, &cfg, watch),
     }
 }
 
@@ -611,7 +773,9 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
             Config::default()
         }
     };
-    run_editor_with_config(img, mode, false, &cfg)
+    // The `open` path is not a capture session: the daemon never
+    // supersedes it, so an inert watch keeps the signature uniform.
+    run_editor_with_config(img, mode, false, &cfg, &SupersedeWatch::inert())
 }
 
 /// [`run_editor_for_capture`] over an already-loaded config (the
@@ -625,35 +789,81 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
 /// wait out the unmap grace, grab a fresh monitor, and re-run the
 /// session. A region recapture re-enters selection-first;
 /// fullscreen stays plain (the whole monitor is the shot). Any other
-/// outcome ends the cycle. The worker process persists across
-/// recaptures, so the daemon's `SessionEnded` (and the app window's
-/// restore) waits for the whole chain, Win11-style.
+/// outcome ends the cycle. A supersede arriving anywhere in the
+/// chain — mid-session (the close handle closes the window, the
+/// outcome resolves `Cancelled`) or between sessions
+/// ([`session_next`] stops the chain) — ends the cycle as cancelled.
+/// The worker process persists across recaptures, so the daemon's
+/// `SessionEnded` (and the app window's restore) waits for the whole
+/// chain, Win11-style.
 #[cfg(feature = "egui")]
 fn run_editor_with_config(
     img: image::RgbaImage,
     mode: &str,
     selection_first: bool,
     cfg: &Config,
+    watch: &SupersedeWatch,
 ) -> Result<()> {
+    // One close handle for the whole chain: each session's window
+    // installs itself; a supersede closes whichever is open.
+    let close = flintshot_editor_egui::CloseHandle::new();
+    let close_for_hook = close.clone();
+    watch.set_close_hook(Box::new(move || close_for_hook.close()));
+
     let mut session = Some((img, selection_first));
     while let Some((img, selection_first)) = session.take() {
-        let outcome = run_editor_session(img, mode, selection_first, cfg)?;
-        if let Some(mode) = recapture_request(&outcome) {
-            let fresh = recapture_image()?;
-            // A region recapture re-enters selection-first;
-            // fullscreen stays plain (the whole monitor is the shot).
-            let region = selection_first_for_recapture(mode);
-            session = Some((fresh, region));
-            tracing::info!(
-                selection_first = region,
-                "new capture from the editor; reopening"
-            );
-        } else {
-            report_editor_outcome(outcome);
-            return Ok(());
+        let outcome = run_editor_session(img, mode, selection_first, cfg, &close)?;
+        match session_next(&outcome, watch.superseded()) {
+            SessionNext::Stop => {
+                tracing::info!("editor chain stopped: superseded");
+                report_editor_outcome(outcome);
+                return Ok(());
+            }
+            SessionNext::Recapture(mode) => {
+                let fresh = recapture_image()?;
+                // A region recapture re-enters selection-first;
+                // fullscreen stays plain (the whole monitor is the shot).
+                let region = selection_first_for_recapture(mode);
+                session = Some((fresh, region));
+                tracing::info!(
+                    selection_first = region,
+                    "new capture from the editor; reopening"
+                );
+            }
+            SessionNext::Report => {
+                report_editor_outcome(outcome);
+                return Ok(());
+            }
         }
     }
     Ok(())
+}
+
+/// What the editor / overlay session loop does with one session's
+/// outcome, given whether a supersede was seen. Pure so the loop's
+/// decision (supersede beats even a recapture request) is
+/// unit-testable.
+#[cfg(feature = "egui")]
+fn session_next(outcome: &flintshot_core::EditorOutcome, superseded: bool) -> SessionNext {
+    if superseded {
+        return SessionNext::Stop;
+    }
+    match recapture_request(outcome) {
+        Some(mode) => SessionNext::Recapture(mode),
+        None => SessionNext::Report,
+    }
+}
+
+/// The session-loop decision (see [`session_next`]).
+#[cfg(feature = "egui")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionNext {
+    /// End the chain (superseded): report the outcome and exit.
+    Stop,
+    /// The outcome asked for a fresh capture of `mode`.
+    Recapture(flintshot_core::NewCaptureMode),
+    /// A terminal outcome; report it and exit.
+    Report,
 }
 
 /// The shared recapture step: the closed window needs the unmap
@@ -674,13 +884,15 @@ fn selection_first_for_recapture(mode: flintshot_core::NewCaptureMode) -> bool {
 }
 
 /// One editor window's blocking session (the pre-recapture body of
-/// [`run_editor_with_config`]).
+/// [`run_editor_with_config`]). `close` installs into the window so
+/// the supersede listener can close it from its own thread.
 #[cfg(feature = "egui")]
 fn run_editor_session(
     img: image::RgbaImage,
     mode: &str,
     selection_first: bool,
     cfg: &Config,
+    close: &flintshot_editor_egui::CloseHandle,
 ) -> Result<flintshot_core::EditorOutcome> {
     use flintshot_core::EditorShell;
 
@@ -691,9 +903,11 @@ fn run_editor_session(
     // `crate::ambient`). Dropped before `report_editor_outcome`.
     let outcome = crate::ambient::with_ambient_runtime(|| {
         let shell = if selection_first {
-            flintshot_editor_egui::EguiShell::new().with_selection_first()
-        } else {
             flintshot_editor_egui::EguiShell::new()
+                .with_selection_first()
+                .with_close_handle(close.clone())
+        } else {
+            flintshot_editor_egui::EguiShell::new().with_close_handle(close.clone())
         };
         shell.run_editor(state)
     })
@@ -728,26 +942,47 @@ fn recapture_request(
 /// region lands on the clipboard and the overlay closes; the shell
 /// lingers briefly to keep the X11 selection alive). A `NewCapture`
 /// outcome (the rail's `+` chip) loops like the editor's: fresh
-/// grab, fresh overlay.
+/// grab, fresh overlay. A supersede (mid-session via the close
+/// handle, or between sessions via [`session_next`]) ends the chain
+/// as cancelled, exactly like the editor loop.
 #[cfg(feature = "egui")]
-fn run_overlay_with_config(img: image::RgbaImage, mode: &str, cfg: &Config) -> Result<()> {
+fn run_overlay_with_config(
+    img: image::RgbaImage,
+    mode: &str,
+    cfg: &Config,
+    watch: &SupersedeWatch,
+) -> Result<()> {
+    let close = flintshot_editor_egui::CloseHandle::new();
+    let close_for_hook = close.clone();
+    watch.set_close_hook(Box::new(move || close_for_hook.close()));
+
     let mut next_image = Some(img);
     while let Some(img) = next_image.take() {
         let state = state_from_config(img, cfg);
 
         // Guard mirrors `run_editor_with_config` (see `crate::ambient`).
         let outcome = crate::ambient::with_ambient_runtime(|| {
-            flintshot_editor_egui::EguiShell::new().run_overlay(state)
+            flintshot_editor_egui::EguiShell::new()
+                .with_close_handle(close.clone())
+                .run_overlay(state)
         })
         .and_then(|ran| ran.map_err(|e| color_eyre::eyre::eyre!(e.to_string())))
         .with_context(|| format!("running overlay for {mode} capture"))?;
 
-        if recapture_request(&outcome).is_some() {
-            next_image = Some(recapture_image()?);
-            tracing::info!("new capture from the overlay; reopening");
-        } else {
-            report_editor_outcome(outcome);
-            return Ok(());
+        match session_next(&outcome, watch.superseded()) {
+            SessionNext::Stop => {
+                tracing::info!("overlay chain stopped: superseded");
+                report_editor_outcome(outcome);
+                return Ok(());
+            }
+            SessionNext::Recapture(_) => {
+                next_image = Some(recapture_image()?);
+                tracing::info!("new capture from the overlay; reopening");
+            }
+            SessionNext::Report => {
+                report_editor_outcome(outcome);
+                return Ok(());
+            }
         }
     }
     Ok(())
@@ -808,14 +1043,15 @@ fn report_editor_outcome(outcome: flintshot_core::EditorOutcome) {
 /// Headless-build fallback: editor is unavailable without the `egui`
 /// feature. The image argument is accepted (and dropped) purely so the
 /// call site in [`run_capture_shell`] is uniform across feature sets.
-/// `selection_first` is likewise accepted and dropped (mirrors the
-/// egui-build signature).
+/// `selection_first` and `watch` are likewise accepted and dropped
+/// (mirrors the egui-build signature).
 #[cfg(not(feature = "egui"))]
 fn run_editor_with_config(
     _img: image::RgbaImage,
     _mode: &str,
     _selection_first: bool,
     _cfg: &Config,
+    _watch: &SupersedeWatch,
 ) -> Result<()> {
     Err(color_eyre::eyre::eyre!(
         "editor not built; pass --out PATH to capture headlessly \
@@ -1470,6 +1706,123 @@ mod tests {
         use flintshot_core::NewCaptureMode;
         assert!(selection_first_for_recapture(NewCaptureMode::Region));
         assert!(!selection_first_for_recapture(NewCaptureMode::Fullscreen));
+    }
+
+    // ── Supersede watch (smart-window-hiding Task 004) ───────────
+
+    #[cfg(feature = "egui")]
+    #[test]
+    fn session_next_stops_the_chain_when_superseded() {
+        use flintshot_core::{EditorOutcome, NewCaptureMode};
+        // A supersede between sessions beats even a NewCapture
+        // outcome: the new capture owns the screen now.
+        let next = session_next(
+            &EditorOutcome::NewCapture {
+                mode: NewCaptureMode::Region,
+            },
+            true,
+        );
+        assert!(matches!(next, SessionNext::Stop), "got {next:?}");
+    }
+
+    #[cfg(feature = "egui")]
+    #[test]
+    fn session_next_recaptures_when_not_superseded() {
+        use flintshot_core::{EditorOutcome, NewCaptureMode};
+        let next = session_next(
+            &EditorOutcome::NewCapture {
+                mode: NewCaptureMode::Fullscreen,
+            },
+            false,
+        );
+        assert!(
+            matches!(next, SessionNext::Recapture(NewCaptureMode::Fullscreen)),
+            "got {next:?}"
+        );
+    }
+
+    #[cfg(feature = "egui")]
+    #[test]
+    fn session_next_reports_terminal_outcomes() {
+        use flintshot_core::EditorOutcome;
+        let next = session_next(&EditorOutcome::Cancelled, false);
+        assert!(matches!(next, SessionNext::Report));
+    }
+
+    #[test]
+    fn inert_watch_is_never_superseded() {
+        // Standalone / no-daemon workers keep today's behavior: the
+        // watch never fires, so no code path short-circuits.
+        let watch = SupersedeWatch::inert();
+        assert!(!watch.superseded());
+    }
+
+    #[test]
+    fn watch_fires_late_close_hooks_immediately() {
+        // A hook registered after the supersede already arrived must
+        // still fire — the window may not have existed at broadcast
+        // time but is open by the time the shell registers it.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let watch = SupersedeWatch::inert();
+        watch.flag().store(true, Ordering::Release);
+        let fired = Arc::new(AtomicBool::new(false));
+        let probe = Arc::clone(&fired);
+        watch.set_close_hook(Box::new(move || {
+            probe.store(true, Ordering::Release);
+        }));
+        assert!(
+            fired.load(Ordering::Acquire),
+            "a late-registered hook fires on registration"
+        );
+    }
+
+    /// The watch's listener against a real daemon: a broadcast
+    /// `CaptureSuperseded` sets the flag and fires the close hook.
+    /// `#[ignore]` (needs a real local socket). Run with:
+    /// `cargo test -p flintshot-app -- --ignored supersede`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a real local socket (no display); run explicitly"]
+    async fn supersede_watch_hears_a_real_broadcast() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("flintshot-supersede-watch.sock");
+        let server = crate::ipc_server::IpcServer::bind(Some(&sock)).expect("binding");
+        let bus = server.bus();
+        let server_task = tokio::spawn(async move {
+            let _ = server.serve().await;
+        });
+
+        // `subscribe_at` blocks on its own little runtime — keep it
+        // off the test's reactor (mirrors the sync worker call site).
+        let sock_clone = sock.clone();
+        let watch =
+            tokio::task::spawn_blocking(move || SupersedeWatch::subscribe_at(Some(&sock_clone)))
+                .await
+                .expect("subscribe task");
+        assert!(!watch.superseded(), "fresh watch is not superseded");
+        let fired = Arc::new(AtomicBool::new(false));
+        let probe = Arc::clone(&fired);
+        watch.set_close_hook(Box::new(move || {
+            probe.store(true, Ordering::Release);
+        }));
+
+        // Retry the broadcast (bounded) to bridge the inherent
+        // subscribe/register race, mirroring the ipc_server tests.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !(watch.superseded() && fired.load(Ordering::Acquire))
+            && std::time::Instant::now() < deadline
+        {
+            bus.broadcast(flintshot_core::ipc::Event::CaptureSuperseded);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(watch.superseded(), "the flag fired on the broadcast");
+        assert!(
+            fired.load(Ordering::Acquire),
+            "the close hook fired with the flag"
+        );
+
+        server_task.abort();
     }
 
     const fn geo(x: i32, y: i32, w: u32, h: u32) -> MonitorGeo {
