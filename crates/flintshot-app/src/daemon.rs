@@ -91,8 +91,11 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     // Capture dispatch context: the session registry + the mutex
     // serializing supersede-then-spawn across every entry point
     // (IPC server, X11 hotkeys, portal hotkeys) — the Replace
-    // policy's home.
+    // policy's home. The prepare gate is the pre-grab handshake's
+    // coordination state (stepped by this loop, awaited by the IPC
+    // side) — the tray-gate pattern, generalized to every surface.
     let capture = crate::worker::CaptureDispatch::new();
+    let prepare = Arc::new(crate::prepare_gate::PrepareGate::new());
     // The live `[hotkeys]` section: written by the config hot-reload
     // below, read by the portal task at bind time (fresh suggestions
     // without a daemon restart). The tray's bind trigger crosses the
@@ -110,6 +113,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
             let bind_requested = Arc::clone(&bind_requested);
             let tray_gate = Arc::clone(&tray_gate);
             let capture = capture.clone();
+            let prepare = Arc::clone(&prepare);
             move || {
                 run_tokio_side(
                     tx,
@@ -120,6 +124,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
                     bind_requested,
                     tray_gate,
                     capture,
+                    prepare,
                 );
             }
         })
@@ -178,6 +183,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
         &tray_gate,
         &mut tray,
         &capture,
+        &prepare,
     );
 
     // Wait for the tokio side to finish so we don't leak the runtime.
@@ -224,7 +230,7 @@ fn replace_running_daemon() -> eyre::Result<()> {
 /// on-screen with a dead tray (every later click silently dropped,
 /// L5 2026-08-31).
 //
-// Ten wiring params by design: this loop is the daemon's integration
+// Eleven wiring params by design: this loop is the daemon's integration
 // point, and each param is a distinct event source or shared state; a
 // context struct would only relocate the list, not shrink it.
 #[allow(clippy::too_many_arguments)]
@@ -246,6 +252,7 @@ fn run_event_loop(
     tray_gate: &TrayGate,
     tray: &mut TraySupervisor,
     capture: &crate::worker::CaptureDispatch,
+    prepare: &Arc<crate::prepare_gate::PrepareGate>,
 ) {
     loop {
         // Helper lifecycle first: a self-exit (capture/quit click, or
@@ -257,6 +264,15 @@ fn run_event_loop(
         // worker is owed before that worker's own reply bound
         // expires, and restart helpers whose captures have reported.
         service_tray_gate(tray_gate, tray);
+
+        // Prepare-gate tick: drive any armed pre-grab handshake
+        // (app-ack, pins, live-capture re-assert) toward its reply.
+        prepare.step(
+            Instant::now(),
+            capture.sessions().app_alive(),
+            capture.sessions().live_pins() > 0,
+            capture.sessions().live_captures(),
+        );
 
         drain_hotkeys(hotkeys, bus, state, tray_gate, tray, capture);
 
@@ -580,6 +596,7 @@ fn run_tokio_side(
     bind_requested: Arc<Notify>,
     tray_gate: Arc<TrayGate>,
     capture: crate::worker::CaptureDispatch,
+    prepare: Arc<crate::prepare_gate::PrepareGate>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -619,7 +636,7 @@ fn run_tokio_side(
         // the capture dispatch context so every capture trigger runs
         // the same serialized supersede-then-spawn.
         let (serve_handle, shutdown) = match crate::ipc_server::IpcServer::bind_with_bus(
-            None, bus, state, portal, tray_gate, capture,
+            None, bus, state, portal, tray_gate, capture, prepare,
         ) {
             Ok(ipc) => {
                 let shutdown = ipc.shutdown_signal();

@@ -175,6 +175,8 @@ impl Spawner for CommandSpawner {
                     argv.iter().map(|s| (*s).to_string()).collect(),
                     Arc::clone(&handle),
                 );
+            } else if is_app_argv(argv) {
+                sessions.register_app(pid, Arc::clone(&handle));
             }
         }
         let bus = self.bus.clone();
@@ -223,6 +225,27 @@ impl Spawner for CommandSpawner {
 /// in sync when a worker kind is added.
 fn is_pin_argv(argv: &[&str]) -> bool {
     matches!(argv.first(), Some(&"pin"))
+}
+
+/// Does this worker argv run the app window (tracked so the pre-grab
+/// handshake knows an app owes a hide-ack)?
+fn is_app_argv(argv: &[&str]) -> bool {
+    matches!(argv.first(), Some(&"app"))
+}
+
+/// Re-spawn the pin argvs parked by `close_all_pins` (the pre-grab
+/// handshake's post-capture restore). Each argv re-registers through
+/// the spawner, so the next grab closes them again. Best-effort: a
+/// spawn failure is logged and never blocks the rest of the queue.
+pub(crate) fn worker_respawn_queued_pins(
+    sessions: &Arc<crate::sessions::CaptureSessions>,
+    spawner: &dyn Spawner,
+) {
+    for argv in sessions.take_respawn_queue() {
+        if let Err(e) = spawn_argv(spawner, &argv) {
+            tracing::warn!(argv = ?argv, error = %e, "respawning a closed pin");
+        }
+    }
 }
 
 /// Does this worker argv run a capture (and so owe a
@@ -1584,5 +1607,61 @@ mod tests {
             "--backend",
             "imgur"
         ]));
+    }
+
+    #[test]
+    fn is_app_argv_classifies_only_the_app_worker() {
+        assert!(is_app_argv(&["app"]));
+        assert!(!is_app_argv(&["pin", "/tmp/x.png"]));
+        assert!(!is_app_argv(&["region", "--standalone"]));
+    }
+
+    #[test]
+    fn respawn_queued_pins_spawns_each_argv_once() {
+        // Queued by close_all_pins (the pre-grab handshake); the
+        // drain is destructive and spawns verbatim.
+        let ctx = CaptureDispatch::new();
+        ctx.sessions().register_pin(
+            1,
+            404,
+            vec![
+                "pin".into(),
+                "/tmp/x.png".into(),
+                "--at".into(),
+                "10,20".into(),
+            ],
+            fake_session_handle(),
+        );
+        ctx.sessions().close_all_pins();
+        let spawner = RecordingSpawner::new();
+
+        worker_respawn_queued_pins(&ctx.sessions(), &spawner);
+        worker_respawn_queued_pins(&ctx.sessions(), &spawner);
+
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec![
+                "pin".to_string(),
+                "/tmp/x.png".into(),
+                "--at".into(),
+                "10,20".into(),
+            ]],
+            "each parked argv respawned verbatim, exactly once"
+        );
+    }
+
+    #[test]
+    fn respawn_ignores_spawn_failures_beyond_a_log() {
+        // One bad argv must not block the rest: failures are logged
+        // and the queue is still drained.
+        let ctx = CaptureDispatch::new();
+        ctx.sessions()
+            .register_pin(1, 404, vec!["pin".into()], fake_session_handle());
+        ctx.sessions().close_all_pins();
+        worker_respawn_queued_pins(&ctx.sessions(), &FailSpawner);
+        assert!(
+            ctx.sessions().take_respawn_queue().is_empty(),
+            "the queue drained despite the spawn failure"
+        );
     }
 }

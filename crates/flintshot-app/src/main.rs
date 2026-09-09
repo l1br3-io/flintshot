@@ -17,6 +17,7 @@ mod hotkeys_portal;
 mod ipc_client;
 mod ipc_server;
 mod platform;
+mod prepare_gate;
 mod sessions;
 mod single;
 #[cfg(all(feature = "tray", target_os = "linux"))]
