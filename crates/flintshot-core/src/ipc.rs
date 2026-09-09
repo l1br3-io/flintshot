@@ -118,6 +118,26 @@ pub enum Request {
     /// promptly when the app instance lock is held — the broadcast
     /// did the real work). Net effect: one window, focused.
     OpenApp,
+    // smart-window-hiding effort — appended (postcard variant-index rule):
+    /// Worker → daemon, pre-grab: the sender is about to capture the
+    /// screen; the daemon clears every flintshot surface (app window,
+    /// pin windows, tray icon) and replies [`Event::CaptureReady`]
+    /// only once the screen is clear or the bounds expire (a capture
+    /// must never fail because a window was slow). Supersedes and
+    /// internally includes [`Request::HideTrayForCapture`]: the tray
+    /// gate is driven as part of the same handshake.
+    PrepareCapture,
+    /// App window → daemon, best-effort ack: "my window is destroyed".
+    /// Pairs with [`Event::HideForCapture`] — the daemon waits for
+    /// this (bounded) before replying [`Event::CaptureReady`] to the
+    /// worker that is about to grab.
+    ReportAppHidden,
+    /// Worker → daemon, fire-and-forget (mirrors
+    /// [`Request::ReportSaved`]): an editor/overlay window is about
+    /// to run. The daemon broadcasts [`Event::EditorOpened`] on
+    /// receipt — one event per actual window, never at spawn time.
+    /// Silently dropped when no daemon answers (standalone worker).
+    ReportEditorWindowOpened,
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -198,6 +218,22 @@ pub enum Event {
     /// [`Request::OpenApp`]; a subscribed app window shows and
     /// focuses itself.
     AppFocus,
+    // smart-window-hiding effort — appended (postcard variant-index rule):
+    /// A new capture replaced the live capture session (Replace
+    /// policy: newest intent wins). Broadcast before the new worker
+    /// spawns; subscribed capture workers close their editor/overlay
+    /// gracefully (`Cancelled`, no partial saves) so the hard-kill
+    /// fallback stays rare.
+    CaptureSuperseded,
+    /// Reply to [`Request::PrepareCapture`]: every flintshot surface
+    /// is out of the frame (or the bounds expired) — the worker may
+    /// grab now. Reply-only, never broadcast (see ADR-0036 for the
+    /// handshake shape it generalizes).
+    CaptureReady,
+    /// Broadcast to the app window: a capture is imminent; close and
+    /// ack with [`Request::ReportAppHidden`] once the window is
+    /// destroyed. Pairs with [`Request::PrepareCapture`].
+    HideForCapture,
 }
 
 /// One entry of an [`Event::ShortcutsBound`] reply: a bound shortcut's
@@ -306,6 +342,9 @@ mod tests {
             Request::BindShortcuts,
             Request::HideTrayForCapture,
             Request::ReportCaptured,
+            Request::PrepareCapture,
+            Request::ReportAppHidden,
+            Request::ReportEditorWindowOpened,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");
@@ -351,6 +390,11 @@ mod tests {
                 delete_handle: Some("hk".into()),
             },
             Event::TrayHidden,
+            Event::SessionEnded,
+            Event::AppFocus,
+            Event::CaptureSuperseded,
+            Event::CaptureReady,
+            Event::HideForCapture,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode event");
