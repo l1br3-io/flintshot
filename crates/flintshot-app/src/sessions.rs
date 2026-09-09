@@ -207,12 +207,17 @@ fn kill_handle(handle: &Arc<Mutex<Option<Child>>>) {
     }
 }
 
+impl Default for CaptureSessions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CaptureSessions {
     /// Registry with the production graces (see the module consts).
     pub(crate) fn new() -> Self {
         Self::with_graces(SUPERSEDE_GRACE, KILL_WAIT)
     }
-
     /// Testable seam: explicit supersede graces (grace, kill wait).
     pub(crate) fn with_graces(grace: Duration, kill_wait: Duration) -> Self {
         Self {

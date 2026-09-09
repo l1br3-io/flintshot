@@ -265,6 +265,7 @@ pub(crate) fn start(
     state: DispatchState,
     hotkeys: SharedHotkeys,
     bind_requested: Arc<Notify>,
+    capture: crate::worker::CaptureDispatch,
 ) -> PortalHandle {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let unavailable = Arc::new(std::sync::Mutex::new(None));
@@ -277,6 +278,7 @@ pub(crate) fn start(
         state,
         hotkeys,
         bind_requested,
+        capture,
         rx,
         unavailable,
     ));
@@ -291,6 +293,7 @@ async fn session_task(
     state: DispatchState,
     hotkeys: SharedHotkeys,
     bind_requested: Arc<Notify>,
+    capture: crate::worker::CaptureDispatch,
     mut cmds: tokio::sync::mpsc::UnboundedReceiver<PortalCmd>,
     unavailable: Arc<std::sync::Mutex<Option<BindFailure>>>,
 ) {
@@ -348,7 +351,7 @@ async fn session_task(
                     session_ended(&unavailable, "the Activated signal stream closed");
                     break;
                 };
-                dispatch_activation(&bus, &state, event.shortcut_id());
+                dispatch_activation(&capture, &bus, &state, event.shortcut_id());
             }
             event = changed.next() => {
                 let Some(event) = event else {
@@ -397,17 +400,39 @@ fn session_ended(unavailable: &Arc<std::sync::Mutex<Option<BindFailure>>>, sourc
 
 /// Handle one `Activated` signal: map the shortcut id and dispatch the
 /// `Request` through the shared worker table (same path as IPC on this
-/// thread). Unknown ids drop at debug.
-fn dispatch_activation(bus: &SubscriberBus, state: &DispatchState, id: &str) {
+/// thread). Capture requests take the supersede-then-spawn path
+/// (Replace policy) — spawned as their own task so the portal's select
+/// loop stays responsive through its bounded waits (the capture
+/// context serializes concurrent triggers; latest wins). Unknown ids
+/// drop at debug.
+fn dispatch_activation(
+    capture: &crate::worker::CaptureDispatch,
+    bus: &SubscriberBus,
+    state: &DispatchState,
+    id: &str,
+) {
     match request_for_shortcut_id(id) {
         Some(request) => {
-            let outcome = crate::worker::dispatch(
+            if crate::worker::spawns_capture_worker(&request) {
+                let capture = capture.clone();
+                let bus = bus.clone();
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        crate::worker::dispatch_capture(capture, request, state, bus).await
+                    {
+                        tracing::warn!(error = %e, "portal hotkey capture dispatch failed");
+                    }
+                });
+            } else if let Err(e) = crate::worker::dispatch(
                 &request,
-                &crate::worker::CommandSpawner::with_bus(bus.clone()),
+                &crate::worker::CommandSpawner::with_bus_and_sessions(
+                    bus.clone(),
+                    capture.sessions(),
+                ),
                 state,
                 &mut |ev| bus.broadcast(ev),
-            );
-            if let Err(e) = outcome {
+            ) {
                 tracing::warn!(error = %e, shortcut_id = %id, "portal hotkey dispatch failed");
             }
         }
