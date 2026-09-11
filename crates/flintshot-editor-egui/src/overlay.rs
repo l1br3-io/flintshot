@@ -79,10 +79,12 @@
 //! A compact rail + accept row in a foreground `egui::Area` anchored
 //! to the selection — below its bottom-left, flipped above when the
 //! space below is short, clamped into the viewport (plan decision
-//! 4). Row 1 reuses the editor toolbar's tool chips plus
-//! undo / redo / delete; row 2 holds ✓ accept, ✕ cancel, Save /
-//! Pin / Upload, and the ember Copy primary (Copy is
-//! Enter-equivalent: the spec pins Enter = Copy). The toolbar shows only while a usable
+//! 4). Row 1 walks the shared tool pods (selection · shapes ·
+//! freehand · labels · redact, no capture `+`) plus a history pod
+//! (undo / redo / delete), each its own island; row 2 reads as two
+//! islands: the ✓ / ✕ pair and the outputs (Save / Pin / Upload,
+//! and the ember Copy primary — Copy is Enter-equivalent: the spec
+//! pins Enter = Copy). The toolbar shows only while a usable
 //! selection exists and no fresh region drag runs, and swallows
 //! pointer presses before chrome interception so chip clicks never
 //! reach the dispatcher; the hover cursor and magnifier stand down
@@ -148,7 +150,7 @@ use crate::app::{
 };
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
-use crate::toolbar::{self, flat_tools, ToolbarAction};
+use crate::toolbar::{self, ToolbarAction};
 
 /// Window title + WM class for the overlay viewport. Distinct from
 /// the editor and pin windows so WMs / compositors can route it.
@@ -549,161 +551,178 @@ pub(crate) fn toolbar_anchor(sel: egui::Rect, panel: egui::Rect, size: egui::Vec
     egui::pos2(x, y)
 }
 
-/// The floating toolbar's compact rail row: the shared tool
-/// chips plus undo / redo / delete (plan decision 4 — the editor
-/// rail's chips and glyph language, new layout only). Tool clicks
-/// switch `state.tool` directly, the same editor-rail semantics;
-/// history and delete clicks return as actions for the caller to
-/// replay.
+/// The floating toolbar's compact rail row: the shared
+/// [`toolbar::TOOL_PODS`] walk plus a history pod, each rendered as
+/// its own rounded island (plan decision 4 — the editor rail's
+/// chips, glyphs, and pod grouping; the overlay has no capture
+/// `+`). Tool clicks switch `state.tool` directly, the same
+/// editor-rail semantics; history and delete clicks return as
+/// actions for the caller to replay.
 fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction {
     let mut action = ToolbarAction::None;
-    for spec in flat_tools() {
-        let selected = state.tool == spec.tool;
-        let tooltip = format!("{} · {}", spec.name, spec.key);
-        // Move renders labeled (rail emphasis), matching the editor
-        // rail; the wider chip simply widens the measured toolbar
-        // size that drives `toolbar_anchor`.
-        let resp = if spec.tool == Tool::Move {
-            toolbar::labeled_chip(
-                ui,
-                egui::Id::new(("overlay_tool", spec.key)),
-                tooltip.as_str(),
-                selected,
-                spec.name,
-                spec.glyph,
-                true,
-            )
-        } else {
-            toolbar::chip(
-                ui,
-                egui::Id::new(("overlay_tool", spec.key)),
-                tooltip.as_str(),
-                selected,
-                spec.glyph,
-                true,
-            )
-        };
-        if resp.clicked() {
-            // Core `set_tool` owns the selection lifecycle: leaving
-            // Move drops the persistent selection (same reroute as
-            // the editor rail and the hotkey block).
-            state.set_tool(spec.tool);
+    for pod in toolbar::TOOL_PODS {
+        toolbar::pod_island(ui, |ui| {
+            for spec in pod.tools {
+                let selected = state.tool == spec.tool;
+                let tooltip = format!("{} · {}", spec.name, spec.key);
+                // Move renders labeled (rail emphasis), matching the editor
+                // rail; the wider chip simply widens the measured toolbar
+                // size that drives `toolbar_anchor`.
+                let resp = if spec.tool == Tool::Move {
+                    toolbar::labeled_chip(
+                        ui,
+                        egui::Id::new(("overlay_tool", spec.key)),
+                        tooltip.as_str(),
+                        selected,
+                        spec.name,
+                        spec.glyph,
+                        true,
+                    )
+                } else {
+                    toolbar::chip(
+                        ui,
+                        egui::Id::new(("overlay_tool", spec.key)),
+                        tooltip.as_str(),
+                        selected,
+                        spec.glyph,
+                        true,
+                    )
+                };
+                if resp.clicked() {
+                    // Core `set_tool` owns the selection lifecycle: leaving
+                    // Move drops the persistent selection (same reroute as
+                    // the editor rail and the hotkey block).
+                    state.set_tool(spec.tool);
+                }
+            }
+        });
+        toolbar::pod_gap(ui);
+    }
+    let history = toolbar::pod_island(ui, |ui| {
+        let mut action = ToolbarAction::None;
+        if toolbar::chip(
+            ui,
+            egui::Id::new("overlay_undo"),
+            "Undo · Ctrl+Z",
+            false,
+            toolbar::g_undo,
+            true,
+        )
+        .clicked()
+        {
+            action = ToolbarAction::Undo;
         }
-    }
-    ui.separator();
-    if toolbar::chip(
-        ui,
-        egui::Id::new("overlay_undo"),
-        "Undo · Ctrl+Z",
-        false,
-        toolbar::g_undo,
-        true,
-    )
-    .clicked()
-    {
-        action = ToolbarAction::Undo;
-    }
-    if toolbar::chip(
-        ui,
-        egui::Id::new("overlay_redo"),
-        "Redo · Ctrl+Y",
-        false,
-        toolbar::g_redo,
-        true,
-    )
-    .clicked()
-    {
-        action = ToolbarAction::Redo;
-    }
-    // Enabled iff an annotation is selected (persistent selection,
-    // task 001); disabled reads greyed / hover-only.
-    if toolbar::chip(
-        ui,
-        egui::Id::new("overlay_delete"),
-        "Delete · Del",
-        false,
-        toolbar::g_trash,
-        state.selected_index.is_some(),
-    )
-    .clicked()
-    {
-        action = ToolbarAction::Delete;
+        if toolbar::chip(
+            ui,
+            egui::Id::new("overlay_redo"),
+            "Redo · Ctrl+Y",
+            false,
+            toolbar::g_redo,
+            true,
+        )
+        .clicked()
+        {
+            action = ToolbarAction::Redo;
+        }
+        // Enabled iff an annotation is selected (persistent
+        // selection, task 001); disabled reads greyed / hover-only.
+        if toolbar::chip(
+            ui,
+            egui::Id::new("overlay_delete"),
+            "Delete · Del",
+            false,
+            toolbar::g_trash,
+            state.selected_index.is_some(),
+        )
+        .clicked()
+        {
+            action = ToolbarAction::Delete;
+        }
+        action
+    });
+    if action == ToolbarAction::None {
+        action = history;
     }
     action
 }
 
-/// The floating toolbar's accept row: ✓ accept (Enter semantics) and
-/// ✕ cancel (Esc semantics) lead, then the Save / Pin / Upload
-/// outputs and the ember Copy primary. Copy is Enter-equivalent
-/// (spec: Enter = Copy); the output chips' pipelines are the Task
-/// 006 flows described in the module docs.
+/// The floating toolbar's accept row, read as two islands: the ✓
+/// accept (Enter semantics) / ✕ cancel (Esc semantics) pair, then
+/// the outputs (Save / Pin / Upload and the ember Copy primary).
+/// Copy is Enter-equivalent (spec: Enter = Copy); the output
+/// chips' pipelines are the Task 006 flows described in the module
+/// docs.
 fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>) {
     let mut action = ToolbarAction::None;
     let mut close = None;
-    if toolbar::chip(
-        ui,
-        egui::Id::new("overlay_accept"),
-        "Accept · Enter",
-        false,
-        toolbar::g_check,
-        true,
-    )
-    .clicked()
-    {
-        close = Some(OverlayClose::Accept);
-    }
-    if toolbar::chip(
-        ui,
-        egui::Id::new("overlay_cancel"),
-        "Cancel · Esc",
-        false,
-        toolbar::g_x,
-        true,
-    )
-    .clicked()
-    {
-        close = Some(OverlayClose::Cancel);
-    }
-    ui.separator();
-    if toolbar::chip(
-        ui,
-        egui::Id::new("overlay_save"),
-        "Save · Ctrl+S",
-        false,
-        toolbar::g_save,
-        true,
-    )
-    .clicked()
-    {
-        action = ToolbarAction::Save;
-    }
-    if toolbar::chip(
-        ui,
-        egui::Id::new("overlay_pin"),
-        "Pin to desktop",
-        false,
-        toolbar::g_pin,
-        true,
-    )
-    .clicked()
-    {
-        action = ToolbarAction::Pin;
-    }
-    if toolbar::chip(
-        ui,
-        egui::Id::new("overlay_upload"),
-        "Upload",
-        false,
-        toolbar::g_upload,
-        true,
-    )
-    .clicked()
-    {
-        action = ToolbarAction::Upload;
-    }
-    if toolbar::copy_chip(ui, false).clicked() {
-        action = ToolbarAction::Copy;
-    }
+    toolbar::pod_island(ui, |ui| {
+        if toolbar::chip(
+            ui,
+            egui::Id::new("overlay_accept"),
+            "Accept · Enter",
+            false,
+            toolbar::g_check,
+            true,
+        )
+        .clicked()
+        {
+            close = Some(OverlayClose::Accept);
+        }
+        if toolbar::chip(
+            ui,
+            egui::Id::new("overlay_cancel"),
+            "Cancel · Esc",
+            false,
+            toolbar::g_x,
+            true,
+        )
+        .clicked()
+        {
+            close = Some(OverlayClose::Cancel);
+        }
+    });
+    toolbar::pod_gap(ui);
+    toolbar::pod_island(ui, |ui| {
+        if toolbar::chip(
+            ui,
+            egui::Id::new("overlay_save"),
+            "Save · Ctrl+S",
+            false,
+            toolbar::g_save,
+            true,
+        )
+        .clicked()
+        {
+            action = ToolbarAction::Save;
+        }
+        if toolbar::chip(
+            ui,
+            egui::Id::new("overlay_pin"),
+            "Pin to desktop",
+            false,
+            toolbar::g_pin,
+            true,
+        )
+        .clicked()
+        {
+            action = ToolbarAction::Pin;
+        }
+        if toolbar::chip(
+            ui,
+            egui::Id::new("overlay_upload"),
+            "Upload",
+            false,
+            toolbar::g_upload,
+            true,
+        )
+        .clicked()
+        {
+            action = ToolbarAction::Upload;
+        }
+        if toolbar::copy_chip(ui, false).clicked() {
+            action = ToolbarAction::Copy;
+        }
+    });
     (action, close)
 }
 
@@ -1130,11 +1149,12 @@ impl OverlayApp {
     /// live region through resize / move gestures. The area's rect is
     /// cached for the next frame's press / cursor / magnifier guards.
     ///
-    /// Layout (plan decision 4: compact rail + accept row, reused
-    /// chips, new layout only): row 1 is the tool chips plus
-    /// undo / redo / delete; row 2 is ✓ accept (Enter semantics),
-    /// ✕ cancel (Esc semantics), Save / Pin / Upload, and the ember
-    /// Copy primary. Copy is Enter-equivalent (spec: Enter = Copy).
+    /// Layout (plan decision 4: compact rail + accept row, the
+    /// editor rail's pod islands): row 1 walks the shared tool pods
+    /// plus a history pod; row 2 reads as two islands — ✓ accept
+    /// (Enter semantics) / ✕ cancel (Esc semantics), then the
+    /// outputs Save / Pin / Upload and the ember Copy primary. Copy
+    /// is Enter-equivalent (spec: Enter = Copy).
     fn show_toolbar(
         &mut self,
         ctx: &Context,
@@ -2426,6 +2446,216 @@ mod tests {
         );
     }
 
+    // --- Floating toolbar pods (toolbar-groups Task 002) ---
+
+    /// Horizontal gap between two chip rects laid out left to right.
+    fn chip_gap(a: egui::Rect, b: egui::Rect) -> f32 {
+        b.min.x - a.max.x
+    }
+
+    /// Whether two chip rects share a centre line (the same-row
+    /// guarantee; layout math is deterministic, so a tight epsilon
+    /// suffices).
+    fn same_row(a: egui::Rect, b: egui::Rect) -> bool {
+        (a.center().y - b.center().y).abs() < 0.01
+    }
+
+    /// Count the pod-island fills a frame painted: rounded
+    /// `GRAPHITE_800` rects at the theme's pod corner radius — the
+    /// visual signature of [`toolbar::pod_island`].
+    fn island_count(output: &egui::FullOutput) -> usize {
+        output
+            .shapes
+            .iter()
+            .filter(|cs| match &cs.shape {
+                egui::Shape::Rect(egui::epaint::RectShape {
+                    fill,
+                    corner_radius,
+                    ..
+                }) => {
+                    *fill == crate::theme::GRAPHITE_800
+                        && *corner_radius == egui::CornerRadius::same(crate::theme::POD_CORNER)
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    /// Lay the overlay rail row out once and return its chip rects
+    /// in visual order, derived from the shared pod table (tool
+    /// pods, then the history pod's undo / redo / delete).
+    fn overlay_rail_chip_rects(state: &mut EditorState) -> (Vec<egui::Rect>, usize) {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.horizontal(|ui| {
+                let _ = overlay_rail_row(ui, state);
+            });
+        });
+        let rects = toolbar::TOOL_PODS
+            .iter()
+            .flat_map(|p| p.tools.iter())
+            .map(|spec| {
+                ctx.read_response(egui::Id::new(("overlay_tool", spec.key)))
+                    .expect("rail layout registers every tool chip")
+                    .rect
+            })
+            .chain(
+                ["overlay_undo", "overlay_redo", "overlay_delete"].map(|id| {
+                    ctx.read_response(egui::Id::new(id))
+                        .expect("rail layout registers the history pod")
+                        .rect
+                }),
+            )
+            .collect();
+        (rects, island_count(&output))
+    }
+
+    #[test]
+    fn overlay_rail_groups_pods_as_islands() {
+        let (rects, islands) = overlay_rail_chip_rects(&mut blank_state(64, 64));
+        // Five tool pods + the history pod, each one painted island.
+        assert_eq!(
+            islands,
+            toolbar::TOOL_PODS.len() + 1,
+            "every pod renders as its own GRAPHITE_800 island"
+        );
+        // One row: shared centre line, strictly left to right.
+        for w in rects.windows(2) {
+            assert!(same_row(w[0], w[1]), "chips share a row");
+            assert!(w[0].max.x < w[1].min.x, "chips run left to right");
+        }
+        // Pod boundaries sit after each pod's last chip (the history
+        // pod trails the tool pods).
+        let mut sizes: Vec<usize> = toolbar::TOOL_PODS.iter().map(|p| p.tools.len()).collect();
+        sizes.push(3);
+        let mut boundary = vec![false; rects.len() - 1];
+        let mut i = 0;
+        for &n in &sizes {
+            i += n;
+            if i < rects.len() {
+                boundary[i - 1] = true;
+            }
+        }
+        let mut intra = Vec::new();
+        let mut inter = Vec::new();
+        for (i, b) in boundary.iter().enumerate() {
+            let gap = chip_gap(rects[i], rects[i + 1]);
+            if *b {
+                inter.push(gap);
+            } else {
+                intra.push(gap);
+            }
+        }
+        assert!(!intra.is_empty() && !inter.is_empty());
+        let max_intra = intra.iter().copied().fold(f32::MIN, f32::max);
+        let min_inter = inter.iter().copied().fold(f32::MAX, f32::min);
+        let max_inter = inter.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            min_inter > max_intra + 4.0,
+            "island gaps ({min_inter}..{max_inter}) must dominate intra-pod gaps (≤{max_intra})"
+        );
+        // Every pod boundary shares the one island rhythm — a stray
+        // separator or missing pad at one boundary would stand out.
+        assert!(
+            max_inter - min_inter <= 2.0,
+            "uniform island gaps, got {inter:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_accept_row_reads_as_two_islands() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.horizontal(|ui| {
+                let _ = overlay_accept_row(ui);
+            });
+        });
+        assert_eq!(
+            island_count(&output),
+            2,
+            "the accept row paints exactly two islands: ✓/✕ and outputs"
+        );
+        let rect = |id: &str| {
+            ctx.read_response(egui::Id::new(id))
+                .expect("accept row registers its chips")
+                .rect
+        };
+        let accept = rect("overlay_accept");
+        let cancel = rect("overlay_cancel");
+        let save = rect("overlay_save");
+        let pin = rect("overlay_pin");
+        let upload = rect("overlay_upload");
+        let copy = ctx
+            .read_response(egui::Id::new("copy_action"))
+            .expect("the ember Copy primary stays in the outputs island")
+            .rect;
+        // One row, Copy trailing the outputs.
+        for w in [accept, cancel, save, pin, upload, copy].windows(2) {
+            assert!(same_row(w[0], w[1]), "chips share a row");
+            assert!(w[0].max.x < w[1].min.x, "chips run left to right");
+        }
+        // The ✓/✕ pair is one island; the outputs island starts one
+        // pod gap later (island pads + POD_GAP make the boundary at
+        // least double the intra-island chip spacing).
+        let tight = chip_gap(accept, cancel);
+        let split = chip_gap(cancel, save);
+        assert!(
+            split >= 20.0 && split > tight + 4.0,
+            "two islands: ✓→✕ gap {tight} must be tight, ✕→Save gap {split} must be a pod gap"
+        );
+        assert!(
+            chip_gap(upload, copy) <= tight + 2.0,
+            "outputs sit tight inside their island, Copy last"
+        );
+    }
+
+    /// Click-through parity for the pod-walked rail: a mid-rail chip
+    /// (Pencil, inside the freehand pod) still switches tools with
+    /// the editor rail's semantics.
+    #[test]
+    fn overlay_tool_chip_click_switches_tool() {
+        let ctx = egui::Context::default();
+        let mut state = blank_state(64, 64);
+        state.tool = Tool::Select;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.horizontal(|ui| {
+                let _ = overlay_rail_row(ui, &mut state);
+            });
+        });
+        let pen = ctx
+            .read_response(egui::Id::new(("overlay_tool", "P")))
+            .expect("pass 1 registered the overlay Pencil chip");
+        let at = pen.rect.center();
+        let click = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(click, |ui| {
+            ui.horizontal(|ui| {
+                let _ = overlay_rail_row(ui, &mut state);
+            });
+        });
+        assert_eq!(
+            state.tool,
+            Tool::Pencil,
+            "the pod walk must keep chip clicks switching tools"
+        );
+    }
+
     // --- Annotation confinement (Task 005) ---
 
     #[test]
@@ -2781,11 +3011,16 @@ mod tests {
 
     /// Drive the overlay rail row through a synthetic context: pass 1
     /// lays out (registering the chip rects by id), pass 2 clicks the
-    /// Delete chip's centre. Returns the row's collected action.
+    /// Delete chip's centre. Returns the row's collected action. The
+    /// `ui.horizontal` wrap mirrors `show_toolbar`'s row layout —
+    /// driving the row at the root ui directly would stack the pod
+    /// islands vertically.
     fn overlay_action_after_delete_click(state: &mut EditorState) -> ToolbarAction {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = overlay_rail_row(ui, state);
+            ui.horizontal(|ui| {
+                let _ = overlay_rail_row(ui, state);
+            });
         });
         let del = ctx
             .read_response(egui::Id::new("overlay_delete"))
@@ -2811,7 +3046,9 @@ mod tests {
         };
         let mut action = ToolbarAction::None;
         let _ = ctx.run_ui(click, |ui| {
-            action = overlay_rail_row(ui, state);
+            ui.horizontal(|ui| {
+                action = overlay_rail_row(ui, state);
+            });
         });
         action
     }
