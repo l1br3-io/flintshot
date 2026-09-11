@@ -148,7 +148,7 @@ use crate::app::{
 };
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
-use crate::toolbar::{self, ToolbarAction, TOOLS};
+use crate::toolbar::{self, flat_tools, ToolbarAction};
 
 /// Window title + WM class for the overlay viewport. Distinct from
 /// the editor and pin windows so WMs / compositors can route it.
@@ -557,7 +557,7 @@ pub(crate) fn toolbar_anchor(sel: egui::Rect, panel: egui::Rect, size: egui::Vec
 /// replay.
 fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction {
     let mut action = ToolbarAction::None;
-    for spec in TOOLS {
+    for spec in flat_tools() {
         let selected = state.tool == spec.tool;
         let tooltip = format!("{} · {}", spec.name, spec.key);
         // Move renders labeled (rail emphasis), matching the editor
