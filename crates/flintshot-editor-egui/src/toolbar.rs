@@ -83,10 +83,9 @@ pub(crate) struct ToolSpec {
 /// editor lands on after every commit — the rail teaches the
 /// tool's existence without a tooltip.
 ///
-/// The pod arrays below are the single source of truth; the editor
-/// rail walks [`TOOL_PODS`] and the overlay's floating rail walks
-/// [`flat_tools`] until it adopts the pods (toolbar-groups task
-/// 002).
+/// The pod arrays below are the single source of truth; both the
+/// editor rail and the overlay's floating tool row walk
+/// [`TOOL_PODS`].
 const SELECTION_POD: &[ToolSpec] = &[
     ToolSpec {
         tool: Tool::Move,
@@ -204,13 +203,6 @@ pub(crate) const TOOL_PODS: &[ToolPod] = &[
     },
 ];
 
-/// The pod table walked flat, rail order — the data source for the
-/// overlay's floating rail until it adopts the pods itself
-/// (toolbar-groups task 002).
-pub(crate) fn flat_tools() -> impl Iterator<Item = &'static ToolSpec> {
-    TOOL_PODS.iter().flat_map(|pod| pod.tools.iter())
-}
-
 /// Which tools the rail may switch to this frame. Shells compute
 /// it from their own state (the editor's selection-first phase, a
 /// future overlay mode); the rail renders it — a gated-off chip
@@ -291,8 +283,9 @@ pub(crate) fn pod_island<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut eg
 
 /// The gap between adjacent rail islands (on top of the ambient
 /// item spacing) — wider than the intra-pod chip spacing so pod
-/// boundaries dominate.
-fn pod_gap(ui: &mut egui::Ui) {
+/// boundaries dominate. Shared by the editor rail and the overlay's
+/// floating rows.
+pub(crate) fn pod_gap(ui: &mut egui::Ui) {
     ui.add_space(theme::POD_GAP);
 }
 
@@ -1196,9 +1189,15 @@ fn g_plus(p: &egui::Painter, r: egui::Rect, c: Color32) {
 mod tests {
     use super::*;
 
+    /// The pod table walked flat, rail order — the shape both rails
+    /// render.
+    fn flat() -> Vec<&'static ToolSpec> {
+        TOOL_PODS.iter().flat_map(|pod| pod.tools.iter()).collect()
+    }
+
     #[test]
     fn tools_cover_every_variant_with_unique_keys() {
-        let flat: Vec<&ToolSpec> = flat_tools().collect();
+        let flat = flat();
         assert_eq!(flat.len(), 11);
         let mut keys: Vec<&str> = flat.iter().map(|t| t.key).collect();
         keys.sort_unstable();
@@ -1275,7 +1274,7 @@ mod tests {
 
     #[test]
     fn move_leads_the_rail_with_select_second() {
-        let flat: Vec<&ToolSpec> = flat_tools().collect();
+        let flat = flat();
         assert!(
             flat.first().is_some_and(|t| t.tool == Tool::Move),
             "Move must be the first rail chip"
@@ -1296,7 +1295,7 @@ mod tests {
 
     #[test]
     fn every_tool_has_a_nonempty_hint() {
-        for spec in flat_tools() {
+        for spec in flat() {
             assert!(!tool_hint(spec.tool).is_empty());
         }
         // The non_exhaustive wildcard arm must hint too.
