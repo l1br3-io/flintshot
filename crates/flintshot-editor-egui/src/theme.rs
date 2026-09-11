@@ -12,6 +12,10 @@ use egui::{Color32, Context, CornerRadius, Stroke};
 
 /// Panel background (graphite-900).
 pub(crate) const GRAPHITE_900: Color32 = Color32::from_rgb(0x15, 0x17, 0x1B);
+/// Pod island fill (graphite-800) — one luminance step off the
+/// panel so a pod reads as a container without competing with its
+/// chips (graphite-700).
+pub(crate) const GRAPHITE_800: Color32 = Color32::from_rgb(0x1C, 0x1E, 0x24);
 /// Widget fill (graphite-700).
 pub(crate) const GRAPHITE_700: Color32 = Color32::from_rgb(0x23, 0x26, 0x2C);
 /// Hairlines, borders, hover fill (graphite-500).
@@ -70,6 +74,17 @@ pub(crate) const SWATCHES: [Color32; 7] = [
 
 /// Stroke-width presets behind the S / M / L dots.
 pub(crate) const STROKE_PRESETS: [f32; 3] = [2.0, 4.0, 8.0];
+
+/// Corner radius of a pod island, logical px — a step rounder than
+/// a chip (6) so the container/chip hierarchy stays readable.
+pub(crate) const POD_CORNER: u8 = 8;
+/// Inner padding between a pod island's edge and its chips, logical
+/// px (i8 to match egui's `Margin`).
+pub(crate) const POD_PAD: i8 = 3;
+/// Extra gap between adjacent pod islands, logical px — added on
+/// top of the ambient item spacing so pod boundaries dominate the
+/// intra-pod chip spacing (5 px).
+pub(crate) const POD_GAP: f32 = 10.0;
 
 /// Apply the flintshot theme to the editor's [`Context`]. Called
 /// once at app construction; the styling persists for the window's
@@ -167,8 +182,32 @@ mod tests {
     fn accent_and_fills_stay_distinct() {
         // Ember must never collide with a graphite or text token, or
         // the "only color on the rail" contract breaks.
-        for grey in [GRAPHITE_900, GRAPHITE_700, GRAPHITE_500, CHALK, SLATE, INK] {
+        for grey in [
+            GRAPHITE_900,
+            GRAPHITE_800,
+            GRAPHITE_700,
+            GRAPHITE_500,
+            CHALK,
+            SLATE,
+            INK,
+        ] {
             assert_ne!(EMBER, grey);
         }
+    }
+
+    #[test]
+    fn pod_island_fill_steps_between_panel_and_chip_fills() {
+        // The island must read as a step off the panel *and* stay
+        // darker than its chips, or the container vanishes (900) or
+        // swallows the chips (700).
+        let lum = |c: Color32| u32::from(c.r()) + u32::from(c.g()) + u32::from(c.b());
+        assert!(
+            lum(GRAPHITE_900) < lum(GRAPHITE_800),
+            "island must lift off the panel fill"
+        );
+        assert!(
+            lum(GRAPHITE_800) < lum(GRAPHITE_700),
+            "island must recede behind its chips"
+        );
     }
 }

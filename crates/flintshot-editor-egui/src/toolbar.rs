@@ -1,12 +1,14 @@
 //! The editor toolbar: a two-row instrument panel.
 //!
-//! **Rail** (top, stable across tools): the tool chips,
-//! undo / redo / delete, and the output actions — Save, Pin, Upload,
-//! and the ember Copy primary. **Bay** (bottom, per-tool): only the
-//! controls the active tool can use, plus a contextual hint on the
-//! right.
+//! **Rail** (top, stable across tools): semantically grouped pods,
+//! each a rounded graphite island separated by gaps — capture `+` ·
+//! selection (Move, Select) · shapes · freehand · labels · redact ·
+//! history (undo / redo / delete) · outputs (Save, Pin, Upload, and
+//! the ember Copy primary, right-aligned). **Bay** (bottom,
+//! per-tool): only the controls the active tool can use, plus a
+//! contextual hint on the right.
 //!
-//! The chips, glyphs, and `ToolSpec` table are shared with the Phase
+//! The chips, glyphs, and `ToolPod` table are shared with the Phase
 //! 5 overlay's floating toolbar (plan decision 4: reuse the chips,
 //! new layout only) — hence `pub(crate)` on the primitives below.
 //!
@@ -75,11 +77,17 @@ pub(crate) struct ToolSpec {
     pub(crate) glyph: Glyph,
 }
 
-/// The tool chips in rail order. Shared with the overlay's
-/// floating rail. Move leads (labeled) because it is the resting
-/// tool the editor lands on after every commit — the rail teaches
-/// the tool's existence without a tooltip.
-pub(crate) const TOOLS: &[ToolSpec] = &[
+/// The tool chips in rail order, partitioned into pods (spec
+/// `toolbar-groups`): selection · shapes · freehand · labels ·
+/// redact. Move leads (labeled) because it is the resting tool the
+/// editor lands on after every commit — the rail teaches the
+/// tool's existence without a tooltip.
+///
+/// The pod arrays below are the single source of truth; the editor
+/// rail walks [`TOOL_PODS`] and the overlay's floating rail walks
+/// [`flat_tools`] until it adopts the pods (toolbar-groups task
+/// 002).
+const SELECTION_POD: &[ToolSpec] = &[
     ToolSpec {
         tool: Tool::Move,
         name: "Move",
@@ -92,6 +100,9 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
         key: "S",
         glyph: g_select,
     },
+];
+
+const SHAPES_POD: &[ToolSpec] = &[
     ToolSpec {
         tool: Tool::Rect,
         name: "Rectangle",
@@ -105,23 +116,20 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
         glyph: g_ellipse,
     },
     ToolSpec {
-        tool: Tool::Arrow,
-        name: "Arrow",
-        key: "A",
-        glyph: g_arrow,
-    },
-    ToolSpec {
         tool: Tool::Line,
         name: "Line",
         key: "L",
         glyph: g_line,
     },
     ToolSpec {
-        tool: Tool::Marker,
-        name: "Marker",
-        key: "M",
-        glyph: g_marker,
+        tool: Tool::Arrow,
+        name: "Arrow",
+        key: "A",
+        glyph: g_arrow,
     },
+];
+
+const FREEHAND_POD: &[ToolSpec] = &[
     ToolSpec {
         tool: Tool::Pencil,
         name: "Pencil",
@@ -129,16 +137,19 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
         glyph: g_pencil,
     },
     ToolSpec {
+        tool: Tool::Marker,
+        name: "Marker",
+        key: "M",
+        glyph: g_marker,
+    },
+];
+
+const LABELS_POD: &[ToolSpec] = &[
+    ToolSpec {
         tool: Tool::Text,
         name: "Text",
         key: "T",
         glyph: g_text,
-    },
-    ToolSpec {
-        tool: Tool::Blur,
-        name: "Blur",
-        key: "B",
-        glyph: g_blur,
     },
     ToolSpec {
         tool: Tool::Number,
@@ -147,6 +158,58 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
         glyph: g_number,
     },
 ];
+
+const REDACT_POD: &[ToolSpec] = &[ToolSpec {
+    tool: Tool::Blur,
+    name: "Blur",
+    key: "B",
+    glyph: g_blur,
+}];
+
+/// One rail pod: a semantic group of tool chips rendered as a
+/// single island. Shared by the editor rail and the overlay's
+/// floating tool row.
+pub(crate) struct ToolPod {
+    /// Group name (debugging + test messages only — pods carry no
+    /// label in the UI). Rendering never reads it, hence the allow:
+    /// the spec (`toolbar-groups` § Code style) mandates the field
+    /// for diagnostics.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) name: &'static str,
+    /// Chips in pod order.
+    pub(crate) tools: &'static [ToolSpec],
+}
+
+/// The tool pods, rail order. The unit test pins the partition.
+pub(crate) const TOOL_PODS: &[ToolPod] = &[
+    ToolPod {
+        name: "selection",
+        tools: SELECTION_POD,
+    },
+    ToolPod {
+        name: "shapes",
+        tools: SHAPES_POD,
+    },
+    ToolPod {
+        name: "freehand",
+        tools: FREEHAND_POD,
+    },
+    ToolPod {
+        name: "labels",
+        tools: LABELS_POD,
+    },
+    ToolPod {
+        name: "redact",
+        tools: REDACT_POD,
+    },
+];
+
+/// The pod table walked flat, rail order — the data source for the
+/// overlay's floating rail until it adopts the pods itself
+/// (toolbar-groups task 002).
+pub(crate) fn flat_tools() -> impl Iterator<Item = &'static ToolSpec> {
+    TOOL_PODS.iter().flat_map(|pod| pod.tools.iter())
+}
 
 /// Which tools the rail may switch to this frame. Shells compute
 /// it from their own state (the editor's selection-first phase, a
@@ -206,6 +269,33 @@ pub(crate) fn show(
 // Rail
 // ------------------------------------------------------------------
 
+/// Wrap a pod's chips in a rounded graphite island — the grouping
+/// container shared by the editor rail and the overlay's floating
+/// tool row. The inner layout is pinned left-to-right so the helper
+/// works inside the outputs island's right-to-left anchor layout
+/// too.
+pub(crate) fn pod_island<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(theme::GRAPHITE_800)
+        .corner_radius(CornerRadius::same(theme::POD_CORNER))
+        .inner_margin(egui::Margin::same(theme::POD_PAD))
+        .show(ui, |ui| {
+            ui.with_layout(
+                egui::Layout::left_to_right(egui::Align::Center),
+                add_contents,
+            )
+        })
+        .inner
+        .inner
+}
+
+/// The gap between adjacent rail islands (on top of the ambient
+/// item spacing) — wider than the intra-pod chip spacing so pod
+/// boundaries dominate.
+fn pod_gap(ui: &mut egui::Ui) {
+    ui.add_space(theme::POD_GAP);
+}
+
 fn draw_rail(
     ui: &mut egui::Ui,
     state: &mut EditorState,
@@ -217,85 +307,96 @@ fn draw_rail(
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let mut action = new_capture_chip(ui);
-                ui.separator();
-                for spec in TOOLS {
-                    let enabled = gate.contains(spec.tool);
-                    let selected = state.tool == spec.tool;
-                    let tooltip = if enabled {
-                        format!("{} · {}", spec.name, spec.key)
-                    } else {
-                        format!("{} · {} · {LOCK_CLAUSE}", spec.name, spec.key)
-                    };
-                    // Move renders labeled (rail emphasis); ids stay
-                    // key-derived so tooltips and clicks are unchanged.
-                    let resp = if spec.tool == Tool::Move {
-                        labeled_chip(
-                            ui,
-                            egui::Id::new(("tool", spec.key)),
-                            &tooltip,
-                            selected,
-                            spec.name,
-                            spec.glyph,
-                            enabled,
-                        )
-                    } else {
-                        chip(
-                            ui,
-                            egui::Id::new(("tool", spec.key)),
-                            &tooltip,
-                            selected,
-                            spec.glyph,
-                            enabled,
-                        )
-                    };
-                    if resp.clicked() {
-                        // Core `set_tool` owns the "the selection is
-                        // Move-tool chrome" invariant: leaving Move
-                        // drops the persistent selection.
-                        state.set_tool(spec.tool);
+                let mut action = pod_island(ui, new_capture_chip);
+                pod_gap(ui);
+                for pod in TOOL_PODS {
+                    pod_island(ui, |ui| {
+                        for spec in pod.tools {
+                            let enabled = gate.contains(spec.tool);
+                            let selected = state.tool == spec.tool;
+                            let tooltip = if enabled {
+                                format!("{} · {}", spec.name, spec.key)
+                            } else {
+                                format!("{} · {} · {LOCK_CLAUSE}", spec.name, spec.key)
+                            };
+                            // Move renders labeled (rail emphasis); ids stay
+                            // key-derived so tooltips and clicks are unchanged.
+                            let resp = if spec.tool == Tool::Move {
+                                labeled_chip(
+                                    ui,
+                                    egui::Id::new(("tool", spec.key)),
+                                    &tooltip,
+                                    selected,
+                                    spec.name,
+                                    spec.glyph,
+                                    enabled,
+                                )
+                            } else {
+                                chip(
+                                    ui,
+                                    egui::Id::new(("tool", spec.key)),
+                                    &tooltip,
+                                    selected,
+                                    spec.glyph,
+                                    enabled,
+                                )
+                            };
+                            if resp.clicked() {
+                                // Core `set_tool` owns the "the selection is
+                                // Move-tool chrome" invariant: leaving Move
+                                // drops the persistent selection.
+                                state.set_tool(spec.tool);
+                            }
+                        }
+                    });
+                    pod_gap(ui);
+                }
+                let history = pod_island(ui, |ui| {
+                    let mut action = ToolbarAction::None;
+                    if chip(
+                        ui,
+                        egui::Id::new("undo"),
+                        "Undo · Ctrl+Z",
+                        false,
+                        g_undo,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        action = ToolbarAction::Undo;
                     }
-                }
-                ui.separator();
-                if chip(
-                    ui,
-                    egui::Id::new("undo"),
-                    "Undo · Ctrl+Z",
-                    false,
-                    g_undo,
-                    true,
-                )
-                .clicked()
-                {
-                    action = ToolbarAction::Undo;
-                }
-                if chip(
-                    ui,
-                    egui::Id::new("redo"),
-                    "Redo · Ctrl+Y",
-                    false,
-                    g_redo,
-                    true,
-                )
-                .clicked()
-                {
-                    action = ToolbarAction::Redo;
-                }
-                // Enabled iff an annotation is selected (persistent
-                // selection, task 001); disabled reads greyed /
-                // hover-only via the same `enabled` path the locked
-                // tool chips use.
-                if chip(
-                    ui,
-                    egui::Id::new("delete"),
-                    "Delete · Del",
-                    false,
-                    g_trash,
-                    state.selected_index.is_some(),
-                )
-                .clicked()
-                {
-                    action = ToolbarAction::Delete;
+                    if chip(
+                        ui,
+                        egui::Id::new("redo"),
+                        "Redo · Ctrl+Y",
+                        false,
+                        g_redo,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        action = ToolbarAction::Redo;
+                    }
+                    // Enabled iff an annotation is selected (persistent
+                    // selection, task 001); disabled reads greyed /
+                    // hover-only via the same `enabled` path the locked
+                    // tool chips use.
+                    if chip(
+                        ui,
+                        egui::Id::new("delete"),
+                        "Delete · Del",
+                        false,
+                        g_trash,
+                        state.selected_index.is_some(),
+                    )
+                    .clicked()
+                    {
+                        action = ToolbarAction::Delete;
+                    }
+                    action
+                });
+                if action == ToolbarAction::None {
+                    action = history;
                 }
                 let output = rail_actions(ui, copied);
                 if action == ToolbarAction::None {
@@ -339,43 +440,47 @@ fn new_capture_chip(ui: &mut egui::Ui) -> ToolbarAction {
     action
 }
 
-/// Output actions, right-aligned: Save / Pin / Upload as quiet icon
-/// chips, Copy as the ember primary (the dominant terminal action
-/// for screenshot flows). On a successful copy the glyph morphs
-/// sheet→check and the label reads "Copied".
+/// Output actions as the right-aligned outputs island: Save / Pin /
+/// Upload as quiet icon chips, Copy as the ember primary (the
+/// dominant terminal action for screenshot flows). The right-to-
+/// left anchor layout only places the island; inside it the chips
+/// run left-to-right in visual order. On a successful copy the
+/// glyph morphs sheet→check and the label reads "Copied".
 fn rail_actions(ui: &mut egui::Ui, copied: bool) -> ToolbarAction {
     let mut action = ToolbarAction::None;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if copy_chip(ui, copied).clicked() {
-            action = ToolbarAction::Copy;
-        }
-        if chip(ui, egui::Id::new("upload"), "Upload", false, g_upload, true).clicked() {
-            action = ToolbarAction::Upload;
-        }
-        if chip(
-            ui,
-            egui::Id::new("pin"),
-            "Pin to desktop",
-            false,
-            g_pin,
-            true,
-        )
-        .clicked()
-        {
-            action = ToolbarAction::Pin;
-        }
-        if chip(
-            ui,
-            egui::Id::new("save"),
-            "Save · Ctrl+S",
-            false,
-            g_save,
-            true,
-        )
-        .clicked()
-        {
-            action = ToolbarAction::Save;
-        }
+        pod_island(ui, |ui| {
+            if chip(
+                ui,
+                egui::Id::new("save"),
+                "Save · Ctrl+S",
+                false,
+                g_save,
+                true,
+            )
+            .clicked()
+            {
+                action = ToolbarAction::Save;
+            }
+            if chip(
+                ui,
+                egui::Id::new("pin"),
+                "Pin to desktop",
+                false,
+                g_pin,
+                true,
+            )
+            .clicked()
+            {
+                action = ToolbarAction::Pin;
+            }
+            if chip(ui, egui::Id::new("upload"), "Upload", false, g_upload, true).clicked() {
+                action = ToolbarAction::Upload;
+            }
+            if copy_chip(ui, copied).clicked() {
+                action = ToolbarAction::Copy;
+            }
+        });
     });
     action
 }
@@ -1093,11 +1198,12 @@ mod tests {
 
     #[test]
     fn tools_cover_every_variant_with_unique_keys() {
-        assert_eq!(TOOLS.len(), 11);
-        let mut keys: Vec<&str> = TOOLS.iter().map(|t| t.key).collect();
+        let flat: Vec<&ToolSpec> = flat_tools().collect();
+        assert_eq!(flat.len(), 11);
+        let mut keys: Vec<&str> = flat.iter().map(|t| t.key).collect();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(keys.len(), TOOLS.len());
+        assert_eq!(keys.len(), flat.len());
         for tool in [
             Tool::Select,
             Tool::Move,
@@ -1112,23 +1218,73 @@ mod tests {
             Tool::Number,
         ] {
             assert!(
-                TOOLS.iter().any(|t| t.tool == tool),
+                flat.iter().any(|t| t.tool == tool),
                 "missing rail chip for {tool:?}"
             );
         }
     }
 
     #[test]
+    fn tool_pods_partition_every_variant_in_spec_order() {
+        let expected: &[(&str, &[Tool])] = &[
+            ("selection", &[Tool::Move, Tool::Select]),
+            (
+                "shapes",
+                &[Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow],
+            ),
+            ("freehand", &[Tool::Pencil, Tool::Marker]),
+            ("labels", &[Tool::Text, Tool::Number]),
+            ("redact", &[Tool::Blur]),
+        ];
+        assert_eq!(TOOL_PODS.len(), expected.len());
+        for (pod, (name, tools)) in TOOL_PODS.iter().zip(expected) {
+            assert_eq!(pod.name, *name, "pod order is fixed by the spec");
+            assert!(!pod.tools.is_empty(), "pod {name} must not be empty");
+            let actual: Vec<Tool> = pod.tools.iter().map(|t| t.tool).collect();
+            assert_eq!(actual, *tools, "pod {name} content is fixed by the spec");
+        }
+        // Stronger than "all present": a variant split across or
+        // duplicated in pods must fail.
+        for tool in [
+            Tool::Select,
+            Tool::Move,
+            Tool::Rect,
+            Tool::Ellipse,
+            Tool::Line,
+            Tool::Arrow,
+            Tool::Marker,
+            Tool::Pencil,
+            Tool::Text,
+            Tool::Blur,
+            Tool::Number,
+        ] {
+            let hits = TOOL_PODS
+                .iter()
+                .filter(|p| p.tools.iter().any(|t| t.tool == tool))
+                .count();
+            assert_eq!(hits, 1, "{tool:?} must sit in exactly one pod");
+        }
+        // Move leads and Select seconds overall.
+        let flat: Vec<Tool> = TOOL_PODS
+            .iter()
+            .flat_map(|p| p.tools.iter().map(|t| t.tool))
+            .collect();
+        assert_eq!(flat.first(), Some(&Tool::Move));
+        assert_eq!(flat.get(1), Some(&Tool::Select));
+    }
+
+    #[test]
     fn move_leads_the_rail_with_select_second() {
+        let flat: Vec<&ToolSpec> = flat_tools().collect();
         assert!(
-            TOOLS.first().is_some_and(|t| t.tool == Tool::Move),
+            flat.first().is_some_and(|t| t.tool == Tool::Move),
             "Move must be the first rail chip"
         );
         assert!(
-            TOOLS.get(1).is_some_and(|t| t.tool == Tool::Select),
+            flat.get(1).is_some_and(|t| t.tool == Tool::Select),
             "Select must be the second rail chip"
         );
-        assert_eq!(TOOLS[0].name, "Move", "the label reads Move");
+        assert_eq!(flat[0].name, "Move", "the label reads Move");
     }
 
     #[test]
@@ -1140,7 +1296,7 @@ mod tests {
 
     #[test]
     fn every_tool_has_a_nonempty_hint() {
-        for spec in TOOLS {
+        for spec in flat_tools() {
             assert!(!tool_hint(spec.tool).is_empty());
         }
         // The non_exhaustive wildcard arm must hint too.
