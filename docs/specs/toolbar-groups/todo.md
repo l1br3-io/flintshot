@@ -2,4 +2,4 @@
 
 - [x] 001: Editor rail pods — table, islands, rail rewrite
 - [x] 002: Overlay floating toolbar adopts the pods
-- [ ] 003: Closeout — narrow-width matrix, CHANGELOG, review kit
+- [x] 003: Closeout — narrow-width matrix, CHANGELOG, review kit

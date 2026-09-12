@@ -2446,6 +2446,44 @@ mod tests {
         );
     }
 
+    /// Closeout (toolbar-groups Task 003): the pod-padded rail is far
+    /// wider than the old flat row — the manual matrix's 500 px
+    /// selection on a narrow panel must still land the whole toolbar
+    /// on-panel. The width isn't hardcoded: it is measured from the
+    /// real rail row, so pod-padding growth keeps stressing the
+    /// clamp.
+    #[test]
+    fn toolbar_anchor_keeps_wide_pod_rail_on_panel_beside_narrow_selection() {
+        let (rects, _) = overlay_rail_chip_rects(&mut blank_state(64, 64));
+        let rail_width = rects
+            .iter()
+            .map(|r| r.max.x)
+            .fold(f32::MIN, f32::max)
+            .max(egui::Vec2::ZERO.x);
+        assert!(
+            rail_width > 500.0,
+            "the pod rail is meaningfully wide (measured {rail_width})"
+        );
+        let size = egui::vec2(rail_width, 72.0);
+        let panel = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 800.0));
+        let sel = egui::Rect::from_min_size(egui::pos2(20.0, 620.0), egui::vec2(500.0, 140.0));
+        let at = toolbar_anchor(sel, panel, size);
+        let toolbar = egui::Rect::from_min_size(at, size);
+        assert!(
+            panel.contains_rect(toolbar),
+            "wide pod toolbar {toolbar:?} must stay fully on {panel:?} beside a 500 px selection"
+        );
+        // A panel narrower than the toolbar documents spec OQ2's
+        // answer: no wrap — the clamp pins to the panel's left and
+        // the rail overflows right, not off both edges.
+        let narrow = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 800.0));
+        let at = toolbar_anchor(sel, narrow, size);
+        assert!(
+            (at.x - narrow.min.x).abs() < 0.01,
+            "pinned left, got {at:?}"
+        );
+    }
+
     // --- Floating toolbar pods (toolbar-groups Task 002) ---
 
     /// Horizontal gap between two chip rects laid out left to right.

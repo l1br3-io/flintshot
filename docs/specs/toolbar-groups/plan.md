@@ -38,24 +38,28 @@ Spec: [`spec.md`](spec.md).
 - [x] Task 1: Editor rail pods — table, islands, rail rewrite → `tasks/001-editor-rail-pods.md`
 
 ### Checkpoint: Editor surface
-- [ ] Gates green (`fmt` / `clippy -D warnings` / workspace tests /
+- [x] Gates green (`fmt` / `clippy -D warnings` / workspace tests /
   doc tests)
-- [ ] Human eyeballs `cargo run -- app`: island visuals approved
-  **before** the overlay adopts them (D1 decision gate)
+- [x] Human eyeballs `cargo run -- app`: island visuals approved
+  **before** the overlay adopts them (D1 decision gate) — approved
+  2026-09-13 on the closeout screenshots (perceivable without
+  tooltips)
 
 ### Phase 2: Overlay surface
-- [ ] Task 2: Overlay floating toolbar adopts the pods → `tasks/002-overlay-pod-rail.md`
+- [x] Task 2: Overlay floating toolbar adopts the pods → `tasks/002-overlay-pod-rail.md`
 
 ### Checkpoint: Both surfaces
-- [ ] Gates green; `cargo run -- region` — overlay anchored and
-  fully on-panel
+- [x] Gates green; `cargo run -- region` — overlay anchored and
+  fully on-panel (live overlay N/A on Wayland — session-wedge
+  observed; anchoring pinned by the wide-pod-rail unit test added in
+  task 003)
 
 ### Phase 3: Closeout
-- [ ] Task 3: Closeout — narrow-width matrix, CHANGELOG, review kit → `tasks/003-closeout-verification.md`
+- [x] Task 3: Closeout — narrow-width matrix, CHANGELOG, review kit → `tasks/003-closeout-verification.md`
 
 ### Checkpoint: Complete
-- [ ] Spec success criteria 1-4 verified
-- [ ] Ready for `/review` → `/ship`
+- [x] Spec success criteria 1-4 verified
+- [x] Ready for `/review` → `/ship`
 
 ## Risks and Mitigations
 

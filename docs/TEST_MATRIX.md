@@ -979,8 +979,13 @@ pre-selected).
 - **Wayland `--overlay` is best-effort.** A plain fullscreen window
   may not raise above other windows or grab input on every
   compositor; the warning says so. The default path (config-set
-  overlay) is demoted to the editor window instead — honest UX, not a
-  hidden bug.
+  overlay) is demoted to the editor window instead — honest UX, not
+  a hidden bug. **Observed on COSMIC (L5, 2026-09-13, pre-existing
+  Phase 5 behavior):** an explicit `--overlay` run died ~80 s in
+  with a winit event-loop error and broken Wayland pipe, and one
+  manual run wedged the session hard enough to require a logout —
+  treat the explicit flag on Wayland as debug-only, never in a
+  scripted test pass.
 - **X11 clipboard linger.** After an accept-with-copy the worker
   process stays alive up to 60 s holding the `arboard` handle (X11's
   owner-based clipboard), then exits — `ps` will show it outlive the

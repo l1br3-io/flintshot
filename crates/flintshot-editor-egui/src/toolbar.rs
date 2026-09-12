@@ -1489,4 +1489,192 @@ mod tests {
             "press an annotation and drag to reposition · Del removes"
         );
     }
+
+    // --- Pod island geometry, closeout (toolbar-groups Task 003) ---
+
+    /// Horizontal gap between two chip rects laid out left to right.
+    fn chip_gap(a: egui::Rect, b: egui::Rect) -> f32 {
+        b.min.x - a.max.x
+    }
+
+    /// The pod-island fills a frame painted: rounded `GRAPHITE_800`
+    /// rects at the theme's pod corner radius — the visual signature
+    /// of [`pod_island`].
+    fn island_count(output: &egui::FullOutput) -> usize {
+        output
+            .shapes
+            .iter()
+            .filter(|cs| match &cs.shape {
+                egui::Shape::Rect(egui::epaint::RectShape {
+                    fill,
+                    corner_radius,
+                    ..
+                }) => {
+                    *fill == theme::GRAPHITE_800
+                        && *corner_radius == egui::CornerRadius::same(theme::POD_CORNER)
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    /// Lay the full toolbar out once at a wide viewport and return
+    /// every rail chip rect in visual order (capture `+`, the pod
+    /// walk, history, then the right-aligned outputs island).
+    fn editor_rail_chip_rects(state: &mut EditorState) -> (Vec<egui::Rect>, usize) {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = show(ui, state, false, ToolGate::All);
+        });
+        let rect = |id: egui::Id| {
+            ctx.read_response(id)
+                .unwrap_or_else(|| panic!("rail layout registers {id:?}"))
+                .rect
+        };
+        let mut rects = vec![rect(egui::Id::new("new-capture"))];
+        for spec in flat() {
+            rects.push(rect(egui::Id::new(("tool", spec.key))));
+        }
+        for id in ["undo", "redo", "delete"] {
+            rects.push(rect(egui::Id::new(id)));
+        }
+        for id in ["save", "pin", "upload", "copy_action"] {
+            rects.push(rect(egui::Id::new(id)));
+        }
+        (rects, island_count(&output))
+    }
+
+    /// The "perceivable without tooltips" contract pinned
+    /// geometrically: every pod renders as its own island, and pod
+    /// boundaries dominate the intra-pod chip spacing at a glance.
+    #[test]
+    fn editor_rail_groups_pods_as_islands() {
+        let (rects, islands) = editor_rail_chip_rects(&mut rail_state());
+        // capture `+` + five tool pods + history + outputs.
+        assert_eq!(
+            islands,
+            TOOL_PODS.len() + 3,
+            "every rail pod renders as its own GRAPHITE_800 island"
+        );
+        // One row, strictly left to right across the whole rail.
+        for w in rects.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            assert!(
+                (a.center().y - b.center().y).abs() < 0.01,
+                "rail chips share a row"
+            );
+            assert!(a.max.x <= b.min.x, "rail chips run left to right");
+        }
+        // Pod boundaries: after the capture chip, after each tool
+        // pod's last chip, and after history. Under the synthetic
+        // run's unbounded scroll width the outputs island trails
+        // history at the same pod rhythm (in a real window with
+        // spare width it stretches right — never the reverse).
+        let mut sizes: Vec<usize> = TOOL_PODS.iter().map(|p| p.tools.len()).collect();
+        sizes.push(3);
+        let mut boundary = vec![false; rects.len() - 1];
+        boundary[0] = true;
+        let mut i = 1;
+        for &n in &sizes {
+            i += n;
+            boundary[i - 1] = true;
+        }
+        let mut intra = Vec::new();
+        let mut inter = Vec::new();
+        for (i, b) in boundary.iter().enumerate() {
+            let gap = chip_gap(rects[i], rects[i + 1]);
+            if *b {
+                inter.push(gap);
+            } else {
+                intra.push(gap);
+            }
+        }
+        // capture→selection, four between the tool pods, redact→
+        // history, history→outputs.
+        assert!(!intra.is_empty() && inter.len() == sizes.len() + 1);
+        let max_intra = intra.iter().copied().fold(f32::MIN, f32::max);
+        // The outputs boundary is alignment-dependent (trails history
+        // under unbounded synthetic width, stretches right in a real
+        // window) — rhythm is pinned on the six true pod gaps only.
+        let (outputs_gap, pod_gaps) = inter.split_last().expect("seven inter-pod boundaries");
+        let min_inter = pod_gaps.iter().copied().fold(f32::MAX, f32::min);
+        let max_inter = pod_gaps.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            min_inter > max_intra + 4.0,
+            "island gaps ({min_inter}..{max_inter}, outputs {outputs_gap}) must dominate intra-pod gaps (≤{max_intra})"
+        );
+        assert!(
+            *outputs_gap > max_intra + 4.0,
+            "the outputs boundary reads as an inter-pod gap too ({outputs_gap} vs intra ≤{max_intra})"
+        );
+        assert!(
+            max_inter - min_inter <= 2.0,
+            "uniform island gaps, got {pod_gaps:?}"
+        );
+    }
+
+    /// The ~500 px stress from the spec's manual matrix, pinned
+    /// headlessly: at a viewport narrower than the rail, the
+    /// scroll fallback keeps every control laid out (nothing
+    /// vanishes or overlaps — all reachable by scrolling).
+    #[test]
+    fn editor_rail_narrow_viewport_lays_out_every_control() {
+        let mut state = rail_state();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(500.0, 400.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                let _ = show(ui, &mut state, false, ToolGate::All);
+            },
+        );
+        let rects = {
+            let mut rects = Vec::new();
+            let rect = |id: egui::Id| {
+                ctx.read_response(id)
+                    .unwrap_or_else(|| panic!("narrow rail still registers {id:?}"))
+                    .rect
+            };
+            rects.push(rect(egui::Id::new("new-capture")));
+            for spec in flat() {
+                rects.push(rect(egui::Id::new(("tool", spec.key))));
+            }
+            for id in [
+                "undo",
+                "redo",
+                "delete",
+                "save",
+                "pin",
+                "upload",
+                "copy_action",
+            ] {
+                rects.push(rect(egui::Id::new(id)));
+            }
+            rects
+        };
+        for (i, r) in rects.iter().enumerate() {
+            assert!(
+                r.width() > 0.0 && r.height() > 0.0,
+                "chip {i} keeps a non-degenerate rect at 500 px"
+            );
+        }
+        for w in rects.windows(2) {
+            assert!(
+                w[0].max.x <= w[1].min.x,
+                "no chip overlap at 500 px: {:?} vs {:?}",
+                w[0],
+                w[1]
+            );
+        }
+        let rightmost = rects.iter().map(|r| r.max.x).fold(f32::MIN, f32::max);
+        assert!(
+            rightmost > 500.0,
+            "the rail must overflow a 500 px viewport (scroll fallback engaged); rightmost {rightmost}"
+        );
+    }
 }
