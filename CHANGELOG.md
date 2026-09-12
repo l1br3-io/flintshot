@@ -71,17 +71,19 @@ Categories used below:
 
 ### Changed
 
-- **The editor rail is organized into grouped pods** (spec
-  `docs/specs/toolbar-groups/`): the flat chip row becomes semantic
-  islands — capture `+` · selection (Move, Select) · shapes
-  (Rect, Ellipse, Line, Arrow) · freehand (Pencil, Marker) · labels
-  (Text, Number) · redact (Blur) · history (Undo, Redo, Delete) ·
-  outputs (Save, Pin, Upload, Copy) — each a rounded graphite
-  container one step off the panel, separated by gaps wider than
-  the intra-pod chip spacing. Pure layout: same chips, glyphs,
-  shortcuts, tooltips, and actions; chip behavior is unchanged.
-  (The overlay's floating toolbar adopts the pods in a follow-up
-  task.)
+- **Both toolbars are organized into grouped pods** (spec
+  `docs/specs/toolbar-groups/`): the editor rail's flat chip row and
+  the overlay's floating toolbar become semantic islands — capture
+  `+` (editor only) · selection (Move, Select) · shapes (Rect,
+  Ellipse, Line, Arrow) · freehand (Pencil, Marker) · labels (Text,
+  Number) · redact (Blur) · history (Undo, Redo, Delete) · outputs
+  (Save, Pin, Upload, Copy) — each a rounded graphite container one
+  step off the panel, separated by gaps wider than the intra-pod
+  chip spacing; the overlay's accept row (✓ / ✕ / outputs) reads as
+  two islands. Pure layout: same chips, glyphs, shortcuts,
+  tooltips, and actions; chip behavior is unchanged. The overlay
+  toolbar re-measures and re-anchors per frame, so the wider pod
+  rail still clamps fully on-panel beside narrow selections.
 - `Event::EditorOpened` is now a **real window-open signal**: the
   worker that runs an editor/overlay window reports it just before
   the window opens (one event per actual window — fresh capture,
