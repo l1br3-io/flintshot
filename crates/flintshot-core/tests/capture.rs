@@ -19,6 +19,9 @@
 
 use flintshot_core::{capture_fullscreen, FlintshotError};
 
+#[cfg(target_os = "linux")]
+use flintshot_core::capture::{CaptureOptions, Capturer, PortalScreenshotCapturer};
+
 /// Grab the primary monitor and sanity-check that we got a non-empty
 /// image back. Marked `#[ignore]` so CI doesn't fail on a headless
 /// runner; humans invoke it explicitly per `docs/TEST_MATRIX.md`.
@@ -41,6 +44,42 @@ fn smoke_can_grab_primary() {
     assert!(
         img.width() > 0 && img.height() > 0,
         "captured image had zero dimensions: {}x{}",
+        img.width(),
+        img.height(),
+    );
+}
+
+/// Live portal-backend grab of the primary monitor. Needs a real
+/// session with `xdg-desktop-portal` running (spike B: prompt-free on
+/// COSMIC; other impls may show a dialog — that's data, not failure).
+/// Run it manually per `docs/TEST_MATRIX.md`:
+///
+/// ```sh
+/// cargo test -p flintshot-core --test capture -- --ignored \
+///     portal_smoke_grabs_primary
+/// ```
+#[test]
+#[ignore]
+#[cfg(target_os = "linux")]
+fn portal_smoke_grabs_primary() {
+    let capturer = PortalScreenshotCapturer;
+    if let Err(FlintshotError::Capture { detail }) = capturer.available() {
+        eprintln!("SKIP: portal unavailable ({detail})");
+        return;
+    }
+
+    let img = match capturer.capture_monitor(None, &CaptureOptions::default()) {
+        Ok(img) => img,
+        Err(FlintshotError::Capture { detail }) if detail.contains("cancelled") => {
+            eprintln!("SKIP: portal request was dismissed ({detail})");
+            return;
+        }
+        Err(e) => panic!("portal capture_monitor(None) failed: {e}"),
+    };
+
+    assert!(
+        img.width() > 0 && img.height() > 0,
+        "portal capture had zero dimensions: {}x{}",
         img.width(),
         img.height(),
     );

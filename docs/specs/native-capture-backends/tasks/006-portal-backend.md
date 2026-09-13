@@ -49,3 +49,19 @@ adds them)
   at the subscription site.
 
 **Estimated scope:** Medium (2-3 files)
+
+**Outcome (executed 2026-09-13):** Implemented per Spike B findings.
+zbus 5 blocking: handle-token request path, match rule installed
+before the call, single-Response pump thread (one message then exit —
+avoids a parked thread per grab), 5 s method + 5 s Response budgets
+(`connection::Builder::method_timeout` + `recv_timeout`). Probe =
+name-owner + Introspectable check (2 s ceiling). Code 1 →
+`"cancelled"` substring. URI parse robust to 3-/4-slash forms; file
+read → delete → decode from memory (no leak on any path). Crop:
+single-output passthrough; multi-output derives scale from composite
+size ÷ reported bbox (never `scale_factor()` — COSMIC 3× quirk,
+unit-tested). 12 unit tests + `#[ignore]` live test
+(`portal_smoke_grabs_primary`). Live COSMIC session verified:
+`--backend portal` grab 2560×1440, auto now resolves `portal`,
+`--backend xcap` still overrides, zero `/tmp/screenshot-*` residue
+from our grabs. Cursor gap logged at debug + documented.
