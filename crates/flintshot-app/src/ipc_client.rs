@@ -244,7 +244,7 @@ pub(crate) enum PrepareCaptureOutcome {
 }
 
 /// Ask the daemon at `override_path` (or the default socket) to clear
-/// every flintshot surface — app window, pins, tray — and await the
+/// every flintshot surface — app window, tray — and await the
 /// `CaptureReady` confirmation, bounded by [`PREPARE_REPLY_BOUND`]
 /// (mirrors [`hide_tray_for_capture_to`] with the same
 /// never-fail-the-capture semantics). Version skew: a daemon that

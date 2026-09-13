@@ -87,7 +87,7 @@ pub struct CommandSpawner {
     /// Bus the reaper broadcasts `SessionEnded` on. `None` in tests
     /// and no-bus call sites (plain `Default`).
     bus: Option<crate::ipc_server::SubscriberBus>,
-    /// Registry capture/pin workers register in. `None` keeps the
+    /// Registry capture workers register in. `None` keeps the
     /// old bus-only behavior (tests, pre-wiring call sites).
     sessions: Option<Arc<CaptureSessions>>,
 }
@@ -429,7 +429,7 @@ pub fn spawns_capture_worker(request: &Request) -> bool {
 const SUPERSEDE_POLL: Duration = Duration::from_millis(25);
 
 /// The daemon-wide capture dispatch context: the session registry
-/// every capture/pin worker registers in, plus the mutex that makes
+/// every capture worker registers in, plus the mutex that makes
 /// **supersede-then-spawn** one atomic unit across every entry point
 /// (IPC server, X11 hotkeys, portal hotkeys). Cloneable and
 /// thread-safe; designed alongside `sessions.rs`.
@@ -731,7 +731,6 @@ mod tests {
         }
         let others = [
             vec!["app"],
-            vec!["pin", "/tmp/x.png"],
             vec!["open", "/tmp/x.png"],
             vec!["upload", "/tmp/x.png"],
             vec![],

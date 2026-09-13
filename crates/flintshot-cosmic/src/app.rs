@@ -3,8 +3,8 @@
 //! This is the Task 7 UI layer, extended in Task 8 with a live event
 //! stream. It builds a [`cosmic::Application`] that shows a panel
 //! button; clicking it opens a popup mirroring the tray menu —
-//! *Capture region*, *Capture fullscreen*, per-monitor entries, *Pin
-//! last*, *Open last*, *Open config*, *Quit*. Menu clicks are resolved
+//! *Capture region*, *Capture fullscreen*, per-monitor entries,
+//! *Open last*, *Open config*, *Quit*. Menu clicks are resolved
 //! by the pure [`crate::menu`] dispatch (unit-tested headless) and
 //! performed here as side-effects: daemon [`Request`]s go out via
 //! [`crate::ipc::send_request`], and *Open config* shells out to
@@ -146,7 +146,7 @@ impl cosmic::Application for App {
                     // applet's own popup lands in the grabbed frame
                     // (ADR-0041). Other requests keep the popup open:
                     // its live status line is the feedback for
-                    // pin/open/quit.
+                    // open/quit.
                     let close = if menu::request_spawns_capture(&req) {
                         self.popup
                             .take()
@@ -261,7 +261,7 @@ impl cosmic::Application for App {
 
 impl App {
     /// Build the popup body: a status line at the top, then a column of
-    /// menu buttons with dividers between the capture / monitor / pin /
+    /// menu buttons with dividers between the capture / monitor /
     /// system groups. Mirrors the tray's menu structure item-for-item;
     /// each button emits a [`MenuMessage`] that [`menu::action_for`]
     /// resolves.

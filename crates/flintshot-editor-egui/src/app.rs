@@ -75,8 +75,8 @@ pub(crate) type ClipboardSlot = Rc<RefCell<Option<arboard::Clipboard>>>;
 /// illegally (there is no "ended without being requested").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionPhase {
-    /// Not requested — the plain editor (`fullscreen` / `open` /
-    /// `pin` paths).
+    /// Not requested — the plain editor (`fullscreen` / `open`
+    /// paths).
     Off,
     /// Requested and live: Select pre-armed, dim mask + hint line
     /// painting. Runs from construction until the first crop.

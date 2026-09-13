@@ -43,7 +43,7 @@
 //! dispatcher recognizes and hands back as a `Copy` outcome): the
 //! region is composed selection-aware onto the clipboard and the
 //! overlay closes, publishing `CopiedToClipboard`. Save (`rfd`
-//! dialog), Pin and Upload (temp PNG + detached workers) reuse the
+//! dialog) and Upload (temp PNG + detached worker) reuse the
 //! editor window's pipelines with its error policy verbatim — only
 //! Save differs in *crop semantics*, composing selection-aware
 //! because in the overlay the region is what ships (the editor
@@ -152,7 +152,7 @@ use crate::magnifier::Magnifier;
 use crate::toolbar::{self, ToolbarAction};
 
 /// Window title + WM class for the overlay viewport. Distinct from
-/// the editor and pin windows so WMs / compositors can route it.
+/// the editor window so WMs / compositors can route it.
 pub(crate) const OVERLAY_TITLE: &str = "flintshot — overlay";
 
 /// Why the overlay is closing this frame. Pure data so the Esc /
@@ -189,8 +189,7 @@ pub(crate) fn close_from_input(esc: bool, enter: bool) -> Option<OverlayClose> {
 }
 
 /// The overlay viewport: fullscreen + undecorated, so the frozen
-/// capture *is* the screen (the Phase 3 pin window's borderless
-/// builder is the precedent). No explicit size or position: the WM
+/// capture *is* the screen. No explicit size or position: the WM
 /// fullscreens on the monitor the window opens at — in the common
 /// single-trigger flow that's the monitor under the cursor, i.e. the
 /// active monitor the capture came from (spec: active-monitor only).
