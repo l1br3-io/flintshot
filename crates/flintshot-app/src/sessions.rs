@@ -1,7 +1,7 @@
 //! Daemon-side registry of live worker sessions (smart-window-hiding).
 //!
 //! The daemon's notion of an *active capture session*: every capture
-//! and pin worker it spawned, keyed by pid, each holding a kill
+//! worker it spawned, keyed by pid, each holding a kill
 //! handle (`Arc<Mutex<Option<Child>>>`). Process exit stays the
 //! truth source — a reaper observes exits and reports them via
 //! [`CaptureSessions::exited`] — so a crashed or killed worker
@@ -19,10 +19,6 @@
 //! lives in [`SupersedeMachine`]: pure, injected-clock, unit-tested.
 //! [`CaptureSessions`] is the thread-safe shell around it (IPC
 //! thread + main loop), designed after `tray_gate.rs`.
-//!
-//! Pins are closed (killed) rather than superseded — their argv is
-//! parked in a respawn queue the daemon drains after the grab, so a
-//! pin returns at its exact position/size/opacity.
 
 // Wired into the daemon's dispatch path in the supersede-dispatch
 // task; until then nothing outside this module (and its tests)
@@ -53,9 +49,6 @@ pub(crate) enum SessionKind {
     /// A capture worker (`region` / `fullscreen`): superseded on a
     /// new capture, never respawned.
     Capture,
-    /// A pin worker: closed for a grab and respawned from its parked
-    /// argv afterwards.
-    Pin,
     /// The app window worker: neither superseded nor respawned, but
     /// tracked so the pre-grab handshake knows a window owes an ack
     /// (its process outlives its hidden window).
@@ -147,26 +140,16 @@ impl SupersedeMachine {
     }
 }
 
-/// Pin respawn payload: the exact worker argv to re-run.
-#[derive(Debug, Clone)]
-struct PinInfo {
-    id: u64,
-    argv: Vec<String>,
-}
-
 /// One tracked worker session.
 #[derive(Debug)]
 struct SessionEntry {
     kind: SessionKind,
     handle: Arc<Mutex<Option<Child>>>,
-    /// Present for pins only.
-    pin: Option<PinInfo>,
 }
 
 #[derive(Debug)]
 struct RegistryInner {
     entries: HashMap<u32, SessionEntry>,
-    respawn_queue: Vec<Vec<String>>,
     machine: SupersedeMachine,
 }
 
@@ -174,7 +157,6 @@ impl RegistryInner {
     fn new(grace: Duration, kill_wait: Duration) -> Self {
         Self {
             entries: HashMap::new(),
-            respawn_queue: Vec::new(),
             machine: SupersedeMachine::new(grace, kill_wait),
         }
     }
@@ -188,8 +170,7 @@ impl RegistryInner {
 }
 
 /// Thread-safe shell: registration and exits from the spawner's
-/// reaper threads, supersede driving and pin respawn from the
-/// dispatch path.
+/// reaper threads, supersede driving from the dispatch path.
 #[derive(Debug)]
 pub(crate) struct CaptureSessions {
     inner: Mutex<RegistryInner>,
@@ -241,29 +222,6 @@ impl CaptureSessions {
                 SessionEntry {
                     kind: SessionKind::Capture,
                     handle,
-                    pin: None,
-                },
-            );
-    }
-
-    /// Track a spawned pin worker with its full respawn argv.
-    pub(crate) fn register_pin(
-        &self,
-        id: u64,
-        pid: u32,
-        argv: Vec<String>,
-        handle: Arc<Mutex<Option<Child>>>,
-    ) {
-        self.inner
-            .lock()
-            .expect("session registry mutex poisoned")
-            .entries
-            .insert(
-                pid,
-                SessionEntry {
-                    kind: SessionKind::Pin,
-                    handle,
-                    pin: Some(PinInfo { id, argv }),
                 },
             );
     }
@@ -286,18 +244,6 @@ impl CaptureSessions {
             .lock()
             .expect("session registry mutex poisoned")
             .live_captures()
-    }
-
-    /// How many pin workers are live (the pre-grab handshake waits
-    /// these out after closing them).
-    pub(crate) fn live_pins(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("session registry mutex poisoned")
-            .entries
-            .values()
-            .filter(|e| e.kind == SessionKind::Pin)
-            .count()
     }
 
     /// Whether the daemon-spawned app window process is live (its
@@ -324,7 +270,6 @@ impl CaptureSessions {
                 SessionEntry {
                     kind: SessionKind::App,
                     handle,
-                    pin: None,
                 },
             );
     }
@@ -399,38 +344,6 @@ impl CaptureSessions {
                 kill_handle(&entry.handle);
             }
         }
-    }
-
-    /// Close every live pin for a grab: hard-kill the workers and
-    /// park their argvs in the respawn queue (exactly once — the
-    /// entries leave the registry as they are queued).
-    pub(crate) fn close_all_pins(&self) {
-        let mut inner = self.inner.lock().expect("session registry mutex poisoned");
-        let pin_pids: Vec<u32> = inner
-            .entries
-            .iter()
-            .filter(|(_, e)| e.kind == SessionKind::Pin)
-            .map(|(&pid, _)| pid)
-            .collect();
-        for pid in pin_pids {
-            if let Some(entry) = inner.entries.remove(&pid) {
-                kill_handle(&entry.handle);
-                if let Some(pin) = entry.pin {
-                    inner.respawn_queue.push(pin.argv);
-                }
-            }
-        }
-    }
-
-    /// Destructively drain the parked pin argvs to respawn.
-    pub(crate) fn take_respawn_queue(&self) -> Vec<Vec<String>> {
-        std::mem::take(
-            &mut self
-                .inner
-                .lock()
-                .expect("session registry mutex poisoned")
-                .respawn_queue,
-        )
     }
 
     /// Poll one worker's exit under a short lock (never a blocking
@@ -569,68 +482,16 @@ mod tests {
     }
 
     #[test]
-    fn pins_are_not_captures_for_the_supersede_machine() {
+    fn app_sessions_are_not_captures_for_the_supersede_machine() {
         let s = CaptureSessions::new();
-        s.register_pin(7, 404, vec!["pin".into()], fake_handle());
+        s.register_app(404, fake_handle());
         assert_eq!(s.live_captures(), 0);
         assert_eq!(s.capture_pids(), Vec::<u32>::new());
+        assert!(s.app_alive());
         assert_eq!(
             s.supersede_step(Instant::now()),
             SupersedeAction::Proceed,
-            "a live pin alone is not superseded"
-        );
-    }
-
-    #[test]
-    fn closing_pins_queues_argv_exactly_once_and_drain_is_destructive() {
-        let s = CaptureSessions::new();
-        s.register_pin(
-            7,
-            404,
-            vec![
-                "pin".into(),
-                "/tmp/x.png".into(),
-                "--at".into(),
-                "10,20".into(),
-            ],
-            fake_handle(),
-        );
-        s.register_pin(
-            8,
-            405,
-            vec!["pin".into(), "/tmp/y.png".into()],
-            fake_handle(),
-        );
-        s.close_all_pins();
-        s.close_all_pins(); // second close must not double-queue
-
-        let mut queued = s.take_respawn_queue();
-        queued.sort();
-        assert_eq!(
-            queued,
-            vec![
-                vec![
-                    "pin".to_string(),
-                    "/tmp/x.png".into(),
-                    "--at".into(),
-                    "10,20".into()
-                ],
-                vec!["pin".to_string(), "/tmp/y.png".into()],
-            ],
-            "each pin's full argv parked exactly once"
-        );
-        assert!(s.take_respawn_queue().is_empty(), "drain is destructive");
-    }
-
-    #[test]
-    fn killed_capture_sessions_never_enqueue_for_respawn() {
-        let s = CaptureSessions::new();
-        s.register_capture(505, fake_handle());
-        s.kill_all_captures();
-        s.close_all_pins();
-        assert!(
-            s.take_respawn_queue().is_empty(),
-            "the respawn queue is a pin-only concept"
+            "a live app window alone is not superseded"
         );
     }
 

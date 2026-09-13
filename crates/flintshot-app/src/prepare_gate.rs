@@ -1,9 +1,9 @@
 //! Daemon-side coordination for `Request::PrepareCapture`
 //! (smart-window-hiding): the generalized pre-grab handshake that
 //! clears **every** flintshot surface from the screen before a
-//! worker's grab — the app window (hide + ack), pin windows (kill +
-//! respawn queue), and the tray icon (the existing `TrayGate`, driven
-//! separately by the same interception).
+//! worker's grab — the app window (hide + ack) and the tray icon
+//! (the existing `TrayGate`, driven separately by the same
+//! interception).
 //!
 //! Split like `tray_gate`: [`PrepareMachine`] is pure (injected
 //! clock, unit-tested); [`PrepareGate`] is the thread-safe shell —
@@ -25,7 +25,7 @@ use tokio::sync::Notify;
 
 /// Compositor unmap grace shared with the app window's close-for-
 /// capture path (`app_window::HIDE_GRACE_MS` aliases this). After
-/// every condition holds (app acked/vacuous, pins closed), the reply
+/// every condition holds (app acked/vacuous), the reply
 /// still waits this out: surface destruction is compositor-side and
 /// asynchronous.
 pub(crate) const UNMAP_GRACE_MS: u64 = 250;
@@ -62,8 +62,8 @@ pub(crate) enum PrepareResolution {
 
 /// Pure handshake state machine. The only stateful part is the
 /// all-clear anchor for the unmap grace; every condition is a fresh
-/// input each step, so a regressing condition (a pin respawned
-/// mid-handshake) re-arms the grace.
+/// input each step, so a regressing condition (the app window
+/// respawning mid-handshake) re-arms the grace.
 #[derive(Debug)]
 struct PrepareMachine {
     deadline: Instant,
@@ -89,10 +89,9 @@ impl PrepareMachine {
         now: Instant,
         ack: bool,
         app_alive: bool,
-        pins_alive: bool,
         live_captures: usize,
     ) -> PrepareAction {
-        let clear = (ack || !app_alive) && !pins_alive && live_captures <= 1;
+        let clear = (ack || !app_alive) && live_captures <= 1;
         if !clear {
             self.all_clear_at = None;
             return if now >= self.deadline {
@@ -175,21 +174,13 @@ impl PrepareGate {
     /// Main-loop tick. Inputs are read fresh each time: an app window
     /// that died without acking (process exit reaped) stops being
     /// waited on, exactly like one that acked.
-    pub(crate) fn step(
-        &self,
-        now: Instant,
-        app_alive: bool,
-        pins_alive: bool,
-        live_captures: usize,
-    ) {
+    pub(crate) fn step(&self, now: Instant, app_alive: bool, live_captures: usize) {
         let mut inner = self.inner.lock().expect("prepare gate mutex poisoned");
         if !inner.armed || inner.outcome.is_some() {
             return;
         }
         let ack = inner.ack;
-        let action = inner
-            .machine
-            .step(now, ack, app_alive, pins_alive, live_captures);
+        let action = inner.machine.step(now, ack, app_alive, live_captures);
         match action {
             PrepareAction::Wait => {}
             PrepareAction::Ready => {
@@ -250,14 +241,11 @@ mod tests {
         let t0 = Instant::now();
         let mut m = machine(Duration::from_millis(250));
         assert_eq!(
-            m.step(t0, false, false, false, 1),
+            m.step(t0, false, false, 1),
             PrepareAction::Wait,
             "clear, but the compositor grace has not elapsed"
         );
-        assert_eq!(
-            m.step(at(t0, 250), false, false, false, 1),
-            PrepareAction::Ready
-        );
+        assert_eq!(m.step(at(t0, 250), false, false, 1), PrepareAction::Ready);
     }
 
     #[test]
@@ -266,11 +254,8 @@ mod tests {
         // grace).
         let t0 = Instant::now();
         let mut m = machine(Duration::from_millis(10));
-        assert_eq!(m.step(t0, false, false, false, 0), PrepareAction::Wait);
-        assert_eq!(
-            m.step(at(t0, 10), false, false, false, 0),
-            PrepareAction::Ready
-        );
+        assert_eq!(m.step(t0, false, false, 0), PrepareAction::Wait);
+        assert_eq!(m.step(at(t0, 10), false, false, 0), PrepareAction::Ready);
     }
 
     #[test]
@@ -279,13 +264,13 @@ mod tests {
         let mut m = PrepareMachine::new(t0, Duration::from_millis(300), Duration::from_millis(10));
         for t in [0, 100, 299] {
             assert_eq!(
-                m.step(at(t0, t), false, true, false, 1),
+                m.step(at(t0, t), false, true, 1),
                 PrepareAction::Wait,
                 "the app is alive and has not acked"
             );
         }
         assert_eq!(
-            m.step(at(t0, 300), false, true, false, 1),
+            m.step(at(t0, 300), false, true, 1),
             PrepareAction::ReadyTimedOut,
             "bound expired: reply anyway"
         );
@@ -295,13 +280,10 @@ mod tests {
     fn ack_releases_the_app_wait() {
         let t0 = Instant::now();
         let mut m = machine(Duration::from_millis(10));
-        assert_eq!(m.step(t0, false, true, false, 1), PrepareAction::Wait);
+        assert_eq!(m.step(t0, false, true, 1), PrepareAction::Wait);
         // The ack lands mid-grace-window; the grace anchors here.
-        assert_eq!(m.step(at(t0, 5), true, true, false, 1), PrepareAction::Wait);
-        assert_eq!(
-            m.step(at(t0, 16), true, true, false, 1),
-            PrepareAction::Ready
-        );
+        assert_eq!(m.step(at(t0, 5), true, true, 1), PrepareAction::Wait);
+        assert_eq!(m.step(at(t0, 16), true, true, 1), PrepareAction::Ready);
     }
 
     #[test]
@@ -310,31 +292,8 @@ mod tests {
         // reaped registry entry stops the wait.
         let t0 = Instant::now();
         let mut m = machine(Duration::from_millis(10));
-        assert_eq!(m.step(t0, false, false, false, 1), PrepareAction::Wait);
-        assert_eq!(
-            m.step(at(t0, 10), false, false, false, 1),
-            PrepareAction::Ready
-        );
-    }
-
-    #[test]
-    fn pins_alive_hold_the_reply() {
-        let t0 = Instant::now();
-        let mut m = machine(Duration::from_millis(10));
-        assert_eq!(
-            m.step(at(t0, 10), false, false, true, 1),
-            PrepareAction::Wait,
-            "a live pin would land in the grab"
-        );
-        assert_eq!(
-            m.step(at(t0, 20), false, false, false, 1),
-            PrepareAction::Wait,
-            "pins clear: the grace re-anchors at the new clear"
-        );
-        assert_eq!(
-            m.step(at(t0, 31), false, false, false, 1),
-            PrepareAction::Ready
-        );
+        assert_eq!(m.step(t0, false, false, 1), PrepareAction::Wait);
+        assert_eq!(m.step(at(t0, 10), false, false, 1), PrepareAction::Ready);
     }
 
     #[test]
@@ -344,32 +303,29 @@ mod tests {
         // kill — wait it out, then reply anyway.
         let t0 = Instant::now();
         let mut m = PrepareMachine::new(t0, Duration::from_millis(200), Duration::from_millis(10));
-        assert_eq!(m.step(t0, false, false, false, 2), PrepareAction::Wait);
+        assert_eq!(m.step(t0, false, false, 2), PrepareAction::Wait);
         assert_eq!(
-            m.step(at(t0, 200), false, false, false, 2),
+            m.step(at(t0, 200), false, false, 2),
             PrepareAction::ReadyTimedOut
         );
     }
 
     #[test]
     fn regression_re_arms_the_grace() {
-        // A condition that clears then regresses (say a pin respawned
-        // mid-handshake) must not inherit the old anchor.
+        // A condition that clears then regresses (say the app window
+        // respawned mid-handshake) must not inherit the old anchor.
         let t0 = Instant::now();
         let mut m = machine(Duration::from_millis(100));
-        m.step(t0, false, false, false, 1); // clear at t0
-                                            // Pin appears at t0+50, gone again at t0+60: the grace counts
-                                            // from the NEW all-clear, not the stale one.
-        m.step(at(t0, 50), false, false, true, 1);
+        m.step(t0, false, false, 1); // clear at t0
+                                     // A second capture appears at t0+50, gone again at t0+60: the
+                                     // grace counts from the NEW all-clear, not the stale one.
+        m.step(at(t0, 50), false, false, 2);
         assert_eq!(
-            m.step(at(t0, 60), false, false, false, 1),
+            m.step(at(t0, 60), false, false, 1),
             PrepareAction::Wait,
             "re-armed: 100 ms grace from the new clear"
         );
-        assert_eq!(
-            m.step(at(t0, 160), false, false, false, 1),
-            PrepareAction::Ready
-        );
+        assert_eq!(m.step(at(t0, 160), false, false, 1), PrepareAction::Ready);
     }
 
     // ── shell ────────────────────────────────────────────────────
@@ -383,9 +339,9 @@ mod tests {
         let g = gate();
         let t0 = Instant::now();
         g.begin(t0);
-        g.step(t0, false, false, 0);
+        g.step(t0, false, 0);
         assert_eq!(g.resolution(), None, "grace not yet elapsed");
-        g.step(at(t0, 11), false, false, 0);
+        g.step(at(t0, 11), false, 0);
         assert_eq!(g.resolution(), Some(PrepareResolution::Ready));
     }
 
@@ -394,12 +350,12 @@ mod tests {
         let g = gate();
         let t0 = Instant::now();
         g.begin(t0);
-        g.step(at(t0, 20), true, false, 0);
+        g.step(at(t0, 20), true, 0);
         assert_eq!(g.resolution(), None, "alive app, no ack: waiting");
         g.report_app_hidden();
-        g.step(at(t0, 21), true, false, 0);
+        g.step(at(t0, 21), true, 0);
         assert_eq!(g.resolution(), None, "acked but the grace re-armed");
-        g.step(at(t0, 32), true, false, 0);
+        g.step(at(t0, 32), true, 0);
         assert_eq!(g.resolution(), Some(PrepareResolution::Ready));
     }
 
@@ -408,14 +364,14 @@ mod tests {
         let g = gate();
         let t0 = Instant::now();
         g.begin(t0);
-        g.step(at(t0, 500), true, false, 0);
+        g.step(at(t0, 500), true, 0);
         assert_eq!(g.resolution(), Some(PrepareResolution::TimedOut));
     }
 
     #[test]
     fn unarmed_gate_never_resolves() {
         let g = gate();
-        g.step(Instant::now(), false, false, 0);
+        g.step(Instant::now(), false, 0);
         assert_eq!(g.resolution(), None);
     }
 
@@ -429,7 +385,7 @@ mod tests {
             let g = std::sync::Arc::clone(&g);
             tokio::spawn(async move {
                 for _ in 0..100 {
-                    g.step(Instant::now(), false, false, 0);
+                    g.step(Instant::now(), false, 0);
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             })

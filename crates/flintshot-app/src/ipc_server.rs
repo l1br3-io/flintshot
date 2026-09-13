@@ -153,7 +153,7 @@ impl Default for SubscriberBus {
 /// Daemon-wide "last saved capture" path.
 ///
 /// Workers report saves via [`Request::ReportSaved`]; the IPC connection
-/// layer records the path here. [`Request::PinLast`] / [`Request::OpenLast`]
+/// layer records the path here. [`Request::OpenLast`]
 /// (Task 4) and Phase 4 upload-from-last read it back. Cheap shared
 /// state — an [`Arc`] around a [`Mutex`] guarding an [`Option<PathBuf>`].
 /// The critical section is a single clone/swap (never held across an
@@ -161,7 +161,6 @@ impl Default for SubscriberBus {
 /// mutex's overhead. See ADR-0023.
 ///
 /// [`Request::ReportSaved`]: flintshot_core::ipc::Request::ReportSaved
-/// [`Request::PinLast`]: flintshot_core::ipc::Request::PinLast
 /// [`Request::OpenLast`]: flintshot_core::ipc::Request::OpenLast
 #[derive(Clone, Default)]
 pub struct LastSaved {
@@ -183,7 +182,7 @@ impl LastSaved {
     /// Clone out the current last-saved path, or `None` if no worker has
     /// reported a save yet.
     #[must_use]
-    // No reader yet — Task 4 (`PinLast`/`OpenLast`) and the Phase 3
+    // No reader yet — Task 4 (`OpenLast`) and the Phase 3
     // integration test consume this. Mirrors `bus()` / `last_saved()`.
     #[allow(dead_code)]
     pub fn get(&self) -> Option<PathBuf> {
@@ -200,7 +199,7 @@ type Listener = interprocess::local_socket::tokio::Listener;
 pub(crate) type Stream = interprocess::local_socket::tokio::Stream;
 
 /// The IPC server: owns the listener, the subscriber bus, the
-/// last-saved + pin-id dispatch state, the portal-bind handle, the
+/// last-saved dispatch state, the portal-bind handle, the
 /// tray gate (capture handshake, ADR-0036), the capture dispatch
 /// context (supersede-before-spawn, smart-window-hiding), and a
 /// shutdown signal.
@@ -296,7 +295,7 @@ impl IpcServer {
     }
 
     /// A cloneable handle to the daemon's last-saved path. The daemon
-    /// keeps one; Task 4 (`PinLast`/`OpenLast`) reads it to act on the
+    /// keeps one; Task 4 (`OpenLast`) reads it to act on the
     /// most recent worker save.
     //
     // Only the integration tests use this externally; the daemon's
@@ -431,7 +430,7 @@ where
         }
 
         // ReportSaved: a worker reports the path it just saved. Record
-        // it as the daemon's last-saved (for PinLast/OpenLast and
+        // it as the daemon's last-saved (for OpenLast and
         // upload-from-last) and broadcast Event::Saved so subscribers
         // learn about the save. This is a state update, not a spawn —
         // it never reaches the worker dispatch table. See ADR-0023.
@@ -508,16 +507,15 @@ where
 
         // PrepareCapture (smart-window-hiding): the generalized
         // pre-grab handshake. The connection layer broadcasts the
-        // hide, closes the pins, arms both gates (prepare + tray),
-        // and awaits both — every wait bounded, the reply going out
-        // even on timeout (a capture must never fail because a
-        // window was slow — ADR-0036, extended). Supersedes and
-        // internally includes HideTrayForCapture; the old request
-        // keeps working below (rolling-upgrade skew).
+        // hide, arms both gates (prepare + tray), and awaits both —
+        // every wait bounded, the reply going out even on timeout
+        // (a capture must never fail because a window was slow —
+        // ADR-0036, extended). Supersedes and internally includes
+        // HideTrayForCapture; the old request keeps working below
+        // (rolling-upgrade skew).
         if matches!(request, IpcRequest::PrepareCapture) {
             tracing::info!("PrepareCapture received; clearing flintshot surfaces");
             bus.broadcast(IpcEvent::HideForCapture);
-            capture.sessions().close_all_pins();
             let tray_baseline = gate.begin_capture();
             prepare.begin(std::time::Instant::now());
             let (prepared, tray_confirmed) = tokio::join!(prepare.wait_ready(), async {
@@ -548,19 +546,10 @@ where
 
         // ReportCaptured (ADR-0036): the grab finished (success or
         // failure), so this in-flight capture releases its hold — the
-        // icon returns when the last one reports — and any pins the
-        // prepare handshake closed come back at their exact
-        // position/size/opacity (best-effort respawns). Fire-and-forget,
+        // icon returns when the last one reports. Fire-and-forget,
         // never broadcast: only the daemon's tray cares.
         if matches!(request, IpcRequest::ReportCaptured) {
             gate.end_capture();
-            crate::worker::worker_respawn_queued_pins(
-                &capture.sessions(),
-                &crate::worker::CommandSpawner::with_bus_and_sessions(
-                    bus.clone(),
-                    capture.sessions(),
-                ),
-            );
             continue;
         }
 
@@ -568,7 +557,7 @@ where
         // Capture requests take the supersede-then-spawn path first
         // (Replace policy: the new capture replaces any live session,
         // bounded waits on the blocking pool so this connection — and
-        // only this connection — is held); PinLast/OpenLast read the
+        // only this connection — is held); OpenLast reads the
         // last-saved state; Quit signals shutdown; unbuilt phases
         // broadcast an `unsupported` Error.
         let outcome = if crate::worker::spawns_capture_worker(&request) {
@@ -942,7 +931,7 @@ mod tests {
             let gate = Arc::clone(&gate);
             tokio::spawn(async move {
                 for _ in 0..600 {
-                    gate.step(std::time::Instant::now(), false, false, 0);
+                    gate.step(std::time::Instant::now(), false, 0);
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
             })
@@ -1023,7 +1012,7 @@ mod tests {
             let gate = Arc::clone(&gate);
             tokio::spawn(async move {
                 for _ in 0..600 {
-                    gate.step(std::time::Instant::now(), true, false, 0);
+                    gate.step(std::time::Instant::now(), true, 0);
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
             })
@@ -1070,7 +1059,7 @@ mod tests {
             let gate = Arc::clone(&gate);
             tokio::spawn(async move {
                 for _ in 0..600 {
-                    gate.step(std::time::Instant::now(), true, false, 0);
+                    gate.step(std::time::Instant::now(), true, 0);
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
             })

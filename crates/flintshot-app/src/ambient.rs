@@ -3,10 +3,9 @@
 //! On at-spi desktops, eframe's accessibility bridge (accesskit →
 //! zbus 5) requires an ambient tokio reactor on the thread that
 //! creates the window. The CLI's window workers (`region` /
-//! `fullscreen` → editor or overlay, `open` → editor, `pin` → pin
-//! window) own no runtime, so the eframe call panics before any
-//! window appears (`TEST_MATRIX` L5, finding 2; full rationale in
-//! ADR-0030).
+//! `fullscreen` → editor or overlay, `open` → editor) own no
+//! runtime, so the eframe call panics before any window appears
+//! (`TEST_MATRIX` L5, finding 2; full rationale in ADR-0030).
 //!
 //! [`with_ambient_runtime`] builds a multi-thread runtime, enters it
 //! for the duration of the closure, and drops the guard before
