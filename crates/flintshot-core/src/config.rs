@@ -36,9 +36,6 @@ pub struct Config {
     /// Global hotkey chords (read by the daemon; see [`HotkeyConfig`]).
     #[serde(default)]
     pub hotkeys: HotkeyConfig,
-    /// Pin-to-desktop window defaults (Phase 3; see [`PinConfig`]).
-    #[serde(default)]
-    pub pin: PinConfig,
     /// Upload defaults (Phase 4; see [`UploadConfig`]).
     #[serde(default)]
     pub upload: UploadConfig,
@@ -165,50 +162,6 @@ fn default_region_hotkey() -> String {
 
 fn default_fullscreen_hotkey() -> String {
     "Ctrl+Alt+PrintScreen".into()
-}
-
-/// Pin-to-desktop window defaults (Phase 3). Mirrors the `[pin]` config
-/// section. `default_position` is a free-form string: the special value
-/// `"center"` centres the pin on the active monitor; any other value is
-/// parsed as an `"X,Y"` coordinate pair by the CLI at resolve time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-#[non_exhaustive]
-pub struct PinConfig {
-    /// Resting opacity of the pin window (the window snaps to full
-    /// opacity while hovered). Range `0.0..=1.0`.
-    #[serde(default = "default_pin_opacity")]
-    pub default_opacity: f32,
-    /// When `true`, the pin's image is copied to the clipboard when the
-    /// window closes.
-    #[serde(default = "default_pin_copy_on_close")]
-    pub copy_on_close: bool,
-    /// Default placement for a new pin. `"center"` → active-monitor
-    /// centre; an `"X,Y"` pair → that point. CLI `--at` overrides this.
-    #[serde(default = "default_pin_position")]
-    pub default_position: String,
-}
-
-impl Default for PinConfig {
-    fn default() -> Self {
-        Self {
-            default_opacity: default_pin_opacity(),
-            copy_on_close: default_pin_copy_on_close(),
-            default_position: default_pin_position(),
-        }
-    }
-}
-
-fn default_pin_opacity() -> f32 {
-    0.5
-}
-
-fn default_pin_copy_on_close() -> bool {
-    false
-}
-
-fn default_pin_position() -> String {
-    "center".into()
 }
 
 /// Upload defaults (Phase 4). Mirrors the `[upload]` config section.
@@ -378,7 +331,6 @@ impl Config {
         ensure_table(&mut doc, "ui");
         ensure_table(&mut doc, "capture");
         ensure_table(&mut doc, "hotkeys");
-        ensure_table(&mut doc, "pin");
         ensure_table(&mut doc, "upload");
 
         if let Some(ui) = doc.get_mut("ui").and_then(|i| i.as_table_mut()) {
@@ -406,23 +358,6 @@ impl Config {
                 hk,
                 "fullscreen",
                 toml_edit::Value::from(self.hotkeys.fullscreen.as_str()),
-            );
-        }
-        if let Some(pin) = doc.get_mut("pin").and_then(|i| i.as_table_mut()) {
-            set_value(
-                pin,
-                "default-opacity",
-                toml_edit::Value::from(f64::from(self.pin.default_opacity)),
-            );
-            set_value(
-                pin,
-                "copy-on-close",
-                toml_edit::Value::from(self.pin.copy_on_close),
-            );
-            set_value(
-                pin,
-                "default-position",
-                toml_edit::Value::from(self.pin.default_position.as_str()),
             );
         }
         if let Some(upload) = doc.get_mut("upload").and_then(|i| i.as_table_mut()) {
@@ -521,36 +456,6 @@ pub fn config_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("flintshot").join("config.toml"))
 }
 
-/// Resolve the pin-cache directory: `<cache_dir>/flintshot/pins/`.
-///
-/// The editor writes composed pin images here before spawning
-/// `flintshot pin <path>`; the daemon may reap stale entries on start.
-/// Returns `None` when `dirs::cache_dir()` returns `None` (platforms
-/// without a cache convention) — callers fall back to
-/// `std::env::temp_dir().join("flintshot-pins")`.
-///
-/// Opportunistic-cleanup contract: files here are safe to delete at any
-/// time (a pin keeps no handle open after `image::open` reads it into
-/// memory). The OS may reap the cache dir independently; the daemon's
-/// own cleanup is best-effort.
-#[must_use]
-pub fn pin_cache_dir() -> Option<PathBuf> {
-    pin_cache_dir_in(dirs::cache_dir().as_deref())
-}
-
-/// Pure, testable seam for [`pin_cache_dir`]: given a base cache dir (or
-/// `None`), return `<base>/flintshot/pins`. Mirrors
-/// `ipc::default_unix_socket_in`'s shape — keeps the platform `dirs`
-/// lookup out of the composition logic so the path shape is unit-tested
-/// without setting env vars.
-///
-/// Returns `None` when `base` is `None` (matching [`pin_cache_dir`]'s
-/// contract for platforms without a cache convention).
-#[must_use]
-pub fn pin_cache_dir_in(base: Option<&Path>) -> Option<PathBuf> {
-    Some(base?.join("flintshot").join("pins"))
-}
-
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
@@ -645,9 +550,11 @@ include-cursor = true  # hide cursor when capturing presentations
     fn unknown_fields_are_ignored() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
+        // Includes a stale `[pin]` section (removed with the
+        // pin-to-desktop feature): loading must still succeed.
         fs::write(
             &path,
-            "[unknown-section]\nfoo = \"bar\"\n[ui]\ndefault-color = \"#abcdef\"\n[experimental]\nflag = true\n",
+            "[pin]\ndefault-opacity = 0.8\n[unknown-section]\nfoo = \"bar\"\n[ui]\ndefault-color = \"#abcdef\"\n[experimental]\nflag = true\n",
         )
         .unwrap();
 
@@ -688,76 +595,6 @@ include-cursor = true  # hide cursor when capturing presentations
         assert_eq!(cfg.hotkeys.fullscreen, "Ctrl+Alt+PrintScreen");
         let d = Config::default();
         assert_eq!(d.hotkeys.region, "Ctrl+Shift+PrintScreen");
-    }
-
-    #[test]
-    fn missing_pin_section_uses_defaults() {
-        // No [pin] in the file → the built-in defaults.
-        let cfg = Config::load_from(&{
-            let dir = tempdir().unwrap();
-            let path = dir.path().join("config.toml");
-            fs::write(&path, "[ui]\ndefault-color = \"#000000\"\n").unwrap();
-            path
-        })
-        .unwrap();
-        assert_eq!(cfg.pin.default_opacity, 0.5);
-        assert!(!cfg.pin.copy_on_close);
-        assert_eq!(cfg.pin.default_position, "center");
-        // Default impl matches.
-        let d = PinConfig::default();
-        assert_eq!(d.default_opacity, 0.5);
-        assert!(!d.copy_on_close);
-        assert_eq!(d.default_position, "center");
-    }
-
-    #[test]
-    fn custom_pin_config_loads_from_toml() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(
-            &path,
-            "[pin]\ndefault-opacity = 0.8\ncopy-on-close = true\ndefault-position = \"top-left\"\n",
-        )
-        .unwrap();
-        let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.pin.default_opacity, 0.8);
-        assert!(cfg.pin.copy_on_close);
-        assert_eq!(cfg.pin.default_position, "top-left");
-    }
-
-    #[test]
-    fn pin_fields_roundtrip() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-
-        let mut cfg = Config::default();
-        cfg.pin.default_opacity = 0.25;
-        cfg.pin.copy_on_close = true;
-        cfg.pin.default_position = "100,200".into();
-        cfg.save_to(&path).unwrap();
-
-        let written = fs::read_to_string(&path).unwrap();
-        assert!(
-            written.contains("[pin]"),
-            "[pin] section missing:\n{written}"
-        );
-        assert!(
-            written.contains("default-opacity = 0.25"),
-            "default-opacity not persisted:\n{written}"
-        );
-        assert!(
-            written.contains("copy-on-close = true"),
-            "copy-on-close not persisted:\n{written}"
-        );
-        assert!(
-            written.contains("default-position = \"100,200\""),
-            "default-position not persisted:\n{written}"
-        );
-
-        let back = Config::load_from(&path).unwrap();
-        assert_eq!(back.pin.default_opacity, 0.25);
-        assert!(back.pin.copy_on_close);
-        assert_eq!(back.pin.default_position, "100,200");
     }
 
     #[test]
@@ -955,33 +792,6 @@ flip-to-move = false
             matches!(err, FlintshotError::Config { .. }),
             "expected Config error, got {err:?}"
         );
-    }
-
-    #[test]
-    fn pin_cache_dir_in_joins_flintshot_pins_under_base() {
-        let path =
-            pin_cache_dir_in(Some(Path::new("/home/user/.cache"))).expect("Some base → Some path");
-        assert_eq!(
-            path,
-            PathBuf::from("/home/user/.cache/flintshot/pins"),
-            "pin cache dir must be <base>/flintshot/pins"
-        );
-    }
-
-    #[test]
-    fn pin_cache_dir_in_none_returns_none() {
-        assert!(
-            pin_cache_dir_in(None).is_none(),
-            "no base cache dir → no pin cache dir (caller falls back to temp)"
-        );
-    }
-
-    #[test]
-    fn pin_cache_dir_in_does_not_require_base_to_exist() {
-        // A nonexistent base is still joined structurally — existence is
-        // the caller's concern (the editor creates the dir on write).
-        let path = pin_cache_dir_in(Some(Path::new("/nonexistent/cache"))).unwrap();
-        assert_eq!(path, PathBuf::from("/nonexistent/cache/flintshot/pins"));
     }
 
     #[test]

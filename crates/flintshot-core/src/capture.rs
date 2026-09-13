@@ -39,8 +39,7 @@ use crate::geom::Rect;
 /// `Some(index)` argument; `name`/`is_primary` are for labelling.
 ///
 /// `x`/`y`/`width`/`height` give the monitor's geometry in the virtual
-/// desktop (physical pixels), used by the pin window to centre itself on
-/// the active monitor (`flintshot pin`).
+/// desktop (physical pixels).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MonitorInfo {
