@@ -27,6 +27,13 @@ toml_edit = { workspace = true }
 tracing = { workspace = true }
 xcap = { workspace = true }
 
+# Native capture backends: the XDG Screenshot Portal client (zbus,
+# blocking facade) is Linux-only — macOS/Windows compile no D-Bus code.
+# Same workspace entry ashpd resolves to in flintshot-app, so the
+# dependency graph never carries two zbus majors.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { workspace = true }
+
 [dev-dependencies]
 serde_json = "1"
 tempfile = { workspace = true }

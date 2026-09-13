@@ -923,15 +923,15 @@ default-backend = \"imgur\"
         // rewritten by a save. Selection warns + resolves auto.
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(&path, "[capture]\nbackend = \"gnome-shell\"\n").unwrap();
+        fs::write(&path, "[capture]\nbackend = \"gnome-shell-legacy\"\n").unwrap();
 
         let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.capture.backend, "gnome-shell");
+        assert_eq!(cfg.capture.backend, "gnome-shell-legacy");
 
         cfg.save_to(&path).unwrap();
         let written = fs::read_to_string(&path).unwrap();
         assert!(
-            written.contains("backend = \"gnome-shell\""),
+            written.contains("backend = \"gnome-shell-legacy\""),
             "save must preserve the user's (unknown) value verbatim:\n{written}"
         );
     }
