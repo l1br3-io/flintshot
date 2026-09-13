@@ -310,6 +310,92 @@ pub fn registered_backends() -> Vec<Box<dyn Capturer>> {
     }
 }
 
+/// One backend's row in the [`BackendReport`] diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BackendReportEntry {
+    /// Machine id — the config/CLI key.
+    pub id: &'static str,
+    /// Human-readable name.
+    pub name: &'static str,
+    /// Whether the availability probe passed.
+    pub available: bool,
+    /// Probe failure detail; `None` when available.
+    pub detail: Option<String>,
+}
+
+impl BackendReportEntry {
+    /// Build a row directly (printer-side tests; the live path goes
+    /// through [`backend_report`]).
+    #[must_use]
+    pub fn new(
+        id: &'static str,
+        name: &'static str,
+        available: bool,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            available,
+            detail,
+        }
+    }
+}
+
+/// The `flintshot backends` report: every registered backend's probe
+/// result plus what `auto` would select right now. Diagnostics only —
+/// building one never grabs pixels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BackendReport {
+    /// Session kind the auto resolution ran under.
+    pub session: SessionKind,
+    /// One entry per registered backend, in registration order.
+    pub entries: Vec<BackendReportEntry>,
+    /// Backend id `auto` resolves to right now (never fails).
+    pub auto_selects: &'static str,
+}
+
+impl BackendReport {
+    /// Assemble a report directly (printer-side tests).
+    #[must_use]
+    pub fn new(
+        session: SessionKind,
+        entries: Vec<BackendReportEntry>,
+        auto_selects: &'static str,
+    ) -> Self {
+        Self {
+            session,
+            entries,
+            auto_selects,
+        }
+    }
+}
+
+/// Probe every registered backend and compute the auto selection —
+/// the data behind `flintshot backends`.
+#[must_use]
+pub fn backend_report() -> BackendReport {
+    let registry = registered_backends();
+    let refs: Vec<&dyn Capturer> = registry.iter().map(AsRef::as_ref).collect();
+    backend_report_with(SessionKind::detect(), &refs)
+}
+
+/// Pure report core over an injected backend list (headless-testable
+/// with fakes); [`backend_report`] is the live wrapper.
+#[must_use]
+pub fn backend_report_with(session: SessionKind, backends: &[&dyn Capturer]) -> BackendReport {
+    let entries = backends
+        .iter()
+        .map(|b| match b.available() {
+            Ok(()) => BackendReportEntry::new(b.id(), b.name(), true, None),
+            Err(e) => BackendReportEntry::new(b.id(), b.name(), false, Some(probe_detail(&e))),
+        })
+        .collect();
+    BackendReport::new(session, entries, auto_select(session, backends))
+}
+
 /// Enumerate monitors in the order [`capture_fullscreen`] expects
 /// (primary first, then by display index — whatever `xcap` returns).
 ///
@@ -611,6 +697,57 @@ mod tests {
         assert!(
             ids.contains(&"xcap"),
             "xcap is the universal fallback: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn report_lists_entries_with_probe_details() {
+        let fakes = [
+            FakeCapturer::unavailable("portal", "org.freedesktop.portal.Desktop not owned"),
+            FakeCapturer::available("xcap"),
+        ];
+        let report = backend_report_with(SessionKind::Wayland, &registry(&fakes));
+        assert_eq!(report.session, SessionKind::Wayland);
+        assert_eq!(report.entries.len(), 2);
+
+        let portal = &report.entries[0];
+        assert_eq!(portal.id, "portal");
+        assert!(!portal.available);
+        assert_eq!(
+            portal.detail.as_deref(),
+            Some("org.freedesktop.portal.Desktop not owned")
+        );
+
+        let xcap = &report.entries[1];
+        assert_eq!(xcap.id, "xcap");
+        assert!(xcap.available);
+        assert!(xcap.detail.is_none());
+    }
+
+    #[test]
+    fn report_auto_matches_selection_precedence() {
+        let portal_up = [
+            FakeCapturer::available("portal"),
+            FakeCapturer::available("xcap"),
+        ];
+        assert_eq!(
+            backend_report_with(SessionKind::Wayland, &registry(&portal_up)).auto_selects,
+            "portal"
+        );
+
+        let portal_down = [
+            FakeCapturer::unavailable("portal", "no bus"),
+            FakeCapturer::available("xcap"),
+        ];
+        assert_eq!(
+            backend_report_with(SessionKind::Wayland, &registry(&portal_down)).auto_selects,
+            "xcap"
+        );
+
+        assert_eq!(
+            backend_report_with(SessionKind::X11, &registry(&portal_up)).auto_selects,
+            "xcap",
+            "X11 precedence skips portal even when it is up"
         );
     }
 

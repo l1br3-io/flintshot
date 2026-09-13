@@ -17,7 +17,8 @@ use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
 use flintshot_core::ipc::Request;
 use flintshot_core::{
-    select_backend, CaptureOptions, Config, ImageMime, UploadContext, UploadOutcome,
+    select_backend, BackendReport, CaptureOptions, Config, ImageMime, SessionKind, UploadContext,
+    UploadOutcome,
 };
 use image::ImageFormat;
 
@@ -47,6 +48,11 @@ pub enum Command {
     Fullscreen(FullscreenArgs),
     /// Print the resolved configuration as TOML to stdout.
     Config,
+    /// List registered capture backends, their availability, and what
+    /// `auto` would select right now (probes only — never grabs
+    /// pixels). Override via `--backend <ID>` on `region`/`fullscreen`
+    /// or the `[capture] backend` config key.
+    Backends,
     /// Open an existing image in the editor. [Phase 3]
     Open(OpenArgs),
     /// Upload an image to a backend and print the resulting URL. [Phase 4]
@@ -1291,6 +1297,48 @@ pub fn run_config() -> Result<()> {
     Ok(())
 }
 
+/// `flintshot backends` — capture-backend diagnostic. Prints every
+/// registered backend's probe result and the current `auto` pick;
+/// always exits 0 (a diagnostic, not a health gate).
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "every run_* keeps the Result shape the main dispatch arms share"
+)]
+pub fn run_backends() -> Result<()> {
+    print!(
+        "{}",
+        format_backend_report(&flintshot_core::backend_report())
+    );
+    Ok(())
+}
+
+/// Rendered `flintshot backends` output (pure; unit-tested).
+fn format_backend_report(report: &BackendReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = format!("session: {}\n", session_str(report.session));
+    for entry in &report.entries {
+        if entry.available {
+            let _ = writeln!(out, "{}: available ({})", entry.id, entry.name);
+        } else if let Some(detail) = &entry.detail {
+            let _ = writeln!(out, "{}: unavailable ({detail})", entry.id);
+        } else {
+            let _ = writeln!(out, "{}: unavailable", entry.id);
+        }
+    }
+    let _ = writeln!(out, "auto selects: {}", report.auto_selects);
+    out
+}
+
+/// Lower-case session-kind label for the report header. Future
+/// variants degrade to `"other"` (`SessionKind` is non-exhaustive).
+fn session_str(session: SessionKind) -> &'static str {
+    match session {
+        SessionKind::X11 => "x11",
+        SessionKind::Wayland => "wayland",
+        _ => "other",
+    }
+}
+
 /// Encode `img` as PNG to `path`, creating parent directories as
 /// needed. Format is forced to PNG regardless of the path extension
 /// so `--out foo.bar` still produces a valid PNG.
@@ -2006,6 +2054,59 @@ mod tests {
             }
             other => panic!("expected fullscreen, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn backends_subcommand_parses_bare() {
+        let cli = Cli::parse_from(["flintshot", "backends"]);
+        assert!(
+            matches!(cli.command, Some(Command::Backends)),
+            "backends takes no arguments"
+        );
+    }
+
+    #[test]
+    fn backend_report_prints_status_lines_and_final_auto_pick() {
+        use flintshot_core::{BackendReport, BackendReportEntry, SessionKind};
+
+        let report = BackendReport::new(
+            SessionKind::Wayland,
+            vec![
+                BackendReportEntry::new("portal", "XDG Screenshot Portal", true, None),
+                BackendReportEntry::new(
+                    "xcap",
+                    "xcap",
+                    false,
+                    Some("no display connection".to_string()),
+                ),
+            ],
+            "portal",
+        );
+        let out = format_backend_report(&report);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "session: wayland");
+        assert!(lines.contains(&"portal: available (XDG Screenshot Portal)"));
+        assert!(lines.contains(&"xcap: unavailable (no display connection)"));
+        assert_eq!(
+            *lines.last().expect("non-empty report"),
+            "auto selects: portal",
+            "the auto pick is the final line"
+        );
+    }
+
+    #[test]
+    fn backend_report_renders_unavailable_without_detail() {
+        use flintshot_core::{BackendReport, BackendReportEntry, SessionKind};
+
+        let report = BackendReport::new(
+            SessionKind::Other,
+            vec![BackendReportEntry::new("xcap", "xcap", false, None)],
+            "xcap",
+        );
+        let out = format_backend_report(&report);
+        assert!(out.contains("session: other"));
+        assert!(out.contains("xcap: unavailable\n"));
+        assert!(out.ends_with("auto selects: xcap\n"));
     }
 
     #[test]
