@@ -29,6 +29,13 @@ Categories used below:
   never-failing fallback; the chosen backend id is logged on every
   grab. Selection groundwork for the native Wayland portal backend
   (spec `docs/specs/native-capture-backends/`).
+- **Portal capture backend** (Linux): the XDG Screenshot Portal
+  backend is live — prompt-free on Wayland/COSMIC (~75–120 ms
+  end-to-end), so `auto` now resolves to `portal` before `xcap` on
+  Wayland sessions when the portal is up. Bounds every D-Bus call
+  (5 s) so a wedged portal errors instead of hanging; response code
+  1 surfaces as a `"cancelled"` capture error. Grabs are always
+  cursor-less (the portal protocol has no cursor option).
 
 - **New capture from the editor** (Win11 Snipping Tool-style): a
   `+` chip leading the editor/overlay toolbar rail (popup: *Region
