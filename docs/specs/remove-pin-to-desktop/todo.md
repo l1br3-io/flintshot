@@ -1,7 +1,7 @@
 # Effort todo: remove-pin-to-desktop
 
 - [x] 001 Remove Pin from editor + overlay toolbars
-- [ ] 002 Remove `flintshot pin` CLI subcommand
+- [x] 002 Remove `flintshot pin` CLI subcommand
 - [ ] 003 Delete pin window + EditorOutcome::Pinned + run_pin trait
 - [ ] 004 Remove daemon PinLast dispatch + PinIdSource
 - [ ] 005 Remove pin sessions + prepare_gate pins condition
