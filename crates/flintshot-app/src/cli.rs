@@ -469,7 +469,7 @@ fn capture_and_dispatch(
 /// Grab the monitor with every flintshot surface cleared from the
 /// screen (smart-window-hiding; the ADR-0036 tray-hide generalized):
 /// the prepare handshake, the capture, and the restore report all sit
-/// inside the guard's scope, so the tray returns and pins respawn the
+/// inside the guard's scope, so the tray returns the
 /// instant the pixels are taken — success or failure — while the
 /// editor / overlay session beyond this function never holds anything
 /// hostage. No daemon (standalone capture) costs one socket probe.
@@ -494,9 +494,9 @@ fn capture_prepared(
 }
 
 /// RAII screen-clear for one capture: on construction, asks a running
-/// daemon to clear every flintshot surface (app window, pins, tray)
+/// daemon to clear every flintshot surface (app window, tray)
 /// for the grab; on drop, reports the grab finished so the tray
-/// returns and closed pins respawn. Best-effort end to end — a
+/// returns. Best-effort end to end — a
 /// capture must never fail because the daemon was slow, absent, or
 /// hostile. See ADR-0036 (extended by smart-window-hiding).
 struct CaptureGuard {

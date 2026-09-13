@@ -1,6 +1,6 @@
 [package]
 name = "flintshot-app"
-description = "flintshot CLI: daemon, region capture, fullscreen, pin, upload."
+description = "flintshot CLI: daemon, region capture, fullscreen, upload."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

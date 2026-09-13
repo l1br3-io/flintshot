@@ -1,7 +1,7 @@
 //! `flintshot-cosmic` — COSMIC panel applet binary.
 //!
 //! A panel button that opens a popup mirroring the tray menu (capture
-//! actions, per-monitor submenu, pin/open last, open config, quit). The
+//! actions, per-monitor submenu, open last, open config, quit). The
 //! applet is a pure IPC client: it talks to a running `flintshot
 //! daemon` over the local socket and never links `flintshot-app` or
 //! `egui` (ADR-0005). Task 8 will add the live event stream and daemon-

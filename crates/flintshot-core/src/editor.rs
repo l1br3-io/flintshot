@@ -323,7 +323,7 @@ pub struct EditorState {
     /// Cleared by a miss press, [`set_tool`](Self::set_tool) away
     /// from Move, `undo` / `redo` / `crop`, and
     /// [`delete_selected`](Self::delete_selected). Chrome-only:
-    /// never composed into Save / Copy / Pin / Upload output.
+    /// never composed into Save / Copy / Upload output.
     pub selected_index: Option<usize>,
     /// Insertion-point position within the in-flight `Tool::Text`
     /// draft, as a **char index** (not byte index) into
