@@ -1476,6 +1476,28 @@ Categories used below:
   toolbar; config persistence on editor close via `Config::load` +
   `Config::save`; CLI seeds `EditorState` from `Config::load()`).
 
+### Removed
+
+- **Pin-to-desktop, removed entirely** (ADR-0049, spec
+  `docs/specs/remove-pin-to-desktop/`): the `flintshot pin`
+  subcommand, the editor/overlay Pin button, the tray/applet *Pin
+  last* action, the pin window machinery
+  (`flintshot-editor-egui`'s `pin` module, `EditorShell::run_pin`,
+  `EditorOutcome::Pinned`), daemon pin sessions and the pre-grab
+  pin kill/respawn path, and the `PinConfig` core type are gone —
+  deleted, not stubbed. The feature never worked as intended on
+  Wayland (no always-on-top protocol for ordinary top-levels) and a
+  layer-shell-based pin is not worth the platform-specific
+  investment. **Wire-format break:** `Request::PinLast` and
+  `Event::Pinned` are deleted from the postcard-encoded IPC enums,
+  which re-indexes every variant after them — old and new binaries
+  cannot interoperate (accepted: every client except the COSMIC
+  applet is daemon-spawned and version-locked; rebuild the applet
+  with the daemon). A `[pin]` section in an existing `config.toml`
+  is now silently ignored (config parsing has no
+  `deny_unknown_fields`); no migration is provided. Save / Copy /
+  Upload / OpenLast flows are unchanged.
+
 ## Release cheat sheet (for maintainers)
 
 When cutting the first release:

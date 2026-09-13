@@ -90,8 +90,6 @@ Key defaults you'll be testing against:
 | ---------- | ----------------------- | --------------------------- |
 | `[hotkeys]`| `region`                | `Ctrl+Shift+PrintScreen`    |
 | `[hotkeys]`| `fullscreen`            | `Ctrl+Alt+PrintScreen`      |
-| `[pin]`    | `default-opacity`       | `1.0`                       |
-| `[pin]`    | `copy-on-close`         | `false`                     |
 
 ### Credentials (Phase 4 only)
 
@@ -130,11 +128,10 @@ testing it helps to know which process owns which UX:
 | ------------------------------- | ------------------------------- | --------------- |
 | `flintshot region`/`fullscreen` | daemon spawns a worker          | tracing log     |
 | `flintshot daemon`              | the daemon itself               | —               |
-| `flintshot pin <path>`          | standalone pin worker           | —               |
 | `flintshot upload <path>`       | standalone upload worker        | desktop notify  |
 | `flintshot auth imgur`          | inline in the CLI process       | —               |
 
-**Only upload fires a desktop notification.** Save, copy, and pin use
+**Only upload fires a desktop notification.** Save and copy use
 `tracing` log lines only (no toast), so keep a terminal open to watch
 for `RUST_LOG=flintshot=info` confirms.
 
@@ -178,7 +175,7 @@ not a failure.
 flintshot --help
 ```
 
-Expected: lists `daemon`, `region`, `fullscreen`, `config`, `pin`,
+Expected: lists `daemon`, `region`, `fullscreen`, `config`,
 `open`, `upload`, `auth` subcommands.
 
 **3. Region capture → editor (rows 5–8).**
@@ -474,136 +471,40 @@ what you saw live.
 
 ---
 
-## Phase 3 — pin-to-desktop + COSMIC applet
+## Phase 3 — COSMIC panel applet
 
 ### Test setup
 
 ```sh
 cargo build --release
 flintshot region           # capture something, Ctrl+S → /tmp/shot.png
-flintshot daemon &         # needed for PinLast/OpenLast IPC rows
+flintshot daemon &         # needed for the IPC rows below
 ```
 
-A pin is a borderless always-on-top floating window showing a captured
-image; each pin runs as its own worker process so a pin crash can't kill
-the editor or daemon (ADR-0019), and multiple pins coexist. All three
-pin entry points (CLI, editor button, daemon `PinLast`) converge on
-`EditorShell::run_pin`. The COSMIC applet is a pure IPC client (depends
-on `flintshot-core` + `libcosmic` only — no `egui`, no `flintshot-app`).
+The COSMIC applet is a pure IPC client (depends on `flintshot-core` +
+`libcosmic` only — no `egui`, no `flintshot-app`).
 
-### Phase 3.A — pin-to-desktop test script
-
-**1. Basic pin (rows 1–3).**
-
-```sh
-flintshot pin /tmp/shot.png
-flintshot pin /tmp/shot.png --at 100,100 --size 400x300
-flintshot pin /tmp/shot.png --opacity 0.7 --no-clipboard
-```
-
-Expected: borderless window opens at the given position/size; the
-opacity override dims it; `--no-clipboard` suppresses close-copy.
-
-**2. Window behavior (rows 4–8).**
-
-- The pin floats above ordinary windows (always-on-top).
-- Left-drag anywhere inside → moves the window.
-- Drag across a second monitor → window follows.
-- `Esc` → closes.
-- Double-click → closes.
-
-**3. Hover-opacity (rows 9–10).**
-
-With `[pin] default-opacity = 0.5`: the pin rests dimmed; moving the
-cursor over it makes it fully opaque; leaving returns it to 0.5.
-
-**4. Resize (rows 11–12).**
-
-Drag the bottom-right resize handle. The image scales — aspect ratio
-locked, no crop or distortion.
-
-**5. Copy-on-close (rows 13–14).**
-
-```sh
-# default: no copy
-flintshot pin /tmp/shot.png          # close it → paste in an image app → nothing
-# opt in:
-# (set [pin] copy-on-close = true in config, or:)
-flintshot pin /tmp/shot.png --no-clipboard  # --no-clipboard overrides even if config says true
-```
-
-To test `copy-on-close = true`: set it in config, pin, close, then paste
-into an image app — the pinned image should be on the clipboard.
-
-**6. Persistence + multiplicity (rows 15–17).**
-
-```sh
-flintshot pin /tmp/shot.png &
-flintshot pin /tmp/shot.png &
-flintshot pin /tmp/shot.png &
-```
-
-Close the editor and the daemon — all three pins stay open as
-independent windows.
-
-**7. Editor pin button (rows 18–19).**
-
-```sh
-flintshot region
-# draw a selection box with ⬚ Select
-# click 📌 Pin
-```
-
-Expected: the editor composes the final image to a temp file
-(`flintshot-pin-<pid>-<n>.png` under the OS temp dir), spawns a pin
-worker, and closes. With an active selection, only the selected region
-is pinned.
-
-**8. `open` + IPC commands (rows 20–25).**
+### Phase 3.A — `open` + IPC commands
 
 ```sh
 flintshot open /tmp/shot.png        # loads existing image into editor
-# via the daemon (PinLast / OpenLast) — exercised through the tray or
-# COSMIC applet, or via a raw IPC client. PinLast with no prior save
-# returns: Event::Error { code: "no-last-capture",
+# OpenLast is exercised through the tray or COSMIC applet, or via a
+# raw IPC client. OpenLast with no prior save returns:
+# Event::Error { code: "no-last-capture",
 #   message: "no capture has been saved yet" }
 ```
 
-**9. Events (rows 26–27).**
-
-After an editor save, subscribers see
-`Event::Saved { path: "<path>" }`. After `PinLast`, they see
-`Event::Pinned { id: <N> }` — ids are monotonic per daemon session.
+**Events.** After an editor save, subscribers see
+`Event::Saved { path: "<path>" }`.
 
 ### Phase 3.A matrix
 
 | Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
-| `flintshot pin <path>` opens borderless window              |    |    |    |    |    |    |    |    |    |
-| `flintshot pin <path> --at X,Y --size WxH` honours geometry  |    |    |    |    |    |    |    |    |    |
-| `flintshot pin <path> --opacity 0.7 --no-clipboard` override |    |    |    |    |    |    |    |    |    |
-| Pin window is always-on-top over ordinary windows           |    |    |    |    |    |    |    |    |    |
-| Pin draggable (left-drag anywhere moves the window)         |    |    |    |    |    |    |    |    |    |
-| Pin draggable across monitors (cross-monitor drag)          |    |    |    |    |    |    |    |    |    |
-| Pin closes on `Esc`                                         |    |    |    |    |    |    |    |    |    |
-| Pin closes on double-click                                  |    |    |    |    |    |    |    |    |    |
-| Hover-opacity: resting at `[pin] default-opacity`, opaque on hover | | | | | | | | | |
-| Hover-opacity: returns to resting when cursor leaves        |    |    |    |    |    |    |    |    |    |
-| Resize handle (bottom-right): drag resizes window           |    |    |    |    |    |    |    |    |    |
-| Resize is aspect-ratio locked (image scales, no crop/distort)|    |    |    |    |    |    |    |    |    |
-| Copy-on-close `[pin] copy_on_close = true`: image on clipboard on close | | | | | | | | | |
-| Copy-on-close `[pin] copy_on_close = false` (default): no copy | | | | | | | | | |
-| Pin persists after the editor exits                         |    |    |    |    |    |    |    |    |    |
-| Pin persists after the daemon exits                         |    |    |    |    |    |    |    |    |    |
-| Multiple pins coexist as independent windows                |    |    |    |    |    |    |    |    |    |
-| Editor *Pin* button: compose → cache file → pin spawns, editor closes | | | | | | | | | |
-| Editor *Pin* with active selection pins just the region     |    |    |    |    |    |    |    |    |    |
 | `flintshot open <path>` loads existing image into editor    |    |    |    |    |    |    |    |    |    |
-| `Request::PinLast` over IPC spawns a pin worker             |    |    |    |    |    |    |    |    |    |
 | `Request::OpenLast` over IPC spawns editor on last save     |    |    |    |    |    |    |    |    |    |
-| `PinLast` with no prior save → `Error { code: "no-last-capture" }` | | | | | | | | | |
+| `OpenLast` with no prior save → `Error { code: "no-last-capture" }` | | | | | | | | | |
 | `Event::Saved { path }` reaches IPC subscribers after editor save | | | | | | | | | |
-| `Event::Pinned { id }` reaches IPC subscribers after `PinLast`; ids monotonic | | | | | | | | | |
 
 ### Phase 3.B — COSMIC panel applet
 
@@ -623,7 +524,7 @@ flintshot daemon &
 #### Test script
 
 Click the panel button → popup opens with: *Capture region*,
-*Capture fullscreen*, *Fullscreen on monitor* submenu, *Pin last*,
+*Capture fullscreen*, *Fullscreen on monitor* submenu,
 *Open last*, *Open config*, *Quit*. Trigger each and confirm the daemon
 acts. Watch the event-feed status line update through
 *Capturing… → Editor opened → Saved \<path\>*.
@@ -646,13 +547,11 @@ the popup re-subscribes within ~2 s.
 | Per-monitor entry captures the right monitor                |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Popup capture: popup closes at the click; grabbed frame is popup-free (ADR-0041) | | | | | | N/A | N/A | N/A | N/A |
 | Popup capture: click-to-grab ≈ 600 ms (settle + icon grace), feels intentional | | | | | | N/A | N/A | N/A | N/A |
-| Popup *Pin last* sends `Request::PinLast`, pin window spawns |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Popup *Open last* sends `Request::OpenLast`, editor opens   |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Popup *Open config* opens `$EDITOR` on `config.toml`        |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Popup *Quit* sends `Request::Quit`, daemon exits cleanly    |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Non-capture clicks keep the popup open (status-line feedback) |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Event feed: status line updates (*Capturing… → Editor opened → Saved \<path\>*) | | | | | | N/A | N/A | N/A | N/A |
-| Event feed: `Event::Pinned { id }` shows *"Pinned #N"*      |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Event feed: `Event::Error` shows tinted-red error line      |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Daemon-absent: popup shows *"daemon not running"* + start hint |    |    |    |    |    | N/A | N/A | N/A | N/A |
 | Daemon-absent: daemon-dependent buttons disabled            |    |    |    |    |    | N/A | N/A | N/A | N/A |
@@ -662,22 +561,6 @@ the popup re-subscribes within ~2 s.
 
 ### Phase 3 known caveats
 
-- **L2–L5 (Wayland):** always-on-top is compositor-dependent.
-  `with_always_on_top()` maps to a winit hint that X11/DWM/macOS honour
-  but Wayland compositors may ignore (there is no Wayland protocol for
-  "always on top" outside layer-shell, which a borderless top-level
-  window doesn't use). The pin still opens and is draggable; it just
-  may not float above other windows. A layer-shell-based pin is the
-  real fix, deferred to a future effort.
-- **M1/M2 (macOS):** `with_always_on_top()` maps to
-  `NSWindow.level = .floating`. Verify whether `.statusBar` is needed
-  for the pin to float above a fullscreen app — record the result.
-- **Pin-cache files:** temp files under the OS temp dir
-  (`flintshot-pin-<pid>-<n>.png`) are safe to delete at any time — a
-  pin reads its image into memory once and holds no file handle. The
-  editor→pin handoff writes the temp file, spawns the pin worker, and
-  the pin worker reads + holds the image; the temp file may be reaped
-  by the OS independently.
 - **COSMIC applet (L1–L5 only):** the applet does not auto-start the
   daemon. If no daemon answers, the popup shows *"daemon not running —
   start with `flintshot daemon`"* and disables daemon-dependent
@@ -917,11 +800,10 @@ parity is test-pinned; this verifies it live).
 | -------------------------- | ----------------------------------------------------------- |
 | `Enter` (or ✓ / Copy chip) | region copied to clipboard, overlay closes; paste an image app |
 | Save chip                  | native `rfd` dialog; saved PNG is the region-cropped shot    |
-| Pin chip                   | overlay closes; pin worker floats the region                 |
 | Upload chip                | overlay closes; upload worker → URL notification + clipboard |
 
 With the daemon running, subscribers see the same `Saved` /
-`Pinned` / `Uploaded` events as the editor window produces.
+`Uploaded` events as the editor window produces.
 
 **7. Wayland fallback (rows 19–20).**
 
@@ -958,7 +840,6 @@ pre-selected).
 | `Enter` (or ✓ / Copy chip) copies region; paste verified    |    | N/A | N/A | N/A | N/A |    |    |    |    |
 | X11: process lingers ≤60 s post-copy (clipboard owner rule) |    | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
 | Save chip → `rfd` dialog writes region-cropped PNG          |    | N/A | N/A | N/A | N/A |    |    |    |    |
-| Pin chip → pin worker floats the region                     |    | N/A | N/A | N/A | N/A |    |    |    |    |
 | Upload chip → upload worker; URL notification + clipboard   |    | N/A | N/A | N/A | N/A |    |    |    |    |
 | `Esc` cancels: exit 0, no clipboard/file/worker side effects |   | N/A | N/A | N/A | N/A |    |    |    |    |
 | Wayland: config `overlay` demoted to editor window; log names fallback | N/A |    |    |    |    | N/A | N/A | N/A | N/A |
@@ -1275,7 +1156,7 @@ below.
    exists in the dev container; the maintainer runs spec exit
    criteria 1–3 before merge.
 2. **Standalone editor workers crash on at-spi sessions**
-   (blocks the fallback path, and pin/upload windows share it).
+   (blocks the fallback path; upload windows share it).
    `flintshot region --standalone` (or with no daemon running)
    panics before any window opens:
    `there is no reactor running, must be called from the context
@@ -1295,8 +1176,8 @@ below.
    **Fixed** in `54d0bf1` (2026-08-28, `fix-delegated-capture`
    Task 2): new `flintshot-app::ambient` module enters a
    multi-thread tokio runtime around every window path
-   (`run_editor_with_config`, `run_overlay_with_config`,
-   `run_pin_window`) for exactly the duration of the window loop;
+   (`run_editor_with_config`, `run_overlay_with_config`)
+   for exactly the duration of the window loop;
    regression tests in `crates/flintshot-app/src/ambient.rs`
    proxy the exact zbus-5 panic condition via
    `tokio::runtime::Handle::try_current()` (no handle on a plain
@@ -1641,7 +1522,6 @@ Re-open `flintshot region`, drag a selection, and without cropping:
 | ------------------- | --------------------------------------------------- |
 | `Ctrl+C` (or Copy)  | pastes the selected region only                     |
 | `Ctrl+S` (or Save)  | saved PNG is the selected region only               |
-| Pin                 | pin worker floats the selected region only          |
 | Upload              | upload worker sends the selected region only        |
 
 Then crop (Enter) and `Ctrl+S` again → the full (cropped) image is
@@ -1690,7 +1570,6 @@ dispatch-pinned, verified live here).
 | `Esc` before any drag: exit 0, no file / clipboard / worker  |    |    |    |    |    |    |    |    |    |
 | Live selection: `Ctrl+C` pastes the region only              |    |    |    |    |    |    |    |    |    |
 | Live selection: `Ctrl+S` saves the region only               |    |    |    |    |    |    |    |    |    |
-| Live selection: Pin floats the region only                   |    |    |    |    |    |    |    |    |    |
 | Live selection: Upload sends the region only; after crop, Save is full-image again | | | | | | | | | |
 | `flintshot fullscreen` opens the plain editor (no mask / pre-arm) | | | | | | | | | |
 | `flintshot open <path>` opens the plain editor               |    |    |    |    |    |    |    |    |    |
@@ -1764,7 +1643,7 @@ see the Prominent Move section below.
 - Dragging with any pre-armed annotation tool (if state got there
   synthetically) commits nothing; the only productive gesture is
   the region drag.
-- Select, Esc-cancel, Enter-crop, Copy / Save / Pin / Upload, and
+- Select, Esc-cancel, Enter-crop, Copy / Save / Upload, and
   undo/redo keep their ADR-0035 phase behaviour.
 
 **2. Editor unlock on crop (row 5).**
@@ -1936,8 +1815,8 @@ registration (ADR-0032 territory).
   (logged, self-healing).
 - **COSMIC never closes an SNI menu popup on activation** (upstream
   `TODO: Close menu?`) — moot for captures since ADR-0042 (the
-  helper's exit destroys it), but non-capture clicks (pin/open)
-  still leave the popup open until dismissed; that is upstream's
+   helper's exit destroys it), but non-capture clicks (open)
+   still leave the popup open until dismissed; that is upstream's
   behavior, not ours.
 - **The COSMIC applet's own popup closes at the click for captures**
   (ADR-0041): the applet destroys it and waits out a 250 ms settle
@@ -2329,18 +2208,15 @@ top of the app-window and recapture setups (daemon + tray running;
    `flintshot app` → press the **hotkey**: the window is absent
    from the shot and returns when the session ends (status line
    preserved). Tray *Open app* during the capture does not raise it.
-3. **Pins across captures**: save → `PinLast` (pin visible) → any
-   capture: the pin is absent from the shot and respawns at the
-   same position/size/opacity afterwards.
-4. **Double trigger**: fire two captures near-simultaneously (CLI
+3. **Double trigger**: fire two captures near-simultaneously (CLI
    `flintshot region & flintshot fullscreen &`): one session
    survives (latest wins), no stacked editors, no fork loop.
-5. **Kill -9 a straggler**: editor open → trigger a new capture →
+4. **Kill -9 a straggler**: editor open → trigger a new capture →
    `kill -9` the old worker mid-supersede: the session still ends
-   (reaper), the next capture proceeds, tray/app/pins all restore.
-6. **Standalone unchanged**: `flintshot region --standalone` with
+   (reaper), the next capture proceeds, tray/app all restore.
+5. **Standalone unchanged**: `flintshot region --standalone` with
    no daemon: same behavior as before, one socket probe of latency.
-7. **`--out` headless**: `flintshot region --out /tmp/x.png` with a
+6. **`--out` headless**: `flintshot region --out /tmp/x.png` with a
    subscriber attached: no `EditorOpened` is broadcast (nothing
    opened); the file is written.
 
@@ -2350,7 +2226,6 @@ top of the app-window and recapture setups (daemon + tray running;
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
 | Tray capture while editor open: graceful close, no chrome in shot, one editor | | | | | | | | | | |
 | Hotkey capture while app window open: window absent, returns after | | | | | | | | | | |
-| Pins absent from the shot; respawned at exact position/size/opacity | | | | | | | | | | |
 | Double trigger: serialized, latest wins, no stacked windows  | | | | | | | | | | |
 | Kill -9 mid-supersede: session ends, next capture proceeds   | | | | | | | | | | |
 | Standalone `--standalone`: unchanged behavior/latency        | | | | | | | | | | |
@@ -2360,16 +2235,12 @@ top of the app-window and recapture setups (daemon + tray running;
 
 - Unsaved annotations in a superseded editor are lost by design
   (Replace policy, Win11-parity with the recapture loop).
-- Editor-**hosted** pins die with their superseded host and are
-  not restored (durable pins = follow-up; ADR-0048).
-- Pins that outlive a daemon restart are unknown to the new daemon
-  and can appear in captures (registry is daemon-lifetime).
 
 Unit/integration coverage while the manual rows pend: the supersede
 ordering (broadcast → graceful wait → kill → spawn, serialization,
 straggler bounds) and the spawner's register/reap cycle are pinned
 in `worker.rs`/`sessions.rs` tests (incl. a real-child kill);
-`PrepareCapture`/`ReportAppHidden`/pin-respawn interceptions in
+`PrepareCapture`/`ReportAppHidden` interceptions in
 `ipc_server.rs` tests; the app-window hide/ack state machine in
 `app_window.rs` tests; the worker guard's skew fallback against a
 scripted old daemon in `ipc_client.rs` (ignored, real socket).

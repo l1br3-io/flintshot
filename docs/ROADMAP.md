@@ -20,7 +20,7 @@ With Phase 4 landed, the `1.0.0` clock is running: tag once we have
 | Phase 1 — Capture + editor window              | Shipped       |
 | Phase 2 — Daemon, tray, hotkeys, IPC           | Shipped       |
 | Phase 2b — Annotation tools, magnifier, polish | Shipped       |
-| Phase 3 — Pin-to-desktop                       | Shipped       |
+| Phase 3 — Pin-to-desktop (pin later removed, ADR-0049) | Shipped |
 | Phase 3b — COSMIC panel applet                 | Shipped       |
 | Phase 4 — Upload                               | Shipped       |
 | Phase 5 — Live overlay (Flameshot-style)       | Shipped       |

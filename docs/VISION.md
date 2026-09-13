@@ -77,7 +77,6 @@ screenshot tools:
 ### Outputs
 - Save to file (native dialog via `rfd`)
 - Copy to clipboard (`arboard`)
-- Pin as floating always-on-top window
 - Upload (Imgur first; pluggable `Backend` trait)
 - Open with external app
 - Notification on completion (`notify-rust`)
@@ -109,7 +108,7 @@ screenshot tools:
 
 ## Success criteria
 
-- v1 ships: capture + editor + tray + hotkeys + pin + upload, on all
+- v1 ships: capture + editor + tray + hotkeys + upload, on all
   three OSes
 - Cold-start-to-capture latency under 200ms on commodity hardware
 - Single static binary per platform under 25 MB (release, stripped)

@@ -80,14 +80,6 @@ otherwise; `--standalone` forces the in-process path.
 > concerns and
 > [`docs/adrs/ADR-0029`](docs/adrs/ADR-0029-ashpd-global-shortcuts.md).
 
-> **Pin always-on-top (Wayland):** the pin window's always-on-top hint
-> is honoured on X11, macOS, and Windows, but Wayland has no
-> always-on-top protocol for ordinary top-level windows — some
-> compositors ignore it. The pin still opens and is draggable; it just
-> may not float above other windows. A layer-shell-based pin is the real
-> fix, deferred to a future effort. See
-> [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md) §Phase 3 known caveats.
-
 ### Development
 
 For contributors. The `justfile` wraps the common loop; see
@@ -108,10 +100,9 @@ Dev shortcuts exist for capture subcommands too — e.g.
 
 - Capture fullscreen/region (via xcap)
 - Editor window with annotation tools (rectangle, arrow, text, blur, ellipse, line, marker, pencil, number)
-- Save to file / copy to clipboard / pin to desktop
+- Save to file / copy to clipboard
 - Config file at `~/.config/flintshot/config.toml`
 - Daemon with tray, hotkeys, and IPC server
-- Pin-to-desktop (`flintshot pin`, editor Pin button, `Request::PinLast`)
 
 ### Coming next (Phase 3b / 4)
 

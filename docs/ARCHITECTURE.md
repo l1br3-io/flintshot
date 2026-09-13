@@ -39,7 +39,7 @@ crosses the boundary.
 ### `flintshot-editor-egui` (lib)
 **Owns:** the egui implementation of `Canvas` (mapping primitives to
 `egui::Painter` calls) and `EditorShell` (driving eframe windows for
-the editor and pin-to-desktop). Translates egui input events into
+the editor). Translates egui input events into
 `flintshot-core::InputEvent`. Owns the toolbar/palette widgets,
 magnifier, color picker — all the toolkit-specific UI.
 
@@ -74,7 +74,7 @@ egui   = ["dep:flintshot-editor-egui"]
 pure IPC client — it connects to the daemon socket, sends `Request`s,
 and reads the live `Event` stream over a persistent `Subscribe`
 connection. The popup mirrors the tray's action set (capture, per-
-monitor capture, pin/open last, config, quit) plus a status line fed by
+monitor capture, open last, config, quit) plus a status line fed by
 the event stream, and degrades to a clear *"daemon not running"* state
 when the socket is absent.
 
@@ -113,7 +113,6 @@ leaf binaries. A future `flintshot-editor-iced` would slot in beside
 │  - capture             │
 │  - editor window       │
 │  - upload              │
-│  - pin window          │
 └────────────────────────┘
 ```
 
@@ -124,7 +123,6 @@ A single binary handles both roles; behavior is selected by subcommand:
   region, open editor
 - `flintshot fullscreen [--monitor N]` — one-shot: capture full screen,
   open editor
-- `flintshot pin <path>` — open a pin window for an existing image
 - `flintshot open <path>` — open an existing image in the editor (no capture)
 - `flintshot upload <path> --backend=imgur` — upload and exit
 - `flintshot config` — print or edit config
@@ -144,7 +142,6 @@ pub enum Request {
     CaptureRegion { monitor: Option<u32>, delay_ms: u32 },
     CaptureFullscreen { monitor: Option<u32> },
     OpenLast,
-    PinLast,
     UploadLast { backend: String },
     ReportSaved { path: PathBuf },   // worker → daemon: best-effort save report
     Quit,
@@ -156,7 +153,6 @@ pub enum Event {
     EditorOpened,
     Saved { path: PathBuf },
     Uploaded { url: String, delete_handle: Option<String> },
-    Pinned { id: u64 },
     Error { code: String, message: String },
 }
 ```
@@ -218,20 +214,18 @@ pub fn render<C: Canvas>(state: &EditorState, canvas: &mut C) {
 
 ### `EditorShell` trait (`flintshot-core::shell`)
 
-Toolkit lifecycle: open the editor (or a pin window), block until the
+Toolkit lifecycle: open the editor, block until the
 user is done, return the outcome.
 
 ```rust
 pub trait EditorShell {
     fn run_editor(&self, state: EditorState) -> Result<EditorOutcome>;
-    fn run_pin   (&self, image: image::RgbaImage, rect: Rect) -> Result<()>;
 }
 
 pub enum EditorOutcome {
     Saved(PathBuf),
     CopiedToClipboard,
     Uploaded(String),
-    Pinned,
     Cancelled,
 }
 ```
@@ -303,11 +297,6 @@ default_delay_ms = 0
 [hotkeys]
 region = "Ctrl+Shift+PrintScreen"
 fullscreen = "Ctrl+Alt+PrintScreen"
-
-[pin]
-default_opacity = 0.5          # resting opacity; snaps to 1.0 while hovered
-copy_on_close = false          # copy image to clipboard when the pin closes
-default_position = "center"    # "center" (active monitor) or "X,Y"
 
 [upload]
 default_backend = "imgur"

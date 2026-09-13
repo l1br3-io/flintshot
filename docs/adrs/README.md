@@ -58,3 +58,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0046 | [New-capture from the editor re-captures in-process (the worker persists)](ADR-0046-editor-new-capture-inprocess.md) |
 | ADR-0047 | [The app window closes for a capture — hiding is not a portable guarantee](ADR-0047-app-window-closes-for-capture.md) |
 | ADR-0048 | [Capture sessions — Replace policy + a generalized pre-grab handshake](ADR-0048-capture-session-replace-and-prepare.md) |
+| ADR-0049 | [Remove pin-to-desktop](ADR-0049-remove-pin-to-desktop.md) |
