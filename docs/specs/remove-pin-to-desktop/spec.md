@@ -1,7 +1,7 @@
 # Spec: Remove pin-to-desktop
 
 ---
-status: draft
+status: active
 started: 2026-09-13
 ---
 
