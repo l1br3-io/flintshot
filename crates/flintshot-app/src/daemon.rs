@@ -266,11 +266,10 @@ fn run_event_loop(
         service_tray_gate(tray_gate, tray);
 
         // Prepare-gate tick: drive any armed pre-grab handshake
-        // (app-ack, pins, live-capture re-assert) toward its reply.
+        // (app-ack, live-capture re-assert) toward its reply.
         prepare.step(
             Instant::now(),
             capture.sessions().app_alive(),
-            capture.sessions().live_pins() > 0,
             capture.sessions().live_captures(),
         );
 
