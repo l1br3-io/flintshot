@@ -14,9 +14,6 @@
 //! - [`overlay`] (private) — the internal `OverlayApp` (`impl
 //!   eframe::App`) for the Phase 5 fullscreen frozen-capture shell;
 //!   entered via [`EguiShell::run_overlay`].
-//! - [`pin`] — the internal `PinApp` (`impl eframe::App`) for the
-//!   Phase 3 pin-to-desktop window (drag / hover-opacity / resize /
-//!   copy-on-close).
 //! - [`shell`] — the public `EguiShell` (`impl EditorShell`) that
 //!   owns the eframe lifecycle and the outcome slot.
 //! - `theme` (private) — the graphite + ember token set and `Visuals`
@@ -41,7 +38,6 @@ mod chrome;
 mod home;
 mod magnifier;
 mod overlay;
-mod pin;
 mod shell;
 mod theme;
 mod toolbar;
