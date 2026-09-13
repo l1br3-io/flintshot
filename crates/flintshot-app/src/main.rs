@@ -45,7 +45,6 @@ fn main() -> Result<()> {
         Some(Command::Region(args)) => cli::run_region(&args),
         Some(Command::Fullscreen(args)) => cli::run_fullscreen(&args),
         Some(Command::Config) => cli::run_config(),
-        Some(Command::Pin(args)) => cli::run_pin(&args),
         Some(Command::Open(args)) => cli::run_open(&args),
         Some(Command::Upload(args)) => cli::run_upload(&args),
         Some(Command::Auth(args)) => cli::run_auth(&args),

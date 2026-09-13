@@ -16,9 +16,7 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
 use flintshot_core::ipc::Request;
-use flintshot_core::{
-    capture_fullscreen, Config, ImageMime, Point, Rect, UploadContext, UploadOutcome,
-};
+use flintshot_core::{capture_fullscreen, Config, ImageMime, UploadContext, UploadOutcome};
 use image::ImageFormat;
 
 /// Cross-platform screenshot capture and annotation.
@@ -47,8 +45,6 @@ pub enum Command {
     Fullscreen(FullscreenArgs),
     /// Print the resolved configuration as TOML to stdout.
     Config,
-    /// Open a pin-to-desktop window for an existing image. [Phase 3]
-    Pin(PinArgs),
     /// Open an existing image in the editor. [Phase 3]
     Open(OpenArgs),
     /// Upload an image to a backend and print the resulting URL. [Phase 4]
@@ -246,7 +242,7 @@ fn resolve_interaction_mode(
 /// and the Wayland demotion of config-set `overlay` (the demoted
 /// editor is still region's editor path). Fullscreen stays plain even
 /// when demoted (spec Open Question 1: "the whole monitor is the
-/// shot"); `open` / `pin` never request the phase.
+/// shot"); `open` never requests the phase.
 fn selection_first_for(mode: &str, resolved: InteractionMode) -> bool {
     mode == "region" && resolved == InteractionMode::Editor
 }
@@ -276,28 +272,6 @@ pub struct FullscreenArgs {
     pub interaction: InteractionArgs,
     #[command(flatten)]
     pub output: OutputArgs,
-}
-
-/// Arguments for `flintshot pin`.
-#[derive(Debug, Args)]
-pub struct PinArgs {
-    /// Path to the image file to pin.
-    pub path: PathBuf,
-    /// Window top-left position as `X,Y` (physical px). Defaults to the
-    /// active monitor's centre.
-    #[arg(long, value_name = "X,Y", value_parser = parse_point)]
-    pub at: Option<Point>,
-    /// Window size as `WxH` (physical px). Defaults to the image's
-    /// natural dimensions.
-    #[arg(long, value_name = "WxH", value_parser = parse_size)]
-    pub size: Option<(u32, u32)>,
-    /// Resting opacity in `0.0..=1.0`. Overrides `[pin] default-opacity`.
-    #[arg(long, value_name = "N")]
-    pub opacity: Option<f32>,
-    /// Do not copy the image to the clipboard when the pin closes
-    /// (overrides `[pin] copy-on-close = true`).
-    #[arg(long)]
-    pub no_clipboard: bool,
 }
 
 /// Arguments for `flintshot upload`.
@@ -1254,195 +1228,6 @@ fn write_png(img: &image::RgbaImage, path: &std::path::Path) -> Result<()> {
         .with_context(|| format!("writing PNG to {}", path.display()))
 }
 
-/// `flintshot pin` — Phase 3.
-///
-/// Loads an image from disk, resolves the window geometry (image natural
-/// size by default; `--size` overrides; active-monitor centre by
-/// default, `--at` overrides), merges CLI overrides over `[pin]` config
-/// (`--opacity`, `--no-clipboard`), and hands the image + rect + resolved
-/// config to the egui pin viewport (`EguiShell::run_pin`), which opens
-/// a borderless always-on-top window.
-pub fn run_pin(args: &PinArgs) -> Result<()> {
-    if !args.path.exists() {
-        return Err(color_eyre::eyre::eyre!(
-            "no such file: {}",
-            args.path.display()
-        ));
-    }
-
-    let img = image::open(&args.path)
-        .with_context(|| format!("loading pin image {}", args.path.display()))?
-        .to_rgba8();
-
-    // A config load failure is non-fatal: fall back to built-in pin
-    // defaults so the pin still opens.
-    let cfg = match Config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "could not load config; using built-in pin defaults"
-            );
-            Config::default()
-        }
-    };
-
-    // CLI overrides win over config defaults. The resolved PinConfig
-    // is passed to the egui shell via its builder (the `run_pin` trait
-    // signature stays `(image, rect)` — config rides the shell).
-    let mut pin_cfg = cfg.pin.clone();
-    if let Some(op) = args.opacity {
-        pin_cfg.default_opacity = op;
-    }
-    if args.no_clipboard {
-        pin_cfg.copy_on_close = false;
-    }
-
-    let rect = pin_window_rect(img.dimensions(), args.at, args.size, active_monitor_geo());
-
-    tracing::debug!(
-        opacity = pin_cfg.default_opacity,
-        copy_on_close = pin_cfg.copy_on_close,
-        rect = ?rect,
-        "pin resolved; opening viewport"
-    );
-
-    run_pin_window(img, rect, pin_cfg)
-}
-
-/// Open the pin viewport. Task 2 hands the image + rect + resolved
-/// config to the egui shell's real borderless always-on-top window.
-#[cfg(feature = "egui")]
-fn run_pin_window(
-    img: image::RgbaImage,
-    rect: Rect,
-    config: flintshot_core::PinConfig,
-) -> Result<()> {
-    use flintshot_core::EditorShell;
-
-    crate::ambient::with_ambient_runtime(|| {
-        flintshot_editor_egui::EguiShell::new()
-            .with_pin_config(config)
-            .run_pin(img, rect)
-    })
-    .and_then(|ran| ran.map_err(|e| color_eyre::eyre::eyre!("running pin window: {e}")))?;
-    Ok(())
-}
-
-/// Headless-build fallback: the pin viewport needs the `egui` feature.
-#[cfg(not(feature = "egui"))]
-fn run_pin_window(
-    _img: image::RgbaImage,
-    _rect: Rect,
-    _config: flintshot_core::PinConfig,
-) -> Result<()> {
-    Err(color_eyre::eyre::eyre!(
-        "pin window not built; this binary was compiled without the `egui` feature"
-    ))
-}
-
-/// A monitor's geometry, used to centre the pin window. Stripped from
-/// [`flintshot_core::MonitorInfo`] so the centre math is pure and
-/// headless-testable — `MonitorInfo` is `#[non_exhaustive]` and thus not
-/// constructable in this crate's unit tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MonitorGeo {
-    /// Virtual-desktop origin X (physical px).
-    x: i32,
-    /// Virtual-desktop origin Y (physical px).
-    y: i32,
-    /// Width (physical px).
-    width: u32,
-    /// Height (physical px).
-    height: u32,
-}
-
-/// Pick the active monitor's geometry for pin centring: the primary
-/// monitor, falling back to the first. Returns `None` (with a warning)
-/// when no monitors are available or enumeration fails — callers then
-/// place the pin at the origin.
-fn active_monitor_geo() -> Option<MonitorGeo> {
-    match flintshot_core::monitors() {
-        Ok(list) if !list.is_empty() => {
-            let primary = list.iter().find(|m| m.is_primary).unwrap_or(&list[0]);
-            Some(MonitorGeo {
-                x: primary.x,
-                y: primary.y,
-                width: primary.width,
-                height: primary.height,
-            })
-        }
-        Ok(_) => {
-            tracing::warn!("no monitors available; placing pin at (0, 0)");
-            None
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "could not enumerate monitors; placing pin at (0, 0)");
-            None
-        }
-    }
-}
-
-/// Resolve the pin window rect from the image dimensions and any CLI
-/// overrides. Size defaults to the image's natural dimensions; position
-/// defaults to the active monitor's centre. A window larger than its
-/// monitor is clamped to the monitor's top-left rather than placed at a
-/// negative coordinate.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "monitor coords/dims fit f32 exactly"
-)]
-fn pin_window_rect(
-    img_dims: (u32, u32),
-    at: Option<Point>,
-    size: Option<(u32, u32)>,
-    monitor: Option<MonitorGeo>,
-) -> Rect {
-    let (w, h) = size.unwrap_or(img_dims);
-    let pos = at.unwrap_or_else(|| match monitor {
-        Some(m) => {
-            let off_x = (m.width as f32 - w as f32).max(0.0) / 2.0;
-            let off_y = (m.height as f32 - h as f32).max(0.0) / 2.0;
-            Point::new(m.x as f32 + off_x, m.y as f32 + off_y)
-        }
-        None => Point::new(0.0, 0.0),
-    });
-    Rect::from_xywh(pos.x, pos.y, w as f32, h as f32)
-}
-
-/// Parse an `--at X,Y` value into a [`Point`]. Both halves accept any
-/// `f32`-parseable text (so `100,200` and `3.5,4` both work).
-fn parse_point(s: &str) -> Result<Point, String> {
-    let (xs, ys) = s
-        .split_once(',')
-        .ok_or_else(|| format!("`{s}` is not `X,Y` (expected a comma)"))?;
-    let x = xs
-        .trim()
-        .parse::<f32>()
-        .map_err(|e| format!("invalid X coordinate `{xs}`: {e}"))?;
-    let y = ys
-        .trim()
-        .parse::<f32>()
-        .map_err(|e| format!("invalid Y coordinate `{ys}`: {e}"))?;
-    Ok(Point::new(x, y))
-}
-
-/// Parse a `--size WxH` value into a `(width, height)` pair.
-fn parse_size(s: &str) -> Result<(u32, u32), String> {
-    let (ws, hs) = s
-        .split_once('x')
-        .ok_or_else(|| format!("`{s}` is not `WxH` (expected an `x`)"))?;
-    let w = ws
-        .trim()
-        .parse::<u32>()
-        .map_err(|e| format!("invalid width `{ws}`: {e}"))?;
-    let h = hs
-        .trim()
-        .parse::<u32>()
-        .map_err(|e| format!("invalid height `{hs}`: {e}"))?;
-    Ok((w, h))
-}
-
 /// `flintshot upload` — Phase 4.
 ///
 /// Loads the image, sniffs its format, resolves the backend, runs the
@@ -1892,94 +1677,31 @@ mod tests {
         server_task.abort();
     }
 
-    const fn geo(x: i32, y: i32, w: u32, h: u32) -> MonitorGeo {
-        MonitorGeo {
-            x,
-            y,
-            width: w,
-            height: h,
-        }
-    }
+    // ── Pin removal (remove-pin-to-desktop Task 002) ─────────────
 
     #[test]
-    fn pin_rect_defaults_to_image_size_at_origin_without_monitor() {
-        let r = pin_window_rect((100, 200), None, None, None);
-        assert_eq!(r, Rect::from_xywh(0.0, 0.0, 100.0, 200.0));
-    }
-
-    #[test]
-    fn pin_rect_size_override_changes_size_not_position() {
-        let r = pin_window_rect((100, 200), None, Some((50, 80)), None);
-        assert_eq!(r, Rect::from_xywh(0.0, 0.0, 50.0, 80.0));
-    }
-
-    #[test]
-    fn pin_rect_at_override_sets_top_left() {
-        let r = pin_window_rect((100, 200), Some(Point::new(10.0, 20.0)), None, None);
-        assert_eq!(r.min, Point::new(10.0, 20.0));
-        assert_eq!(r.width(), 100.0);
-        assert_eq!(r.height(), 200.0);
-    }
-
-    #[test]
-    fn pin_rect_centers_on_monitor() {
-        // 1000x800 monitor at origin, 200x100 window → centre (400, 350).
-        let r = pin_window_rect((200, 100), None, None, Some(geo(0, 0, 1000, 800)));
-        assert_eq!(r.min, Point::new(400.0, 350.0));
-        assert_eq!(r.width(), 200.0);
-        assert_eq!(r.height(), 100.0);
-    }
-
-    #[test]
-    fn pin_rect_centers_on_monitor_with_offset_origin() {
-        // Secondary monitor at (1920, 0), 1000x800, 200x100 window.
-        let r = pin_window_rect((200, 100), None, None, Some(geo(1920, 0, 1000, 800)));
-        assert_eq!(r.min, Point::new(1920.0 + 400.0, 350.0));
-    }
-
-    #[test]
-    fn pin_rect_clamps_to_origin_when_bigger_than_monitor() {
-        let r = pin_window_rect((2000, 2000), None, None, Some(geo(0, 0, 1000, 800)));
-        assert_eq!(r.min, Point::new(0.0, 0.0));
-    }
-
-    #[test]
-    fn pin_rect_at_overrides_monitor_centering() {
-        let r = pin_window_rect(
-            (200, 100),
-            Some(Point::new(5.0, 6.0)),
-            None,
-            Some(geo(0, 0, 1000, 800)),
+    fn pin_subcommand_is_rejected() {
+        let err = Cli::try_parse_from(["flintshot", "pin", "/tmp/x.png"])
+            .expect_err("pin must not be a subcommand");
+        assert!(
+            err.to_string().to_lowercase().contains("unrecognized"),
+            "expected an unrecognized-subcommand error, got: {err}"
         );
-        assert_eq!(r.min, Point::new(5.0, 6.0));
     }
 
     #[test]
-    fn parse_point_accepts_comma_pair() {
-        assert_eq!(parse_point("100,200").unwrap(), Point::new(100.0, 200.0));
-        assert_eq!(parse_point(" 3 , 4 ").unwrap(), Point::new(3.0, 4.0));
-    }
-
-    #[test]
-    fn parse_point_rejects_missing_comma() {
-        assert!(parse_point("100 200").is_err());
-    }
-
-    #[test]
-    fn parse_point_rejects_non_numeric() {
-        assert!(parse_point("a,b").is_err());
-    }
-
-    #[test]
-    fn parse_size_accepts_x_pair() {
-        assert_eq!(parse_size("800x600").unwrap(), (800, 600));
-        assert_eq!(parse_size(" 1280 x 720 ").unwrap(), (1280, 720));
-    }
-
-    #[test]
-    fn parse_size_rejects_garbage() {
-        assert!(parse_size("800").is_err());
-        assert!(parse_size("800,600").is_err());
+    fn help_text_mentions_no_pin() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_help().to_string();
+        // Token-level match: "Snipping" (the app subcommand's copy)
+        // contains "pin" as a substring and is not a pin reference.
+        let mentions_pin = help
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|tok| tok.eq_ignore_ascii_case("pin"));
+        assert!(
+            !mentions_pin,
+            "`--help` must not advertise a pin subcommand: {help}"
+        );
     }
 
     /// A standalone worker (no daemon) must not error when it tries to
