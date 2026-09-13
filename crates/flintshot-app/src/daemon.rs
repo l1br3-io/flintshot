@@ -86,7 +86,7 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     //    icon, so the gate hands it actions to apply.
     let wayland = crate::platform::session_is_wayland();
     let bus = crate::ipc_server::SubscriberBus::new();
-    let state = crate::worker::DispatchState::new();
+    let state = crate::worker::DispatchState::new().with_capture_backend(&config.capture.backend);
     let tray_gate = Arc::new(TrayGate::new());
     // Capture dispatch context: the session registry + the mutex
     // serializing supersede-then-spawn across every entry point

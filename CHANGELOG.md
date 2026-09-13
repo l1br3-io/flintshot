@@ -20,6 +20,16 @@ Categories used below:
 
 ### Added
 
+- **Capture backend selection**: `region` / `fullscreen` gain
+  `--backend <BACKEND>` (`auto`, `xcap`, `portal` on Linux; unknown
+  ids are a hard CLI error naming the valid set), and config gains
+  `[capture] backend` (default `"auto"`; unknown values load and
+  re-save verbatim, warning at selection time). Resolution is CLI >
+  config > auto-detect by session kind, with `xcap` as the
+  never-failing fallback; the chosen backend id is logged on every
+  grab. Selection groundwork for the native Wayland portal backend
+  (spec `docs/specs/native-capture-backends/`).
+
 - **New capture from the editor** (Win11 Snipping Tool-style): a
   `+` chip leading the editor/overlay toolbar rail (popup: *Region
   · Ctrl+N* / *Fullscreen*) and the `Ctrl+N` chord start a fresh

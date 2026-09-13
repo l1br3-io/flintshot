@@ -16,7 +16,9 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
 use flintshot_core::ipc::Request;
-use flintshot_core::{capture_fullscreen, Config, ImageMime, UploadContext, UploadOutcome};
+use flintshot_core::{
+    select_backend, CaptureOptions, Config, ImageMime, UploadContext, UploadOutcome,
+};
 use image::ImageFormat;
 
 /// Cross-platform screenshot capture and annotation.
@@ -256,6 +258,10 @@ pub struct RegionArgs {
     /// Delay before capturing, in milliseconds.
     #[arg(long, default_value_t = 0, value_name = "MILLIS")]
     pub delay_ms: u32,
+    /// Capture backend override (`auto`, `xcap`, `portal` on Linux).
+    /// Defaults to config's `[capture] backend`.
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
     #[command(flatten)]
     pub interaction: InteractionArgs,
     #[command(flatten)]
@@ -268,6 +274,10 @@ pub struct FullscreenArgs {
     /// Index of the monitor to capture (0-based). Defaults to the active monitor.
     #[arg(long, value_name = "N")]
     pub monitor: Option<u32>,
+    /// Capture backend override (`auto`, `xcap`, `portal` on Linux).
+    /// Defaults to config's `[capture] backend`.
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
     #[command(flatten)]
     pub interaction: InteractionArgs,
     #[command(flatten)]
@@ -336,6 +346,7 @@ pub fn run_daemon(args: &DaemonArgs) -> Result<()> {
 /// and the daemon's worker opens the editor. Otherwise the in-process
 /// Phase 1 capture+editor path runs (or a PNG is written with `--out`).
 pub fn run_region(args: &RegionArgs) -> Result<()> {
+    validate_capture_backend_arg(args.backend.as_deref())?;
     let interaction = args.interaction.mode_override();
     if delegate_to_daemon(
         &Request::CaptureRegion {
@@ -352,12 +363,19 @@ pub fn run_region(args: &RegionArgs) -> Result<()> {
         tracing::debug!(delay_ms = args.delay_ms, "sleeping before capture");
         std::thread::sleep(Duration::from_millis(u64::from(args.delay_ms)));
     }
-    capture_and_dispatch(args.monitor, "region", &args.output, interaction)
+    capture_and_dispatch(
+        args.monitor,
+        "region",
+        &args.output,
+        interaction,
+        args.backend.as_deref(),
+    )
 }
 
 /// `flintshot fullscreen` — Phase 1 capture+editor, with Phase 2
 /// detect-and-delegate. See [`run_region`].
 pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
+    validate_capture_backend_arg(args.backend.as_deref())?;
     let interaction = args.interaction.mode_override();
     if delegate_to_daemon(
         &Request::CaptureFullscreen {
@@ -369,7 +387,39 @@ pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
     ) {
         return Ok(());
     }
-    capture_and_dispatch(args.monitor, "fullscreen", &args.output, interaction)
+    capture_and_dispatch(
+        args.monitor,
+        "fullscreen",
+        &args.output,
+        interaction,
+        args.backend.as_deref(),
+    )
+}
+
+/// Validate a `--backend` value for `region`/`fullscreen`: `auto`,
+/// any id registered in this build, or nothing. Unlike the config
+/// field (which tolerates unknown strings), a bad CLI value is a hard
+/// error — the user just typed it, mirroring `validate_auth_backend`
+/// and upload's `--backend`.
+fn validate_capture_backend_arg(backend: Option<&str>) -> Result<()> {
+    let Some(pin) = backend else {
+        return Ok(());
+    };
+    if pin == "auto" {
+        return Ok(());
+    }
+    let valid: Vec<&str> = flintshot_core::registered_backends()
+        .iter()
+        .map(|b| b.id())
+        .collect();
+    if valid.contains(&pin) {
+        Ok(())
+    } else {
+        Err(color_eyre::eyre::eyre!(
+            "unknown capture backend `{pin}` (valid: auto, {})",
+            valid.join(", ")
+        ))
+    }
 }
 
 /// `flintshot open <path>` — Phase 3. Load an existing image from disk
@@ -433,6 +483,9 @@ fn delegate_to_daemon(
 /// [`run_fullscreen`]; `mode` is just the log label ("region" /
 /// "fullscreen"). `interaction` is the resolved CLI-flag override, if
 /// any — the config value joins in [`run_capture_shell`].
+/// `backend_pin` is the CLI `--backend` override (config joins in
+/// [`capture_prepared`], CLI > config per the upload `--backend`
+/// precedent).
 ///
 /// The worker subscribes to daemon events for its whole lifetime: a
 /// supersede before the shell opens cancels the worker instead
@@ -442,13 +495,14 @@ fn capture_and_dispatch(
     mode: &str,
     output: &OutputArgs,
     interaction: Option<InteractionMode>,
+    backend_pin: Option<&str>,
 ) -> Result<()> {
     let watch = SupersedeWatch::subscribe_at(None);
     if watch.superseded() {
         tracing::info!("{mode} worker superseded before its grab; exiting");
         return Ok(());
     }
-    let Some(img) = capture_prepared(monitor, mode, &watch, None)? else {
+    let Some(img) = capture_prepared(monitor, mode, &watch, None, backend_pin)? else {
         tracing::info!("{mode} worker superseded during the prepare handshake; exiting");
         return Ok(());
     };
@@ -477,17 +531,39 @@ fn capture_and_dispatch(
 /// `None` means a supersede arrived mid-handshake (Task 004's
 /// subscription flag): the capture is abandoned without grabbing —
 /// the newer capture owns the screen.
+///
+/// `backend_pin` is the CLI `--backend` value; the config's
+/// `[capture] backend` joins here (CLI > config > auto — upload's
+/// `--backend` precedence). The grab goes through the backend
+/// registry; the chosen id is logged so a mis-pinned backend is
+/// diagnosable from the worker log.
 fn capture_prepared(
     monitor: Option<u32>,
     mode: &str,
     watch: &SupersedeWatch,
     override_path: Option<&std::path::Path>,
+    backend_pin: Option<&str>,
 ) -> Result<Option<image::RgbaImage>> {
     let _prepared = CaptureGuard::request_at(override_path);
     if watch.superseded() {
         return Ok(None);
     }
-    capture_fullscreen(monitor)
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load config; using built-in defaults");
+            Config::default()
+        }
+    };
+    let preference = backend_pin.or(Some(cfg.capture.backend.as_str()));
+    let backend = select_backend(preference).map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
+    tracing::info!(backend = backend.id(), "{mode} capture backend resolved");
+    // `CaptureOptions` is `#[non_exhaustive]`: mutate-from-default is
+    // the cross-crate construction path.
+    let mut opts = CaptureOptions::default();
+    opts.include_cursor = cfg.capture.include_cursor;
+    backend
+        .capture_monitor(monitor, &opts)
         .map(Some)
         .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
         .with_context(|| format!("capturing {mode} on monitor {monitor:?}"))
@@ -868,10 +944,14 @@ enum SessionNext {
 /// grace before the fresh grab (same bound the app window's hide
 /// uses), then a monitor is captured with the screen prepared.
 /// `None` = superseded mid-handshake: abandon the chain.
+///
+/// No CLI backend pin here: like the monitor choice, a recapture is a
+/// fresh grab — the config's `[capture] backend` re-resolves inside
+/// [`capture_prepared`].
 #[cfg(feature = "egui")]
 fn recapture_image(watch: &SupersedeWatch) -> Result<Option<image::RgbaImage>> {
     std::thread::sleep(Duration::from_millis(crate::app_window::HIDE_GRACE_MS));
-    capture_prepared(None, "recapture", watch, None)
+    capture_prepared(None, "recapture", watch, None, None)
         .with_context(|| "recapturing for a new editor session")
 }
 
@@ -1779,6 +1859,7 @@ mod tests {
             Some(std::path::Path::new(
                 "/this/does/not/exist/flintshot-test-superseded.sock",
             )),
+            None,
         )
         .expect("an abandoned grab is Ok(None), not an error");
         assert!(outcome.is_none(), "superseded → no grab at all");
@@ -1800,6 +1881,7 @@ mod tests {
             Some(std::path::Path::new(
                 "/this/does/not/exist/flintshot-test-grab.sock",
             )),
+            None,
         );
         assert!(
             matches!(&outcome, Ok(Some(_)) | Err(_)),
@@ -1881,6 +1963,67 @@ mod tests {
     fn validate_auth_backend_rejects_unknown() {
         assert!(validate_auth_backend("0x0").is_err());
         assert!(validate_auth_backend("").is_err());
+    }
+
+    // ── Capture backend helpers ──────────────────────────────────
+
+    #[test]
+    fn validate_capture_backend_accepts_auto_and_registered_ids() {
+        assert!(validate_capture_backend_arg(None).is_ok());
+        assert!(validate_capture_backend_arg(Some("auto")).is_ok());
+        assert!(validate_capture_backend_arg(Some("xcap")).is_ok());
+        for backend in flintshot_core::registered_backends() {
+            assert!(
+                validate_capture_backend_arg(Some(backend.id())).is_ok(),
+                "registered id {} must validate",
+                backend.id()
+            );
+        }
+    }
+
+    #[test]
+    fn validate_capture_backend_rejects_unknown_naming_valid_ids() {
+        let err = validate_capture_backend_arg(Some("bogus")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("bogus"), "error must name the bad id: {msg}");
+        assert!(msg.contains("auto"), "error must list auto: {msg}");
+        assert!(msg.contains("xcap"), "error must list xcap: {msg}");
+    }
+
+    #[test]
+    fn region_and_fullscreen_parse_backend_flag() {
+        let cli = Cli::parse_from(["flintshot", "region", "--backend", "xcap"]);
+        match cli.command {
+            Some(Command::Region(args)) => {
+                assert_eq!(args.backend.as_deref(), Some("xcap"));
+            }
+            other => panic!("expected region, got {other:?}"),
+        }
+        let cli = Cli::parse_from(["flintshot", "fullscreen", "--backend", "auto"]);
+        match cli.command {
+            Some(Command::Fullscreen(args)) => {
+                assert_eq!(args.backend.as_deref(), Some("auto"));
+            }
+            other => panic!("expected fullscreen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_region_rejects_unknown_backend_before_any_delegation() {
+        let args = RegionArgs {
+            monitor: None,
+            delay_ms: 0,
+            backend: Some("nope".into()),
+            interaction: InteractionArgs {
+                overlay: false,
+                editor: false,
+            },
+            output: OutputArgs {
+                out: None,
+                standalone: false,
+            },
+        };
+        assert!(run_region(&args).is_err());
     }
 
     #[test]

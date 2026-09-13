@@ -103,8 +103,8 @@ impl Default for UiConfig {
     }
 }
 
-/// Capture behaviour: whether the cursor is included and any capture
-/// delay applied before grabbing the framebuffer.
+/// Capture behaviour: cursor inclusion, pre-grab delay, and the
+/// capture-backend selection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -115,6 +115,14 @@ pub struct CaptureConfig {
     /// Delay before capturing, in milliseconds.
     #[serde(default = "default_delay_ms")]
     pub default_delay_ms: u32,
+    /// Capture backend id: `"auto"` (default; session-kind detection
+    /// with `xcap` as terminal fallback), a registered backend id
+    /// (`"xcap"`, `"portal"` on Linux), or anything else — unknown ids
+    /// load verbatim, warn at selection time, and resolve like `auto`
+    /// (same string-tolerant policy as `interaction-mode`, so a typo
+    /// never bricks config loading).
+    #[serde(default = "default_capture_backend")]
+    pub backend: String,
 }
 
 impl Default for CaptureConfig {
@@ -122,6 +130,7 @@ impl Default for CaptureConfig {
         Self {
             include_cursor: default_include_cursor(),
             default_delay_ms: default_delay_ms(),
+            backend: default_capture_backend(),
         }
     }
 }
@@ -224,6 +233,10 @@ fn default_include_cursor() -> bool {
 
 fn default_delay_ms() -> u32 {
     0
+}
+
+fn default_capture_backend() -> String {
+    "auto".into()
 }
 
 impl Config {
@@ -346,6 +359,11 @@ impl Config {
                 cap,
                 "default-delay-ms",
                 toml_edit::Value::from(i64::from(self.capture.default_delay_ms)),
+            );
+            set_value(
+                cap,
+                "backend",
+                toml_edit::Value::from(self.capture.backend.as_str()),
             );
         }
         if let Some(hk) = doc.get_mut("hotkeys").and_then(|i| i.as_table_mut()) {
@@ -862,6 +880,87 @@ default-backend = \"imgur\"
         assert!(
             written.contains("# which backend to use"),
             "upload field comment lost:\n{written}"
+        );
+    }
+
+    #[test]
+    fn capture_backend_defaults_to_auto_when_absent() {
+        let cfg = Config::load_from(&{
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            fs::write(&path, "[capture]\ninclude-cursor = false\n").unwrap();
+            path
+        })
+        .unwrap();
+        assert_eq!(cfg.capture.backend, "auto");
+        assert_eq!(CaptureConfig::default().backend, "auto");
+    }
+
+    #[test]
+    fn capture_backend_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.capture.backend = "portal".into();
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("backend = \"portal\""),
+            "capture backend not persisted:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.capture.backend, "portal");
+    }
+
+    #[test]
+    fn capture_backend_unknown_value_loads_and_resaves_verbatim() {
+        // String-tolerant policy (interaction-mode precedent): a value
+        // this build knows nothing about — e.g. a backend id a future
+        // release removed — must neither break loading nor be
+        // rewritten by a save. Selection warns + resolves auto.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[capture]\nbackend = \"gnome-shell\"\n").unwrap();
+
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.capture.backend, "gnome-shell");
+
+        cfg.save_to(&path).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("backend = \"gnome-shell\""),
+            "save must preserve the user's (unknown) value verbatim:\n{written}"
+        );
+    }
+
+    #[test]
+    fn capture_backend_preserves_existing_comment_on_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let existing = "\
+[capture]
+# portal until the cursor gap is fixed
+backend = \"portal\"
+";
+        fs::write(&path, existing).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.capture.backend = "portal".into();
+        cfg.save_to(&path).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("# portal until the cursor gap is fixed"),
+            "comment on backend lost:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(
+            back.capture.backend, "portal",
+            "user value must survive re-save"
         );
     }
 }
