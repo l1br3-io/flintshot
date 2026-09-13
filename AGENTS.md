@@ -75,6 +75,7 @@ cargo run -- --help              # see subcommand surface
 cargo run -- region              # Phase 1 (currently a stub)
 cargo run -- fullscreen          # Phase 1 (currently a stub)
 cargo run -- app                 # app window (capture home; auto-starts the daemon)
+cargo run -- backends            # capture-backend diagnostics (probes + auto pick)
 ```
 
 ### Dev tooling (optional, recommended)
@@ -172,6 +173,7 @@ Authoritative style detail lives in
 | CLI subcommands                 | `crates/flintshot-app/src/cli.rs`                          |
 | App window (capture home)       | `crates/flintshot-app/src/app_window.rs` + `flintshot-editor-egui/src/home.rs` |
 | Geometry / data model           | `crates/flintshot-core/src/{geom,editor}.rs`              |
+| Capture backends / registry     | `crates/flintshot-core/src/capture/` (`Capturer` trait, `xcap` + portal, `select_backend`) |
 | `Canvas` / `EditorShell` traits | `crates/flintshot-core/src/{render,shell}.rs`             |
 | Upload `Backend` trait          | `crates/flintshot-core/src/upload.rs`                     |
 | egui editor implementation      | `crates/flintshot-editor-egui/src/`                        |

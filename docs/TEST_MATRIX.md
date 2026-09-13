@@ -2247,6 +2247,59 @@ scripted old daemon in `ipc_client.rs` (ignored, real socket).
 
 ---
 
+## Capture backends — registry, portal on Wayland, `flintshot backends`
+
+Spec: `docs/specs/native-capture-backends/`; design: ADR-0050. The
+portal path is live-verified on L5 (COSMIC); GNOME/KDE/wlr rows are
+the unmeasured frontier — Spike B flagged they may prompt. The
+`#[ignore]`'d live test backs these rows:
+`cargo test -p flintshot-core --test capture -- --ignored
+portal_smoke_grabs_primary`.
+
+### Test script
+
+1. **Diagnostics**: `flintshot backends` — one status line per
+   backend, final line `auto selects: <id>`; exits 0 even when
+   backends are down.
+2. **Auto pick**: `flintshot region --out /tmp/b.png` and read the
+   `region capture backend resolved` log — Wayland rows with a
+   portal up print `backend="portal"`; X11 rows print
+   `backend="xcap"`.
+3. **Pin overrides**: `flintshot region --backend xcap --out
+   /tmp/x.png` logs `backend="xcap"` on every platform;
+   `--backend bogus` is a hard CLI error naming the valid set.
+4. **Portal grab**: on a Wayland row, the portal-pinned grab returns
+   a non-empty PNG of the right monitor, prompt-free (COSMIC;
+   note any dialog on GNOME/KDE/wlr — that's data).
+5. **Wedged portal**: stop/kill the portal mid-grab — the grab
+   errors within ~5 s (bounded timeouts), the *next* auto grab
+   falls through to `xcap` (probe fails), no hang.
+6. **Cursor gap (expected)**: portal grabs contain no cursor (the
+   protocol has no option); xcap grabs do.
+7. **Temp hygiene**: after portal grabs, no new
+   `/tmp/screenshot-*` files remain (spike-era orphans excepted).
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| `backends`: status lines + final `auto selects`, exit 0      | | | | | | | | | | |
+| Auto: `portal` on Wayland w/ portal up, `xcap` on X11       | | | | | | | | | | |
+| `--backend xcap` pins on any session; unknown id hard-errors | | | | | | | | | | |
+| Portal grab: right monitor, prompt-free, no hang            | | | | | | | | | | |
+| Portal down: grab errors ≤5 s, auto falls to `xcap`         | | | | | | | | | | |
+| Portal grabs cursor-less (expected); xcap includes cursor   | | | | | | | | | | |
+| No `/tmp/screenshot-*` residue after portal grabs           | | | | | | | | | | |
+
+### Known caveats
+
+- Portal grabs are always cursor-less and multi-monitor `HiDPI`
+  composites are logical-resolution (portal downscales) — permanent
+  protocol limits, not bugs.
+- Monitor enumeration always rides `xcap` (prompt-free by design);
+  its COSMIC geometry quirk (3× inflated `MonitorInfo`) is handled
+  by the bbox-ratio crop in `portal.rs`.
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).
