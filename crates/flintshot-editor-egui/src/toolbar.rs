@@ -3,7 +3,7 @@
 //! **Rail** (top, stable across tools): semantically grouped pods,
 //! each a rounded graphite island separated by gaps — capture `+` ·
 //! selection (Move, Select) · shapes · freehand · labels · redact ·
-//! history (undo / redo / delete) · outputs (Save, Pin, Upload, and
+//! history (undo / redo / delete) · outputs (Save, Upload, and
 //! the ember Copy primary, right-aligned). **Bay** (bottom,
 //! per-tool): only the controls the active tool can use, plus a
 //! contextual hint on the right.
@@ -43,8 +43,6 @@ pub(crate) enum ToolbarAction {
     Save,
     /// Copy button — write to clipboard.
     Copy,
-    /// Pin button — compose, write temp PNG, spawn pin worker.
-    Pin,
     /// Upload button — compose, write temp PNG, spawn upload worker.
     Upload,
     /// Undo button — replay a Ctrl+Z dispatch.
@@ -433,7 +431,7 @@ fn new_capture_chip(ui: &mut egui::Ui) -> ToolbarAction {
     action
 }
 
-/// Output actions as the right-aligned outputs island: Save / Pin /
+/// Output actions as the right-aligned outputs island: Save /
 /// Upload as quiet icon chips, Copy as the ember primary (the
 /// dominant terminal action for screenshot flows). The right-to-
 /// left anchor layout only places the island; inside it the chips
@@ -454,18 +452,6 @@ fn rail_actions(ui: &mut egui::Ui, copied: bool) -> ToolbarAction {
             .clicked()
             {
                 action = ToolbarAction::Save;
-            }
-            if chip(
-                ui,
-                egui::Id::new("pin"),
-                "Pin to desktop",
-                false,
-                g_pin,
-                true,
-            )
-            .clicked()
-            {
-                action = ToolbarAction::Pin;
             }
             if chip(ui, egui::Id::new("upload"), "Upload", false, g_upload, true).clicked() {
                 action = ToolbarAction::Upload;
@@ -655,7 +641,7 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 /// Per-tool hint copy. Kept pure for testing.
 fn tool_hint(tool: Tool) -> &'static str {
     match tool {
-        Tool::Select => "drag a region · Copy and Pin use it · Enter crops",
+        Tool::Select => "drag a region · Copy uses it · Enter crops",
         Tool::Move => "press an annotation and drag to reposition · Del removes",
         Tool::Text => "click to place the caret",
         Tool::Blur => "drag over what to hide",
@@ -1143,12 +1129,6 @@ pub(crate) fn g_upload(p: &egui::Painter, r: egui::Rect, c: Color32) {
     arrowhead(p, pt(r, 0.0, -3.0), Vec2::new(0.0, -1.0), c);
 }
 
-/// Tilted pushpin: filled head + needle.
-pub(crate) fn g_pin(p: &egui::Painter, r: egui::Rect, c: Color32) {
-    p.circle(pt(r, 4.0, -4.0), 3.0, c, Stroke::NONE);
-    seg(p, r, (1.8, -1.8), (-6.0, 6.0), c, 2.0);
-}
-
 /// Two sheets: full front rect, back corner peeking top-right.
 fn g_copy(p: &egui::Painter, r: egui::Rect, c: Color32) {
     let front = egui::Rect::from_min_size(pt(r, -7.0, -4.0), egui::vec2(8.0, 10.0));
@@ -1490,6 +1470,22 @@ mod tests {
         );
     }
 
+    /// The Pin affordance is gone from the outputs island
+    /// (remove-pin-to-desktop): no chip may register under the
+    /// retired id.
+    #[test]
+    fn rail_has_no_pin_chip() {
+        let mut state = rail_state();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = show(ui, &mut state, false, ToolGate::All);
+        });
+        assert!(
+            ctx.read_response(egui::Id::new("pin")).is_none(),
+            "the pin chip must not register a response"
+        );
+    }
+
     // --- Pod island geometry, closeout (toolbar-groups Task 003) ---
 
     /// Horizontal gap between two chip rects laid out left to right.
@@ -1538,7 +1534,7 @@ mod tests {
         for id in ["undo", "redo", "delete"] {
             rects.push(rect(egui::Id::new(id)));
         }
-        for id in ["save", "pin", "upload", "copy_action"] {
+        for id in ["save", "upload", "copy_action"] {
             rects.push(rect(egui::Id::new(id)));
         }
         (rects, island_count(&output))
@@ -1644,15 +1640,7 @@ mod tests {
             for spec in flat() {
                 rects.push(rect(egui::Id::new(("tool", spec.key))));
             }
-            for id in [
-                "undo",
-                "redo",
-                "delete",
-                "save",
-                "pin",
-                "upload",
-                "copy_action",
-            ] {
+            for id in ["undo", "redo", "delete", "save", "upload", "copy_action"] {
                 rects.push(rect(egui::Id::new(id)));
             }
             rects

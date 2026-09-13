@@ -82,7 +82,7 @@
 //! 4). Row 1 walks the shared tool pods (selection · shapes ·
 //! freehand · labels · redact, no capture `+`) plus a history pod
 //! (undo / redo / delete), each its own island; row 2 reads as two
-//! islands: the ✓ / ✕ pair and the outputs (Save / Pin / Upload,
+//! islands: the ✓ / ✕ pair and the outputs (Save / Upload,
 //! and the ember Copy primary — Copy is Enter-equivalent: the spec
 //! pins Enter = Copy). The toolbar shows only while a usable
 //! selection exists and no fresh region drag runs, and swallows
@@ -144,9 +144,8 @@ use flintshot_core::{
 };
 
 use crate::app::{
-    compose_and_write_pin, compose_and_write_upload, copy_to_clipboard, dispatch_text_input,
-    save_region_to_disk, spawn_pin_worker, spawn_upload_worker, tool_for_key, translate_modifiers,
-    ClipboardSlot, OutcomeSlot,
+    compose_and_write_upload, copy_to_clipboard, dispatch_text_input, save_region_to_disk,
+    spawn_upload_worker, tool_for_key, translate_modifiers, ClipboardSlot, OutcomeSlot,
 };
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
@@ -648,7 +647,7 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
 
 /// The floating toolbar's accept row, read as two islands: the ✓
 /// accept (Enter semantics) / ✕ cancel (Esc semantics) pair, then
-/// the outputs (Save / Pin / Upload and the ember Copy primary).
+/// the outputs (Save / Upload and the ember Copy primary).
 /// Copy is Enter-equivalent (spec: Enter = Copy); the output
 /// chips' pipelines are the Task 006 flows described in the module
 /// docs.
@@ -694,18 +693,6 @@ fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>
         .clicked()
         {
             action = ToolbarAction::Save;
-        }
-        if toolbar::chip(
-            ui,
-            egui::Id::new("overlay_pin"),
-            "Pin to desktop",
-            false,
-            toolbar::g_pin,
-            true,
-        )
-        .clicked()
-        {
-            action = ToolbarAction::Pin;
         }
         if toolbar::chip(
             ui,
@@ -908,43 +895,13 @@ impl OverlayApp {
         }
     }
 
-    /// Pin chip handler: temp PNG + detached `flintshot pin` worker
-    /// (the editor window's path verbatim — both helpers are already
-    /// selection-aware), publish `Pinned` and close. A **spawn**
-    /// failure is recoverable: log at `error` and leave the overlay
-    /// open so Save / Copy still work; a compose/write failure is
-    /// terminal (publish `Err`, close).
-    fn handle_pin(&mut self, ctx: &Context) {
-        match compose_and_write_pin(&self.state) {
-            Ok(path) => match spawn_pin_worker(&path) {
-                Ok(()) => {
-                    tracing::info!(path = %path.display(), "pinned image; spawned pin worker");
-                    *self.outcome.borrow_mut() = Some(Ok(EditorOutcome::Pinned));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                Err(err) => {
-                    tracing::error!(
-                        error = %err,
-                        "could not spawn pin worker; overlay stays open"
-                    );
-                }
-            },
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "pin compose/write failed; closing overlay session"
-                );
-                *self.outcome.borrow_mut() = Some(Err(err));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-        }
-    }
-
     /// Upload chip handler: temp PNG + detached `flintshot upload`
     /// worker (the editor window's path verbatim), publish
     /// `Uploaded(String::new())` — the URL placeholder; the real one
     /// arrives asynchronously via the daemon event stream — and
-    /// close. Error policy mirrors [`Self::handle_pin`].
+    /// close. A **spawn** failure is recoverable: log at `error` and
+    /// leave the overlay open so Save / Copy still work; a
+    /// compose/write failure is terminal (publish `Err`, close).
     fn handle_upload(&mut self, ctx: &Context) {
         match compose_and_write_upload(&self.state) {
             Ok(path) => match spawn_upload_worker(&path) {
@@ -1153,7 +1110,7 @@ impl OverlayApp {
     /// editor rail's pod islands): row 1 walks the shared tool pods
     /// plus a history pod; row 2 reads as two islands — ✓ accept
     /// (Enter semantics) / ✕ cancel (Esc semantics), then the
-    /// outputs Save / Pin / Upload and the ember Copy primary. Copy
+    /// outputs Save / Upload and the ember Copy primary. Copy
     /// is Enter-equivalent (spec: Enter = Copy).
     fn show_toolbar(
         &mut self,
@@ -1217,7 +1174,7 @@ impl OverlayApp {
     /// replay the same dispatches a Ctrl+Z / Ctrl+Y / Del keypress
     /// would produce (the editor window's rail handlers, verbatim);
     /// Copy is Enter-equivalent (the same accept-copy pipeline Enter
-    /// triggers); Save / Pin / Upload run their output pipelines
+    /// triggers); Save / Upload run their output pipelines
     /// (Task 006) — the editor window's handlers' overlay twins.
     fn apply_toolbar_action(&mut self, ctx: &Context, action: ToolbarAction) {
         match action {
@@ -1247,7 +1204,6 @@ impl OverlayApp {
                 });
             }
             ToolbarAction::Save => self.handle_save(ctx),
-            ToolbarAction::Pin => self.handle_pin(ctx),
             // The editor window's NewCapture twin: publish and close
             // — the closing overlay is the not-in-the-shot guarantee
             // for the next grab (the shell's caller re-runs the
@@ -2600,6 +2556,23 @@ mod tests {
         );
     }
 
+    /// The Pin affordance is gone from the overlay's outputs island
+    /// (remove-pin-to-desktop): no chip may register under the
+    /// retired id.
+    #[test]
+    fn overlay_accept_row_has_no_pin_chip() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.horizontal(|ui| {
+                let _ = overlay_accept_row(ui);
+            });
+        });
+        assert!(
+            ctx.read_response(egui::Id::new("overlay_pin")).is_none(),
+            "the overlay pin chip must not register a response"
+        );
+    }
+
     #[test]
     fn overlay_accept_row_reads_as_two_islands() {
         let ctx = egui::Context::default();
@@ -2621,14 +2594,13 @@ mod tests {
         let accept = rect("overlay_accept");
         let cancel = rect("overlay_cancel");
         let save = rect("overlay_save");
-        let pin = rect("overlay_pin");
         let upload = rect("overlay_upload");
         let copy = ctx
             .read_response(egui::Id::new("copy_action"))
             .expect("the ember Copy primary stays in the outputs island")
             .rect;
         // One row, Copy trailing the outputs.
-        for w in [accept, cancel, save, pin, upload, copy].windows(2) {
+        for w in [accept, cancel, save, upload, copy].windows(2) {
             assert!(same_row(w[0], w[1]), "chips share a row");
             assert!(w[0].max.x < w[1].min.x, "chips run left to right");
         }
