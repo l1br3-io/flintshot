@@ -35,3 +35,88 @@ implementation choice (passthrough vs crop reuse).
 - Findings feed Task 2 and Task 10's ADR.
 
 **Estimated scope:** Small (2 files; scratch probe outside the tree)
+
+## Findings
+
+**Executed:** 2026-09-14, live Wayland/COSMIC session
+(`xdg-desktop-portal` 1.18.4 + `xdg-desktop-portal-cosmic`
+`0.1.0pop1~1788284590~24.04~abf258b`, Screenshot iface v2, single
+2560×1440 output). Probe: scratch zbus-5.18 blocking client rebuilt at
+`/tmp/opencode/spike-c-portal/` (the spike-B original was cleaned
+from /tmp; identical dance — match-rule-before-call, per-request
+path, 180 s Response wait).
+
+### (a) Response shape after select-and-Enter
+
+`Response` code **0** + `uri` key. Every Enter-path grab returned a
+decodable PNG with **100% opaque, real screen content** (verified by
+full defiltered alpha scan; an early "transparent" readout was a
+probe-side PNG-defilter bug, not portal behavior).
+
+### (b) Return shape: exactly the selection — passthrough, no crop
+
+| Run | Interaction                          | Returned dims        | Content            |
+| --- | ------------------------------------ | -------------------- | ------------------ |
+| 1   | drag ~57%×68% + Enter                | 1472×984             | real, 100% opaque  |
+| 5   | drag collapsed to a click + Enter    | 1×1                  | real (white px)    |
+| 6   | slow deliberate drag ~⅓ screen + Enter | 2230×1091          | real, 100% opaque  |
+
+Dims track the dragged rect (logical px). **No composite is
+returned; Task 2 implements passthrough** (the non-interactive
+`crop_composite_to_monitor` dance is NOT wanted on this path).
+
+### (c) Escape / dismissal: unreliable on this build
+
+Three distinct observed behaviors for "user backs out":
+
+| Runs | Escape scenario                       | Result                                          |
+| ---- | ------------------------------------- | ----------------------------------------------- |
+| 2–3  | Escape after a selection existed      | **code 0 + uri** — spurious capture of the stale/default rect |
+| 4    | Escape during mode/drag interaction   | **code 1**, no uri (proper `Cancelled`)          |
+| 7    | Escape immediately, no prior input    | **no Response within 180 s** — request hangs    |
+
+Master-branch source (`src/screenshot.rs`) maps Escape →
+`Msg::Cancel` → `PortalResponse::Cancelled` (code 1); the installed
+snapshot diverges. Consequences for Task 2:
+
+- code 1 → keep flowing as the `"cancelled"` capture error (contract
+  exists and was observed);
+- the **no-Response hang** means the interactive path needs both a
+  long Response budget (user think-time) and a hard outer bound with
+  a quiet timeout-exit — a 5 s `RESPONSE_TIMEOUT` can never work
+  here;
+- spurious code-0-after-Escape captures can't be defended against
+  client-side in general (degenerate-dims heuristics only catch the
+  1×1 case). GOTCHA + TEST_MATRIX row; revisit when COSMIC ships a
+  fixed portal build.
+
+### (d) Latency
+
+- method call → handle: **1.1–2.0 ms** (same as non-interactive).
+- handle → Response: dominated by the user (1.9–32.6 s across runs);
+  post-Enter save+respond is fast — no separate measurement possible
+  from outside (bounded by human timing).
+- Non-interactive baseline re-measured same session: 107.9 ms
+  end-to-end, 2560×1440 composite — unchanged from spike B.
+
+### (e) UI / dialog behavior and file location
+
+- The selection UI is a keyboard-exclusive layer surface
+  (`Anchor::all`, `Layer::Overlay`); no permission dialog on any
+  path.
+- COSMIC's drag mechanism is **DnD-based** (`start_dnd` in
+  `rectangle_selection.rs`) and flaky on this build: run 5's
+  deliberate drag collapsed to a 1×1 click-rect, run 4's drag+Enter
+  became `Cancelled`. Compositor-side bug; recorded for the ADR and
+  TEST_MATRIX (newer portal builds may fix).
+- **Files land in `~/Pictures/Screenshots/Screenshot_*.png`** (cosmic
+  `get_img_path`, default save location from its own config), *not*
+  `/tmp` like the non-interactive path. Task 2 must read-then-delete
+  (the dir is user-visible; leaving files litters it on every grab).
+
+### Verdict for the spec's Open Question #1
+
+**Interactive returns exactly the selection** (passthrough; no crop
+reuse needed). Cancellation (code 1) is reachable but **not
+reliable on the installed COSMIC build** — design for quiet-exit on
+code 1 *and* on Response timeout.

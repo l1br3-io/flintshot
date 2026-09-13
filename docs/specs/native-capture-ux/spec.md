@@ -243,14 +243,20 @@ core, no comments restating code). See
 
 ## Open questions
 
-- **Interactive return shape**: does the portal return exactly the
-  selected region (assumed — no composite crop needed)? Spike B ran
-   interactive mode but didn't record the returned image's coverage;
-   the first implementation task verifies live on COSMIC and adjusts
-   (worst case: reuse the composite crop).
+- ~~**Interactive return shape**~~ **Resolved (Spike C, 2026-09-14):**
+  the portal returns exactly the selected region (dims track the
+  drag; passthrough, no composite crop). Caveats recorded in
+  `tasks/001-spike-interactive.md`: on the installed
+  `xdg-desktop-portal-cosmic` (0.1.0pop1~abf258b) Escape is
+  unreliable — sometimes code 1 (proper cancel), sometimes a
+  spurious code 0 capture of a stale rect, sometimes no Response at
+  all (hang). The interactive path therefore needs a long Response
+  budget + hard outer bound with quiet timeout-exit, and
+  read-then-delete for files that land in `~/Pictures/Screenshots`
+  (not `/tmp`).
 - **GNOME/KDE/wlr interactive behavior**: unmeasured; their UIs and
-   prompt behavior may differ (TEST_MATRIX rows). Auto keeps xcap as
-   the terminal fallback; pinning remains the escape hatch.
+  prompt behavior may differ (TEST_MATRIX rows). Auto keeps xcap as
+  the terminal fallback; pinning remains the escape hatch.
 - **`--delay` on the native path**: keep (sleep before the
-   interactive call) or reject with a clear error? Lean: keep —
-   harmless, and scripts use it.
+  interactive call) or reject with a clear error? Lean: keep —
+  harmless, and scripts use it.
