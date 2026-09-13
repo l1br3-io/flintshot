@@ -459,7 +459,6 @@ mod tests {
     fn linger_not_required_for_other_outcomes() {
         for outcome in [
             Ok(EditorOutcome::Saved(std::path::PathBuf::from("/tmp/x.png"))),
-            Ok(EditorOutcome::Pinned),
             Ok(EditorOutcome::Uploaded(String::new())),
             Ok(EditorOutcome::Cancelled),
             Err(flintshot_core::FlintshotError::Shell {
