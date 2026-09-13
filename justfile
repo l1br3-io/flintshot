@@ -279,11 +279,6 @@ fullscreen *args:
 config *args:
     cargo run -- config {{ args }}
 
-# Open a pin-to-desktop window for an existing image. [Phase 3]
-#   just pin foo.png --at 100,200 --size 800x600
-pin path *args:
-    cargo run -- pin {{ path }} {{ args }}
-
 # Open an existing image in the editor (no capture). [Phase 3]
 open path *args:
     cargo run -- open {{ path }} {{ args }}
