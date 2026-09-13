@@ -40,21 +40,36 @@ pub enum DispatchOutcome {
 pub struct DispatchState {
     /// Last worker-reported save path.
     pub(crate) last_saved: LastSaved,
+    /// Daemon-side `[capture] backend` view, threaded into
+    /// daemon-spawned capture argvs (elided when `"auto"` — the
+    /// worker then re-resolves from its own config load). Set once at
+    /// daemon start; `Arc` so every clone shares it.
+    pub(crate) capture_backend: Arc<str>,
 }
 
 impl Default for DispatchState {
     fn default() -> Self {
         Self {
             last_saved: LastSaved::new(),
+            capture_backend: Arc::from(DEFAULT_CAPTURE_BACKEND),
         }
     }
 }
 
 impl DispatchState {
-    /// Fresh state: no last save recorded.
+    /// Fresh state: no last save recorded, default backend.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach the daemon's resolved `[capture] backend` (from
+    /// [`flintshot_core::Config`]); capture argvs pass it as
+    /// `--backend` unless it is the built-in default.
+    #[must_use]
+    pub fn with_capture_backend(mut self, backend: &str) -> Self {
+        self.capture_backend = Arc::from(backend);
+        self
     }
 }
 
@@ -223,7 +238,7 @@ pub fn dispatch(
 ) -> eyre::Result<DispatchOutcome> {
     match request {
         Request::CaptureRegion { monitor, delay_ms } => {
-            let argv = region_argv(*monitor, *delay_ms);
+            let argv = region_argv(*monitor, *delay_ms, &state.capture_backend);
             sink(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
             // No EditorOpened here: spawn does not imply a window —
@@ -232,7 +247,7 @@ pub fn dispatch(
             Ok(DispatchOutcome::Continue)
         }
         Request::CaptureFullscreen { monitor } => {
-            let argv = fullscreen_argv(*monitor);
+            let argv = fullscreen_argv(*monitor, &state.capture_backend);
             sink(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
             Ok(DispatchOutcome::Continue)
@@ -310,15 +325,26 @@ pub fn dispatch(
     }
 }
 
+/// Built-in default capture backend id. When the daemon-side config
+/// view equals this, `--backend` is omitted from the capture worker
+/// argv — the worker resolves the same value from its own config.
+/// Tracks [`flintshot_core::CaptureConfig`]'s default (`"auto"`); kept
+/// in sync by the `backend = "auto"` round-trip tests in core's
+/// `config.rs`.
+const DEFAULT_CAPTURE_BACKEND: &str = "auto";
+
 /// Build the `flintshot region [--monitor N] [--delay-ms M]
-/// --standalone` argv.
+/// [--backend BACKEND] --standalone` argv.
 ///
 /// The trailing `--standalone` breaks the delegation loop: without
 /// it, the daemon-spawned worker would re-delegate back to the
 /// daemon, which spawns the next worker (~60–100/s observed; see
 /// `TEST_MATRIX` "L5 pass findings" 1). `delegate_to_daemon`
 /// short-circuits on the flag.
-fn region_argv(monitor: Option<u32>, delay_ms: u32) -> Vec<String> {
+///
+/// `--backend` mirrors [`upload_argv`]'s elision rule: passed only
+/// when it differs from the built-in default.
+fn region_argv(monitor: Option<u32>, delay_ms: u32, backend: &str) -> Vec<String> {
     let mut argv = vec!["region".to_string()];
     if let Some(m) = monitor {
         argv.push("--monitor".into());
@@ -328,21 +354,33 @@ fn region_argv(monitor: Option<u32>, delay_ms: u32) -> Vec<String> {
         argv.push("--delay-ms".into());
         argv.push(delay_ms.to_string());
     }
+    push_backend_flag(&mut argv, backend);
     argv.push("--standalone".into());
     argv
 }
 
-/// Build the `flintshot fullscreen [--monitor N] --standalone` argv.
-/// The `--standalone` guard mirrors [`region_argv`]'s — see its doc
-/// comment for the fork-loop rationale.
-fn fullscreen_argv(monitor: Option<u32>) -> Vec<String> {
+/// Build the `flintshot fullscreen [--monitor N] [--backend BACKEND]
+/// --standalone` argv. The `--standalone` guard mirrors
+/// [`region_argv`]'s — see its doc comment for the fork-loop
+/// rationale.
+fn fullscreen_argv(monitor: Option<u32>, backend: &str) -> Vec<String> {
     let mut argv = vec!["fullscreen".to_string()];
     if let Some(m) = monitor {
         argv.push("--monitor".into());
         argv.push(m.to_string());
     }
+    push_backend_flag(&mut argv, backend);
     argv.push("--standalone".into());
     argv
+}
+
+/// Append `--backend <id>` unless it is the built-in default (the
+/// worker resolves the default from its own config load).
+fn push_backend_flag(argv: &mut Vec<String>, backend: &str) {
+    if backend != DEFAULT_CAPTURE_BACKEND {
+        argv.push("--backend".into());
+        argv.push(backend.to_string());
+    }
 }
 
 /// Build the `flintshot app` argv for [`Request::OpenApp`]. No
@@ -668,6 +706,65 @@ mod tests {
                 "--standalone".into()
             ]]
         );
+    }
+
+    #[test]
+    fn capture_argv_elides_backend_at_default() {
+        // The default DispatchState carries the built-in default
+        // backend ("auto"): the flag is omitted and the worker
+        // re-resolves from its own config load.
+        let spawner = RecordingSpawner::new();
+        dispatch(
+            &Request::CaptureRegion {
+                monitor: None,
+                delay_ms: 0,
+            },
+            &spawner,
+            &DispatchState::new().with_capture_backend("auto"),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["region".to_string(), "--standalone".into()]],
+            "default backend must not reach the argv"
+        );
+    }
+
+    #[test]
+    fn capture_argv_passes_explicit_backend() {
+        for request in [
+            Request::CaptureRegion {
+                monitor: None,
+                delay_ms: 0,
+            },
+            Request::CaptureFullscreen { monitor: None },
+        ] {
+            let spawner = RecordingSpawner::new();
+            dispatch(
+                &request,
+                &spawner,
+                &DispatchState::new().with_capture_backend("portal"),
+                &mut |_| {},
+            )
+            .unwrap();
+            let calls = spawner.snapshot();
+            assert_eq!(calls.len(), 1, "one worker for {request:?}");
+            let argv = &calls[0];
+            let pos = argv
+                .iter()
+                .position(|a| a == "--backend")
+                .unwrap_or_else(|| panic!("--backend missing from {argv:?}"));
+            assert_eq!(
+                argv.get(pos + 1).map(String::as_str),
+                Some("portal"),
+                "backend id must follow the flag: {argv:?}"
+            );
+            assert!(
+                argv.contains(&"--standalone".to_string()),
+                "--standalone still present: {argv:?}"
+            );
+        }
     }
 
     /// Regression test for the L5 fork loop (`TEST_MATRIX` finding 1):

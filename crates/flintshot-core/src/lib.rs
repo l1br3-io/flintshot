@@ -34,8 +34,8 @@ pub mod upload;
 #[cfg(target_os = "linux")]
 pub use capture::PortalScreenshotCapturer;
 pub use capture::{
-    capture_fullscreen, capture_region, monitors, select_backend, CaptureOptions, Capturer,
-    MonitorInfo, SessionKind, XcapCapturer,
+    capture_fullscreen, capture_region, monitors, registered_backends, select_backend,
+    CaptureOptions, Capturer, MonitorInfo, SessionKind, XcapCapturer,
 };
 pub use config::{config_path, CaptureConfig, Config, HotkeyConfig, UiConfig, UploadConfig};
 pub use editor::{Annotation, BlurKind, EditorState, Snapshot, Tool};
