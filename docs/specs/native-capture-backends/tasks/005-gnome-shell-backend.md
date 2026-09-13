@@ -49,3 +49,17 @@ removed — do not implement a dead backend.
   px on scaled displays) → comment at the rect-conversion site.
 
 **Estimated scope:** Medium (4 files)
+
+**Outcome (executed 2026-09-13, per Spike A `drop-to-portal`):**
+GnomeShellCapturer never implemented — GNOME 41+ blocks third-party
+callers of `org.gnome.Shell.Screenshot` (DBusSenderChecker allowlist),
+so it would be dead code. No registry slot existed to remove (Task 3
+shipped portal + xcap only). Landed: linux-gated `zbus` workspace dep
+in `flintshot-core` (unifies with ashpd's 5.18, `cargo tree -d` shows
+one zbus); `no_gui_types_in_core.rs` gained a path-scoped allowance —
+`use zbus` passes only under `src/capture/`, fails everywhere else
+(probe-verified both directions), `use ashpd` still banned everywhere.
+`tempfile` was **not** added: the portal writes the screenshot file
+itself; the client only reads + decodes it (the tempfile consumer was
+the gnome backend). Config round-trip fixture retargeted off the
+`"gnome-shell"` id. GNOME-manual verification criteria are moot.

@@ -10,9 +10,17 @@
 //! `postcard`/`serde`/std types; the transport/server implementations
 //! live in `flintshot-app`. It runs without compiling the toolkit
 //! crates — pure source scan.
+//!
+//! One path-scoped exception: the native capture backends under
+//! `src/capture/` may use `zbus` (XDG Screenshot Portal client). D-Bus
+//! must not spread beyond that module — everywhere else in core, `use
+//! zbus` fails exactly like the global bans. `ashpd` stays banned
+//! everywhere (the portal-heavy app crate owns it); see
+//! `docs/specs/native-capture-backends/`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+/// Prefixes banned in every file under `src/`.
 const FORBIDDEN_PREFIXES: &[&str] = &[
     "use egui",
     "use eframe",
@@ -32,12 +40,36 @@ const FORBIDDEN_PREFIXES: &[&str] = &[
     "use ashpd",
 ];
 
+/// Prefixes banned everywhere **except** under `src/capture/` — the
+/// native capture backends speak D-Bus (zbus blocking facade); no
+/// other core module may.
+const CAPTURE_ONLY_PREFIXES: &[&str] = &["use zbus"];
+
+/// Returns the prefix that bans `stripped_line` at `rel_src_path`
+/// (path relative to `src/`), or `None` if the line is allowed there.
+fn offending_prefix(rel_src_path: &Path, stripped_line: &str) -> Option<&'static str> {
+    let in_capture = rel_src_path.starts_with(Path::new("capture"));
+    if !in_capture {
+        if let Some(prefix) = CAPTURE_ONLY_PREFIXES
+            .iter()
+            .copied()
+            .find(|prefix| stripped_line.starts_with(prefix))
+        {
+            return Some(prefix);
+        }
+    }
+    FORBIDDEN_PREFIXES
+        .iter()
+        .copied()
+        .find(|prefix| stripped_line.starts_with(prefix))
+}
+
 /// The deny-list must actually flag a matching line for every prefix —
 /// a regression guard for future additions that would otherwise never be
 /// exercised until core really imports the crate.
 #[test]
 fn every_forbidden_prefix_flags_a_matching_use_line() {
-    for prefix in FORBIDDEN_PREFIXES {
+    for prefix in FORBIDDEN_PREFIXES.iter().chain(CAPTURE_ONLY_PREFIXES) {
         let line = format!("{prefix}::example::Thing;");
         assert!(
             line.trim_start().starts_with(prefix),
@@ -51,23 +83,62 @@ fn every_forbidden_prefix_flags_a_matching_use_line() {
 }
 
 #[test]
+fn zbus_is_banned_outside_capture_but_allowed_inside() {
+    assert_eq!(
+        offending_prefix(Path::new("error.rs"), "use zbus::Connection;"),
+        Some("use zbus"),
+        "zbus must stay capture-only"
+    );
+    assert_eq!(
+        offending_prefix(Path::new("ipc/mod.rs"), "use zbus;"),
+        Some("use zbus"),
+        "nested non-capture modules get no allowance"
+    );
+    assert_eq!(
+        offending_prefix(Path::new("capture/portal.rs"), "use zbus::Connection;"),
+        None,
+        "capture backends may speak D-Bus"
+    );
+    assert_eq!(
+        offending_prefix(Path::new("capture/sub/deeper.rs"), "use zbus;"),
+        None,
+        "the allowance is the whole capture/ subtree"
+    );
+    assert_eq!(
+        offending_prefix(Path::new("capturex/thing.rs"), "use zbus;"),
+        Some("use zbus"),
+        "a component that merely starts with 'capture' is not capture/"
+    );
+}
+
+#[test]
+fn ashpd_stays_banned_everywhere_including_capture() {
+    assert_eq!(
+        offending_prefix(Path::new("capture/portal.rs"), "use ashpd::DesktopPortal;"),
+        Some("use ashpd")
+    );
+    assert_eq!(
+        offending_prefix(Path::new("upload.rs"), "use ashpd::DesktopPortal;"),
+        Some("use ashpd")
+    );
+}
+
+#[test]
 fn no_gui_toolkit_imports_in_core_src() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut offenders: Vec<(PathBuf, usize, String)> = Vec::new();
 
     let mut entries = Vec::new();
-    collect_rust_files(&manifest_dir, &mut entries);
+    collect_rust_files(&src_dir, &mut entries);
 
     for path in entries {
+        let rel = path.strip_prefix(&src_dir).unwrap_or(&path);
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
         for (lineno, line) in src.lines().enumerate() {
             let stripped = line.trim_start();
-            if FORBIDDEN_PREFIXES
-                .iter()
-                .any(|prefix| stripped.starts_with(prefix))
-            {
+            if offending_prefix(rel, stripped).is_some() {
                 offenders.push((path.clone(), lineno + 1, line.to_string()));
             }
         }
