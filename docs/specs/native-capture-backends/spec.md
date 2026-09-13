@@ -1,6 +1,7 @@
 ---
-status: active
+status: shipped
 started: 2026-09-13
+shipped: 2026-09-14
 ---
 
 # Spec: Native capture backends
