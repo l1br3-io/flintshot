@@ -9,8 +9,8 @@
 //! feeds button presses in and performs the resulting actions.
 //!
 //! Mirrors the tray menu set: *Capture region*, *Capture fullscreen*,
-//! *Fullscreen on monitor →* (per-monitor submenu), *Pin last*,
-//! *Open last*, *Open config*, *Quit*. See ADR-0005 (applet is a pure
+//! *Fullscreen on monitor →* (per-monitor submenu), *Open last*,
+//! *Open config*, *Quit*. See ADR-0005 (applet is a pure
 //! IPC client) and the Phase 3 plan's "applet shells out to `$EDITOR`"
 //! decision.
 
@@ -35,8 +35,6 @@ pub enum MenuMessage {
     CaptureFullscreen,
     /// *Fullscreen on monitor →* submenu, entry `index`.
     CaptureFullscreenMonitor(u32),
-    /// *Pin last* — pin the most recently saved capture.
-    PinLast,
     /// *Open last* — re-open the most recently saved capture.
     OpenLast,
     /// *Open config* — edit `config.toml` in `$EDITOR`.
@@ -72,7 +70,6 @@ pub fn action_for(message: &MenuMessage) -> Action {
         MenuMessage::CaptureFullscreenMonitor(index) => Request::CaptureFullscreen {
             monitor: Some(*index),
         },
-        MenuMessage::PinLast => Request::PinLast,
         MenuMessage::OpenLast => Request::OpenLast,
         MenuMessage::Quit => Request::Quit,
         MenuMessage::OpenConfig => return Action::OpenConfig,
@@ -204,14 +201,6 @@ mod tests {
     }
 
     #[test]
-    fn pin_last_maps_to_request() {
-        assert_eq!(
-            action_for(&MenuMessage::PinLast),
-            Action::Request(Request::PinLast)
-        );
-    }
-
-    #[test]
     fn open_last_maps_to_request() {
         assert_eq!(
             action_for(&MenuMessage::OpenLast),
@@ -252,7 +241,7 @@ mod tests {
                 "{request:?} freezes the screen: the popup must close first"
             );
         }
-        let others = [Request::PinLast, Request::OpenLast, Request::Quit];
+        let others = [Request::OpenLast, Request::Quit];
         for request in &others {
             assert!(
                 !request_spawns_capture(request),

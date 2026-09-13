@@ -164,7 +164,6 @@ fn is_no_daemon(error: &std::io::Error) -> bool {
 /// | `CaptureStarted`             | *"Capturing…"*                |
 /// | `EditorOpened`               | *"Editor opened"*             |
 /// | `Saved { path }`             | *"Saved \<basename\>"*        |
-/// | `Pinned { id }`              | *"Pinned #\<id\>"*            |
 /// | `Uploaded { url, .. }`       | *"Uploaded \<url\>"*          |
 /// | `Error { message, .. }`      | *"Error: \<message\>"*        |
 ///
@@ -184,7 +183,6 @@ pub fn status_for_event(event: &IpcEvent) -> String {
             );
             format!("Saved {name}")
         }
-        IpcEvent::Pinned { id } => format!("Pinned #{id}"),
         IpcEvent::Uploaded { url, .. } => format!("Uploaded {url}"),
         IpcEvent::Error { message, .. } => format!("Error: {message}"),
         // Future variants (non_exhaustive): render the debug form so
@@ -207,7 +205,7 @@ pub enum DaemonState {
 }
 
 /// Connect, send one framed `request`, disconnect. For one-shot
-/// actions (`CaptureRegion`, `CaptureFullscreen`, `Quit`, `PinLast`, …).
+/// actions (`CaptureRegion`, `CaptureFullscreen`, `Quit`, `OpenLast`, …).
 /// Fire-and-forget: no response is read; the daemon's reaction arrives
 /// via side effects (spawned worker, event stream, shutdown).
 ///
@@ -368,7 +366,10 @@ mod tests {
     #[tokio::test]
     async fn framing_roundtrips_an_event() {
         let (mut a, mut b) = duplex(8 * 1024);
-        let original = Event::Pinned { id: 42 };
+        let original = Event::Error {
+            code: "x".to_string(),
+            message: "boom".to_string(),
+        };
         let bytes = encode_msg(&original).unwrap();
         write_frame(&mut a, &bytes).await.unwrap();
         let payload = read_frame(&mut b).await.unwrap();
@@ -462,7 +463,6 @@ mod tests {
             Event::Saved {
                 path: PathBuf::from("/tmp/a.png"),
             },
-            Event::Pinned { id: 7 },
         ];
         // Clone for the server closure so the original stays available
         // for the final assertion.
@@ -612,11 +612,6 @@ mod tests {
             }),
             "Saved screenshot.png"
         );
-    }
-
-    #[test]
-    fn status_for_pinned_shows_id() {
-        assert_eq!(status_for_event(&Event::Pinned { id: 42 }), "Pinned #42");
     }
 
     #[test]
