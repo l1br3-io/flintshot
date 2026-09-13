@@ -7,4 +7,4 @@
 - [x] Task 5: GnomeShellCapturer (tasks/005-gnome-shell-backend.md) — shrunk per Spike A: gnome backend dropped; zbus dep + capture/-scoped guard allowance landed
 - [x] Task 6: PortalScreenshotCapturer (tasks/006-portal-backend.md) — live-verified on COSMIC: auto slot flips to portal, pin + xcap override intact
 - [x] Task 7: flintshot backends debug subcommand (tasks/007-backends-subcommand.md)
-- [ ] Task 8: ADR + docs (ARCHITECTURE, CHANGELOG, TEST_MATRIX, AGENTS) (tasks/008-adr-docs.md)
+- [x] Task 8: ADR + docs (ARCHITECTURE, CHANGELOG, TEST_MATRIX, AGENTS) (tasks/008-adr-docs.md)

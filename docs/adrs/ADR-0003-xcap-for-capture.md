@@ -19,3 +19,7 @@ on Wayland becomes a user-visible problem.
 - On Wayland, capture goes through `xdg-desktop-portal`, which shows a
   permission dialog on first use
 - We're at the mercy of `xcap`'s update cadence for new platform quirks
+
+**Superseded by** [ADR-0050](ADR-0050-capturer-trait-native-backends.md):
+`xcap` stays the default provider and universal fallback, behind the
+`Capturer` trait, with the Screenshot portal native on Wayland.

@@ -32,7 +32,7 @@ User stories:
 - As an X11 / macOS / Windows user, my behavior is byte-for-byte
   unchanged (xcap path).
 - As a power user, I can pin a backend via config
-  (`[capture] backend = "gnome-shell"`) or debug what auto-detection
+  (`[capture] backend = "portal"`) or debug what auto-detection
   picks (`flintshot backends`).
 - As a contributor, I can add a capture backend without touching any
   call site.
@@ -49,8 +49,9 @@ User stories:
    allowlist-restricted since GNOME 41; see
    `tasks/001-spike-gnome-shell.md`).
 4. `PortalScreenshotCapturer` — `org.freedesktop.portal.Screenshot`
-   via `ashpd` (already a workspace dep for Phase 6 hotkeys); the
-   cross-desktop native service (KDE, COSMIC, wlroots).
+   via `zbus` (the transport `ashpd` already links; see
+   **Technologies**); the cross-desktop native service (KDE, COSMIC,
+   wlroots).
 5. Runtime auto-detection with config override.
 6. `flintshot backends` debug subcommand.
 
@@ -71,15 +72,14 @@ User stories:
 | ------------------------ | -------------------------------------------------- | ----- |
 | Trait + shared logic     | `flintshot-core::capture` (module, not new crate)  | Keeps `flintshot_core::monitors()` API stable for `flintshot-app` / `flintshot-cosmic` |
 | Fallback backend         | `xcap` (existing)                                  | Unchanged behavior |
-| GNOME Shell service      | `zbus` (blocking facade)                           | `cfg(target_os = "linux")`-gated dep |
 | Portal screenshot        | `zbus` (raw portal request/response)               | Hand-rolled `Screenshot` call; see note below |
-| Auto-detection           | Bus-name probes + `XDG_SESSION_TYPE` / env         | Injectable probe seam for tests |
+| Auto-detection           | Bus-name probes + `XDG_SESSION_TYPE` / env         | Injectable seam for tests (`select_backend_with` / `backend_report_with`) |
 | Config override          | `[capture] backend = "auto"`                       | Follows existing string-tolerant config convention |
 
 **zbus, not ashpd.** `no_gui_types_in_core.rs` deliberately bans
 `use ashpd` from `flintshot-core` (Phase 6 decision: the portal client
-lives in `flintshot-app`). That ban stands. Both Linux native backends
-talk D-Bus directly via `zbus` — the transport layer, not a GUI
+lives in `flintshot-app`). That ban stands. The portal backend talks
+D-Bus directly via `zbus` — the transport layer, not a GUI
 toolkit, riding the same exemption as `keyring` (ADR-0024 precedent).
 `zbus` lands as a
 `[target.'cfg(target_os = "linux")'.dependencies]` entry so
@@ -100,7 +100,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- region                           # manual: default backend path
 cargo run -- backends                         # manual: list probe results
-cargo run -- region --backend gnome-shell     # manual: pinned backend (CLI override)
+cargo run -- region --backend portal      # manual: pinned backend (CLI override)
 XDG_SESSION_TYPE=wayland cargo run -- backends  # manual: force detection inputs
 ```
 
@@ -111,10 +111,9 @@ the tree for Phase 6.)
 
 ```
 crates/flintshot-core/src/capture/
-├── mod.rs          # Capturer trait, CaptureOptions, registry + auto-detect, re-exports
+├── mod.rs          # Capturer trait, CaptureOptions, registry + auto-detect, compat wrappers
 ├── xcap_backend.rs # XcapCapturer (moved from capture.rs, behavior unchanged)
-├── gnome_shell.rs  # GnomeShellCapturer (zbus, linux-only)
-└── portal.rs       # PortalScreenshotCapturer (ashpd, linux-only)
+└── portal.rs       # PortalScreenshotCapturer (zbus, linux-only)
 ```
 
 - `capture.rs` free functions (`monitors()`, `capture_fullscreen()`,
@@ -140,7 +139,7 @@ pub struct CaptureOptions {
 }
 
 pub trait Capturer: Send + Sync {
-    /// Stable machine id ("xcap", "gnome-shell", "portal") — config/CLI key.
+    /// Stable machine id ("xcap", "portal") — config/CLI key.
     fn id(&self) -> &'static str;
     /// Human-readable name for `flintshot backends` output.
     fn name(&self) -> &'static str;
@@ -183,30 +182,10 @@ Config `backend = "auto"` (default) or explicit pin; unknown id →
 
 Follows repo conventions verbatim (pedantic clippy, `#![forbid(unsafe_code)]`,
 doc comments on all public items, `#[non_exhaustive]`, thiserror in
-core, no comments restating code). Backend illustration:
-
-```rust
-pub struct GnomeShellCapturer {
-    conn: zbus::blocking::Connection,
-}
-
-impl Capturer for GnomeShellCapturer {
-    fn id(&self) -> &'static str { "gnome-shell" }
-    fn name(&self) -> &'static str { "GNOME Shell Screenshot" }
-
-    fn available(&self) -> Result<()> {
-        // NameHasOwner-style probe; detail string feeds `flintshot backends`.
-        ...
-    }
-
-    fn capture_monitor(&self, monitor: Option<u32>, opts: &CaptureOptions)
-        -> Result<RgbaImage> {
-        // Call ScreenshotMonitor/Screenshot → shell writes file → decode →
-        // map any service error into FlintshotError::Capture verbatim.
-        ...
-    }
-}
-```
+core, no comments restating code). The dropped GNOME-Shell
+illustration lived here before Spike A; see `portal.rs` for the
+shipped backend's shape (probe → dance → decode → crop, every phase
+time-bounded).
 
 ## Testing strategy
 
@@ -214,9 +193,10 @@ impl Capturer for GnomeShellCapturer {
   (in-crate test impl): override wins, auto falls through failed
   probes, xcap terminal fallback, unknown-id warning path. All
   headless; no bus needed.
-- **Probe seam** — availability probing goes through an injectable
-  `Probe` (env + bus-name checks), so tests simulate
-  X11 / Wayland+GNOME / Wayland+bare sessions.
+- **Probe seam** — selection/report logic is pure over an injected
+  backend list (`select_backend_with` / `backend_report_with`), so
+  tests simulate X11 / Wayland+portal / Wayland-bare sessions
+  headless with fakes.
 - **Config** — `backend` string roundtrips, survives re-saves
   verbatim, unknown values load + persist untouched (same policy as
   `interaction-mode`).
@@ -226,8 +206,9 @@ impl Capturer for GnomeShellCapturer {
   `tests/capture.rs` smoke test (run manually per desktop).
 - **Existing suites** — `capture.rs` unit tests, the smoke
   integration test, and `no_gui_types_in_core.rs` all stay green;
-  the no-GUI test's allowlist gains `zbus`/`ashpd` only if it scans
-  crate names (verify during build).
+  the no-GUI guard resolved as a path-scoped `use zbus` allowance
+  under `src/capture/` only (regression-tested both directions),
+  with the `ashpd` ban kept global.
 - **Manual matrix** — `TEST_MATRIX.md` gains a backends × session
   section (X11, Wayland+GNOME, Wayland+COSMIC).
 

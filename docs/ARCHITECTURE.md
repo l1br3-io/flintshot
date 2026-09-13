@@ -119,13 +119,15 @@ leaf binaries. A future `flintshot-editor-iced` would slot in beside
 A single binary handles both roles; behavior is selected by subcommand:
 
 - `flintshot daemon` — long-running, owns tray + hotkeys + IPC server
-- `flintshot region [--monitor N] [--delay SECS]` — one-shot: capture
-  region, open editor
-- `flintshot fullscreen [--monitor N]` — one-shot: capture full screen,
+- `flintshot region [--monitor N] [--delay SECS] [--backend ID]` — one-shot:
+  capture region, open editor
+- `flintshot fullscreen [--monitor N] [--backend ID]` — one-shot: capture full screen,
   open editor
 - `flintshot open <path>` — open an existing image in the editor (no capture)
 - `flintshot upload <path> --backend=imgur` — upload and exit
 - `flintshot config` — print or edit config
+- `flintshot backends` — list capture backends, their availability, and
+  what `auto` selects right now (diagnostic; exits 0)
 
 ### IPC protocol
 
@@ -293,6 +295,7 @@ interaction_mode = "editor"  # or "overlay" (Phase 5)
 [capture]
 include_cursor = true
 default_delay_ms = 0
+backend = "auto"  # auto | xcap | portal (Linux)
 
 [hotkeys]
 region = "Ctrl+Shift+PrintScreen"
@@ -307,6 +310,27 @@ socket_path = ""  # empty = platform default
 
 Loaded via `serde` + `toml_edit`. Hot-reloaded via `notify` file
 watcher in the daemon.
+
+### Capture: `Capturer` trait + backend registry
+
+All capture lives behind `flintshot-core::capture`'s `Capturer`
+trait (ADR-0050). Providers register in `registered_backends()` —
+`xcap` everywhere, plus the XDG Screenshot Portal backend on Linux —
+and `select_backend()` resolves a preference chain: CLI `--backend` >
+config `[capture] backend` > auto-detection by session kind
+(X11/Other → `xcap`; Wayland → `portal` → `xcap`). Auto never fails:
+`xcap` is the never-failing terminal fallback; a *pinned* backend
+whose probe fails is a hard error carrying the probe detail. Every
+backend's failure to honor `include_cursor` is documented at its
+impl (the portal protocol has no cursor option — its grabs are
+cursor-less). The pre-trait free functions (`monitors`,
+`capture_fullscreen`, `capture_region`) remain as delegating
+wrappers so call sites stay source-compatible; `flintshot backends`
+prints the registry's probe results and the live auto pick. The
+portal client (`zbus`, Linux-gated) is the one D-Bus exception to
+core's no-transport rule: `use zbus` is legal only under
+`src/capture/` (path-scoped rule in `no_gui_types_in_core.rs`; the
+`ashpd` ban stays global).
 
 ### Upload `Backend` trait
 ```rust
@@ -348,7 +372,7 @@ pub struct UploadOutcome {
 | Concern              | Crate                                       | Why                                                                        |
 | -------------------- | ------------------------------------------- | -------------------------------------------------------------------------- |
 | GUI / event loop (default shell) | `eframe` (egui + winit + glow)  | Native multi-window via viewports; immediate mode perfect for live drawing |
-| Screen capture       | `xcap`                                        | Best X11/Wayland/macOS/Windows story                                       |
+| Screen capture       | `xcap` (default) + `zbus` portal client (Linux) | `Capturer` trait + registry (ADR-0050); portal is prompt-free native on Wayland |
 | Image decode/encode  | `image`                                       | De facto; also the cross-toolkit image type used in `Canvas`               |
 | Image processing     | `imageproc`                                   | Blur, pixelate helpers (used in core)                                      |
 | Text shaping         | `cosmic-text` + `ab_glyph`                       | High-quality text rendering for annotations                                |
@@ -375,10 +399,14 @@ All choices are documented in [decision records](adr/).
 
 ### Linux
 - **X11**: full feature set; `global-hotkey` and live overlay both work
-- **Wayland**: capture via `xcap` (which uses `xdg-desktop-portal`
-  under the hood); first capture per session may show a portal dialog;
-  global hotkeys require Phase 6 portal integration — the daemon
-  detects this and logs a "bind a compositor keybinding to `flintshot
+- **Wayland**: `auto` capture prefers the XDG Screenshot Portal
+  (`org.freedesktop.portal.Screenshot`, prompt-free on COSMIC,
+  ~75–120 ms; cursor-less — protocol has no option); `xcap` remains
+  the fallback (its ScreenCast path may show a per-session portal
+  dialog). `--backend xcap` / `[capture] backend = "xcap"` pins the
+  old path; `flintshot backends` shows the live pick. Global hotkeys
+  require Phase 6 portal integration — the daemon detects this and
+  logs a "bind a compositor keybinding to `flintshot
   region`/`flintshot fullscreen`" notice instead of failing (tray +
   IPC still work); live overlay falls back to editor-window
 - **System tray**: `tray-icon` (libappindicator) needs an SNI host; on
