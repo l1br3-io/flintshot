@@ -312,11 +312,10 @@ mod tests {
 
     #[test]
     fn other_clicks_keep_the_helper_alive() {
-        // Pin/open/upload still stream status through the daemon; the
+        // Open/upload still stream status through the daemon; the
         // bind dialog runs in its own thread. Nothing here needs the
         // item unregistered.
         let staying = [
-            Request::PinLast,
             Request::OpenLast,
             Request::UploadLast {
                 backend: "imgur".into(),

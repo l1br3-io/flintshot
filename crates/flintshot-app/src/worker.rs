@@ -11,7 +11,6 @@
 //! [`Event`]s to emit, and is unit-testable via [`RecordingSpawner`]
 //! without forking a single process.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -31,56 +30,28 @@ pub enum DispatchOutcome {
     Shutdown,
 }
 
-/// Monotonic pin-id counter, incremented once per successful `PinLast`.
-///
-/// Wraps an [`Arc<AtomicU64>`] so clones share the same counter — every
-/// dispatch entry point (IPC, tray, hotkey) allocates from the same
-/// sequence. [`next`](Self::next) returns 1-based ids (first call → 1).
-#[derive(Clone, Default)]
-pub struct PinIdSource {
-    next: Arc<AtomicU64>,
-}
-
-impl PinIdSource {
-    /// Create a fresh counter (next id will be 1).
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Allocate and return the next pin id.
-    pub fn next(&self) -> u64 {
-        self.next.fetch_add(1, Ordering::Relaxed) + 1
-    }
-}
-
 /// Daemon-wide shared state that [`dispatch`] reads or mutates beyond the
 /// spawner: the last-saved capture path (set by [`Request::ReportSaved`],
-/// read by [`Request::PinLast`] / [`Request::OpenLast`]) and the
-/// monotonic pin-id counter.
+/// read by [`Request::OpenLast`]).
 ///
-/// Cloning shares the underlying state (both fields are `Arc`-backed),
-/// so every entry point observes the same last-saved path and pin-id
-/// sequence.
+/// Cloning shares the underlying state (the field is `Arc`-backed),
+/// so every entry point observes the same last-saved path.
 #[derive(Clone)]
 pub struct DispatchState {
     /// Last worker-reported save path.
     pub(crate) last_saved: LastSaved,
-    /// Monotonic pin-id counter (incremented per successful `PinLast`).
-    pub(crate) pin_ids: PinIdSource,
 }
 
 impl Default for DispatchState {
     fn default() -> Self {
         Self {
             last_saved: LastSaved::new(),
-            pin_ids: PinIdSource::new(),
         }
     }
 }
 
 impl DispatchState {
-    /// Fresh state: no last save recorded, pin ids starting at 1.
+    /// Fresh state: no last save recorded.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -107,11 +78,10 @@ pub trait Spawner {
 ///
 /// With a [`crate::sessions::CaptureSessions`] attached
 /// ([`Self::with_bus_and_sessions`]), the spawn also **registers**
-/// capture and pin workers in the registry (kill handle +, for pins,
-/// the verbatim respawn argv), and the reaper deregisters on exit —
-/// process death stays the crash-safe session truth (ADR-0046). With
-/// a [`SubscriberBus`] attached, the reaper broadcasts
-/// [`Event::SessionEnded`] for capture workers.
+/// capture workers in the registry (kill handle), and the reaper
+/// deregisters on exit — process death stays the crash-safe session
+/// truth (ADR-0046). With a [`SubscriberBus`] attached, the reaper
+/// broadcasts [`Event::SessionEnded`] for capture workers.
 #[derive(Default, Clone)]
 pub struct CommandSpawner {
     /// Bus the reaper broadcasts `SessionEnded` on. `None` in tests
@@ -165,16 +135,6 @@ impl Spawner for CommandSpawner {
         if let Some(sessions) = &self.sessions {
             if is_capture_argv(argv) {
                 sessions.register_capture(pid, Arc::clone(&handle));
-            } else if is_pin_argv(argv) {
-                // Registry-local id: the pin's own pid. The
-                // `Event::Pinned` id stays the dispatch counter; the
-                // registry only ever needs identity + argv.
-                sessions.register_pin(
-                    u64::from(pid),
-                    pid,
-                    argv.iter().map(|s| (*s).to_string()).collect(),
-                    Arc::clone(&handle),
-                );
             } else if is_app_argv(argv) {
                 sessions.register_app(pid, Arc::clone(&handle));
             }
@@ -220,13 +180,6 @@ impl Spawner for CommandSpawner {
     }
 }
 
-/// Does this worker argv pin (and so owe a registry entry with its
-/// respawn argv)? The argv-side twin of `is_capture_argv` — keep both
-/// in sync when a worker kind is added.
-fn is_pin_argv(argv: &[&str]) -> bool {
-    matches!(argv.first(), Some(&"pin"))
-}
-
 /// Does this worker argv run the app window (tracked so the pre-grab
 /// handshake knows an app owes a hide-ack)?
 fn is_app_argv(argv: &[&str]) -> bool {
@@ -263,8 +216,8 @@ fn is_capture_argv(argv: &[&str]) -> bool {
 /// `CaptureStarted` is emitted the moment a worker is launched; later
 /// events (`EditorOpened`/`Saved`) need the worker to report back, which
 /// is wired in Task 006. `Quit` requests shutdown (the caller performs
-/// it). `PinLast` / `OpenLast` read the last-saved path from `state`
-/// (Task 4); with no prior save they emit
+/// it). `OpenLast` reads the last-saved path from `state`
+/// (Task 4); with no prior save it emits
 /// `Error { code: "no-last-capture" }`. `UploadLast` follows the same
 /// last-saved pattern and emits `UploadStarted` optimistically before
 /// spawn (Task 007). Requests for unbuilt phases emit
@@ -297,20 +250,6 @@ pub fn dispatch(
             let argv = fullscreen_argv(*monitor);
             sink(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
-            Ok(DispatchOutcome::Continue)
-        }
-        Request::PinLast => {
-            if let Some(path) = state.last_saved.get() {
-                let argv = pin_argv(&path);
-                spawn_argv(spawner, &argv)?;
-                let id = state.pin_ids.next();
-                sink(Event::Pinned { id });
-            } else {
-                sink(Event::Error {
-                    code: "no-last-capture".to_string(),
-                    message: "no capture has been saved yet".to_string(),
-                });
-            }
             Ok(DispatchOutcome::Continue)
         }
         Request::OpenLast => {
@@ -449,11 +388,6 @@ fn upload_argv(path: &std::path::Path, backend: &str) -> Vec<String> {
     argv
 }
 
-/// Build the `flintshot pin <path>` argv for [`Request::PinLast`].
-fn pin_argv(path: &std::path::Path) -> Vec<String> {
-    vec!["pin".to_string(), path.to_string_lossy().into_owned()]
-}
-
 /// Build the `flintshot open <path>` argv for [`Request::OpenLast`].
 fn open_argv(path: &std::path::Path) -> Vec<String> {
     vec!["open".to_string(), path.to_string_lossy().into_owned()]
@@ -480,7 +414,6 @@ fn variant_name(request: &Request) -> &'static str {
         Request::ReportSaved { .. } => "report-saved",
         Request::ReportUploaded { .. } => "report-uploaded",
         Request::OpenLast => "open-last",
-        Request::PinLast => "pin-last",
         Request::UploadLast { .. } => "upload-last",
         Request::BindShortcuts => "bind-shortcuts",
         Request::HideTrayForCapture => "hide-tray-for-capture",
@@ -872,7 +805,7 @@ mod tests {
 
     #[test]
     fn unsupported_requests_emit_error_and_continue() {
-        // PinLast, OpenLast (Task 4), and UploadLast (Task 007) are now
+        // OpenLast (Task 4) and UploadLast (Task 007) are now
         // supported; BindShortcuts joins Subscribe here until the IPC
         // connection layer intercepts it (Phase 6 Task 003).
         let cases = [Request::Subscribe, Request::BindShortcuts];
@@ -983,7 +916,6 @@ mod tests {
             Request::Quit,
             Request::Subscribe,
             Request::OpenLast,
-            Request::PinLast,
             Request::UploadLast {
                 backend: "imgur".into(),
             },
@@ -1020,92 +952,6 @@ mod tests {
         assert!(
             events.is_empty(),
             "ReportUploaded emits nothing from dispatch"
-        );
-    }
-
-    #[test]
-    fn pin_last_with_saved_path_spawns_pin_and_emits_pinned() {
-        let spawner = RecordingSpawner::new();
-        let state = DispatchState::new();
-        state
-            .last_saved
-            .set(std::path::PathBuf::from("/tmp/shot.png"));
-        let mut events = Vec::new();
-        let outcome = dispatch(&Request::PinLast, &spawner, &state, &mut |ev| {
-            events.push(ev);
-        })
-        .unwrap();
-
-        assert_eq!(outcome, DispatchOutcome::Continue);
-        assert_eq!(
-            spawner.snapshot(),
-            vec![vec!["pin".to_string(), "/tmp/shot.png".into()]],
-            "PinLast spawns `flintshot pin <last-saved>`"
-        );
-        assert_eq!(events, vec![Event::Pinned { id: 1 }]);
-    }
-
-    #[test]
-    fn pin_last_id_is_monotonic() {
-        let spawner = RecordingSpawner::new();
-        let state = DispatchState::new();
-        state.last_saved.set(std::path::PathBuf::from("/tmp/a.png"));
-
-        let mut events1 = Vec::new();
-        dispatch(&Request::PinLast, &spawner, &state, &mut |ev| {
-            events1.push(ev);
-        })
-        .unwrap();
-        let mut events2 = Vec::new();
-        dispatch(&Request::PinLast, &spawner, &state, &mut |ev| {
-            events2.push(ev);
-        })
-        .unwrap();
-
-        assert_eq!(events1, vec![Event::Pinned { id: 1 }]);
-        assert_eq!(
-            events2,
-            vec![Event::Pinned { id: 2 }],
-            "second pin gets the next monotonic id"
-        );
-        assert_eq!(spawner.snapshot().len(), 2, "two pins spawned");
-    }
-
-    #[test]
-    fn pin_last_without_save_emits_error_and_does_not_spawn() {
-        let spawner = RecordingSpawner::new();
-        let state = DispatchState::new();
-        let mut events = Vec::new();
-        let outcome = dispatch(&Request::PinLast, &spawner, &state, &mut |ev| {
-            events.push(ev);
-        })
-        .unwrap();
-
-        assert_eq!(outcome, DispatchOutcome::Continue);
-        assert!(
-            spawner.snapshot().is_empty(),
-            "PinLast with no prior save must not spawn"
-        );
-        assert_eq!(events.len(), 1, "exactly one event");
-        match &events[0] {
-            Event::Error { code, .. } => assert_eq!(code, "no-last-capture"),
-            other => panic!("expected Error event, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pin_last_spawn_failure_propagates_without_pinned() {
-        let state = DispatchState::new();
-        state.last_saved.set(std::path::PathBuf::from("/tmp/x.png"));
-        let mut events = Vec::new();
-        let result = dispatch(&Request::PinLast, &FailSpawner, &state, &mut |ev| {
-            events.push(ev);
-        });
-
-        assert!(result.is_err(), "spawn failure must propagate");
-        assert!(
-            events.is_empty(),
-            "no Pinned event when the pin worker failed to spawn"
         );
     }
 
@@ -1303,7 +1149,6 @@ mod tests {
                 "report-saved",
             ),
             (Request::OpenLast, "open-last"),
-            (Request::PinLast, "pin-last"),
             (
                 Request::UploadLast {
                     backend: "imgur".into(),
@@ -1492,19 +1337,19 @@ mod tests {
         let spawner = RecordingSpawner::new();
         let mut events = Vec::new();
 
-        dispatch(&Request::PinLast, &spawner, &state, &mut |ev| {
+        dispatch(&Request::OpenLast, &spawner, &state, &mut |ev| {
             events.push(ev);
         })
         .unwrap();
 
         assert!(
             !events.iter().any(|e| matches!(e, Event::CaptureSuperseded)),
-            "PinLast must not supersede anything"
+            "OpenLast must not supersede anything"
         );
         assert_eq!(
             ctx.sessions().live_captures(),
             1,
-            "the live capture session survives a pin dispatch"
+            "the live capture session survives a non-capture dispatch"
         );
     }
 
@@ -1580,31 +1425,10 @@ mod tests {
     }
 
     #[test]
-    fn is_pin_argv_twin_classifies_only_pin_workers() {
-        assert!(is_pin_argv(&["pin", "/tmp/x.png"]));
-        assert!(is_pin_argv(&[
-            "pin",
-            "/tmp/x.png",
-            "--at",
-            "1,2",
-            "--opacity",
-            "0.5"
-        ]));
-        assert!(!is_pin_argv(&["region", "--standalone"]));
-        assert!(!is_pin_argv(&["open", "/tmp/x.png"]));
-        assert!(!is_pin_argv(&[
-            "upload",
-            "/tmp/x.png",
-            "--backend",
-            "imgur"
-        ]));
-    }
-
-    #[test]
     fn is_app_argv_classifies_only_the_app_worker() {
         assert!(is_app_argv(&["app"]));
-        assert!(!is_app_argv(&["pin", "/tmp/x.png"]));
         assert!(!is_app_argv(&["region", "--standalone"]));
+        assert!(!is_app_argv(&["upload", "/tmp/x.png"]));
     }
 
     #[test]
