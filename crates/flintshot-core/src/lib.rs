@@ -5,7 +5,8 @@
 //! [`shell::EditorShell`] traits that UI toolkits implement, the
 //! [`upload::UploadBackend`] trait for pluggable upload providers
 //! (with `keyring::Entry` as the credential handle — see ADR-0024),
-//! screen capture via [`capture`], and the user-facing
+//! screen capture via [`capture`] (the [`capture::Capturer`] trait and
+//! its backend registry), and the user-facing
 //! [`config::Config`] schema. No GUI toolkit types appear in this
 //! crate's public API.
 //!
@@ -30,7 +31,12 @@ pub mod shell;
 pub mod text;
 pub mod upload;
 
-pub use capture::{capture_fullscreen, capture_region, monitors, MonitorInfo};
+#[cfg(target_os = "linux")]
+pub use capture::PortalScreenshotCapturer;
+pub use capture::{
+    capture_fullscreen, capture_region, monitors, select_backend, CaptureOptions, Capturer,
+    MonitorInfo, SessionKind, XcapCapturer,
+};
 pub use config::{config_path, CaptureConfig, Config, HotkeyConfig, UiConfig, UploadConfig};
 pub use editor::{Annotation, BlurKind, EditorState, Snapshot, Tool};
 pub use error::{FlintshotError, Result};
