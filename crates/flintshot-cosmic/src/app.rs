@@ -13,7 +13,7 @@
 //! Task 8 layers the live feedback: a persistent [`subscribe`]
 //! connection reads the daemon's [`Event`] stream and updates a status
 //! line in the popup (*Idle* / *Capturing…* / *Editor opened* / *Saved
-//! <basename>* / *Pinned #N* / error). When the daemon is absent, the
+//! <basename>* / error). When the daemon is absent, the
 //! popup shows *"daemon not running"* and disables action buttons. A
 //! background [`subscription`] drives the reconnect loop so a daemon
 //! restart doesn't require restarting the applet.
@@ -300,7 +300,6 @@ impl App {
 
         col = col
             .push(divider::horizontal::default())
-            .push(action_btn("Pin last", MenuMessage::PinLast, up))
             .push(action_btn("Open last", MenuMessage::OpenLast, up))
             .push(divider::horizontal::default())
             .push(action_btn("Open config", MenuMessage::OpenConfig, true))
@@ -518,9 +517,9 @@ mod tests {
     #[test]
     fn non_capture_click_keeps_the_popup() {
         // The popup's live status line is the feedback for
-        // pin/open/quit; only captures destroy it.
+        // open/quit; only captures destroy it.
         let mut app = test_app(Some(Id::unique()));
-        let _ = cosmic::Application::update(&mut app, Message::Menu(MenuMessage::PinLast));
+        let _ = cosmic::Application::update(&mut app, Message::Menu(MenuMessage::OpenLast));
         assert!(app.popup.is_some());
     }
 
