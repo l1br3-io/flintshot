@@ -45,8 +45,9 @@ User stories:
    monitor-selection) in `flintshot-core`.
 2. `XcapCapturer` — wraps today's behavior; default provider and
    fallback.
-3. `GnomeShellCapturer` — `org.gnome.Shell.Screenshot` session-bus
-   service (pending Spike A on callable-ness).
+3. ~~`GnomeShellCapturer`~~ — **dropped by Spike A** (service
+   allowlist-restricted since GNOME 41; see
+   `tasks/001-spike-gnome-shell.md`).
 4. `PortalScreenshotCapturer` — `org.freedesktop.portal.Screenshot`
    via `ashpd` (already a workspace dep for Phase 6 hotkeys); the
    cross-desktop native service (KDE, COSMIC, wlroots).
@@ -162,13 +163,17 @@ pub fn select_backend(preference: Option<&str>) -> Result<Box<dyn Capturer>>;
 Region capture stays a free function (validate → capture_monitor →
 crop); it is not on the trait.
 
-## Auto-detection precedence (draft — Spike B may reorder)
+## Auto-detection precedence (amended by Spike A; Spike B may reorder)
+
+GNOME Shell's screenshot D-Bus service is allowlist-restricted for
+unprivileged callers since GNOME 41 (Spike A verdict:
+`drop-to-portal`), so no `gnome-shell` backend exists; GNOME Wayland
+rides the general portal row.
 
 | Session                    | Precedence                                        |
 | -------------------------- | ------------------------------------------------- |
 | X11                        | `xcap` (direct grab is fastest; services add overhead) |
-| Wayland + GNOME Shell svc  | `gnome-shell` → `portal` → `xcap`                 |
-| Wayland, other compositors | `portal` → `xcap`                                 |
+| Wayland (any compositor)   | `portal` → `xcap`                                 |
 | macOS / Windows            | `xcap`                                            |
 
 Config `backend = "auto"` (default) or explicit pin; unknown id →
