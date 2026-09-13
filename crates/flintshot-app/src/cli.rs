@@ -1089,7 +1089,7 @@ fn run_overlay_with_config(_img: image::RgbaImage, _mode: &str, _cfg: &Config) -
 }
 
 /// Report a save back to a running daemon so it can track the path as
-/// "last saved" (for `PinLast`/`OpenLast` and upload-from-last).
+/// "last saved" (for `OpenLast` and upload-from-last).
 /// Best-effort: a missing daemon is a silent no-op (the worker may be
 /// standalone). See ADR-0023.
 #[cfg(feature = "egui")]

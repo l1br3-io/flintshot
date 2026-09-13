@@ -55,8 +55,8 @@ pub enum Request {
     Subscribe,
     /// Worker → daemon save report (Phase 3). A worker that closed its
     /// editor with a save sends the resulting path back so the daemon can
-    /// track it as "last saved" (for [`Request::PinLast`] /
-    /// [`Request::OpenLast`] and Phase 4 upload-from-last). Sent
+    /// track it as "last saved" (for [`Request::OpenLast`]
+    /// and Phase 4 upload-from-last). Sent
     /// best-effort: silently dropped when no daemon answers (a standalone
     /// worker has no one to report to).
     ReportSaved {
@@ -66,8 +66,6 @@ pub enum Request {
     // Forward-compat variants — defined now, unsupported until Phase 3:
     /// Re-open the most recently saved capture (Phase 3).
     OpenLast,
-    /// Pin the most recently saved capture to the desktop (Phase 3).
-    PinLast,
     /// Upload the most recently saved capture via the named backend
     /// (Phase 4).
     UploadLast {
@@ -121,7 +119,7 @@ pub enum Request {
     // smart-window-hiding effort — appended (postcard variant-index rule):
     /// Worker → daemon, pre-grab: the sender is about to capture the
     /// screen; the daemon clears every flintshot surface (app window,
-    /// pin windows, tray icon) and replies [`Event::CaptureReady`]
+    /// tray icon) and replies [`Event::CaptureReady`]
     /// only once the screen is clear or the bounds expire (a capture
     /// must never fail because a window was slow). Supersedes and
     /// internally includes [`Request::HideTrayForCapture`]: the tray
@@ -175,11 +173,6 @@ pub enum Event {
         message: String,
     },
     // Phase 3/4 variants — defined now, emitted later:
-    /// A capture was pinned to the desktop (Phase 3).
-    Pinned {
-        /// Opaque id the pin window is tracked under.
-        id: u64,
-    },
     /// An upload was initiated (worker spawned). Emitted optimistically
     /// on `UploadLast` dispatch (Phase 4). Mirrors `CaptureStarted`.
     UploadStarted {
@@ -331,7 +324,6 @@ mod tests {
                 path: PathBuf::from("/tmp/flintshot/shot.png"),
             },
             Request::OpenLast,
-            Request::PinLast,
             Request::UploadLast {
                 backend: "imgur".into(),
             },
@@ -381,7 +373,6 @@ mod tests {
                 code: "unsupported".into(),
                 message: "nope".into(),
             },
-            Event::Pinned { id: 42 },
             Event::UploadStarted {
                 backend: "imgur".into(),
             },

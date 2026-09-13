@@ -63,8 +63,8 @@ pub enum FlintshotError {
 
     /// The editor shell (window system, GPU surface, or runtime) failed
     /// to start or sustained a fatal error mid-session. `detail` carries
-    /// the lower-level message verbatim. Used for `eframe::Error`,
-    /// clipboard failures, and pin-window failures.
+    /// the lower-level message verbatim. Used for `eframe::Error` and
+    /// clipboard failures.
     ///
     /// Named `detail` rather than `source` for the same reason as
     /// [`FlintshotError::Capture`]: `thiserror` treats a field literally
