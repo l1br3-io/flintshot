@@ -1042,9 +1042,6 @@ fn report_editor_outcome(outcome: flintshot_core::EditorOutcome) {
         EditorOutcome::Uploaded(url) => {
             tracing::info!(%url, "editor uploaded");
         }
-        EditorOutcome::Pinned => {
-            tracing::info!("editor pinned image to desktop");
-        }
         EditorOutcome::Cancelled => {
             tracing::info!("editor cancelled; no file written");
         }
@@ -1541,7 +1538,6 @@ mod tests {
         for other in [
             EditorOutcome::Cancelled,
             EditorOutcome::CopiedToClipboard,
-            EditorOutcome::Pinned,
             EditorOutcome::Uploaded(String::new()),
             EditorOutcome::Saved(std::path::PathBuf::from("/tmp/x.png")),
         ] {

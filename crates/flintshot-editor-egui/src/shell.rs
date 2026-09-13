@@ -7,12 +7,11 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use eframe::{AppCreator, NativeOptions};
-use flintshot_core::{EditorOutcome, EditorShell, EditorState, PinConfig, Rect};
+use flintshot_core::{EditorOutcome, EditorShell, EditorState};
 
 use crate::app::{eframe_err_to_flintshot, EditorApp, OutcomeSlot};
 use crate::home::{HomeApp, HomeBridge};
 use crate::overlay::{OverlayApp, OVERLAY_TITLE};
-use crate::pin::PinApp;
 
 /// Window title shown in the titlebar and used as the WM class hint.
 /// Matches the Phase 1 editor-window spec (`"flintshot — annotate"` with
@@ -23,10 +22,6 @@ const WINDOW_TITLE: &str = "flintshot — annotate";
 /// capture-controls surface, distinct from the editor so WMs and
 /// `.desktop` `StartupWMClass` can route it separately.
 const HOME_WINDOW_TITLE: &str = "flintshot";
-
-/// Window title + WM class for a pin-to-desktop window. Distinct from
-/// the editor so WMs / compositors can route / style pins separately.
-const PIN_WINDOW_TITLE: &str = "flintshot — pin";
 
 /// Thread-safe handle for closing an egui window from **another
 /// thread** — the graceful-close seam for superseded capture workers
@@ -88,22 +83,12 @@ impl CloseHandle {
 /// eframe app: it opens a window sized to the screenshot, runs the
 /// shared `render()` path each frame, and returns [`EditorOutcome`]
 /// when the window closes (`Esc` → `Cancelled`, X button → `Cancelled`
-/// via the slot defaulting). Phase 3 Task 2 implements `run_pin` as a
-/// borderless, always-on-top, transparent viewport driven by
-/// [`PinApp`].
+/// via the slot defaulting).
 ///
-/// The resolved [`PinConfig`] for a pin session is passed via the
-/// [`with_pin_config`](Self::with_pin_config) builder — the
-/// [`EditorShell::run_pin`] trait signature stays `(image, rect)` (a
-/// core boundary, GUI-toolkit-free), and the config rides along on the
-/// shell as a side channel. The selection-first request rides the
-/// same way via [`with_selection_first`](Self::with_selection_first).
+/// The selection-first request rides the shell via
+/// [`with_selection_first`](Self::with_selection_first).
 #[derive(Default)]
 pub struct EguiShell {
-    /// Resolved pin config applied to the next `run_pin` call.
-    /// Defaults to `[pin]` config defaults; the CLI applies its
-    /// `--opacity` / `--no-clipboard` overrides before calling.
-    pin: PinConfig,
     /// Whether the next `run_editor` call opens selection-first (the
     /// `region` capture landing experience: Select pre-armed, dim
     /// mask, hint line — see `EditorApp::selection_first`). Set by
@@ -111,30 +96,18 @@ pub struct EguiShell {
     selection_first: bool,
     /// Cross-thread close handle installed into the next editor /
     /// overlay window (graceful supersede close). `None` keeps the
-    /// unclosable-from-outside behavior (open path, pins).
+    /// unclosable-from-outside behavior (open path).
     close: Option<CloseHandle>,
 }
 
 impl EguiShell {
-    /// Construct the shell with default pin config.
+    /// Construct the shell.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            pin: PinConfig::default(),
             selection_first: false,
             close: None,
         }
-    }
-
-    /// Override the pin-window config (opacity, copy-on-close) applied
-    /// to the next [`EditorShell::run_pin`] call. The CLI merges its
-    /// `--opacity` / `--no-clipboard` overrides into a [`PinConfig`]
-    /// and passes it here; without this call, `[pin]` config defaults
-    /// apply.
-    #[must_use]
-    pub fn with_pin_config(mut self, config: PinConfig) -> Self {
-        self.pin = config;
-        self
     }
 
     /// Open the next [`EditorShell::run_editor`] session
@@ -143,8 +116,7 @@ impl EguiShell {
     /// `region` capture landing experience. The phase ends
     /// permanently on the session's first crop.
     ///
-    /// A concrete builder method mirroring
-    /// [`with_pin_config`](Self::with_pin_config): no
+    /// A concrete builder method: no
     /// [`EditorShell`] trait change — the request rides the shell
     /// into the editor state construction (region-selection-first
     /// plan decision 2).
@@ -156,9 +128,8 @@ impl EguiShell {
 
     /// Attach the cross-thread close handle installed into the next
     /// editor / overlay window: the worker's supersede listener closes
-    /// the window through it (see [`CloseHandle`]). Mirrors the
-    /// [`with_pin_config`](Self::with_pin_config) side-channel
-    /// pattern — the [`EditorShell`] trait stays GUI-free.
+    /// the window through it (see [`CloseHandle`]). The
+    /// [`EditorShell`] trait stays GUI-free.
     #[must_use]
     pub fn with_close_handle(mut self, handle: CloseHandle) -> Self {
         self.close = Some(handle);
@@ -170,10 +141,6 @@ impl EditorShell for EguiShell {
     fn run_editor(&self, state: EditorState) -> flintshot_core::Result<EditorOutcome> {
         run_editor_blocking(state, self.selection_first, self.close.as_ref())
     }
-
-    fn run_pin(&self, image: image::RgbaImage, rect: Rect) -> flintshot_core::Result<()> {
-        run_pin_blocking(image, rect, self.pin.clone())
-    }
 }
 
 impl EguiShell {
@@ -183,9 +150,8 @@ impl EguiShell {
     ///
     /// A **concrete method**, not an [`EditorShell`] trait addition —
     /// the spec's §Boundaries explicitly allows the shell to grow
-    /// overlay entries this way (mirroring how `run_pin`'s config
-    /// rides the shell). The overlay is a flintshot-editor-egui
-    /// feature, not a cross-toolkit contract.
+    /// overlay entries this way. The overlay is a
+    /// flintshot-editor-egui feature, not a cross-toolkit contract.
     ///
     /// # Errors
     /// Surfaces [`crate::FlintshotError`] for window-system or
@@ -343,50 +309,9 @@ fn run_overlay_blocking(
     resolved
 }
 
-/// Open a borderless, always-on-top, transparent pin window and block
-/// until the user closes it (Esc / double-click / window close).
-///
-/// Mirrors [`run_editor_blocking`]'s single-threaded lifecycle but
-/// needs no outcome slot — a pin returns `()` (the window simply
-/// closes). Window geometry comes from `rect`: `rect.min` is the
-/// outer position (physical px, passed straight to winit) and
-/// `rect.max - rect.min` is the inner size (treated as logical px,
-/// matching the editor's convention so egui's `pixels_per_point`
-/// keeps the blit sharp on `HiDPI`).
-fn run_pin_blocking(
-    image: image::RgbaImage,
-    rect: Rect,
-    config: PinConfig,
-) -> flintshot_core::Result<()> {
-    let inner_size = egui::vec2(rect.width(), rect.height());
-    let position = egui::pos2(rect.min.x, rect.min.y);
-
-    let viewport = egui::ViewportBuilder::default()
-        .with_title(PIN_WINDOW_TITLE)
-        .with_decorations(false)
-        .with_always_on_top()
-        .with_transparent(true)
-        .with_resizable(true)
-        .with_inner_size(inner_size)
-        .with_position(position);
-
-    let options = NativeOptions {
-        viewport,
-        centered: false,
-        ..Default::default()
-    };
-
-    let app_creator: AppCreator<'_> =
-        Box::new(move |_cc| Ok(Box::new(PinApp::new(image, rect, config))));
-
-    eframe::run_native(PIN_WINDOW_TITLE, options, app_creator)
-        .map_err(|e| eframe_err_to_flintshot(&e))?;
-    Ok(())
-}
-
 /// Whether the overlay session's outcome requires holding the
 /// clipboard handle after the window closes. Only a *successful*
-/// copy does: Save / Pin / Upload never touch the clipboard, and
+/// copy does: Save / Upload never touch the clipboard, and
 /// `Cancelled` / `Err` must have no side effects at all.
 ///
 /// Pure so the X11 linger policy is unit-testable without a display
@@ -483,17 +408,6 @@ mod tests {
     #[test]
     fn with_selection_first_flags_the_next_run_editor() {
         let shell = EguiShell::new().with_selection_first();
-        assert!(shell.selection_first);
-    }
-
-    #[test]
-    fn with_selection_first_composes_with_pin_config() {
-        // Both builder flags ride the shell independently — the
-        // region path sets selection-first while the CLI merges pin
-        // config (the `with_pin_config` precedent).
-        let shell = EguiShell::new()
-            .with_pin_config(PinConfig::default())
-            .with_selection_first();
         assert!(shell.selection_first);
     }
 
