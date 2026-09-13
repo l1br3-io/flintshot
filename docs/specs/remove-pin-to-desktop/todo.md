@@ -8,4 +8,4 @@
 - [x] 006 Remove Pin last from COSMIC applet
 - [x] 007 Delete PinLast/Pinned/PinConfig from flintshot-core
 - [x] 008 Living docs, justfile, ADR-0049, CHANGELOG
-- [ ] 009 Final sweep + full CI-parity verification
+- [x] 009 Final sweep + full CI-parity verification
