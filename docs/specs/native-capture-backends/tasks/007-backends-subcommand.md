@@ -35,3 +35,15 @@ Tasks 5-6, but works with xcap-only registration
 - None beyond CLI help.
 
 **Estimated scope:** Small (2 files)
+
+**Outcome (executed 2026-09-13):** `capture::backend_report()` +
+injectable `backend_report_with(session, &[&dyn Capturer])` in core
+(`BackendReport`/`BackendReportEntry` with constructors so the app's
+printer tests can build reports despite `#[non_exhaustive]`). App:
+`Backends` variant, `run_backends` thin printer via pure
+`format_backend_report`. Output: `session: <kind>`, per-backend
+`<id>: available (<name>)` / `unavailable (<detail>)`, final
+`auto selects: <id>`. Help names `--backend` + `[capture] backend`.
+Core report tests with fakes + app printer/parse tests. Live
+COSMIC run: `portal: available`, `xcap: available`,
+`auto selects: portal`.
