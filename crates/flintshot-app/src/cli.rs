@@ -309,10 +309,68 @@ pub struct CaptureArgs {
     /// Defaults to config's `[capture] backend`.
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
+    /// Post-grab action on the native path: `editor` (default),
+    /// `clipboard` (copy the grab, no windows), or `upload` (default
+    /// upload backend; URL → clipboard). Overrides
+    /// `[capture] after_grab`. Implies `--standalone` delegation
+    /// semantics — the IPC request cannot carry it.
+    #[arg(long, value_name = "ACTION", value_parser = validate_after_action)]
+    pub after: Option<String>,
     #[command(flatten)]
     pub interaction: InteractionArgs,
     #[command(flatten)]
     pub output: OutputArgs,
+}
+
+/// Post-grab action on the native capture path (see `[capture]
+/// after_grab`). The fallback (`xcap`) path never dispatches on this —
+/// its grabs always land in the editor/overlay flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostGrabAction {
+    /// Open the grab in the editor (today's path; the default).
+    Editor,
+    /// Copy the grab to the system clipboard, no windows.
+    Clipboard,
+    /// Upload via the default upload backend; URL → clipboard.
+    Upload,
+}
+
+/// Pure post-grab dispatch: CLI flag > config value, unknown values
+/// resolve `PostGrabAction::Editor` with a warning (string-tolerant
+/// policy — the config keeps the raw string, so a typo neither bricks
+/// loading nor gets rewritten by a save).
+fn resolve_post_grab(config_value: &str, flag: Option<&str>) -> PostGrabAction {
+    let raw = flag.unwrap_or(config_value);
+    match raw {
+        "clipboard" => PostGrabAction::Clipboard,
+        "upload" => PostGrabAction::Upload,
+        "editor" => PostGrabAction::Editor,
+        other => {
+            if flag.is_none() {
+                tracing::warn!(
+                    value = other,
+                    "unknown after-grab action; falling back to \"editor\""
+                );
+            }
+            PostGrabAction::Editor
+        }
+    }
+}
+
+/// Clap `value_parser` for `--after`: only the three known actions
+/// parse; anything else is a hard CLI error naming the valid set (the
+/// config field tolerates unknowns, a just-typed flag does not —
+/// `validate_capture_backend_arg` precedent).
+fn validate_after_action(value: &str) -> std::result::Result<String, String> {
+    const VALID: [&str; 3] = ["editor", "clipboard", "upload"];
+    if VALID.contains(&value) {
+        Ok(value.to_string())
+    } else {
+        Err(format!(
+            "unknown after action `{value}` (valid: {})",
+            VALID.join(", ")
+        ))
+    }
 }
 
 /// Arguments for `flintshot upload`.
@@ -387,6 +445,7 @@ pub fn run_region(args: &RegionArgs) -> Result<()> {
         &args.output,
         "region",
         interaction,
+        false,
     ) {
         return Ok(());
     }
@@ -415,6 +474,7 @@ pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
         &args.output,
         "fullscreen",
         interaction,
+        false,
     ) {
         return Ok(());
     }
@@ -452,6 +512,7 @@ pub fn run_capture(args: &CaptureArgs) -> Result<()> {
         &args.output,
         "capture",
         interaction,
+        args.after.is_some(),
     ) {
         return Ok(());
     }
@@ -468,12 +529,27 @@ pub fn run_capture(args: &CaptureArgs) -> Result<()> {
 
     let backend = resolve_capture_backend(args.backend.as_deref())?;
     if backend.supports_selection() {
-        native_capture_and_dispatch(&args.output, interaction, &watch, backend.as_ref())
+        let post_grab = resolve_post_grab(
+            &cfg_for_post_grab().capture.after_grab,
+            args.after.as_deref(),
+        );
+        native_capture_and_dispatch(
+            &args.output,
+            interaction,
+            &watch,
+            backend.as_ref(),
+            post_grab,
+        )
     } else {
-        // The fallback flow is today's `region` semantics minus the
-        // monitor flag: primary monitor, selection in the editor.
-        // The mode label stays "region" so the editor's
-        // selection-first landing phase and logs are byte-identical.
+        // GOTCHA: the fallback flow ignores post-grab routing —
+        // selection happens in the editor/overlay on this path, and a
+        // raw primary-monitor dump to the clipboard (or an unannotated
+        // upload of one) is never what the user meant. Every fallback
+        // grab lands in today's editor flow; only the native path,
+        // where the OS UI already performed the selection, dispatches
+        // on `after_grab`. The mode label stays "region" so the
+        // editor's selection-first landing phase and logs stay
+        // byte-identical.
         capture_and_dispatch(
             None,
             "region",
@@ -481,6 +557,19 @@ pub fn run_capture(args: &CaptureArgs) -> Result<()> {
             interaction,
             args.backend.as_deref(),
         )
+    }
+}
+
+/// Config load for the post-grab dispatch decision (lossy: a broken
+/// config warns and falls back to built-in defaults, whose
+/// `after_grab` is `editor`).
+fn cfg_for_post_grab() -> Config {
+    match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load config; using built-in defaults");
+            Config::default()
+        }
     }
 }
 
@@ -505,14 +594,16 @@ fn resolve_capture_backend(
 
 /// Native flow: run the OS's selection UI under the prepare handshake
 /// (flintshot's own chrome must not sit in the portal's frozen frame),
-/// then route the grab like any capture — `--out` PNG or the
-/// interaction shell. `None`-style quiet exits (superseded, dismissed,
-/// timed out) return `Ok(())` with one info log; real failures bubble.
+/// then dispatch the grab on `post_grab` — `--out` PNG (wins over
+/// everything), editor shell, clipboard copy, or upload. `None`-style
+/// quiet exits (superseded, dismissed, timed out) return `Ok(())`
+/// with one info log; real failures bubble.
 fn native_capture_and_dispatch(
     output: &OutputArgs,
     interaction: Option<InteractionMode>,
     watch: &SupersedeWatch,
     backend: &dyn flintshot_core::capture::Capturer,
+    post_grab: PostGrabAction,
 ) -> Result<()> {
     // The guard mirrors `capture_prepared`: the handshake, the grab,
     // and the restore all sit inside its scope so the tray returns the
@@ -555,16 +646,95 @@ fn native_capture_and_dispatch(
     if let Some(path) = &output.out {
         write_png(&img, path)?;
         tracing::info!(path = %path.display(), "native capture saved");
-    } else {
-        if watch.superseded() {
-            tracing::info!("native capture superseded before the shell; exiting cancelled");
-            return Ok(());
+        return Ok(());
+    }
+
+    match post_grab {
+        PostGrabAction::Editor => {
+            if watch.superseded() {
+                tracing::info!("native capture superseded before the shell; exiting cancelled");
+                return Ok(());
+            }
+            // Mode label "capture" (not "region"): selection already
+            // happened in the OS UI — the editor opens plain.
+            run_capture_shell(img, "capture", interaction, watch)?;
         }
-        // Mode label "capture" (not "region"): selection already
-        // happened in the OS UI — the editor opens plain.
-        run_capture_shell(img, "capture", interaction, watch)?;
+        PostGrabAction::Clipboard => {
+            copy_image_to_clipboard(&img)?;
+            fire_capture_notification("Capture copied to clipboard");
+            tracing::info!("native capture copied to clipboard");
+        }
+        PostGrabAction::Upload => {
+            upload_capture_and_report(&img)?;
+        }
     }
     Ok(())
+}
+
+/// Copy the grab to the system clipboard as an RGBA image. Unlike the
+/// best-effort URL copies, a failure here is a real capture failure —
+/// the user asked for the clipboard and nothing else happened.
+fn copy_image_to_clipboard(img: &image::RgbaImage) -> Result<()> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| color_eyre::eyre::eyre!("clipboard: {e}"))?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: img.width() as usize,
+            height: img.height() as usize,
+            bytes: std::borrow::Cow::Borrowed(img.as_raw()),
+        })
+        .map_err(|e| color_eyre::eyre::eyre!("copying image to clipboard: {e}"))
+}
+
+/// Upload the grab through the default upload backend and apply the
+/// same side effects as `flintshot upload`: URL → clipboard,
+/// notification, and the daemon report (which broadcasts
+/// `Event::Uploaded` — the window-less flow's equivalent of the
+/// editor's save report).
+fn upload_capture_and_report(img: &image::RgbaImage) -> Result<()> {
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+        .with_context(|| "encoding the capture for upload")?;
+
+    let cfg = cfg_for_post_grab();
+    let backend_id = cfg.upload.default_backend.clone();
+    let backend = crate::upload::resolve_backend(&backend_id)
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
+        .with_context(|| format!("resolving upload backend `{backend_id}`"))?;
+    let entry_name = credential_entry_name(&backend_id);
+    let entry = keyring::Entry::new("flintshot", &entry_name).ok();
+    let ctx = UploadContext {
+        credentials: entry.as_ref(),
+        filename: Some("flintshot-capture.png"),
+    };
+
+    tracing::info!(%backend_id, "uploading native capture");
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| color_eyre::eyre::eyre!("creating tokio runtime: {e}"))?;
+    let outcome = runtime
+        .block_on(backend.upload(&png, ImageMime::Png, &ctx))
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
+
+    println!("{}", outcome.url);
+    copy_url_to_clipboard(&outcome.url);
+    fire_upload_notification(true, &outcome.url);
+    report_uploaded_to_daemon(&outcome.url, outcome.delete_handle.as_deref());
+    tracing::info!(%outcome.url, "native capture uploaded");
+    Ok(())
+}
+
+/// Best-effort desktop notification for the window-less capture
+/// paths (`after_grab = clipboard`): with no editor window to show
+/// the result, the notification is the only feedback.
+fn fire_capture_notification(message: &str) {
+    if let Err(e) = notify_rust::Notification::new()
+        .appname("flintshot")
+        .summary("flintshot capture")
+        .body(message)
+        .show()
+    {
+        tracing::warn!(error = %e, "could not show desktop notification");
+    }
 }
 
 /// Classify a capture error as a **quiet exit**: the user dismissed
@@ -631,20 +801,29 @@ pub fn run_open(args: &OpenArgs) -> Result<()> {
 }
 
 /// Try to hand a capture `request` to a running daemon. Returns `true`
-/// if delegated (the caller should exit). Skipped when `--standalone` is
-/// set, when `--out` is given (the PNG-write path is headless and must
-/// run in-process; the daemon's worker would open an editor instead),
-/// or when an explicit `--overlay`/`--editor` flag is set (the IPC
-/// request cannot carry it, so honoring the flag means running here).
-/// A delegation failure falls back to standalone with a warning rather
-/// than failing the whole capture.
+/// if delegated (the caller should exit). Skipped when `--standalone`
+/// is set, when `--out` is given (the PNG-write path is headless and
+/// must run in-process; the daemon's worker would open an editor
+/// instead), when an explicit `--overlay`/`--editor` flag is set (the
+/// IPC request cannot carry it, so honoring the flag means running
+/// here), or when `ipc_incompatible_flag` is set (`--after`: same
+/// cannot-carry-it rationale). A delegation failure falls back to
+/// standalone with a warning rather than failing the whole capture.
 fn delegate_to_daemon(
     request: &Request,
     output: &OutputArgs,
     mode: &str,
     interaction: Option<InteractionMode>,
+    ipc_incompatible_flag: bool,
 ) -> bool {
     if output.standalone || output.out.is_some() {
+        return false;
+    }
+    if ipc_incompatible_flag {
+        tracing::debug!(
+            "{mode}: explicit flag that cannot ride the IPC request; running standalone \
+             (the daemon worker would re-resolve it from config)"
+        );
         return false;
     }
     if interaction.is_some() {
@@ -2306,10 +2485,37 @@ mod tests {
     }
 
     #[test]
+    fn capture_parses_after_flag() {
+        let cli = Cli::parse_from(["flintshot", "capture", "--after", "clipboard"]);
+        match cli.command {
+            Some(Command::Capture(args)) => {
+                assert_eq!(args.after.as_deref(), Some("clipboard"));
+            }
+            other => panic!("expected capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_rejects_unknown_after_action() {
+        let err = Cli::try_parse_from(["flintshot", "capture", "--after", "print"]);
+        assert!(err.is_err(), "unknown --after must be a hard CLI error");
+        let rendered = err.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            rendered.contains("editor"),
+            "error must name the valid actions: {rendered}"
+        );
+        assert!(
+            rendered.contains("clipboard") && rendered.contains("upload"),
+            "error must name every valid action: {rendered}"
+        );
+    }
+
+    #[test]
     fn run_capture_rejects_unknown_backend_before_any_delegation() {
         let args = CaptureArgs {
             delay_ms: 0,
             backend: Some("nope".into()),
+            after: None,
             interaction: InteractionArgs {
                 overlay: false,
                 editor: false,
@@ -2320,6 +2526,51 @@ mod tests {
             },
         };
         assert!(run_capture(&args).is_err());
+    }
+
+    /// Pure post-grab dispatch: the CLI flag beats config, unknown
+    /// config values resolve `editor` (string-tolerant), and `editor`
+    /// is the default throughout.
+    #[test]
+    fn post_grab_flag_beats_config() {
+        use PostGrabAction::*;
+        // Flag wins over every config value.
+        assert_eq!(
+            resolve_post_grab("clipboard", Some("upload")),
+            Upload,
+            "explicit flag must beat the config value"
+        );
+        assert_eq!(resolve_post_grab("upload", Some("editor")), Editor);
+        assert_eq!(resolve_post_grab("editor", Some("clipboard")), Clipboard);
+        // Config decides when no flag.
+        assert_eq!(resolve_post_grab("clipboard", None), Clipboard);
+        assert_eq!(resolve_post_grab("upload", None), Upload);
+        assert_eq!(resolve_post_grab("editor", None), Editor);
+        // Unknown config → editor (warn + default).
+        assert_eq!(resolve_post_grab("print-it", None), Editor);
+        // Unknown flag never reaches here (CLI validation rejects it),
+        // but the fn stays total: unknown resolves editor.
+        assert_eq!(resolve_post_grab("clipboard", Some("nope")), Editor);
+    }
+
+    /// The `--after` flag cannot ride the IPC request, so it must
+    /// force the standalone path exactly like the interaction flags.
+    #[test]
+    fn after_flag_skips_daemon_delegation() {
+        let output = OutputArgs {
+            out: None,
+            standalone: false,
+        };
+        assert!(
+            !delegate_to_daemon(
+                &Request::Capture { delay_ms: 0 },
+                &output,
+                "capture",
+                None,
+                true,
+            ),
+            "an explicit --after flag must not delegate to the daemon"
+        );
     }
 
     /// Quiet-cancel classification: dismissal in the OS selection UI
@@ -2745,6 +2996,7 @@ mod tests {
                 &output,
                 "region",
                 Some(InteractionMode::Overlay),
+                false,
             ),
             "an explicit mode flag must not delegate to the daemon"
         );

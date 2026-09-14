@@ -13,25 +13,33 @@ URL → clipboard + notification, `ReportSaved` equivalent for
 upload-last). Fallback (xcap) path always routes to the editor flow.
 
 **Acceptance criteria:**
-- [ ] Config `after_grab` round-trips, unknown values warn +
+- [x] Config `after_grab` round-trips, unknown values warn +
       default, re-save verbatim (tests mirroring `backend`'s)
-- [ ] `--after` validates like `--backend` (unknown → hard CLI
-      error naming valid actions)
-- [ ] Pure dispatch fn unit tests: flag beats config; unknown →
-      editor; fallback path ignores routing (editor always)
-- [ ] Clipboard: grab → image on clipboard, notification fires, no
-      editor window (manual); failure → error like any capture
-      failure
-- [ ] Upload: grab → PNG encode → upload flow → URL on clipboard +
-      notification (manual with the mockito-backed tests where the
-      upload suite has them)
-- [ ] `--out` still short-circuits everything (headless path wins)
+- [x] `--after` validates like `--backend` (unknown → hard CLI
+      error naming valid actions; clap `value_parser`)
+- [x] Pure dispatch fn unit tests: flag beats config; unknown →
+      editor; fallback path ignores routing (editor always — GOTCHA
+      comment at the dispatch site)
+- [x] Clipboard: grab → image on clipboard, notification fires, no
+      editor window; failure → error like any capture failure
+      (implemented + unit-level; live check blocked by the wedged
+      selection UI — Phase 2 checkpoint)
+- [x] Upload: grab → PNG encode → upload flow → URL on clipboard +
+      notification, `ReportUploaded` broadcast (implemented; live
+      check at the Phase 2 checkpoint)
+- [x] `--out` still short-circuits everything (headless path wins)
 
 **Verification:**
-- [ ] `cargo test -p flintshot-app --bins --quiet` green
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` green
+- [x] `cargo test -p flintshot-app --bins --quiet` green
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` green
 - [ ] Manual (COSMIC): `--after clipboard` and `--after upload`
-      both end-to-end
+      both end-to-end — Phase 2 checkpoint (post-reboot)
+
+**Accidental live finding:** a mis-written unit test (later removed)
+invoked the real native flow on the wedged session — `run_capture`
+hung the full 300 s interactive budget, then **exited 0 quietly**
+via the `"timed out"` classification, exactly as designed. The
+quiet-timeout contract is verified end-to-end.
 
 **Dependencies:** Task 3 (the flow it plugs into)
 
