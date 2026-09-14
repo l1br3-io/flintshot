@@ -141,10 +141,26 @@ Categories used below:
   portal answers a Copy-confirmed grab with `clipboard:///` — the
   image is on the system clipboard, no file exists — which
   flintshot rejected as a non-file-uri error, ending the capture
-  invisibly (the failure only reached the daemon log). The grab is
-  now read back from the clipboard and every post-grab action
-  (`--out`, editor, clipboard, upload) proceeds as with a
-  file-delivered grab; Save/Enter-confirmed captures are unchanged.
+  invisibly (the failure only reached the daemon log), so the
+  editor never opened. Two stacked causes, both fixed: (1) the
+  portal sends its `clipboard:///` response *before* its own
+  clipboard-write task runs (queued behind the overlay teardown —
+  observed landing ~1 s later), so flintshot snapshots the
+  clipboard beforehand and waits up to ~5 s for an image that
+  *changed* (a stale image already on the clipboard is never
+  mistaken for the grab; a byte-identical one at the deadline is
+  accepted); (2) **arboard had no native Wayland support** —
+  without the `wayland-data-control` feature it is X11-only and
+  rode XWayland's clipboard bridge, whose Wayland→X11 sync is
+  lazy/focus-gated, so reads failed nondeterministically even
+  after the write landed. The workspace now enables
+  `wayland-data-control` (and declares `image-data`, which the
+  app's clipboard code always needed — `--no-default-features`
+  builds compile again). Every post-grab action (`--out`, editor,
+  clipboard, upload) proceeds as with a file-delivered grab;
+  Save/Enter-confirmed captures are unchanged. The tray also
+  restores at pixel-time now — the pre-grab guard no longer spans
+  the clipboard wait.
 - **App-window capture races** (ADR-0052, spec
   `docs/specs/fix-app-window-capture-races/`) — the "window in the
   shot" guarantee now holds for every trigger and every app-window

@@ -17,6 +17,17 @@ generic error arm: on marker, read the image back via a new
 Update `parse_portal_uri`'s doc comment to name the clipboard
 form. Keep `native_capture_and_dispatch` untouched.
 
+**Reopened after first manual check failed:** the read-back raced
+the portal itself — xdg-desktop-portal-cosmic spawns the
+`clipboard:///` D-Bus Response *before* executing its queued
+`clipboard::write_data` task (`Msg::Capture` in its
+`src/screenshot.rs`), so an immediate read sees the previous
+selection ("clipboard is empty" hard error; app window + tray
+stayed hidden — the user-visible "crash"). Fix: the marker arm
+reads through `read_with_retries(&CLIPBOARD_READ_RETRY_DELAYS,
+…)` — 20 × 50 ms slots (~1 s bound), policy unit-tested around an
+injected reader; final failure stays a contextual hard error.
+
 **Acceptance criteria:**
 - [x] `parse_portal_uri("clipboard:///")` errors with a detail
       containing `PORTAL_GRAB_ON_CLIPBOARD`; `file:///` and
@@ -26,8 +37,9 @@ form. Keep `native_capture_and_dispatch` untouched.
       true; near-miss details ("non-file uri", "cancelled",
       decode-failure) false
 - [x] `native_grab_prepared` marker arm returns the read-back
-      image as the grab; read-back failure is a contextual hard
-      error (mentions clipboard read-back)
+      image as the grab, retried over ~1 s (the portal's
+      Response races its own clipboard write); read-back failure
+      is a contextual hard error (mentions clipboard read-back)
 - [x] No `Capturer` trait change; xcap backend, fallback path,
       and all `PostGrabAction` arms untouched
 - [x] `flintshot-core` gains no new dependencies

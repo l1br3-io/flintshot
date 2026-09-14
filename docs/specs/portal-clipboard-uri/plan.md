@@ -2,55 +2,65 @@
 
 ## Overview
 
-COSMIC's screenshot portal answers Copy-confirmed captures with
-`clipboard:///` — the grab is on the system clipboard, not in a
-file. flintshot currently hard-errors at `parse_portal_uri`,
-killing every post-grab action invisibly (error only in
-daemon.log). Fix at the grab seam: the portal backend marks the
-outcome through the existing error channel (exported canonical
-constant), and the app layer detects the marker, reads the pixels
-back via arboard, and continues normal dispatch. Spec:
-`docs/specs/portal-clipboard-uri/spec.md`.
+xdg-desktop-portal-cosmic's Copy-confirmed screenshot answers
+`clipboard:///` (image on the system clipboard, no file). The grab
+must be read back so every post-grab action (editor, clipboard,
+upload, `--out`) proceeds. Effort history: Task 001 marker +
+read-back (failed manual), Task 003 change-detect wait (still
+failed manual). Root cause is now proven: **arboard 3.6.1 has no
+native Wayland support unless the `wayland-data-control` feature
+is enabled** — without it, every arboard call rides XWayland's
+clipboard bridge, whose Wayland→X11 direction is lazy/focus-gated,
+so reads fail nondeterministically (the portal's write itself
+lands within ~1 s; `wl-paste` sees it fine).
 
 ## Architecture Decisions
 
-- **Marker through the existing error channel, not a trait
-  change.** `FlintshotError::Capture { detail }` already carries
-  classified outcomes across the core→app boundary
-  (`quiet_capture_exit` matches "cancelled"/"timed out" the same
-  way). A `pub const` in `capture::portal` keeps the string
-  single-sourced; both producer and consumer reference it. A
-  `GrabOutcome` enum would be more explicit but costs a `Capturer`
-  trait break across two backends for a one-consumer seam.
-- **Read-back in the app layer, arboard stays out of core.**
-  `flintshot-core` is types/traits/pure logic; a clipboard client
-  is I/O. `flintshot-app` already owns arboard and the clipboard
-  failure semantics (`copy_image_to_clipboard`).
-- **Marker resolves before dispatch, arms stay symmetric.** The
-  read-back happens in `native_grab_prepared`, so every post-grab
-  arm (`--out`, editor, clipboard, upload) gets pixels without
-  knowing how the grab arrived. No per-arm special cases.
+- **Marker through the existing error channel** (Task 001):
+  `PORTAL_GRAB_ON_CLIPBOARD` const in core, classified in the app
+  layer — no trait-shape change.
+- **Read-back waits for a changed image, not mere presence**
+  (Task 003): pre-grab digest snapshot + ~5 s change-detect wait;
+  byte-identical-at-deadline accepted. Stays — correct regardless
+  of the arboard fix.
+- **Enable `wayland-data-control` on the workspace arboard entry**
+  (Task 004): one line; wl-clipboard-rs gives arboard native
+  `zwlr_data_control_v1` (the same path `wl-paste` uses, proven
+  working against the portal's selection on this COSMIC session).
+  X11/other-OS behavior unchanged (feature gates the wayland
+  backend; arboard picks per-session).
+- Evidence trail: daemon.log timelines + the instrumented repro
+  (Enter-injected portal capture; `wl-paste` vs arboard racing the
+  same selection) recorded in
+  `tasks/004-enable-arboard-wayland-data-control.md`.
 
 ## Task Index
 
-### Phase 1 — Behavior
+### Phase 1: shipped (history)
 - [x] Task 1: Portal marks `clipboard:///`; app reads the grab back → `tasks/001-marker-and-read-back.md`
+- [x] Task 2: CHANGELOG entry + spec reconcile → `tasks/002-changelog.md`
+- [x] Task 3: Clipboard wait outlasts the Response race — change-detect + 5 s budget → `tasks/003-clipboard-wait.md`
 
-### Checkpoint: behavior live (HUMAN GATE)
-- [x] Full gate green (`fmt`, `clippy -D warnings`, `test --workspace --all-targets`, doc-tests)
-- [ ] Human confirms on the COSMIC session: OS screenshot UI **Copy** → capture completes (post-grab action runs, no `non-file uri` error in daemon.log); **Save/Enter** path unchanged
+### Phase 2: reopen fix
+- [x] Task 4: Enable arboard `wayland-data-control` → `tasks/004-enable-arboard-wayland-data-control.md`
 
-### Phase 2 — Record
-- [x] Task 2: CHANGELOG entry + spec reconcile (skip if Task 1's entry suffices) → `tasks/002-changelog.md`
+### Checkpoint: Complete
+- [x] Full finish gate passes (fmt, clippy, workspace tests, doc tests)
+- [x] Manual COSMIC check (injected-Enter repro): capture → Copy →
+      editor session confirmed live (35-thread editor process);
+      human tray-path confirmation pending
+- [ ] Review with human before merging
 
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 | :--- | :--- | :--- |
-| Selection read race: another app takes the clipboard between portal copy and read-back | Low — milliseconds, portal serves from a daemon process | Read-back failure is a hard, contextual error (never a wrong image); user retries |
-| arboard `get_image` returns non-RGBA bytes or mismatched dimensions on odd portals | Low | `RgbaImage::from_raw` `None` → explicit capture error naming the mismatch |
-| Marker string drift between producer and consumer | None | Single `pub const`, both sites compile against it; unit tests on both sides |
+| New transitive deps (wl-clipboard-rs, wayland-client) break a CI job | Med | Task 4 verifies all CI-shaped builds incl. `--features tray` and `FEATURES=''`; wayland-client's rust backend needs no system libs |
+| Native-wayland **writes** (editor Copy, capture clipboard arm) now take the data-control path — selection lifetime after process exit depends on the compositor's clipboard manager | Med | Manual check: Copy in editor → close editor → paste elsewhere; keep the existing linger logic, revisit only if the check fails |
+| `wayland-data-control` feature renamed/changed in future arboard | Low | Pinned `version = "3"`; feature verified present in 3.6.1 (registry Cargo.toml) |
 
 ## Open Questions
 
-- None blocking.
+- None blocking. (Editor-egui's Linux-wide 60 s clipboard linger
+  predates native-wayland arboard; revisit in a later effort if
+  the manual Copy check surfaces anything.)

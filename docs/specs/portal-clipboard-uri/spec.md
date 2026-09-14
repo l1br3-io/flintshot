@@ -43,10 +43,17 @@ completes exactly as it does when I confirm with Save.*
    returns a marker-bearing `FlintshotError::Capture` whose detail
    contains an exported canonical constant — not a bare
    "non-file uri" error.
-2. `native_grab_prepared` detects the marker, reads the image back
-   from the system clipboard (`arboard`), and returns it as the
-   grab; the normal dispatch (copy/notify/editor, `--out`, upload)
-   proceeds unchanged.
+2. `native_grab_prepared` detects the marker, then waits out the
+   portal's Response-before-write race and reads the image back
+   from the system clipboard (`arboard`): a pre-grab digest
+   snapshot distinguishes the portal's write from an image already
+   on the clipboard, the wait budget is ~5 s (observed >1 s from
+   Response to readable selection on COSMIC — the write is queued
+   behind the overlay teardown), and an image byte-identical to
+   the snapshot at the deadline is accepted (two identical
+   screenshots must not read as "never landed"). The normal
+   dispatch (copy/notify/editor, `--out`, upload) proceeds
+   unchanged.
 3. A read-back failure (clipboard empty, wrong-size payload,
    arboard error) is a hard error with clear context — never a
    silently wrong image.
@@ -58,9 +65,13 @@ completes exactly as it does when I confirm with Save.*
 
 ## Technologies
 
-No new dependencies. `arboard` is already a workspace dep of
-`flintshot-app` (and `flintshot-editor-egui`); it is **not** added
-to `flintshot-core` — the read-back happens in the app layer.
+No new **direct** dependencies. `arboard` is already a workspace
+dep of `flintshot-app` (and `flintshot-editor-egui`); it is **not**
+added to `flintshot-core` — the read-back happens in the app
+layer. (Task 004 enables arboard's `wayland-data-control` feature —
+without it arboard is X11-only and rides XWayland's lazy
+clipboard bridge on Wayland sessions — which pulls the
+`wl-clipboard-rs` transitive dep, pure Rust, no system libs.)
 
 ## Commands
 
@@ -124,7 +135,8 @@ body is not headless-testable):
 
 - [ ] On a COSMIC session, `flintshot capture` confirmed with the
       OS UI's **Copy** button completes: pixels flow to the
-      configured post-grab action, no error in daemon.log.
+      configured post-grab action (the clipboard write observed
+      landing within the wait window), no error in daemon.log.
 - [ ] Confirmed with **Save/Enter** still behaves as before.
 - [ ] `cargo fmt --all --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
