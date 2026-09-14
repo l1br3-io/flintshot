@@ -2322,9 +2322,10 @@ byte-identical. Live smoke (incl. interactive):
    A wedged interactive Response (COSMIC frontend caveat) exits
    quietly at the hard timeout.
 3. **after_grab variants**: `flintshot capture --after clipboard`
-   copies the grab with no windows (notification is the only
-   feedback); `--after upload` prints + copies the URL;
-   `[capture] after_grab = "clipboard"` in config behaves the same.
+   copies the grab (notification, paste-ready), then opens the
+   editor/overlay pre-loaded with it; `--after upload` prints +
+   copies the URL (window-less); `[capture] after_grab = "clipboard"`
+   in config behaves the same.
 4. **Fallback flow pinned**: `flintshot capture --backend xcap`
    reproduces today's flow — primary-monitor grab → editor/overlay,
    selection-first landing, no OS UI. The fallback ignores
@@ -2350,7 +2351,8 @@ byte-identical. Live smoke (incl. interactive):
 | ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
 | `capture`: OS UI opens, Enter → editor with the selection   | | | | | | | | | | |
 | Escape / timeout: quiet exit 0, one log, no notification    | | | | | | | | | | |
-| `--after clipboard` / `upload`: windowless flow             | | | | | | | | | | |
+| `--after clipboard`: copy + notify, editor opens pre-loaded | | | | | | | | | | |
+| `--after upload`: windowless, URL printed + copied          | | | | | | | | | | |
 | `--backend xcap`: fallback flow unchanged, ignores after    | | | | | | | | | | |
 | `region` / `fullscreen` fail to parse (pinned)              | | | | | | | | | | |
 | Tray / applet / home: one Capture action, no monitor items  | | | | | | | | | | |

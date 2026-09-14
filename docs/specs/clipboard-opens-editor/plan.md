@@ -48,7 +48,7 @@ the doc/CHANGELOG sweep it makes stale. Spec:
 - [ ] Human runs `flintshot capture --after clipboard` on the Wayland session: clipboard holds the grab, notification fires, editor/overlay opens pre-loaded; `--after editor` / `--after upload` / `--out` / `--backend xcap` unchanged
 
 ### Phase 2 — Record
-- [ ] Task 2: Doc + CHANGELOG sweep (TEST_MATRIX, CHANGELOG in-place, ADR-0051 addendum, spec reconcile) → `tasks/002-docs-changelog.md`
+- [x] Task 2: Doc + CHANGELOG sweep (TEST_MATRIX, CHANGELOG in-place, ADR-0051 addendum, spec reconcile) → `tasks/002-docs-changelog.md`
 
 ### Checkpoint: complete
 - [ ] Spec success criteria met; harness linters green; ready for PR

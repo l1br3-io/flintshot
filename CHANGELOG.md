@@ -55,12 +55,14 @@ Categories used below:
 
 - **Post-grab routing** (`after_grab`): `[capture] after_grab =
   "editor" (default) | "clipboard" | "upload"` (CLI `--after`) —
-  native-path grabs can land straight on the clipboard (window-less,
-  notification as the only feedback) or upload via the default
-  backend (URL printed + copied). Unknown values warn and resolve
-  `editor`. The fallback path ignores it: selection happens in the
-  editor there, and a raw monitor dump to the clipboard is never
-  right.
+  native-path grabs can land on the clipboard (`clipboard` copies
+  immediately — notification, paste-ready — then opens the
+  editor/overlay pre-loaded with the same grab, so every backend
+  lands in the editor after a grab) or upload via the default
+  backend (window-less; URL printed + copied). Unknown values warn
+  and resolve `editor`. The fallback path ignores it: selection
+  happens in the editor there, and a raw monitor dump to the
+  clipboard is never right.
 - **Home window — *Open* control** (`flintshot app`): a native file
   dialog picks an image and opens it in a `flintshot open` worker
   (its own process — native event loops do not nest); the home

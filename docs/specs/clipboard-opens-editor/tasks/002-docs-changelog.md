@@ -15,21 +15,25 @@ addendum note on the consequence line (~line 90) pointing to
 — reconcile only if implementation reality diverged from the spec.
 
 **Acceptance criteria:**
-- [ ] No doc under `docs/` (excluding `docs/specs/` history) claims
+- [x] No doc under `docs/` (excluding `docs/specs/` history) claims
       the clipboard flow opens no windows — verified via
       `rg -n "window-less|windowless" docs/ CHANGELOG.md AGENTS.md`
       hitting only upload-appropriate or historical-spec contexts
-- [ ] CHANGELOG `after_grab` entry describes copy + notification +
+- [x] CHANGELOG `after_grab` entry describes copy + notification +
       editor open; no separate contradicting **Changed** bullet
-- [ ] ADR-0051 carries the addendum; no other ADR edited
-- [ ] `AGENTS.md` needs no change (its run examples don't describe
+- [x] ADR-0051 carries the addendum; no other ADR edited
+- [x] `AGENTS.md` needs no change (its run examples don't describe
       the clipboard flow) — verify, don't assume
 
 **Verification:**
-- [ ] `python3 .opencode/harness/scripts/check-refs.py`
-- [ ] `python3 .opencode/harness/scripts/lint-frontmatter.py`
-- [ ] `python3 .opencode/harness/scripts/lint-plan.py`
-- [ ] Full finish gate green (docs-only, but the discipline holds):
+- [x] `python3 .opencode/harness/scripts/check-refs.py`
+      (one pre-existing unrelated broken ref:
+      `docs/specs/launcher-desktop-entry/spec.md` →
+      `../snipping-modes/spec.md`; not introduced here, left for
+      its owning effort)
+- [x] `python3 .opencode/harness/scripts/lint-frontmatter.py`
+- [x] `python3 .opencode/harness/scripts/lint-plan.py`
+- [x] Full finish gate green (docs-only, but the discipline holds):
       `cargo fmt --all --check` +
       `cargo clippy --workspace --all-targets -- -D warnings` +
       `cargo test --workspace --all-targets` +
