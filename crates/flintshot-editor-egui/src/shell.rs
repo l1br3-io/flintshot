@@ -176,7 +176,7 @@ impl EguiShell {
     ) -> flintshot_core::Result<()> {
         let viewport = egui::ViewportBuilder::default()
             .with_title(HOME_WINDOW_TITLE)
-            .with_inner_size(egui::vec2(360.0, 300.0))
+            .with_inner_size(egui::vec2(360.0, 240.0))
             .with_resizable(false);
 
         let options = NativeOptions {

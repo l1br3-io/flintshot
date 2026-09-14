@@ -1,22 +1,30 @@
 //! The eframe app that drives the flintshot home (app) window.
 //!
-//! [`HomeApp`] is the Win11-Snipping-Tool-style capture home: two
-//! prominent controls (*Capture region*, *Capture fullscreen* plus a
-//! monitor picker) and a status line. This crate stays IPC-free —
-//! the window talks to the world exclusively through [`HomeBridge`],
-//! which the app crate implements (subscription pump + daemon
-//! delegation live there).
+//! [`HomeApp`] is the Win11-Snipping-Tool-style capture home: one
+//! prominent **Capture** control (the single Capture action,
+//! native-capture-ux — the OS's own selection UI where the backend
+//! supports it, else the editor flow), an **Open** control (native
+//! file dialog → the picked image opens in an editor window of its
+//! own), and a status line. A **Paste** control is fully built but
+//! hidden behind [`SHOW_PASTE`] for the future clipboard→editor
+//! feature. This crate stays IPC-free — the window talks to the
+//! world exclusively through [`HomeBridge`], which the app crate
+//! implements (subscription pump + daemon delegation live there).
 //!
-//! Close/reopen contract (ADR-0047): a control click asks the
+//! Close/reopen contract (ADR-0047): a Capture click asks the
 //! bridge to start the capture and then sends
 //! [`egui::ViewportCommand::Close`] — a destroyed window cannot be
 //! captured, on every compositor (winit's Wayland `set_visible` is
 //! a hard no-op, so hiding is not a portable guarantee). The caller
 //! (which owns the process) waits out the unmap grace, delegates,
-//! and reopens a fresh window on [`HomeDirective::Show`]. While the
-//! window is open, a standing `request_repaint_after` keeps
-//! directives (status, focus pings) flowing even when idle.
+//! and reopens a fresh window on [`HomeDirective::Show`]. **Open**
+//! does *not* close the window: the editor runs elsewhere (its own
+//! process — see [`HomeBridge::open_image`]), so there is nothing
+//! to keep out of a shot. While the window is open, a standing
+//! `request_repaint_after` keeps directives (status, focus pings)
+//! flowing even when idle.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use eframe::App;
@@ -28,14 +36,13 @@ use crate::theme;
 /// changes, focus pings arrive independent of input).
 const REPOLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// One entry of the fullscreen monitor picker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MonitorEntry {
-    /// `xcap` monitor index (the `--monitor N` value).
-    pub index: u32,
-    /// Human label, e.g. `"0 · DP-1 (primary)"`.
-    pub label: String,
-}
+/// Whether the **Paste** control renders (and its `P` accelerator
+/// arms). The clipboard→editor feature is a later effort; the
+/// button, accelerator, and [`HomeBridge::request_paste`] plumbing
+/// are built now so flipping this const is the whole toggle.
+// TODO(future effort): clipboard → editor — read the system
+// clipboard image straight into a fresh editor session.
+const SHOW_PASTE: bool = false;
 
 /// A directive from the app crate into the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,33 +67,26 @@ pub enum HomeDirective {
 /// The home window's only seam to the outside world. Implemented by
 /// the app crate; every method runs on the UI thread.
 pub trait HomeBridge {
-    /// Start a region capture (the window closes itself right
-    /// after; the implementation owns the grace + delegation + the
-    /// reopen decision).
-    fn request_capture_region(&mut self);
+    /// Start the single Capture action (the window closes itself
+    /// right after; the implementation owns the grace + delegation +
+    /// the reopen decision).
+    fn request_capture(&mut self);
 
-    /// Start a fullscreen capture of `monitor` (primary when
-    /// `None`).
-    fn request_capture_fullscreen(&mut self, monitor: Option<u32>);
+    /// Open `path` in the editor — the `flintshot open` path. The
+    /// editor must not run on this thread (the home window's eframe
+    /// loop owns it and native loops do not nest), so the
+    /// implementation opens it as its own window/process; the home
+    /// window stays open and untouched.
+    fn open_image(&mut self, path: PathBuf);
+
+    /// Placeholder for the future clipboard→editor feature: read the
+    /// system clipboard image into a fresh editor session. Only
+    /// reachable while [`SHOW_PASTE`] is `true`.
+    fn request_paste(&mut self);
 
     /// Take one pending directive, oldest first. Called every
     /// frame (see [`REPOLL_INTERVAL`]).
     fn poll_directive(&mut self) -> Option<HomeDirective>;
-
-    /// The monitors offered by the fullscreen picker. Called on
-    /// construction and on each [`HomeDirective::Show`] (a monitor
-    /// hot-plug between captures is then picked up).
-    fn monitors(&mut self) -> Vec<MonitorEntry>;
-}
-
-/// Which capture a control asked for. Local to the click handlers —
-/// the bridge methods stay the wire-shaped pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CaptureKind {
-    /// Interactive region selection.
-    Region,
-    /// Whole-monitor grab (`None` = primary).
-    Fullscreen(Option<u32>),
 }
 
 /// The eframe app for the home window. Owns no IPC state — see
@@ -97,23 +97,22 @@ pub(crate) struct HomeApp {
     /// Pure UI state, kept separate so directive application is
     /// headless-testable.
     ui: HomeUiState,
-    /// Keyboard shortcut: R → region.
-    region_shortcut: KeyboardShortcut,
-    /// Keyboard shortcut: F → fullscreen.
-    fullscreen_shortcut: KeyboardShortcut,
+    /// Keyboard shortcut: C → capture.
+    capture_shortcut: KeyboardShortcut,
+    /// Keyboard shortcut: O → open.
+    open_shortcut: KeyboardShortcut,
+    /// Keyboard shortcut: P → paste (only consumed while
+    /// [`SHOW_PASTE`] is `true`).
+    paste_shortcut: KeyboardShortcut,
 }
 
-/// Pure UI state of the home window — the part directives and clicks
-/// mutate. Extracted from [`HomeApp`] so the transition logic is
+/// Pure UI state of the home window — the part directives mutate.
+/// Extracted from [`HomeApp`] so the transition logic is
 /// unit-testable without an egui context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HomeUiState {
     /// Status line contents.
     status: String,
-    /// Selected fullscreen monitor (`None` = primary/default).
-    selected_monitor: Option<u32>,
-    /// Monitor picker entries (refreshed on show).
-    monitors: Vec<MonitorEntry>,
 }
 
 impl HomeUiState {
@@ -131,32 +130,47 @@ impl HomeApp {
     /// Construct the app over a bridge. Pure: no egui context is
     /// touched until the first `update`.
     pub(crate) fn new(bridge: Box<dyn HomeBridge>, initial_status: String) -> Self {
-        let mut bridge = bridge;
-        let monitors = bridge.monitors();
         Self {
-            bridge,
             ui: HomeUiState {
                 status: initial_status,
-                selected_monitor: None,
-                monitors,
             },
-            region_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::R),
-            fullscreen_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::F),
+            bridge,
+            capture_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::C),
+            open_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::O),
+            paste_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::P),
         }
     }
 
-    /// Start a capture through the bridge and close the window —
-    /// the not-in-the-shot guarantee (ADR-0047). Shared by the
-    /// region button, the fullscreen button, and the keyboard
-    /// shortcuts. Order matters: the intent must be registered
-    /// before the close tears this app down.
-    fn start_capture(&mut self, ctx: &Context, kind: CaptureKind) {
-        match kind {
-            CaptureKind::Region => self.bridge.request_capture_region(),
-            CaptureKind::Fullscreen(monitor) => self.bridge.request_capture_fullscreen(monitor),
-        }
+    /// Start the Capture action through the bridge and close the
+    /// window — the not-in-the-shot guarantee (ADR-0047). Shared by
+    /// the Capture button and its keyboard accelerator. Order
+    /// matters: the intent must be registered before the close tears
+    /// this app down.
+    fn start_capture(&mut self, ctx: &Context) {
+        self.bridge.request_capture();
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
+
+    /// The Open control: native file dialog, then hand the picked
+    /// path to the bridge. Cancelling the dialog is a plain no-op —
+    /// the window stays exactly as it was. The window does **not**
+    /// close: the editor opens elsewhere (see [`HomeBridge::open_image`]).
+    fn handle_open(&mut self) {
+        if let Some(path) = pick_image_path() {
+            self.bridge.open_image(path);
+        }
+    }
+}
+
+/// Prompt for an image to open via `rfd`. Reuses the editor
+/// save path's blocking-modal pattern (`crates/flintshot-editor-egui`
+/// already depends on `rfd`; the eframe event loop is already
+/// blocking, and the dialog is what the user is driving anyway).
+/// `None` when the user cancels.
+fn pick_image_path() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Image files", &["png", "jpg", "jpeg", "webp", "bmp"])
+        .pick_file()
 }
 
 impl App for HomeApp {
@@ -171,8 +185,8 @@ impl App for HomeApp {
 
 impl HomeApp {
     /// Headless-callable core of `App::logic`: directive polling and
-    /// keyboard shortcuts. Lives in `logic` (not `ui`) because eframe
-    /// calls it even without recent input.
+    /// keyboard accelerators. Lives in `logic` (not `ui`) because
+    /// eframe calls it even without recent input.
     fn logic_impl(&mut self, ctx: &Context) {
         // Directives (status changes, focus pings) arrive independent
         // of input; keep a slow repaint heartbeat so they land.
@@ -189,12 +203,6 @@ impl HomeApp {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
             if focus {
-                self.ui.monitors = self.bridge.monitors();
-                if let Some(sel) = self.ui.selected_monitor {
-                    if !self.ui.monitors.iter().any(|m| m.index == sel) {
-                        self.ui.selected_monitor = None;
-                    }
-                }
                 // The window is open by construction here (a closed
                 // one has no frames to run); Show while open is the
                 // focus ping — raise and focus.
@@ -203,10 +211,12 @@ impl HomeApp {
             }
         }
 
-        if ctx.input_mut(|i| i.consume_shortcut(&self.region_shortcut)) {
-            self.start_capture(ctx, CaptureKind::Region);
-        } else if ctx.input_mut(|i| i.consume_shortcut(&self.fullscreen_shortcut)) {
-            self.start_capture(ctx, CaptureKind::Fullscreen(self.ui.selected_monitor));
+        if ctx.input_mut(|i| i.consume_shortcut(&self.capture_shortcut)) {
+            self.start_capture(ctx);
+        } else if ctx.input_mut(|i| i.consume_shortcut(&self.open_shortcut)) {
+            self.handle_open();
+        } else if SHOW_PASTE && ctx.input_mut(|i| i.consume_shortcut(&self.paste_shortcut)) {
+            self.bridge.request_paste();
         }
     }
 
@@ -224,43 +234,41 @@ impl HomeApp {
             ui.add_space(10.0);
 
             let tall = egui::vec2(ui.available_width(), 42.0);
-            let region = egui::Button::new(
-                egui::RichText::new("Capture region  [R]")
+            let capture = egui::Button::new(
+                egui::RichText::new("Capture  [C]")
                     .color(theme::INK)
                     .strong(),
             )
             .fill(theme::EMBER)
             .min_size(tall);
-            if ui.add(region).clicked() {
-                self.start_capture(ui.ctx(), CaptureKind::Region);
+            if ui.add(capture).clicked() {
+                self.start_capture(ui.ctx());
                 return;
             }
             ui.add_space(4.0);
 
-            egui::ComboBox::from_id_salt("flintshot-home-monitor")
-                .selected_text(self.monitor_selection_label())
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.ui.selected_monitor, None, "Primary monitor");
-                    for entry in &self.ui.monitors {
-                        ui.selectable_value(
-                            &mut self.ui.selected_monitor,
-                            Some(entry.index),
-                            &entry.label,
-                        );
-                    }
-                });
-            ui.add_space(4.0);
-
-            let fullscreen = egui::Button::new(
-                egui::RichText::new("Capture fullscreen  [F]")
+            let open = egui::Button::new(
+                egui::RichText::new("Open…  [O]")
                     .color(theme::CHALK)
                     .strong(),
             )
-            .min_size(tall);
-            if ui.add(fullscreen).clicked() {
-                self.start_capture(ui.ctx(), CaptureKind::Fullscreen(self.ui.selected_monitor));
+            .min_size(egui::vec2(ui.available_width(), 34.0));
+            if ui.add(open).clicked() {
+                self.handle_open();
                 return;
+            }
+
+            if SHOW_PASTE {
+                ui.add_space(4.0);
+                let paste = egui::Button::new(
+                    egui::RichText::new("Paste  [P]")
+                        .color(theme::CHALK)
+                        .strong(),
+                )
+                .min_size(egui::vec2(ui.available_width(), 34.0));
+                if ui.add(paste).clicked() {
+                    self.bridge.request_paste();
+                }
             }
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -273,19 +281,6 @@ impl HomeApp {
             });
         });
     }
-
-    /// Label for the monitor picker's closed state.
-    fn monitor_selection_label(&self) -> String {
-        match self.ui.selected_monitor {
-            None => "Primary monitor".to_string(),
-            Some(sel) => self
-                .ui
-                .monitors
-                .iter()
-                .find(|m| m.index == sel)
-                .map_or_else(|| "Primary monitor".to_string(), |m| m.label.clone()),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -297,11 +292,6 @@ mod tests {
     fn ui_state() -> HomeUiState {
         HomeUiState {
             status: "connected".into(),
-            selected_monitor: None,
-            monitors: vec![MonitorEntry {
-                index: 0,
-                label: "0 · DP-1 (primary)".into(),
-            }],
         }
     }
 
@@ -350,34 +340,17 @@ mod tests {
         );
     }
 
+    /// Pinned: the Paste control stays dark on this branch — the
+    /// clipboard→editor feature is a later effort. Flipping
+    /// [`SHOW_PASTE`] without shipping that feature breaks this test
+    /// on purpose.
     #[test]
-    fn combo_label_tracks_selection_and_falls_back() {
-        let mut app = HomeApp::new(Box::new(RecordingBridge::default()), "connected".into());
-        assert_eq!(app.monitor_selection_label(), "Primary monitor");
-        app.ui.selected_monitor = Some(0);
-        assert_eq!(app.monitor_selection_label(), "0 · DP-1 (primary)");
-        // A selection whose monitor vanished (hot-unplug between
-        // captures) reads as the default instead of a blank combo.
-        app.ui.selected_monitor = Some(7);
-        assert_eq!(app.monitor_selection_label(), "Primary monitor");
-    }
-
-    #[test]
-    fn stale_selection_is_reset_on_show_refresh() {
-        // monitors() returns only index 0; a stale selection of 2
-        // must be dropped by the same refresh update() applies on
-        // Show.
-        let monitors = [MonitorEntry {
-            index: 0,
-            label: "0 · DP-1 (primary)".into(),
-        }];
-        let mut selected = Some(2_u32);
-        if let Some(sel) = selected {
-            if !monitors.iter().any(|m| m.index == sel) {
-                selected = None;
-            }
-        }
-        assert_eq!(selected, None);
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "the constant IS the pinned contract; the test exists to fail on flip"
+    )]
+    fn show_paste_const_is_false_on_this_branch() {
+        assert!(!SHOW_PASTE);
     }
 
     /// Shared recorder so tests can inspect a bridge handed to
@@ -387,8 +360,9 @@ mod tests {
 
     #[derive(Default)]
     struct Recorder {
-        region_requests: usize,
-        fullscreen_requests: Vec<Option<u32>>,
+        capture_requests: usize,
+        opened: Vec<PathBuf>,
+        paste_requests: usize,
     }
 
     /// Bridge double that records requests and replays directives.
@@ -399,28 +373,20 @@ mod tests {
     }
 
     impl HomeBridge for RecordingBridge {
-        fn request_capture_region(&mut self) {
-            self.rec.0.lock().expect("recorder mutex").region_requests += 1;
+        fn request_capture(&mut self) {
+            self.rec.0.lock().expect("recorder mutex").capture_requests += 1;
         }
 
-        fn request_capture_fullscreen(&mut self, monitor: Option<u32>) {
-            self.rec
-                .0
-                .lock()
-                .expect("recorder mutex")
-                .fullscreen_requests
-                .push(monitor);
+        fn open_image(&mut self, path: PathBuf) {
+            self.rec.0.lock().expect("recorder mutex").opened.push(path);
+        }
+
+        fn request_paste(&mut self) {
+            self.rec.0.lock().expect("recorder mutex").paste_requests += 1;
         }
 
         fn poll_directive(&mut self) -> Option<HomeDirective> {
             self.pending.lock().expect("pending mutex").pop_front()
-        }
-
-        fn monitors(&mut self) -> Vec<MonitorEntry> {
-            vec![MonitorEntry {
-                index: 0,
-                label: "0 · DP-1 (primary)".into(),
-            }]
         }
     }
 
@@ -429,17 +395,40 @@ mod tests {
         let bridge = RecordingBridge::default();
         let rec = bridge.rec.clone();
         let mut boxed: Box<dyn HomeBridge> = Box::new(bridge);
-        boxed.request_capture_region();
-        boxed.request_capture_fullscreen(Some(2));
+        boxed.request_capture();
+        boxed.open_image(PathBuf::from("/tmp/shot.png"));
+        boxed.request_paste();
         let guard = rec.0.lock().expect("recorder mutex");
-        assert_eq!(guard.region_requests, 1);
-        assert_eq!(guard.fullscreen_requests, vec![Some(2)]);
+        assert_eq!(guard.capture_requests, 1);
+        assert_eq!(guard.opened, [PathBuf::from("/tmp/shot.png")]);
+        assert_eq!(guard.paste_requests, 1);
     }
 
     #[test]
-    fn initial_monitors_come_from_the_bridge() {
-        let app = HomeApp::new(Box::new(RecordingBridge::default()), "connected".into());
-        assert_eq!(app.ui.monitors.len(), 1);
-        assert_eq!(app.ui.monitors[0].label, "0 · DP-1 (primary)");
+    fn capture_accelerator_fires_the_bridge_request() {
+        // A synthetic C keystroke through a default context must
+        // reach the bridge — the accelerator is part of the Capture
+        // control's contract.
+        let bridge = RecordingBridge::default();
+        let rec = bridge.rec.clone();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::C,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        });
+        app.logic_impl(&ctx);
+        let _ = ctx.end_pass();
+        assert_eq!(
+            rec.0.lock().expect("recorder mutex").capture_requests,
+            1,
+            "the C accelerator must fire request_capture exactly once"
+        );
     }
 }

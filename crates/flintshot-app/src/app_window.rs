@@ -43,7 +43,7 @@ use std::time::Duration;
 use color_eyre::eyre;
 use flintshot_core::ipc::Event as IpcEvent;
 use flintshot_core::ipc::Request;
-use flintshot_editor_egui::{HomeBridge, HomeDirective, MonitorEntry};
+use flintshot_editor_egui::{HomeBridge, HomeDirective};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::ipc_server::{decode_event, read_frame};
@@ -73,10 +73,8 @@ const HIDE_ACK_WINDOW: Duration = Duration::from_millis(1500);
 /// A capture intent crossing UI → pump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PumpCommand {
-    /// Delegate [`Request::Capture`] — the single Capture action.
-    /// (The home UI still offers region / fullscreen-per-monitor
-    /// entry points; every one of them is the same request now —
-    /// the OS UI or the editor owns selection.)
+    /// Delegate [`Request::Capture`] — the single Capture action;
+    /// the OS UI (native) or the editor (fallback) owns selection.
     Capture,
 }
 
@@ -675,44 +673,53 @@ struct Bridge {
 }
 
 impl HomeBridge for Bridge {
-    fn request_capture_region(&mut self) {
+    fn request_capture(&mut self) {
         self.shared.set_pending_capture(PumpCommand::Capture);
     }
 
-    fn request_capture_fullscreen(&mut self, _monitor: Option<u32>) {
-        // Monitor dropped: selection is the OS UI's job (native) or
-        // the editor's (fallback). Kept as a separate bridge method
-        // until the home-window UX collapse (native-capture-ux Task 6).
-        self.shared.set_pending_capture(PumpCommand::Capture);
+    fn open_image(&mut self, path: std::path::PathBuf) {
+        if let Err(e) = spawn_open_worker(&path) {
+            tracing::warn!(error = %e, "spawning the open worker");
+            self.shared.push_directive(HomeDirective::SetStatus(format!(
+                "could not open {}: {e}",
+                path.display()
+            )));
+        }
+    }
+
+    fn request_paste(&mut self) {
+        // Placeholder for the future clipboard→editor feature; the
+        // home window gates this behind its SHOW_PASTE const (false
+        // on this branch), so it is unreachable in practice.
+        tracing::warn!("Paste is not available yet (future clipboard→editor feature)");
     }
 
     fn poll_directive(&mut self) -> Option<HomeDirective> {
         self.shared.poll_directive()
     }
-
-    fn monitors(&mut self) -> Vec<MonitorEntry> {
-        monitor_entries()
-    }
 }
 
-/// Build the monitor picker entries, mirroring the tray submenu's
-/// label format. Enumeration failure yields an empty list — the
-/// picker falls back to "Primary monitor".
-fn monitor_entries() -> Vec<MonitorEntry> {
-    match flintshot_core::monitors() {
-        Ok(list) => list
-            .iter()
-            .map(|m| MonitorEntry {
-                index: m.index,
-                label: if m.is_primary {
-                    format!("{} · {} (primary)", m.index, m.name)
-                } else {
-                    format!("{} · {}", m.index, m.name)
-                },
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+/// Build the `flintshot open <path>` argv (pure; unit-tested).
+fn open_argv(path: &std::path::Path) -> Vec<String> {
+    vec!["open".to_string(), path.to_string_lossy().into_owned()]
+}
+
+/// Spawn `flintshot open <path>` detached (via `current_exe`, the
+/// worker pattern — same binary as this window). Why a child and not
+/// this process: the home window's eframe loop owns the thread, and
+/// native event loops do not nest — the editor needs a process of
+/// its own (exactly the argv the daemon spawns for `OpenLast`).
+fn spawn_open_worker(path: &std::path::Path) -> eyre::Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| eyre::eyre!("resolving current_exe for the open worker: {e}"))?;
+    let argv = open_argv(path);
+    std::process::Command::new(exe)
+        .args(&argv)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| eyre::eyre!("spawning the open worker {argv:?}: {e}"))
 }
 
 #[cfg(test)]
@@ -1043,6 +1050,26 @@ mod tests {
         assert_eq!(
             PumpCommand::Capture.request(),
             Request::Capture { delay_ms: 0 }
+        );
+    }
+
+    #[test]
+    fn bridge_capture_request_registers_the_intent() {
+        // The UI-thread seam: request_capture registers the pending
+        // command the outer loop services once the window closes.
+        let shared = Arc::new(Shared::default());
+        let mut bridge = Bridge {
+            shared: Arc::clone(&shared),
+        };
+        bridge.request_capture();
+        assert_eq!(shared.take_pending_capture(), Some(PumpCommand::Capture));
+    }
+
+    #[test]
+    fn open_argv_is_the_flintshot_open_path() {
+        assert_eq!(
+            open_argv(std::path::Path::new("/tmp/shot 1.png")),
+            vec!["open".to_string(), "/tmp/shot 1.png".to_string()]
         );
     }
 
