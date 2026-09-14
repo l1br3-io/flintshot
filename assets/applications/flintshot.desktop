@@ -11,7 +11,7 @@ Icon=flintshot
 Terminal=false
 Categories=Utility;Graphics;
 Keywords=screenshot;capture;
-Actions=region;fullscreen;
+Actions=capture;
 # StartupWMClass follows the window title (eframe/winit derive the
 # class from the title, not argv[0]): the app window is titled
 # "flintshot" — HOME_WINDOW_TITLE in
@@ -20,10 +20,8 @@ Actions=region;fullscreen;
 # launches.)
 StartupWMClass=flintshot
 
-[Desktop Action region]
-Name=Capture region
-Exec=flintshot region
-
-[Desktop Action fullscreen]
-Name=Capture fullscreen
-Exec=flintshot fullscreen
+[Desktop Action capture]
+Name=Capture
+# The single Capture action (native-capture-ux): the OS's own
+# selection UI where the backend supports it, else the editor flow.
+Exec=flintshot capture

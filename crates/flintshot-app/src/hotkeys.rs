@@ -62,20 +62,20 @@ impl HotkeyRegistry {
             }
         };
         let mut by_id = HashMap::new();
+        // Both legacy chords fire the single Capture action
+        // (native-capture-ux Task 005); the [hotkeys] collapse to one
+        // `capture` binding lands with Task 9.
         Self::register(
             &manager,
             &mut by_id,
             &config.region,
-            Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
+            Request::Capture { delay_ms: 0 },
         );
         Self::register(
             &manager,
             &mut by_id,
             &config.fullscreen,
-            Request::CaptureFullscreen { monitor: None },
+            Request::Capture { delay_ms: 0 },
         );
         Self {
             manager: Some(manager),
@@ -130,16 +130,13 @@ impl HotkeyRegistry {
             &manager,
             &mut self.by_id,
             &config.region,
-            Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
+            Request::Capture { delay_ms: 0 },
         );
         Self::register(
             &manager,
             &mut self.by_id,
             &config.fullscreen,
-            Request::CaptureFullscreen { monitor: None },
+            Request::Capture { delay_ms: 0 },
         );
         self.manager = Some(manager);
         self.region.clone_from(&config.region);
@@ -202,7 +199,7 @@ mod tests {
     #[test]
     fn lookup_returns_the_registered_request() {
         let mut by_id = HashMap::new();
-        by_id.insert(42, Request::CaptureFullscreen { monitor: None });
+        by_id.insert(42, Request::Capture { delay_ms: 0 });
         let reg = HotkeyRegistry {
             manager: None,
             by_id,
@@ -211,7 +208,7 @@ mod tests {
         };
         assert!(matches!(
             reg.lookup(42),
-            Some(Request::CaptureFullscreen { monitor: None })
+            Some(Request::Capture { delay_ms: 0 })
         ));
         assert!(reg.lookup(7).is_none());
     }

@@ -42,8 +42,6 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Daemon(args)) => cli::run_daemon(&args),
-        Some(Command::Region(args)) => cli::run_region(&args),
-        Some(Command::Fullscreen(args)) => cli::run_fullscreen(&args),
         Some(Command::Capture(args)) => cli::run_capture(&args),
         Some(Command::Config) => cli::run_config(),
         Some(Command::Backends) => cli::run_backends(),

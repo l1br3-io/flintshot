@@ -73,22 +73,21 @@ const HIDE_ACK_WINDOW: Duration = Duration::from_millis(1500);
 /// A capture intent crossing UI → pump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PumpCommand {
-    /// Delegate `Request::CaptureRegion`.
-    Region,
-    /// Delegate `Request::CaptureFullscreen` on `monitor`.
-    Fullscreen(Option<u32>),
+    /// Delegate [`Request::Capture`] — the single Capture action.
+    /// (The home UI still offers region / fullscreen-per-monitor
+    /// entry points; every one of them is the same request now —
+    /// the OS UI or the editor owns selection.)
+    Capture,
 }
 
 impl PumpCommand {
     /// The IPC request this intent delegates.
+    #[allow(
+        clippy::unused_self,
+        reason = "kept as a method so future variants can vary the request"
+    )]
     fn request(self) -> Request {
-        match self {
-            Self::Region => Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
-            Self::Fullscreen(monitor) => Request::CaptureFullscreen { monitor },
-        }
+        Request::Capture { delay_ms: 0 }
     }
 }
 
@@ -677,12 +676,14 @@ struct Bridge {
 
 impl HomeBridge for Bridge {
     fn request_capture_region(&mut self) {
-        self.shared.set_pending_capture(PumpCommand::Region);
+        self.shared.set_pending_capture(PumpCommand::Capture);
     }
 
-    fn request_capture_fullscreen(&mut self, monitor: Option<u32>) {
-        self.shared
-            .set_pending_capture(PumpCommand::Fullscreen(monitor));
+    fn request_capture_fullscreen(&mut self, _monitor: Option<u32>) {
+        // Monitor dropped: selection is the OS UI's job (native) or
+        // the editor's (fallback). Kept as a separate bridge method
+        // until the home-window UX collapse (native-capture-ux Task 6).
+        self.shared.set_pending_capture(PumpCommand::Capture);
     }
 
     fn poll_directive(&mut self) -> Option<HomeDirective> {
@@ -744,8 +745,8 @@ mod tests {
     #[test]
     fn pending_capture_round_trips_once() {
         let shared = Shared::default();
-        shared.set_pending_capture(PumpCommand::Region);
-        assert_eq!(shared.take_pending_capture(), Some(PumpCommand::Region));
+        shared.set_pending_capture(PumpCommand::Capture);
+        assert_eq!(shared.take_pending_capture(), Some(PumpCommand::Capture));
         assert_eq!(
             shared.take_pending_capture(),
             None,
@@ -915,11 +916,11 @@ mod tests {
         );
         shared.push_directive(HomeDirective::Hide);
         assert_eq!(close_reason(&shared), CloseReason::HiddenByEvent);
-        shared.set_pending_capture(PumpCommand::Region);
+        shared.set_pending_capture(PumpCommand::Capture);
         shared.push_directive(HomeDirective::Hide);
         assert!(matches!(
             close_reason(&shared),
-            CloseReason::CaptureIntent(PumpCommand::Region)
+            CloseReason::CaptureIntent(PumpCommand::Capture)
         ));
     }
 
@@ -1040,15 +1041,8 @@ mod tests {
     #[test]
     fn commands_map_to_requests() {
         assert_eq!(
-            PumpCommand::Region.request(),
-            Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0
-            }
-        );
-        assert_eq!(
-            PumpCommand::Fullscreen(Some(2)).request(),
-            Request::CaptureFullscreen { monitor: Some(2) }
+            PumpCommand::Capture.request(),
+            Request::Capture { delay_ms: 0 }
         );
     }
 

@@ -206,7 +206,7 @@ fn is_app_argv(argv: &[&str]) -> bool {
 /// [`spawns_capture_worker`]'s request-side check — keep both in
 /// sync when a capture mode is added.
 fn is_capture_argv(argv: &[&str]) -> bool {
-    matches!(argv.first(), Some(&"region" | &"fullscreen" | &"capture"))
+    matches!(argv.first(), Some(&"capture"))
 }
 
 /// Dispatch a [`Request`]: spawn the right worker (if any), emit the
@@ -237,21 +237,6 @@ pub fn dispatch(
     sink: &mut impl FnMut(Event),
 ) -> eyre::Result<DispatchOutcome> {
     match request {
-        Request::CaptureRegion { monitor, delay_ms } => {
-            let argv = region_argv(*monitor, *delay_ms, &state.capture_backend);
-            sink(Event::CaptureStarted);
-            spawn_argv(spawner, &argv)?;
-            // No EditorOpened here: spawn does not imply a window —
-            // the worker reports one per actual window via
-            // `ReportEditorWindowOpened` (smart-window-hiding).
-            Ok(DispatchOutcome::Continue)
-        }
-        Request::CaptureFullscreen { monitor } => {
-            let argv = fullscreen_argv(*monitor, &state.capture_backend);
-            sink(Event::CaptureStarted);
-            spawn_argv(spawner, &argv)?;
-            Ok(DispatchOutcome::Continue)
-        }
         // The single Capture action (native-capture-ux): the worker
         // owns the native-vs-fallback flow decision, so the argv
         // carries no backend hint beyond the daemon-side elision rule.
@@ -259,6 +244,9 @@ pub fn dispatch(
             let argv = capture_argv(*delay_ms, &state.capture_backend);
             sink(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
+            // No EditorOpened here: spawn does not imply a window —
+            // the worker reports one per actual window via
+            // `ReportEditorWindowOpened` (smart-window-hiding).
             Ok(DispatchOutcome::Continue)
         }
         Request::OpenLast => {
@@ -342,52 +330,16 @@ pub fn dispatch(
 /// `config.rs`.
 const DEFAULT_CAPTURE_BACKEND: &str = "auto";
 
-/// Build the `flintshot region [--monitor N] [--delay-ms M]
-/// [--backend BACKEND] --standalone` argv.
-///
-/// The trailing `--standalone` breaks the delegation loop: without
-/// it, the daemon-spawned worker would re-delegate back to the
-/// daemon, which spawns the next worker (~60–100/s observed; see
-/// `TEST_MATRIX` "L5 pass findings" 1). `delegate_to_daemon`
-/// short-circuits on the flag.
-///
-/// `--backend` mirrors [`upload_argv`]'s elision rule: passed only
-/// when it differs from the built-in default.
-fn region_argv(monitor: Option<u32>, delay_ms: u32, backend: &str) -> Vec<String> {
-    let mut argv = vec!["region".to_string()];
-    if let Some(m) = monitor {
-        argv.push("--monitor".into());
-        argv.push(m.to_string());
-    }
-    if delay_ms > 0 {
-        argv.push("--delay-ms".into());
-        argv.push(delay_ms.to_string());
-    }
-    push_backend_flag(&mut argv, backend);
-    argv.push("--standalone".into());
-    argv
-}
-
-/// Build the `flintshot fullscreen [--monitor N] [--backend BACKEND]
-/// --standalone` argv. The `--standalone` guard mirrors
-/// [`region_argv`]'s — see its doc comment for the fork-loop
-/// rationale.
-fn fullscreen_argv(monitor: Option<u32>, backend: &str) -> Vec<String> {
-    let mut argv = vec!["fullscreen".to_string()];
-    if let Some(m) = monitor {
-        argv.push("--monitor".into());
-        argv.push(m.to_string());
-    }
-    push_backend_flag(&mut argv, backend);
-    argv.push("--standalone".into());
-    argv
-}
-
 /// Build the `flintshot capture [--delay-ms M] [--backend BACKEND]
 /// --standalone` argv. No monitor flag by design (selection is the OS
 /// UI's job on the native path; the fallback grabs the primary). The
-/// `--standalone` guard mirrors [`region_argv`]'s — see its doc
-/// comment for the fork-loop rationale.
+/// trailing `--standalone` breaks the delegation loop: without it,
+/// the daemon-spawned worker would re-delegate back to the daemon,
+/// which spawns the next worker (~60–100/s observed; see
+/// `TEST_MATRIX` "L5 pass findings" 1). `delegate_to_daemon`
+/// short-circuits on the flag. `--backend` mirrors [`upload_argv`]'s
+/// elision rule: passed only when it differs from the built-in
+/// default.
 fn capture_argv(delay_ms: u32, backend: &str) -> Vec<String> {
     let mut argv = vec!["capture".to_string()];
     if delay_ms > 0 {
@@ -455,8 +407,6 @@ fn spawn_argv(spawner: &dyn Spawner, argv: &[String]) -> eyre::Result<()> {
 )]
 fn variant_name(request: &Request) -> &'static str {
     match request {
-        Request::CaptureRegion { .. } => "capture-region",
-        Request::CaptureFullscreen { .. } => "capture-fullscreen",
         Request::Capture { .. } => "capture",
         Request::Quit => "quit",
         Request::Subscribe => "subscribe",
@@ -475,16 +425,13 @@ fn variant_name(request: &Request) -> &'static str {
     }
 }
 
-/// Does dispatching this request spawn a capture worker (region /
-/// fullscreen)? The daemon's main-loop dispatch sites pre-hide the
-/// tray icon for exactly these — nothing else freezes the screen, so
-/// nothing else should make the icon vanish. See ADR-0036.
+/// Does dispatching this request spawn a capture worker? The daemon's
+/// main-loop dispatch sites pre-hide the tray icon for exactly these —
+/// nothing else freezes the screen, so nothing else should make the
+/// icon vanish. See ADR-0036.
 #[must_use]
 pub fn spawns_capture_worker(request: &Request) -> bool {
-    matches!(
-        request,
-        Request::CaptureRegion { .. } | Request::CaptureFullscreen { .. } | Request::Capture { .. }
-    )
+    matches!(request, Request::Capture { .. })
 }
 
 /// Supersede-wait poll cadence: the machine owns the deadlines; this
@@ -640,111 +587,14 @@ mod tests {
     }
 
     #[test]
-    fn capture_region_spawns_region_subcommand_and_emits_started() {
-        let spawner = RecordingSpawner::new();
-        let state = DispatchState::new();
-        let mut events = Vec::new();
-        let outcome = dispatch(
-            &Request::CaptureRegion {
-                monitor: Some(1),
-                delay_ms: 200,
-            },
-            &spawner,
-            &state,
-            &mut |ev| events.push(ev),
-        )
-        .unwrap();
-
-        assert_eq!(outcome, DispatchOutcome::Continue);
-        assert_eq!(
-            spawner.snapshot(),
-            vec![vec![
-                "region".to_string(),
-                "--monitor".into(),
-                "1".into(),
-                "--delay-ms".into(),
-                "200".into(),
-                "--standalone".into(),
-            ]]
-        );
-        assert_eq!(
-            events,
-            vec![Event::CaptureStarted],
-            "CaptureStarted on receipt; EditorOpened is now the worker's own truthful report"
-        );
-    }
-
-    #[test]
-    fn capture_region_omits_flags_at_defaults() {
-        let spawner = RecordingSpawner::new();
-        dispatch(
-            &Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
-            &spawner,
-            &DispatchState::new(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(
-            spawner.snapshot(),
-            vec![vec!["region".to_string(), "--standalone".into()]],
-            "no monitor / zero delay should yield `region --standalone`"
-        );
-    }
-
-    #[test]
-    fn capture_fullscreen_spawns_fullscreen_subcommand() {
-        let spawner = RecordingSpawner::new();
-        let state = DispatchState::new();
-        let mut events = Vec::new();
-        dispatch(
-            &Request::CaptureFullscreen { monitor: None },
-            &spawner,
-            &state,
-            &mut |ev| events.push(ev),
-        )
-        .unwrap();
-        assert_eq!(
-            spawner.snapshot(),
-            vec![vec!["fullscreen".to_string(), "--standalone".into()]]
-        );
-        assert_eq!(events, vec![Event::CaptureStarted]);
-    }
-
-    #[test]
-    fn capture_fullscreen_passes_monitor() {
-        let spawner = RecordingSpawner::new();
-        dispatch(
-            &Request::CaptureFullscreen { monitor: Some(2) },
-            &spawner,
-            &DispatchState::new(),
-            &mut |_| {},
-        )
-        .unwrap();
-        assert_eq!(
-            spawner.snapshot(),
-            vec![vec![
-                "fullscreen".to_string(),
-                "--monitor".into(),
-                "2".into(),
-                "--standalone".into()
-            ]]
-        );
-    }
-
-    #[test]
     fn capture_argv_elides_backend_at_default() {
         // The default DispatchState carries the built-in default
         // backend ("auto"): the flag is omitted and the worker
-        // re-resolves from its own config load.
+        // re-resolves from its own config load. (The zero-delay arm
+        // lives in `capture_request_elides_default_backend_and_zero_delay`.)
         let spawner = RecordingSpawner::new();
         dispatch(
-            &Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
+            &Request::Capture { delay_ms: 0 },
             &spawner,
             &DispatchState::new().with_capture_backend("auto"),
             &mut |_| {},
@@ -752,7 +602,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             spawner.snapshot(),
-            vec![vec!["region".to_string(), "--standalone".into()]],
+            vec![vec!["capture".to_string(), "--standalone".into()]],
             "default backend must not reach the argv"
         );
     }
@@ -822,64 +672,54 @@ mod tests {
 
     #[test]
     fn capture_argv_passes_explicit_backend() {
-        for request in [
-            Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
-            Request::CaptureFullscreen { monitor: None },
-        ] {
-            let spawner = RecordingSpawner::new();
-            dispatch(
-                &request,
-                &spawner,
-                &DispatchState::new().with_capture_backend("portal"),
-                &mut |_| {},
-            )
-            .unwrap();
-            let calls = spawner.snapshot();
-            assert_eq!(calls.len(), 1, "one worker for {request:?}");
-            let argv = &calls[0];
-            let pos = argv
-                .iter()
-                .position(|a| a == "--backend")
-                .unwrap_or_else(|| panic!("--backend missing from {argv:?}"));
-            assert_eq!(
-                argv.get(pos + 1).map(String::as_str),
-                Some("portal"),
-                "backend id must follow the flag: {argv:?}"
-            );
-            assert!(
-                argv.contains(&"--standalone".to_string()),
-                "--standalone still present: {argv:?}"
-            );
-        }
+        let spawner = RecordingSpawner::new();
+        dispatch(
+            &Request::Capture { delay_ms: 0 },
+            &spawner,
+            &DispatchState::new().with_capture_backend("portal"),
+            &mut |_| {},
+        )
+        .unwrap();
+        let calls = spawner.snapshot();
+        assert_eq!(calls.len(), 1);
+        let argv = &calls[0];
+        let pos = argv
+            .iter()
+            .position(|a| a == "--backend")
+            .unwrap_or_else(|| panic!("--backend missing from {argv:?}"));
+        assert_eq!(
+            argv.get(pos + 1).map(String::as_str),
+            Some("portal"),
+            "backend id must follow the flag: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"--standalone".to_string()),
+            "--standalone still present: {argv:?}"
+        );
     }
 
     /// Regression test for the L5 fork loop (`TEST_MATRIX` finding 1):
     /// a daemon-spawned capture worker must not re-delegate back to
-    /// the daemon — `run_region` / `run_fullscreen` delegate whenever
-    /// the daemon is up unless `--standalone` is set, so its presence
-    /// in the argv is what breaks the daemon↔worker spawn cycle.
+    /// the daemon — `run_capture` delegates whenever the daemon is up
+    /// unless `--standalone` is set, so its presence in the argv is
+    /// what breaks the daemon↔worker spawn cycle.
     #[test]
     fn capture_workers_spawn_standalone_to_break_delegation_loop() {
-        for request in [
-            Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
-            Request::CaptureFullscreen { monitor: None },
-        ] {
-            let spawner = RecordingSpawner::new();
-            dispatch(&request, &spawner, &DispatchState::new(), &mut |_| {}).unwrap();
-            let calls = spawner.snapshot();
-            assert_eq!(calls.len(), 1, "one worker for {request:?}");
-            assert!(
-                calls[0].contains(&"--standalone".to_string()),
-                "worker argv must carry --standalone: {:?}",
-                calls[0]
-            );
-        }
+        let spawner = RecordingSpawner::new();
+        dispatch(
+            &Request::Capture { delay_ms: 0 },
+            &spawner,
+            &DispatchState::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+        let calls = spawner.snapshot();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].contains(&"--standalone".to_string()),
+            "worker argv must carry --standalone: {:?}",
+            calls[0]
+        );
     }
 
     #[test]
@@ -908,9 +748,6 @@ mod tests {
         // the request-side flags as a capture must classify true,
         // and every non-capture worker argv must not.
         let captures = [
-            vec!["region"],
-            vec!["region", "--standalone"],
-            vec!["fullscreen", "--monitor", "1", "--standalone"],
             vec!["capture"],
             vec!["capture", "--standalone"],
             vec![
@@ -938,7 +775,7 @@ mod tests {
 
     /// The reaper's `SessionEnded` broadcast, exercised with a real
     /// (short-lived) child. The spawned child is this test binary
-    /// run with `region --standalone` as libtest args — libtest
+    /// run with `capture --standalone` as libtest args — libtest
     /// exits promptly whatever it makes of them; the reaper only
     /// cares that the process ends.
     #[test]
@@ -948,7 +785,7 @@ mod tests {
         let spawner = CommandSpawner::with_bus_and_sessions(bus, Arc::new(CaptureSessions::new()));
 
         spawner
-            .spawn(&["region", "--standalone"])
+            .spawn(&["capture", "--standalone"])
             .expect("spawning the stand-in worker");
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1017,10 +854,7 @@ mod tests {
     fn spawn_failure_propagates_after_capture_started() {
         let mut events = Vec::new();
         let result = dispatch(
-            &Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
+            &Request::Capture { delay_ms: 0 },
             &FailSpawner,
             &DispatchState::new(),
             &mut |ev| events.push(ev),
@@ -1075,16 +909,6 @@ mod tests {
     #[test]
     fn spawns_capture_worker_is_true_only_for_captures() {
         let captures = [
-            Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
-            Request::CaptureRegion {
-                monitor: Some(2),
-                delay_ms: 500,
-            },
-            Request::CaptureFullscreen { monitor: None },
-            Request::CaptureFullscreen { monitor: Some(1) },
             Request::Capture { delay_ms: 0 },
             Request::Capture { delay_ms: 500 },
         ];
@@ -1311,17 +1135,7 @@ mod tests {
         // every current variant so messages stay readable (and never
         // fall through to the generic "request").
         let cases = [
-            (
-                Request::CaptureRegion {
-                    monitor: None,
-                    delay_ms: 0,
-                },
-                "capture-region",
-            ),
-            (
-                Request::CaptureFullscreen { monitor: None },
-                "capture-fullscreen",
-            ),
+            (Request::Capture { delay_ms: 0 }, "capture"),
             (Request::Quit, "quit"),
             (Request::Subscribe, "subscribe"),
             (
@@ -1385,10 +1199,7 @@ mod tests {
 
         let outcome = ctx
             .dispatch_capture_blocking(
-                &Request::CaptureRegion {
-                    monitor: None,
-                    delay_ms: 0,
-                },
+                &Request::Capture { delay_ms: 0 },
                 &spawner,
                 &DispatchState::new(),
                 &mut |ev| events.push(ev),
@@ -1432,7 +1243,7 @@ mod tests {
         let spawner = RecordingSpawner::new();
         let mut events = Vec::new();
         ctx.dispatch_capture_blocking(
-            &Request::CaptureFullscreen { monitor: None },
+            &Request::Capture { delay_ms: 0 },
             &spawner,
             &DispatchState::new(),
             &mut |ev| events.push(ev),
@@ -1465,10 +1276,7 @@ mod tests {
 
         for _ in 0..2 {
             ctx.dispatch_capture_blocking(
-                &Request::CaptureRegion {
-                    monitor: None,
-                    delay_ms: 0,
-                },
+                &Request::Capture { delay_ms: 0 },
                 &spawner,
                 &DispatchState::new(),
                 &mut |ev| events.push(ev),
@@ -1554,7 +1362,7 @@ mod tests {
         let spawner = RecordingSpawner::new();
         let started = Instant::now();
         ctx.dispatch_capture_blocking(
-            &Request::CaptureFullscreen { monitor: None },
+            &Request::Capture { delay_ms: 0 },
             &spawner,
             &DispatchState::new(),
             &mut |_| {},
@@ -1587,7 +1395,7 @@ mod tests {
         let spawner = CommandSpawner::with_bus_and_sessions(bus, Arc::clone(&sessions));
 
         spawner
-            .spawn(&["region", "--standalone"])
+            .spawn(&["capture", "--standalone"])
             .expect("spawning the stand-in worker");
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1609,7 +1417,7 @@ mod tests {
     #[test]
     fn is_app_argv_classifies_only_the_app_worker() {
         assert!(is_app_argv(&["app"]));
-        assert!(!is_app_argv(&["region", "--standalone"]));
+        assert!(!is_app_argv(&["capture", "--standalone"]));
         assert!(!is_app_argv(&["upload", "/tmp/x.png"]));
     }
 }

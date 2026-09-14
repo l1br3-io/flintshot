@@ -297,14 +297,7 @@ mod tests {
         // The exit is the point: it unregisters the SNI item, which is
         // the only event that closes the panel's open popup
         // (ADR-0042).
-        let exiting = [
-            Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
-            Request::CaptureFullscreen { monitor: Some(2) },
-            Request::Quit,
-        ];
+        let exiting = [Request::Capture { delay_ms: 0 }, Request::Quit];
         for request in &exiting {
             assert!(exits_after_action(request), "{request:?} must exit");
         }

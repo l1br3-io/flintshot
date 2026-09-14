@@ -205,7 +205,7 @@ pub enum DaemonState {
 }
 
 /// Connect, send one framed `request`, disconnect. For one-shot
-/// actions (`CaptureRegion`, `CaptureFullscreen`, `Quit`, `OpenLast`, …).
+/// actions (`Capture`, `Quit`, `OpenLast`, …).
 /// Fire-and-forget: no response is read; the daemon's reaction arrives
 /// via side effects (spawned worker, event stream, shutdown).
 ///
@@ -352,10 +352,7 @@ mod tests {
     #[tokio::test]
     async fn framing_roundtrips_a_request() {
         let (mut a, mut b) = duplex(8 * 1024);
-        let original = Request::CaptureRegion {
-            monitor: Some(2),
-            delay_ms: 500,
-        };
+        let original = Request::Capture { delay_ms: 500 };
         let bytes = encode_msg(&original).unwrap();
         write_frame(&mut a, &bytes).await.unwrap();
         let payload = read_frame(&mut b).await.unwrap();
@@ -420,10 +417,7 @@ mod tests {
         let (_dir, sock) = fresh_socket();
         let listener = bind_listener(&sock);
 
-        let original = Request::CaptureRegion {
-            monitor: None,
-            delay_ms: 0,
-        };
+        let original = Request::Capture { delay_ms: 0 };
         let server = tokio::spawn(async move {
             use interprocess::local_socket::traits::tokio::Listener as _;
             let mut conn = listener.accept().await.expect("accept");
