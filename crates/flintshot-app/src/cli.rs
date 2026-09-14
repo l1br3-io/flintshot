@@ -589,6 +589,15 @@ fn native_grab_prepared(
     );
     match backend.capture_selection(&opts) {
         Ok(img) => Ok(Some(img)),
+        Err(e) if portal_grab_on_clipboard(&e) => {
+            // The portal already put the grab on the clipboard and
+            // answered `clipboard:///` (no file). It serves the
+            // selection from its long-lived process, so reading the
+            // pixels back here succeeds and every post-grab arm
+            // proceeds as with a file-delivered grab.
+            tracing::info!("portal delivered the grab to the clipboard; reading it back");
+            Ok(Some(read_image_from_clipboard()?))
+        }
         Err(e) if quiet_capture_exit(&e) => {
             // Dismissal / Response timeout: not an error UX (spec
             // Flow). One log line, exit 0, no notification.
@@ -613,6 +622,32 @@ fn copy_image_to_clipboard(img: &image::RgbaImage) -> Result<()> {
             bytes: std::borrow::Cow::Borrowed(img.as_raw()),
         })
         .map_err(|e| color_eyre::eyre::eyre!("copying image to clipboard: {e}"))
+}
+
+/// Read the portal's Copy-confirmed grab back from the system
+/// clipboard ([`portal_grab_on_clipboard`]: the portal wrote it
+/// there itself and answered `clipboard:///`). A failure here is a
+/// real capture failure — the grab exists nowhere else.
+fn read_image_from_clipboard() -> Result<image::RgbaImage> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| color_eyre::eyre::eyre!("clipboard: {e}"))?;
+    let arboard::ImageData {
+        width,
+        height,
+        bytes,
+    } = clipboard
+        .get_image()
+        .map_err(|e| color_eyre::eyre::eyre!("reading the grab back from the clipboard: {e}"))?;
+    let len = bytes.len();
+    let w = u32::try_from(width)
+        .map_err(|_| color_eyre::eyre::eyre!("clipboard image width {width} overflows u32"))?;
+    let h = u32::try_from(height)
+        .map_err(|_| color_eyre::eyre::eyre!("clipboard image height {height} overflows u32"))?;
+    image::RgbaImage::from_raw(w, h, bytes.into_owned()).ok_or_else(|| {
+        color_eyre::eyre::eyre!(
+            "clipboard image is {width}x{height} but carries {len} bytes (expected width*height*4)"
+        )
+    })
 }
 
 /// Upload the grab through the default upload backend and apply the
@@ -682,6 +717,20 @@ fn quiet_capture_exit(err: &flintshot_core::FlintshotError) -> bool {
     match err {
         flintshot_core::FlintshotError::Capture { detail } => {
             detail.contains("cancelled") || detail.contains("timed out")
+        }
+        _ => false,
+    }
+}
+
+/// Whether the portal delivered the grab to the system clipboard
+/// itself (COSMIC's interactive UI confirmed with its Copy button
+/// answers `clipboard:///`): the caller reads the pixels back
+/// instead of failing. Matches only the canonical core marker — a
+/// bare "non-file uri" wording stays a real error.
+fn portal_grab_on_clipboard(err: &flintshot_core::FlintshotError) -> bool {
+    match err {
+        flintshot_core::FlintshotError::Capture { detail } => {
+            detail.contains(flintshot_core::capture::PORTAL_GRAB_ON_CLIPBOARD)
         }
         _ => false,
     }
@@ -2538,6 +2587,37 @@ mod tests {
         assert!(
             !quiet_capture_exit(&FlintshotError::NotImplemented("no selection")),
             "non-capture errors are never quiet cancels"
+        );
+    }
+
+    /// On-clipboard classification: only the portal's canonical
+    /// marker (COSMIC's Copy-confirmed screenshot answers
+    /// `clipboard:///`) routes to the clipboard read-back. The old
+    /// bare "non-file uri" wording must NOT match — it would mask
+    /// genuinely unsupported URI forms behind a clipboard read.
+    #[test]
+    fn portal_grab_on_clipboard_classifies_marker_only() {
+        use flintshot_core::FlintshotError;
+        let marked = FlintshotError::Capture {
+            detail: flintshot_core::capture::PORTAL_GRAB_ON_CLIPBOARD.into(),
+        };
+        assert!(portal_grab_on_clipboard(&marked));
+        let near_miss = [
+            "portal returned a non-file uri: clipboard:///",
+            "portal screenshot cancelled (response code 1)",
+            "portal screenshot decode failed: bad bytes",
+        ];
+        for detail in near_miss {
+            assert!(
+                !portal_grab_on_clipboard(&FlintshotError::Capture {
+                    detail: detail.into()
+                }),
+                "must NOT classify as on-clipboard: {detail}"
+            );
+        }
+        assert!(
+            !portal_grab_on_clipboard(&FlintshotError::NotImplemented("no selection")),
+            "non-capture errors are never clipboard deliveries"
         );
     }
 
