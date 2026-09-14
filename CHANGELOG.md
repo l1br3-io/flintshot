@@ -61,6 +61,17 @@ Categories used below:
   collapse into one prominent **Capture** control (`C`
   accelerator); a fully-built *Paste* control stays hidden behind a
   compile-time const for the future clipboard→editor feature.
+- **`--refresh` flag on `just daemon` / `just dev` / `just install[-user]`**:
+  full-refresh dev loop. `daemon` / `dev`: rebuild with the tray
+  feature (`FEATURES=` overrides, `FEATURES=''` minimal, same
+  convention as `just install`), then restart any running daemon
+  (`--replace` appended when not already given; in `dev`, only when
+  the target is `daemon`). `install[-user] --refresh` is the
+  single-command update: release build + redeploy + daemon restart
+  from the installed binary (detached, logging to
+  `~/.local/state/flintshot/daemon.log`; under elevation the restart
+  is skipped with the command to run from the session instead).
+  Plain invocations are unchanged.
 
 - **Capture backend selection**: the capture subcommand carries
   `--backend <BACKEND>` (`auto`, `xcap`, `portal` on Linux; unknown

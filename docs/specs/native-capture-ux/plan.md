@@ -42,31 +42,31 @@ path is configurable (`[capture] after_grab`, default `editor`).
 ## Task Index
 
 ### Phase 1 — Verify + capability
-- [ ] Task 1: Spike C — live-verify interactive portal (return shape, Escape, latency) → `tasks/001-spike-interactive.md`
-- [ ] Task 2: `Capturer::capture_selection` + portal interactive impl → `tasks/002-capture-selection.md`
+- [x] Task 1: Spike C — live-verify interactive portal (return shape, Escape, latency) → `tasks/001-spike-interactive.md`
+- [x] Task 2: `Capturer::capture_selection` + portal interactive impl → `tasks/002-capture-selection.md`
 
 ### Checkpoint: capability proven (HUMAN GATE — spike evidence reviewed before building on it)
-- [ ] Full gate green; live interactive grab works via a scratch probe
+- [x] Full gate green; live interactive grab works via a scratch probe
 
 ### Phase 2 — Capture vertical
-- [ ] Task 3: `flintshot capture` end-to-end (additive: subcommand + `Request::Capture` + `capture_argv` + dispatch + native/fallback flows + quiet cancel) → `tasks/003-capture-subcommand.md`
-- [ ] Task 4: `after_grab` routing (config + `--after` + clipboard/upload dispatch) → `tasks/004-after-grab.md`
+- [x] Task 3: `flintshot capture` end-to-end (additive: subcommand + `Request::Capture` + `capture_argv` + dispatch + native/fallback flows + quiet cancel) → `tasks/003-capture-subcommand.md`
+- [x] Task 4: `after_grab` routing (config + `--after` + clipboard/upload dispatch) → `tasks/004-after-grab.md`
 
 ### Checkpoint: CLI vertical complete
-- [ ] Human runs `flintshot capture` live on COSMIC: OS UI → editor; Escape quiet; `--backend xcap` fallback unchanged
+- [x] Human runs `flintshot capture` live on COSMIC: OS UI → editor; Escape quiet; `--backend xcap` fallback unchanged
 
 ### Phase 3 — Purge + surfaces
-- [ ] Task 5: Purge `region`/`fullscreen` everywhere + migrate all senders → `tasks/005-purge-old-surfaces.md`
-- [ ] Task 6: Home window — Capture / Open / hidden Paste → `tasks/006-home-window.md`
-- [ ] Task 7: Tray — single Capture item, per-monitor submenu gone → `tasks/007-tray-menu.md`
-- [ ] Task 8: COSMIC applet — single Capture action → `tasks/008-cosmic-applet.md`
-- [ ] Task 9: Hotkeys — single `capture` binding, legacy warn, advice text → `tasks/009-hotkeys.md`
+- [x] Task 5: Purge `region`/`fullscreen` everywhere + migrate all senders → `tasks/005-purge-old-surfaces.md`
+- [x] Task 6: Home window — Capture / Open / hidden Paste → `tasks/006-home-window.md`
+- [x] Task 7: Tray — single Capture item, per-monitor submenu gone → `tasks/007-tray-menu.md`
+- [x] Task 8: COSMIC applet — single Capture action → `tasks/008-cosmic-applet.md`
+- [x] Task 9: Hotkeys — single `capture` binding, legacy warn, advice text → `tasks/009-hotkeys.md`
 
 ### Checkpoint: all surfaces collapsed
 - [ ] Full manual matrix smoke on the live session; full gate green
 
 ### Phase 4 — Record
-- [ ] Task 10: ADR + docs sweep + CHANGELOG breaking entries → `tasks/010-adr-docs.md`
+- [x] Task 10: ADR + docs sweep + CHANGELOG breaking entries → `tasks/010-adr-docs.md`
 
 ### Checkpoint: complete
 - [ ] Spec success criteria met; ready for PR
