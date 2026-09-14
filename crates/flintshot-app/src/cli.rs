@@ -46,6 +46,10 @@ pub enum Command {
     Region(RegionArgs),
     /// Capture a full monitor and open the editor. [Phase 1]
     Fullscreen(FullscreenArgs),
+    /// The single Capture action: the OS's own selection UI where the
+    /// selected backend supports it (portal interactive on Wayland),
+    /// else today's monitor-grab → editor/overlay flow.
+    Capture(CaptureArgs),
     /// Print the resolved configuration as TOML to stdout.
     Config,
     /// List registered capture backends, their availability, and what
@@ -290,6 +294,27 @@ pub struct FullscreenArgs {
     pub output: OutputArgs,
 }
 
+/// Arguments for `flintshot capture` — the single Capture action.
+///
+/// Deliberately no `--monitor`: on the native path the OS's own
+/// selection UI picks the region (monitor selection is its job), and
+/// the fallback path grabs the primary monitor with selection in the
+/// editor.
+#[derive(Debug, Args)]
+pub struct CaptureArgs {
+    /// Delay before capturing, in milliseconds.
+    #[arg(long, default_value_t = 0, value_name = "MILLIS")]
+    pub delay_ms: u32,
+    /// Capture backend override (`auto`, `xcap`, `portal` on Linux).
+    /// Defaults to config's `[capture] backend`.
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
+    #[command(flatten)]
+    pub interaction: InteractionArgs,
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
 /// Arguments for `flintshot upload`.
 #[derive(Debug, Args)]
 pub struct UploadArgs {
@@ -400,6 +425,167 @@ pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
         interaction,
         args.backend.as_deref(),
     )
+}
+
+/// `flintshot capture` — the single Capture action
+/// (native-capture-ux). One command on every surface: the selected
+/// backend (CLI `--backend` > `[capture] backend` > auto) decides the
+/// flow —
+///
+/// - **native**: backend supports selection → the OS's own UI picks
+///   the region (`capture_selection`), then the grab routes to the
+///   editor (`--out` writes a PNG instead). Dismissal and interactive
+///   Response timeouts exit quietly (exit 0, one info log).
+/// - **fallback**: today's `region` flow unchanged — primary-monitor
+///   grab under the prepare handshake, then editor/overlay with
+///   selection-first.
+///
+/// Post-grab routing beyond editor/`--out` (`[capture] after_grab`)
+/// lands with the `after_grab` task.
+pub fn run_capture(args: &CaptureArgs) -> Result<()> {
+    validate_capture_backend_arg(args.backend.as_deref())?;
+    let interaction = args.interaction.mode_override();
+    if delegate_to_daemon(
+        &Request::Capture {
+            delay_ms: args.delay_ms,
+        },
+        &args.output,
+        "capture",
+        interaction,
+    ) {
+        return Ok(());
+    }
+    if args.delay_ms > 0 {
+        tracing::debug!(delay_ms = args.delay_ms, "sleeping before capture");
+        std::thread::sleep(Duration::from_millis(u64::from(args.delay_ms)));
+    }
+
+    let watch = SupersedeWatch::subscribe_at(None);
+    if watch.superseded() {
+        tracing::info!("capture worker superseded before its grab; exiting");
+        return Ok(());
+    }
+
+    let backend = resolve_capture_backend(args.backend.as_deref())?;
+    if backend.supports_selection() {
+        native_capture_and_dispatch(&args.output, interaction, &watch, backend.as_ref())
+    } else {
+        // The fallback flow is today's `region` semantics minus the
+        // monitor flag: primary monitor, selection in the editor.
+        // The mode label stays "region" so the editor's
+        // selection-first landing phase and logs are byte-identical.
+        capture_and_dispatch(
+            None,
+            "region",
+            &args.output,
+            interaction,
+            args.backend.as_deref(),
+        )
+    }
+}
+
+/// Resolve the capture backend for the flow decision (CLI > config >
+/// auto). Shared by [`run_capture`]'s two flows so both branches log
+/// the same resolution.
+fn resolve_capture_backend(
+    backend_pin: Option<&str>,
+) -> Result<Box<dyn flintshot_core::capture::Capturer>> {
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load config; using built-in defaults");
+            Config::default()
+        }
+    };
+    let preference = backend_pin.or(Some(cfg.capture.backend.as_str()));
+    let backend = select_backend(preference).map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
+    tracing::info!(backend = backend.id(), "capture backend resolved");
+    Ok(backend)
+}
+
+/// Native flow: run the OS's selection UI under the prepare handshake
+/// (flintshot's own chrome must not sit in the portal's frozen frame),
+/// then route the grab like any capture — `--out` PNG or the
+/// interaction shell. `None`-style quiet exits (superseded, dismissed,
+/// timed out) return `Ok(())` with one info log; real failures bubble.
+fn native_capture_and_dispatch(
+    output: &OutputArgs,
+    interaction: Option<InteractionMode>,
+    watch: &SupersedeWatch,
+    backend: &dyn flintshot_core::capture::Capturer,
+) -> Result<()> {
+    // The guard mirrors `capture_prepared`: the handshake, the grab,
+    // and the restore all sit inside its scope so the tray returns the
+    // instant the portal takes its pixels.
+    let _prepared = CaptureGuard::request_at(None);
+    if watch.superseded() {
+        tracing::info!("native capture superseded before the grab; exiting");
+        return Ok(());
+    }
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load config; using built-in defaults");
+            Config::default()
+        }
+    };
+    // `CaptureOptions` is `#[non_exhaustive]`: mutate-from-default is
+    // the cross-crate construction path.
+    let mut opts = CaptureOptions::default();
+    opts.include_cursor = cfg.capture.include_cursor;
+
+    tracing::info!(
+        backend = backend.id(),
+        "opening the OS selection UI (native capture)"
+    );
+    let img = match backend.capture_selection(&opts) {
+        Ok(img) => img,
+        Err(e) if quiet_capture_exit(&e) => {
+            // Dismissal / Response timeout: not an error UX (spec
+            // Flow). One log line, exit 0, no notification.
+            tracing::info!(error = %e, "native capture dismissed; exiting quietly");
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(color_eyre::eyre::eyre!(e.to_string()))
+                .with_context(|| "native capture via the OS selection UI");
+        }
+    };
+
+    if let Some(path) = &output.out {
+        write_png(&img, path)?;
+        tracing::info!(path = %path.display(), "native capture saved");
+    } else {
+        if watch.superseded() {
+            tracing::info!("native capture superseded before the shell; exiting cancelled");
+            return Ok(());
+        }
+        // Mode label "capture" (not "region"): selection already
+        // happened in the OS UI — the editor opens plain.
+        run_capture_shell(img, "capture", interaction, watch)?;
+    }
+    Ok(())
+}
+
+/// Classify a capture error as a **quiet exit**: the user dismissed
+/// the OS selection UI, or the interactive Response never arrived
+/// within its budget (spike C: the wedged-session hang). Both are
+/// "changed my mind" outcomes — exit 0 with one info log, never an
+/// error toast.
+///
+/// GOTCHA: substring matching over the backend's error detail is the
+/// established contract — `capture_selection` documents
+/// `"cancelled"` (portal code 1, macOS `"permission"` precedent) and
+/// the portal adds `"timed out"` for the interactive budget. Core's
+/// error enum is stringly for backend detail by design (0.x; see
+/// `FlintshotError::Capture`).
+fn quiet_capture_exit(err: &flintshot_core::FlintshotError) -> bool {
+    match err {
+        flintshot_core::FlintshotError::Capture { detail } => {
+            detail.contains("cancelled") || detail.contains("timed out")
+        }
+        _ => false,
+    }
 }
 
 /// Validate a `--backend` value for `region`/`fullscreen`: `auto`,
@@ -2054,6 +2240,124 @@ mod tests {
             }
             other => panic!("expected fullscreen, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn capture_parses_flag_set() {
+        let cli = Cli::parse_from([
+            "flintshot",
+            "capture",
+            "--delay-ms",
+            "500",
+            "--backend",
+            "portal",
+            "--out",
+            "/tmp/shot.png",
+            "--standalone",
+        ]);
+        match cli.command {
+            Some(Command::Capture(args)) => {
+                assert_eq!(args.delay_ms, 500);
+                assert_eq!(args.backend.as_deref(), Some("portal"));
+                assert_eq!(
+                    args.output.out.as_deref(),
+                    Some(std::path::Path::new("/tmp/shot.png"))
+                );
+                assert!(args.output.standalone);
+                assert_eq!(args.interaction.mode_override(), None);
+            }
+            other => panic!("expected capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_parses_bare_and_interaction_flags() {
+        let cli = Cli::parse_from(["flintshot", "capture"]);
+        match cli.command {
+            Some(Command::Capture(args)) => {
+                assert_eq!(args.delay_ms, 0);
+                assert_eq!(args.backend, None);
+                assert_eq!(args.output.out, None);
+                assert!(!args.output.standalone);
+            }
+            other => panic!("expected capture, got {other:?}"),
+        }
+        let cli = Cli::parse_from(["flintshot", "capture", "--editor"]);
+        match cli.command {
+            Some(Command::Capture(args)) => {
+                assert_eq!(
+                    args.interaction.mode_override(),
+                    Some(InteractionMode::Editor)
+                );
+            }
+            other => panic!("expected capture, got {other:?}"),
+        }
+    }
+
+    /// Pinned: `--monitor` is deliberately absent from `capture` —
+    /// selection is the OS UI's job on the native path, and the
+    /// fallback grabs the primary monitor.
+    #[test]
+    fn capture_rejects_monitor_flag() {
+        assert!(
+            Cli::try_parse_from(["flintshot", "capture", "--monitor", "0"]).is_err(),
+            "capture must not carry --monitor"
+        );
+    }
+
+    #[test]
+    fn run_capture_rejects_unknown_backend_before_any_delegation() {
+        let args = CaptureArgs {
+            delay_ms: 0,
+            backend: Some("nope".into()),
+            interaction: InteractionArgs {
+                overlay: false,
+                editor: false,
+            },
+            output: OutputArgs {
+                out: None,
+                standalone: false,
+            },
+        };
+        assert!(run_capture(&args).is_err());
+    }
+
+    /// Quiet-cancel classification: dismissal in the OS selection UI
+    /// and the interactive Response timeout both exit quietly (exit 0,
+    /// one info log, no notification). Everything else is a real
+    /// failure the user must see.
+    #[test]
+    fn quiet_capture_exit_classifies_dismissal_and_timeout_only() {
+        use flintshot_core::FlintshotError;
+        let quiet = [
+            "portal screenshot cancelled (response code 1)",
+            "portal screenshot timed out after 300 s (no Response signal)",
+        ];
+        for detail in quiet {
+            assert!(
+                quiet_capture_exit(&FlintshotError::Capture {
+                    detail: detail.into()
+                }),
+                "must classify quietly: {detail}"
+            );
+        }
+        let loud = [
+            "portal screenshot decode failed: bad bytes",
+            "shm screencopy failed",
+            "permission denied",
+        ];
+        for detail in loud {
+            assert!(
+                !quiet_capture_exit(&FlintshotError::Capture {
+                    detail: detail.into()
+                }),
+                "must NOT be quiet: {detail}"
+            );
+        }
+        assert!(
+            !quiet_capture_exit(&FlintshotError::NotImplemented("no selection")),
+            "non-capture errors are never quiet cancels"
+        );
     }
 
     #[test]

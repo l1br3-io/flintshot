@@ -136,6 +136,18 @@ pub enum Request {
     /// receipt — one event per actual window, never at spawn time.
     /// Silently dropped when no daemon answers (standalone worker).
     ReportEditorWindowOpened,
+    // native-capture-ux effort — appended (postcard variant-index rule):
+    /// The single Capture action (native-capture-ux): one request for
+    /// every surface (hotkey, tray, applet, CLI). The worker resolves
+    /// the backend (CLI > config > auto), runs the OS's own selection
+    /// UI when the backend supports it, else today's monitor-grab →
+    /// editor/overlay flow. `delay_ms` is the pre-capture delay.
+    /// Replaces `CaptureRegion`/`CaptureFullscreen` (0.x schema, all
+    /// consumers ship together).
+    Capture {
+        /// Pre-capture delay in milliseconds.
+        delay_ms: u32,
+    },
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -341,6 +353,9 @@ mod tests {
             Request::PrepareCapture,
             Request::ReportAppHidden,
             Request::ReportEditorWindowOpened,
+            // native-capture-ux — appended (postcard variant-index rule)
+            Request::Capture { delay_ms: 0 },
+            Request::Capture { delay_ms: 2_500 },
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");

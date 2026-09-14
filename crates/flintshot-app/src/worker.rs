@@ -206,7 +206,7 @@ fn is_app_argv(argv: &[&str]) -> bool {
 /// [`spawns_capture_worker`]'s request-side check — keep both in
 /// sync when a capture mode is added.
 fn is_capture_argv(argv: &[&str]) -> bool {
-    matches!(argv.first(), Some(&"region" | &"fullscreen"))
+    matches!(argv.first(), Some(&"region" | &"fullscreen" | &"capture"))
 }
 
 /// Dispatch a [`Request`]: spawn the right worker (if any), emit the
@@ -248,6 +248,15 @@ pub fn dispatch(
         }
         Request::CaptureFullscreen { monitor } => {
             let argv = fullscreen_argv(*monitor, &state.capture_backend);
+            sink(Event::CaptureStarted);
+            spawn_argv(spawner, &argv)?;
+            Ok(DispatchOutcome::Continue)
+        }
+        // The single Capture action (native-capture-ux): the worker
+        // owns the native-vs-fallback flow decision, so the argv
+        // carries no backend hint beyond the daemon-side elision rule.
+        Request::Capture { delay_ms } => {
+            let argv = capture_argv(*delay_ms, &state.capture_backend);
             sink(Event::CaptureStarted);
             spawn_argv(spawner, &argv)?;
             Ok(DispatchOutcome::Continue)
@@ -374,6 +383,22 @@ fn fullscreen_argv(monitor: Option<u32>, backend: &str) -> Vec<String> {
     argv
 }
 
+/// Build the `flintshot capture [--delay-ms M] [--backend BACKEND]
+/// --standalone` argv. No monitor flag by design (selection is the OS
+/// UI's job on the native path; the fallback grabs the primary). The
+/// `--standalone` guard mirrors [`region_argv`]'s — see its doc
+/// comment for the fork-loop rationale.
+fn capture_argv(delay_ms: u32, backend: &str) -> Vec<String> {
+    let mut argv = vec!["capture".to_string()];
+    if delay_ms > 0 {
+        argv.push("--delay-ms".into());
+        argv.push(delay_ms.to_string());
+    }
+    push_backend_flag(&mut argv, backend);
+    argv.push("--standalone".into());
+    argv
+}
+
 /// Append `--backend <id>` unless it is the built-in default (the
 /// worker resolves the default from its own config load).
 fn push_backend_flag(argv: &mut Vec<String>, backend: &str) {
@@ -432,6 +457,7 @@ fn variant_name(request: &Request) -> &'static str {
     match request {
         Request::CaptureRegion { .. } => "capture-region",
         Request::CaptureFullscreen { .. } => "capture-fullscreen",
+        Request::Capture { .. } => "capture",
         Request::Quit => "quit",
         Request::Subscribe => "subscribe",
         Request::ReportSaved { .. } => "report-saved",
@@ -457,7 +483,7 @@ fn variant_name(request: &Request) -> &'static str {
 pub fn spawns_capture_worker(request: &Request) -> bool {
     matches!(
         request,
-        Request::CaptureRegion { .. } | Request::CaptureFullscreen { .. }
+        Request::CaptureRegion { .. } | Request::CaptureFullscreen { .. } | Request::Capture { .. }
     )
 }
 
@@ -732,6 +758,69 @@ mod tests {
     }
 
     #[test]
+    fn capture_request_spawns_capture_worker_with_delay() {
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        dispatch(
+            &Request::Capture { delay_ms: 250 },
+            &spawner,
+            &DispatchState::new(),
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+        assert_eq!(events, vec![Event::CaptureStarted]);
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec![
+                "capture".to_string(),
+                "--delay-ms".into(),
+                "250".into(),
+                "--standalone".into()
+            ]]
+        );
+    }
+
+    #[test]
+    fn capture_request_elides_default_backend_and_zero_delay() {
+        let spawner = RecordingSpawner::new();
+        dispatch(
+            &Request::Capture { delay_ms: 0 },
+            &spawner,
+            &DispatchState::new().with_capture_backend("auto"),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["capture".to_string(), "--standalone".into()]],
+            "zero delay and the default backend must not reach the argv"
+        );
+    }
+
+    #[test]
+    fn capture_request_passes_explicit_backend() {
+        let spawner = RecordingSpawner::new();
+        dispatch(
+            &Request::Capture { delay_ms: 0 },
+            &spawner,
+            &DispatchState::new().with_capture_backend("portal"),
+            &mut |_| {},
+        )
+        .unwrap();
+        let calls = spawner.snapshot();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            vec![
+                "capture".to_string(),
+                "--backend".into(),
+                "portal".into(),
+                "--standalone".into()
+            ]
+        );
+    }
+
+    #[test]
     fn capture_argv_passes_explicit_backend() {
         for request in [
             Request::CaptureRegion {
@@ -822,6 +911,16 @@ mod tests {
             vec!["region"],
             vec!["region", "--standalone"],
             vec!["fullscreen", "--monitor", "1", "--standalone"],
+            vec!["capture"],
+            vec!["capture", "--standalone"],
+            vec![
+                "capture",
+                "--delay-ms",
+                "500",
+                "--backend",
+                "xcap",
+                "--standalone",
+            ],
         ];
         for argv in captures {
             assert!(is_capture_argv(&argv), "{argv:?} is a capture worker");
@@ -986,6 +1085,8 @@ mod tests {
             },
             Request::CaptureFullscreen { monitor: None },
             Request::CaptureFullscreen { monitor: Some(1) },
+            Request::Capture { delay_ms: 0 },
+            Request::Capture { delay_ms: 500 },
         ];
         for request in &captures {
             assert!(
