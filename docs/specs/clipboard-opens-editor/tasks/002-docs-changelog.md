@@ -28,9 +28,9 @@ addendum note on the consequence line (~line 90) pointing to
 **Verification:**
 - [x] `python3 .opencode/harness/scripts/check-refs.py`
       (one pre-existing unrelated broken ref:
-      `docs/specs/launcher-desktop-entry/spec.md` →
-      `../snipping-modes/spec.md`; not introduced here, left for
-      its owning effort)
+      `docs/specs/launcher-desktop-entry/spec.md` points at a
+      `snipping-modes` spec that no longer exists; not introduced
+      here, left for its owning effort)
 - [x] `python3 .opencode/harness/scripts/lint-frontmatter.py`
 - [x] `python3 .opencode/harness/scripts/lint-plan.py`
 - [x] Full finish gate green (docs-only, but the discipline holds):
