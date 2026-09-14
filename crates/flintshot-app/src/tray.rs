@@ -1,8 +1,9 @@
 //! System tray menu (`tray-icon` + `muda`), behind the `tray` feature.
 //!
-//! The menu offers *Capture region*, *Capture fullscreen*, *Open
-//! config*, and *Quit* — plus *Bind shortcuts…* on Wayland sessions
-//! (the portal hotkey path, Phase 6). Since ADR-0042 this icon is
+//! The menu offers one **Capture** item (the single Capture action,
+//! native-capture-ux), *Open app window*, *Open config*, and *Quit*
+//! — plus *Bind shortcuts…* on Wayland sessions (the portal hotkey
+//! path, Phase 6). Since ADR-0042 this icon is
 //! built by the **tray helper** process (`flintshot tray`,
 //! [`crate::tray_helper`]), spawned and supervised by the daemon:
 //! the helper's process-exit is the only causal SNI unregistration,
@@ -15,20 +16,16 @@
 
 use color_eyre::eyre;
 use flintshot_core::ipc::Request;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 // Stable string ids — `MenuEvent::id` is matched against these. Kept
 // short and namespaced so they don't collide with any muda defaults.
 const ID_OPEN_APP: &str = "flintshot.app";
-const ID_CAPTURE_REGION: &str = "flintshot.region";
-const ID_CAPTURE_FULLSCREEN: &str = "flintshot.fullscreen";
+const ID_CAPTURE: &str = "flintshot.capture";
 const ID_BIND_SHORTCUTS: &str = "flintshot.bind-shortcuts";
 const ID_OPEN_CONFIG: &str = "flintshot.open-config";
 const ID_QUIT: &str = "flintshot.quit";
-/// Per-monitor submenu items use this prefix + the monitor index, e.g.
-/// `flintshot.fullscreen-monitor.2`.
-const ID_FULLSCREEN_MONITOR_PREFIX: &str = "flintshot.fullscreen-monitor.";
 /// Stable `TrayIcon` id. Without it, `TrayIconBuilder::new()` mints a
 /// fresh `{pid}-{counter}` id per build, which becomes the SNI object
 /// path — so any second registration (a stray re-`build` in the same
@@ -40,7 +37,7 @@ const TRAY_ID: &str = "flintshot";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TrayAction {
     /// A request the daemon dispatches via the worker table
-    /// (region/fullscreen spawn a worker; quit shuts down).
+    /// (capture spawns a worker; quit shuts down).
     Request(Request),
     /// Open the portal bind dialog (the Wayland portal path; the menu
     /// item only exists on a Wayland session — see [`build`]).
@@ -51,26 +48,11 @@ pub(crate) enum TrayAction {
 
 /// Map a menu event to the action it should trigger, or `None` for an
 /// unknown id (e.g. events not from our menu).
-///
-/// Every capture-flavored item — *Capture region*, *Capture
-/// fullscreen*, and the per-monitor submenu — maps to the single
-/// [`Request::Capture`] (native-capture-ux Task 005; the monitor is
-/// dropped: selection belongs to the OS UI or the editor). The menu
-/// itself keeps both labels until the Task 7 UX collapse.
 #[must_use]
 pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
-    let id = event.id.as_ref();
-    // Per-monitor submenu: "flintshot.fullscreen-monitor.<N>".
-    if let Some(num) = id.strip_prefix(ID_FULLSCREEN_MONITOR_PREFIX) {
-        if num.parse::<u32>().is_ok() {
-            return Some(TrayAction::Request(Request::Capture { delay_ms: 0 }));
-        }
-    }
-    match id {
+    match event.id.as_ref() {
         ID_OPEN_APP => Some(TrayAction::Request(Request::OpenApp)),
-        ID_CAPTURE_REGION | ID_CAPTURE_FULLSCREEN => {
-            Some(TrayAction::Request(Request::Capture { delay_ms: 0 }))
-        }
+        ID_CAPTURE => Some(TrayAction::Request(Request::Capture { delay_ms: 0 })),
         ID_BIND_SHORTCUTS => Some(TrayAction::BindShortcuts),
         ID_OPEN_CONFIG => Some(TrayAction::OpenConfig),
         ID_QUIT => Some(TrayAction::Request(Request::Quit)),
@@ -101,26 +83,14 @@ pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
 
     let menu = Menu::new();
     let open_app = MenuItem::with_id(ID_OPEN_APP, "Open app window", true, None);
-    let region = MenuItem::with_id(ID_CAPTURE_REGION, "Capture region", true, None);
-    let fullscreen = MenuItem::with_id(ID_CAPTURE_FULLSCREEN, "Capture fullscreen", true, None);
+    let capture = MenuItem::with_id(ID_CAPTURE, "Capture", true, None);
     let bind_shortcuts = MenuItem::with_id(ID_BIND_SHORTCUTS, "Bind shortcuts…", true, None);
     let open_config = MenuItem::with_id(ID_OPEN_CONFIG, "Open config", true, None);
     let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
 
-    // Per-monitor submenu (Phase 2's multi-monitor UX). The list is
-    // enumerated at build time — muda doesn't portably expose a
-    // submenu-open event, and rebuilding the tray to hot-plug a
-    // monitor is off the table (a second registration duplicates the
-    // panel item, ADR-0039) — so the list refreshes on daemon
-    // restart.
-    let monitor_submenu = Submenu::with_id("flintshot.monitors", "Fullscreen on monitor", true);
-    append_monitor_entries(&monitor_submenu)?;
-
     let mut appending = menu
         .append(&open_app)
-        .and_then(|()| menu.append(&region))
-        .and_then(|()| menu.append(&fullscreen))
-        .and_then(|()| menu.append(&monitor_submenu))
+        .and_then(|()| menu.append(&capture))
         .and_then(|()| menu.append(&PredefinedMenuItem::separator()));
     if wayland {
         appending = appending
@@ -143,39 +113,6 @@ pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
         .with_menu(Box::new(menu))
         .build()
         .map_err(|e| eyre::eyre!("building tray icon: {e}"))
-}
-
-/// Populate the per-monitor submenu: one entry per monitor
-/// (`"<N> · <name> (primary)"`), or a disabled "no monitors" entry if
-/// `xcap` reports none or errors. A failure here is non-fatal — the
-/// submenu just shows "no monitors".
-fn append_monitor_entries(submenu: &Submenu) -> eyre::Result<()> {
-    match flintshot_core::monitors() {
-        Ok(list) if !list.is_empty() => {
-            for m in list {
-                let label = if m.is_primary {
-                    format!("{} · {} (primary)", m.index, m.name)
-                } else {
-                    format!("{} · {}", m.index, m.name)
-                };
-                let id = format!("{ID_FULLSCREEN_MONITOR_PREFIX}{}", m.index);
-                let item = MenuItem::with_id(id, label, true, None);
-                submenu
-                    .append(&item)
-                    .map_err(|e| eyre::eyre!("appending monitor entry: {e}"))?;
-            }
-        }
-        _ => {
-            // Zero monitors or enumeration error: a disabled placeholder
-            // so the submenu isn't a confusing empty void.
-            let none = MenuItem::with_id("flintshot.no-monitors", "no monitors", false, None);
-            let _ = submenu.append(&none);
-            if let Err(e) = flintshot_core::monitors() {
-                tracing::warn!(error = %e, "could not enumerate monitors for the tray submenu");
-            }
-        }
-    }
-    Ok(())
 }
 
 /// A simple two-tone 32×32 mark — a bright lens on a dark rounded
@@ -237,21 +174,13 @@ mod tests {
     }
 
     #[test]
-    fn capture_region_maps_to_capture_request() {
+    fn capture_maps_to_capture_request() {
         let Some(TrayAction::Request(Request::Capture { delay_ms })) =
-            action_for(&event(ID_CAPTURE_REGION))
+            action_for(&event(ID_CAPTURE))
         else {
             panic!("expected Capture");
         };
-        assert_eq!(delay_ms, 0, "tray region uses the single Capture action");
-    }
-
-    #[test]
-    fn capture_fullscreen_maps_to_capture_request() {
-        assert!(matches!(
-            action_for(&event(ID_CAPTURE_FULLSCREEN)),
-            Some(TrayAction::Request(Request::Capture { delay_ms: 0 }))
-        ));
+        assert_eq!(delay_ms, 0, "the tray's single Capture item");
     }
 
     #[test]
@@ -283,23 +212,23 @@ mod tests {
         assert!(action_for(&event("something-else")).is_none());
     }
 
+    /// Pinned (native-capture-ux Task 007): the old capture ids —
+    /// *Capture region*, *Capture fullscreen*, and the per-monitor
+    /// submenu prefix — must not resolve to anything; one **Capture**
+    /// item (`flintshot.capture`) is the whole capture set.
     #[test]
-    fn monitor_submenu_item_maps_to_capture_with_index_dropped() {
-        let Some(TrayAction::Request(Request::Capture { delay_ms })) =
-            action_for(&event("flintshot.fullscreen-monitor.3"))
-        else {
-            panic!("expected Capture for a monitor submenu click");
-        };
-        assert_eq!(
-            delay_ms, 0,
-            "the monitor index is dropped: selection is the OS UI's / editor's job"
-        );
-    }
-
-    #[test]
-    fn malformed_monitor_id_is_ignored() {
-        // Prefix but not a number — must not panic, must not match.
-        assert!(action_for(&event("flintshot.fullscreen-monitor.abc")).is_none());
-        assert!(action_for(&event("flintshot.fullscreen-monitor.")).is_none());
+    fn legacy_capture_ids_are_gone() {
+        for legacy in [
+            "flintshot.region",
+            "flintshot.fullscreen",
+            "flintshot.fullscreen-monitor.0",
+            "flintshot.fullscreen-monitor.3",
+            "flintshot.fullscreen-monitor.abc",
+        ] {
+            assert!(
+                action_for(&event(legacy)).is_none(),
+                "legacy id `{legacy}` must not resolve anymore"
+            );
+        }
     }
 }
