@@ -32,13 +32,13 @@ use flintshot_core::ipc::{Request, ShortcutBinding};
 /// `daemon::apply_wayland_hotkey_reload`).
 pub(crate) type SharedHotkeys = Arc<Mutex<flintshot_core::HotkeyConfig>>;
 
-/// Stable portal shortcut id for region capture. The same string is
-/// used as the `BindShortcuts` id (Task 003), so re-binds keep
-/// activating the same mapping.
-pub(crate) const REGION_ID: &str = "region";
-
-/// Stable portal shortcut id for fullscreen capture.
-pub(crate) const FULLSCREEN_ID: &str = "fullscreen";
+/// Stable portal shortcut id for the single Capture action
+/// (native-capture-ux). The same string is used as the `BindShortcuts`
+/// id (Task 003), so re-binds keep activating the same mapping. Users
+/// with a pre-collapse bind under the legacy `region`/`fullscreen` ids
+/// keep those activations dropped at debug (unknown ids) until they
+/// re-bind.
+pub(crate) const CAPTURE_ID: &str = "capture";
 
 /// Convert a `[hotkeys]` chord from `global-hotkey`'s accelerator
 /// format to the XDG desktop-entry accelerator format the portal
@@ -136,14 +136,14 @@ fn gdk_key_name(code: &str) -> Option<String> {
 }
 
 /// Map a portal `Activated::shortcut_id` to the [`Request`] it should
-/// dispatch. Both legacy shortcut ids (`region`, `fullscreen`) map to
-/// the single [`Request::Capture`] — the OS UI or the editor owns
-/// selection (native-capture-ux Task 005). Mirrors the chord →
-/// request mapping `HotkeyRegistry` uses on X11. `None` for unknown
-/// ids (logged + dropped by the caller).
+/// dispatch — one shortcut, one action. Mirrors the chord → request
+/// mapping `HotkeyRegistry` uses on X11. `None` for unknown ids
+/// (logged + dropped by the caller); the pre-collapse `region` /
+/// `fullscreen` ids land there too — a re-bind is the fix, and the
+/// silent-attach log says nothing of ours is bound.
 pub(crate) fn request_for_shortcut_id(id: &str) -> Option<Request> {
     match id {
-        REGION_ID | FULLSCREEN_ID => Some(Request::Capture { delay_ms: 0 }),
+        CAPTURE_ID => Some(Request::Capture { delay_ms: 0 }),
         _ => None,
     }
 }
@@ -185,24 +185,24 @@ impl FallbackKind {
         match self {
             Self::NoSessionBus => {
                 "no D-Bus session bus reachable; Wayland global hotkeys unavailable. \
-                 Workaround: bind a compositor keybinding to `flintshot region` / \
-                 `flintshot fullscreen` (tray + IPC still work)"
+                 Workaround: bind a compositor keybinding to `flintshot capture` \
+                 (tray + IPC still work)"
             }
             Self::PortalMissing => {
                 "no xdg-desktop-portal frontend with the GlobalShortcuts interface \
                  (GNOME and most wlroots compositors lack it; COSMIC and KDE ship it). \
-                 Workaround: bind a compositor keybinding to `flintshot region` / \
-                 `flintshot fullscreen` (tray + IPC still work)"
+                 Workaround: bind a compositor keybinding to `flintshot capture` \
+                 (tray + IPC still work)"
             }
             Self::InterfaceUnsupported => {
                 "xdg-desktop-portal GlobalShortcuts interface is too old for flintshot; \
                  update xdg-desktop-portal (>= 1.16). Workaround meanwhile: bind a \
-                 compositor keybinding to `flintshot region` / `flintshot fullscreen`"
+                 compositor keybinding to `flintshot capture`"
             }
             Self::Other => {
                 "portal GlobalShortcuts startup failed for an unknown reason. \
-                 Workaround: bind a compositor keybinding to `flintshot region` / \
-                 `flintshot fullscreen` (tray + IPC still work)"
+                 Workaround: bind a compositor keybinding to `flintshot capture` \
+                 (tray + IPC still work)"
             }
         }
     }
@@ -481,10 +481,7 @@ async fn do_bind(
         .lock()
         .expect("hotkeys config mutex poisoned")
         .clone();
-    let to_bind = vec![
-        suggested_shortcut(REGION_ID, "Capture region", &hotkeys.region),
-        suggested_shortcut(FULLSCREEN_ID, "Capture fullscreen", &hotkeys.fullscreen),
-    ];
+    let to_bind = vec![suggested_shortcut(CAPTURE_ID, "Capture", &hotkeys.capture)];
     let bound = shortcuts
         .bind_shortcuts(session, &to_bind, None, BindShortcutsOptions::default())
         .await
@@ -716,17 +713,9 @@ mod tests {
     // ── request_for_shortcut_id ──────────────────────────────────
 
     #[test]
-    fn region_id_maps_to_capture() {
+    fn capture_id_maps_to_capture() {
         assert!(matches!(
-            request_for_shortcut_id(REGION_ID),
-            Some(Request::Capture { delay_ms: 0 })
-        ));
-    }
-
-    #[test]
-    fn fullscreen_id_maps_to_capture() {
-        assert!(matches!(
-            request_for_shortcut_id(FULLSCREEN_ID),
+            request_for_shortcut_id(CAPTURE_ID),
             Some(Request::Capture { delay_ms: 0 })
         ));
     }
@@ -736,6 +725,9 @@ mod tests {
         assert!(request_for_shortcut_id("nope").is_none());
         assert!(request_for_shortcut_id("").is_none());
         assert!(request_for_shortcut_id("Region").is_none());
+        // The pre-collapse ids are unknown now: a re-bind is the fix.
+        assert!(request_for_shortcut_id("region").is_none());
+        assert!(request_for_shortcut_id("fullscreen").is_none());
     }
 
     // ── convert_chord ────────────────────────────────────────────
@@ -802,7 +794,7 @@ mod tests {
 
     fn sample_binding() -> ShortcutBinding {
         ShortcutBinding {
-            id: REGION_ID.into(),
+            id: CAPTURE_ID.into(),
             trigger: "Print".into(),
         }
     }
@@ -958,8 +950,8 @@ mod tests {
                 "{kind:?} notice must name the compositor-keybind workaround: {notice}"
             );
             assert!(
-                notice.contains("flintshot region"),
-                "{kind:?} notice must point at `flintshot region`: {notice}"
+                notice.contains("flintshot capture"),
+                "{kind:?} notice must point at `flintshot capture`: {notice}"
             );
         }
     }

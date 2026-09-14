@@ -1,4 +1,4 @@
-//! CLI → daemon delegation. `flintshot region` / `fullscreen` try to
+//! CLI → daemon delegation. `flintshot capture` tries to
 //! hand the capture to a running daemon (centralising the `Event`
 //! stream for subscribers); if no daemon answers, they fall back to the
 //! Phase 1 in-process capture+editor path unchanged.

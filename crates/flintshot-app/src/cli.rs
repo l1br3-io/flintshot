@@ -2637,7 +2637,7 @@ mod tests {
     fn bind_outcome_success_renders_each_binding() {
         let event = IpcEvent::ShortcutsBound {
             bindings: vec![ShortcutBinding {
-                id: "region".into(),
+                id: "capture".into(),
                 trigger: "<Control><Shift>Print".into(),
             }],
         };

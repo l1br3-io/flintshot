@@ -236,7 +236,7 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ShortcutBinding {
-    /// Stable shortcut id (`"region"` / `"fullscreen"`).
+    /// Stable shortcut id (`"capture"`).
     pub id: String,
     /// The effective trigger, in the portal's human-readable form
     /// (e.g. `"Print"`, `"<Ctrl><Shift>P"` — whatever the portal
@@ -349,16 +349,10 @@ mod tests {
                 path: PathBuf::from("/tmp/x.png"),
             },
             Event::ShortcutsBound {
-                bindings: vec![
-                    ShortcutBinding {
-                        id: "region".into(),
-                        trigger: "Print".into(),
-                    },
-                    ShortcutBinding {
-                        id: "fullscreen".into(),
-                        trigger: "<Control><Alt>F4".into(),
-                    },
-                ],
+                bindings: vec![ShortcutBinding {
+                    id: "capture".into(),
+                    trigger: "<Control><Shift>Print".into(),
+                }],
             },
             Event::Error {
                 code: "unsupported".into(),

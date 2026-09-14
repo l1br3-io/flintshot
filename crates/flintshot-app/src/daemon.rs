@@ -493,7 +493,7 @@ fn pre_hide_for_capture(
 /// reads? (`HotkeyConfig` deliberately has no `PartialEq` — fields
 /// could grow without anyone noticing the comparison going stale.)
 fn hotkeys_differ(new: &flintshot_core::HotkeyConfig, last: &flintshot_core::HotkeyConfig) -> bool {
-    new.region != last.region || new.fullscreen != last.fullscreen
+    new.capture != last.capture
 }
 
 /// Wayland arm of the config hot-reload. This is *not* a missed
@@ -698,15 +698,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn hotkeys_differ_detects_region_or_fullscreen_change() {
+    fn hotkeys_differ_detects_a_capture_change() {
         let base = HotkeyConfig::default();
-        let mut region_only = base.clone();
-        region_only.region = "Ctrl+Shift+KeyR".into();
-        let mut fullscreen_only = base.clone();
-        fullscreen_only.fullscreen = "Ctrl+Alt+KeyF".into();
-        assert!(hotkeys_differ(&region_only, &base));
-        assert!(hotkeys_differ(&fullscreen_only, &base));
-        assert!(hotkeys_differ(&base, &region_only));
+        let mut changed = base.clone();
+        changed.capture = "Ctrl+Shift+KeyR".into();
+        assert!(hotkeys_differ(&changed, &base));
+        assert!(hotkeys_differ(&base, &changed));
     }
 
     #[test]
@@ -720,10 +717,10 @@ mod tests {
     fn wayland_reload_updates_the_suggestion_source() {
         let shared = Arc::new(Mutex::new(HotkeyConfig::default()));
         let mut fresh = HotkeyConfig::default();
-        fresh.region = "Ctrl+Shift+KeyR".into();
+        fresh.capture = "Ctrl+Shift+KeyR".into();
         apply_wayland_hotkey_reload(&shared, &fresh);
         assert_eq!(
-            shared.lock().expect("hotkeys mutex poisoned").region,
+            shared.lock().expect("hotkeys mutex poisoned").capture,
             "Ctrl+Shift+KeyR"
         );
     }
@@ -736,8 +733,8 @@ mod tests {
         let shared = Arc::new(Mutex::new(HotkeyConfig::default()));
         apply_wayland_hotkey_reload(&shared, &HotkeyConfig::default());
         assert_eq!(
-            shared.lock().expect("hotkeys mutex poisoned").region,
-            HotkeyConfig::default().region
+            shared.lock().expect("hotkeys mutex poisoned").capture,
+            HotkeyConfig::default().capture
         );
     }
 

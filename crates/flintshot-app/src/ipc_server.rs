@@ -1157,7 +1157,7 @@ mod tests {
         tokio::spawn(async move {
             if let Some(PortalCmd::Bind { reply }) = cmds.recv().await {
                 let binding = ShortcutBinding {
-                    id: "region".into(),
+                    id: "capture".into(),
                     trigger: "Print".into(),
                 };
                 reply.send(Ok(vec![binding])).expect("reply sends");
@@ -1184,7 +1184,7 @@ mod tests {
             &decoded,
             Event::ShortcutsBound { bindings }
                 if bindings.len() == 1
-                    && bindings[0].id == "region"
+                    && bindings[0].id == "capture"
                     && bindings[0].trigger == "Print"
         ));
         task.abort();
