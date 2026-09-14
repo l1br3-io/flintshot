@@ -9,14 +9,14 @@ clipboard and post-grab dispatch proceeds. Reconcile
 reality diverged.
 
 **Acceptance criteria:**
-- [ ] CHANGELOG `Fixed` entry names the symptom (capture did
+- [x] CHANGELOG `Fixed` entry names the symptom (capture did
       nothing when confirming with Copy) and the fix (clipboard
       read-back), not the internal marker mechanics
-- [ ] No doc under `docs/` (outside `docs/specs/` history) claims
+- [x] No doc under `docs/` (outside `docs/specs/` history) claims
       non-file portal URIs are fatal
 
 **Verification:**
-- [ ] Finish gate green (docs-only change; discipline holds):
+- [x] Finish gate green (docs-only change; discipline holds):
       `cargo fmt --all --check` +
       `cargo clippy --workspace --all-targets -- -D warnings` +
       `cargo test --workspace --all-targets` +

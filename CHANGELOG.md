@@ -136,6 +136,15 @@ Categories used below:
 
 ### Fixed
 
+- **Confirming the OS screenshot UI with Copy no longer kills the
+  capture** (spec `docs/specs/portal-clipboard-uri/`): COSMIC's
+  portal answers a Copy-confirmed grab with `clipboard:///` — the
+  image is on the system clipboard, no file exists — which
+  flintshot rejected as a non-file-uri error, ending the capture
+  invisibly (the failure only reached the daemon log). The grab is
+  now read back from the clipboard and every post-grab action
+  (`--out`, editor, clipboard, upload) proceeds as with a
+  file-delivered grab; Save/Enter-confirmed captures are unchanged.
 - **App-window capture races** (ADR-0052, spec
   `docs/specs/fix-app-window-capture-races/`) — the "window in the
   shot" guarantee now holds for every trigger and every app-window

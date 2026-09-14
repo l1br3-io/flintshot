@@ -41,7 +41,7 @@ back via arboard, and continues normal dispatch. Spec:
 - [ ] Human confirms on the COSMIC session: OS screenshot UI **Copy** → capture completes (post-grab action runs, no `non-file uri` error in daemon.log); **Save/Enter** path unchanged
 
 ### Phase 2 — Record
-- [ ] Task 2: CHANGELOG entry + spec reconcile (skip if Task 1's entry suffices) → `tasks/002-changelog.md`
+- [x] Task 2: CHANGELOG entry + spec reconcile (skip if Task 1's entry suffices) → `tasks/002-changelog.md`
 
 ## Risks and Mitigations
 
