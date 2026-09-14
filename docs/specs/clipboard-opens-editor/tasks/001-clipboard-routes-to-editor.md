@@ -18,25 +18,25 @@ substantively true ("only the native path dispatches on after_grab")
 and should need no change.
 
 **Acceptance criteria:**
-- [ ] Clipboard arm order is: `copy_image_to_clipboard(&img)?` →
+- [x] Clipboard arm order is: `copy_image_to_clipboard(&img)?` →
       `fire_capture_notification(...)` → info log → supersede check
       (quiet `Ok(())` exit) → `run_capture_shell(img, "capture",
       interaction, watch)?`
-- [ ] Copy failure (`?` on `copy_image_to_clipboard`) returns before
+- [x] Copy failure (`?` on `copy_image_to_clipboard`) returns before
       any window opens
-- [ ] `Editor`, `Upload`, and `--out` arms byte-identical to before;
+- [x] `Editor`, `Upload`, and `--out` arms byte-identical to before;
       fallback path (`run_capture`'s else branch) untouched
-- [ ] `native_capture_and_dispatch` and `fire_capture_notification`
+- [x] `native_capture_and_dispatch` and `fire_capture_notification`
       doc comments describe the new flow (no stale "window-less")
-- [ ] Existing unit tests still pass; no new pure seams introduced
+- [x] Existing unit tests still pass; no new pure seams introduced
       (none changed — dispatch body stays I/O-driven per spec)
 
 **Verification:**
-- [ ] `cargo build`
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace --all-targets`
-- [ ] `cargo test --doc -p flintshot-core -p flintshot-editor-egui`
+- [x] `cargo build`
+- [x] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test --workspace --all-targets`
+- [x] `cargo test --doc -p flintshot-core -p flintshot-editor-egui`
 - [ ] Manual (Wayland session, human or live agent run):
       `cargo run -- capture --after clipboard` → clipboard holds the
       grab, notification fires, editor/overlay opens pre-loaded;

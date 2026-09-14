@@ -488,9 +488,10 @@ fn resolve_capture_backend(
 /// Native flow: run the OS's selection UI under the prepare handshake
 /// (flintshot's own chrome must not sit in the portal's frozen frame),
 /// then dispatch the grab on `post_grab` — `--out` PNG (wins over
-/// everything), editor shell, clipboard copy, or upload. `None`-style
-/// quiet exits (superseded, dismissed, timed out) return `Ok(())`
-/// with one info log; real failures bubble.
+/// everything), editor shell, clipboard copy that then opens the
+/// editor shell too, or upload. `None`-style quiet exits (superseded,
+/// dismissed, timed out) return `Ok(())` with one info log; real
+/// failures bubble.
 fn native_capture_and_dispatch(
     output: &OutputArgs,
     interaction: Option<InteractionMode>,
@@ -526,9 +527,25 @@ fn native_capture_and_dispatch(
             run_capture_shell(img, "capture", interaction, watch)?;
         }
         PostGrabAction::Clipboard => {
+            // Copy first, unconditionally: the copy is the requested
+            // action, so a supersede between grab and shell must not
+            // swallow it. GOTCHA (X11 owner-based clipboard, only
+            // reachable by pinning `--backend portal` on an X11
+            // session): the arboard handle's scope ends with this
+            // arm, but the shell below keeps the process — and the
+            // selection — alive while its window is open; a
+            // supersede skip exits right after the copy, no worse
+            // than the window-less flow this replaces.
             copy_image_to_clipboard(&img)?;
             fire_capture_notification("Capture copied to clipboard");
             tracing::info!("native capture copied to clipboard");
+            // Then the editor, mirroring the Editor arm: every
+            // backend lands in the editor after a grab.
+            if watch.superseded() {
+                tracing::info!("native capture superseded before the shell; exiting cancelled");
+                return Ok(());
+            }
+            run_capture_shell(img, "capture", interaction, watch)?;
         }
         PostGrabAction::Upload => {
             upload_capture_and_report(&img)?;
@@ -635,9 +652,9 @@ fn upload_capture_and_report(img: &image::RgbaImage) -> Result<()> {
     Ok(())
 }
 
-/// Best-effort desktop notification for the window-less capture
-/// paths (`after_grab = clipboard`): with no editor window to show
-/// the result, the notification is the only feedback.
+/// Best-effort desktop notification for the clipboard capture path
+/// (`after_grab = clipboard`): the grab is paste-ready the moment it
+/// fires, so this is immediate feedback — the editor opens after.
 fn fire_capture_notification(message: &str) {
     if let Err(e) = notify_rust::Notification::new()
         .appname("flintshot")

@@ -41,10 +41,10 @@ the doc/CHANGELOG sweep it makes stale. Spec:
 ## Task Index
 
 ### Phase 1 — Behavior
-- [ ] Task 1: Clipboard arm copies, notifies, then routes through `run_capture_shell` → `tasks/001-clipboard-routes-to-editor.md`
+- [x] Task 1: Clipboard arm copies, notifies, then routes through `run_capture_shell` → `tasks/001-clipboard-routes-to-editor.md`
 
 ### Checkpoint: behavior live (HUMAN GATE)
-- [ ] Full gate green (`fmt`, `clippy -D warnings`, `test --workspace --all-targets`, doc-tests)
+- [x] Full gate green (`fmt`, `clippy -D warnings`, `test --workspace --all-targets`, doc-tests)
 - [ ] Human runs `flintshot capture --after clipboard` on the Wayland session: clipboard holds the grab, notification fires, editor/overlay opens pre-loaded; `--after editor` / `--after upload` / `--out` / `--backend xcap` unchanged
 
 ### Phase 2 — Record
