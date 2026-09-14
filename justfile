@@ -8,6 +8,12 @@
 #   cargo-nextest - faster test runner (used by `nextest`, preferred by `test`)
 # Recipes that need them fall back gracefully when absent.
 
+# Pass recipe arguments to recipe scripts as positional parameters
+# ($1, $2, …) so `daemon` / `dev` can intercept their `--refresh` flag
+# from "$@" before forwarding the rest. Recipes that only use {{ … }}
+# interpolation are unaffected.
+set positional-arguments
+
 # Default: list available recipes.
 default:
     @just --list
@@ -110,11 +116,28 @@ cosmic:
 # Rustup users: cargo lives in ~/.cargo/bin, which sudo's secure_path
 # hides from root — preserve your PATH with:
 #   sudo env "PATH=$PATH" just install
-install:
+# `--refresh` restarts the daemon from the installed binary — but a
+# daemon spawned from an elevated recipe would sit on root's runtime
+# dir (duplicate IPC socket) and the wrong session bus, so the restart
+# is skipped with the exact command to run from your session instead.
+# Un-elevated (`PREFIX=$HOME/.local just install --refresh`) restarts.
+install *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    refresh=0
+    for a in "$@"; do
+        if [[ "$a" == "--refresh" ]]; then
+            refresh=1
+        else
+            echo "error: unrecognized argument '$a' (only --refresh)" >&2
+            exit 2
+        fi
+    done
     just _build
     just _deploy "${PREFIX:-/usr/local}"
+    if [[ "$refresh" == 1 ]]; then
+        just _restart-daemon "${PREFIX:-/usr/local}/bin/flintshot"
+    fi
 
 # Install per-user, no elevation: release binary, launcher entry, and
 # icon under ~/.local. Builds first with the tray feature on
@@ -122,11 +145,27 @@ install:
 #   just install-user                      # -> ~/.local
 #   AUTOSTART=1 just install-user          # + ~/.config/autostart entry
 #   FEATURES='' just install-user          # minimal build, no GTK deps
-install-user:
+# `--refresh` is the single-command update: rebuild + redeploy +
+# restart the daemon from the installed binary (`--replace` takes
+# over from any running instance, dev-loop debug daemon included).
+#   just install-user --refresh
+install-user *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    refresh=0
+    for a in "$@"; do
+        if [[ "$a" == "--refresh" ]]; then
+            refresh=1
+        else
+            echo "error: unrecognized argument '$a' (only --refresh)" >&2
+            exit 2
+        fi
+    done
     just _build
     just _deploy "${HOME}/.local"
+    if [[ "$refresh" == 1 ]]; then
+        just _restart-daemon "${HOME}/.local/bin/flintshot"
+    fi
 
 # Build the release binary for the install recipes. FEATURES selects
 # the feature set: unset -> tray (the launcher promise: daemon +
@@ -155,6 +194,33 @@ _build:
     else
         echo "== build (release, minimal: no features) =="
         cargo build --release
+    fi
+
+# Debug-profile build backing the `--refresh` flag of `daemon` / `dev`.
+# FEATURES selects the feature set exactly as in _build: unset -> tray
+# (the refresh promise: a tray icon at the end), '' -> minimal, 'a,b' ->
+# passed through verbatim. Debug, not release, so the dev loop stays
+# fast; the later `cargo run` reuses this build. Private helper.
+[private]
+_refresh-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    features="${FEATURES-tray}"
+    if [[ -n "$features" ]]; then
+        echo "== build (debug, features: ${features}) =="
+        if ! cargo build --features "$features"; then
+            # Comma-boundary match so a feature like 'mytray' can't
+            # trigger the hint.
+            if [[ ",${features}," == *",tray,"* ]]; then
+                echo "hint: the 'tray' feature needs the GTK dev libs at build time" >&2
+                echo "      (Debian/Ubuntu: libgtk-3-dev libayatana-appindicator3-dev)" >&2
+                echo "      Install them, or re-run with FEATURES='' for a minimal no-tray build" >&2
+            fi
+            exit 1
+        fi
+    else
+        echo "== build (debug, minimal: no features) =="
+        cargo build
     fi
 
 # Copy the built artifacts under a scope root, then refresh desktop /
@@ -206,6 +272,30 @@ _deploy root:
     else
         echo "ok: gtk-update-icon-cache not on PATH; skipping"
     fi
+
+# Restart the daemon from a freshly installed binary, for the install
+# recipes' `--refresh` flag. `--replace` asks any running daemon to
+# quit over IPC and takes over its socket (a dev-loop debug daemon
+# included) or starts fresh when none is running. Detached (setsid,
+# stdio appended to a state-dir log) so just returns at once and the
+# daemon outlives the terminal. Skips under elevation: a root-spawned
+# daemon would resolve XDG_RUNTIME_DIR to root's — a second IPC socket
+# next to the user session's — and miss the session bus entirely.
+# Private helper.
+[private]
+_restart-daemon bin:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        echo "skip: elevated install — a root-spawned daemon would land on the wrong session" >&2
+        echo "      restart from your session instead: {{ bin }} daemon --replace" >&2
+        exit 0
+    fi
+    log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/flintshot"
+    mkdir -p "$log_dir"
+    setsid "{{ bin }}" daemon --replace \
+        </dev/null >>"$log_dir/daemon.log" 2>&1 &
+    echo "ok: daemon restarting from {{ bin }} (log: $log_dir/daemon.log)"
 
 # Remove everything install / install-user put down — both scopes
 # (PREFIX and ~/.local) plus the autostart entry. Safe to re-run when
@@ -262,8 +352,26 @@ help:
 
 # Start the long-running daemon (tray, hotkeys, IPC server). [Phase 2]
 # Extra args pass through, e.g. `just daemon --replace`.
+# `--refresh` = full refresh after code changes: rebuild first with
+# the tray feature (FEATURES= overrides; FEATURES='' minimal), then
+# restart any running daemon — `--replace` is appended for you when
+# not already given. The pre-build makes the `cargo run` instant.
+#   just daemon --refresh
 daemon *args:
-    cargo run -- daemon {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    refresh=0
+    pass=()
+    for a in "$@"; do
+        if [[ "$a" == "--refresh" ]]; then refresh=1; else pass+=("$a"); fi
+    done
+    if [[ "$refresh" == 1 ]]; then
+        just _refresh-build
+        if [[ " ${pass[*]-} " != *" --replace "* ]]; then
+            pass+=(--replace)
+        fi
+    fi
+    exec cargo run -- daemon "${pass[@]}"
 
 # Capture a region and open the editor. Extra args pass through, e.g.
 #   just region --monitor 1 --delay-ms 500
@@ -298,13 +406,36 @@ auth backend *args:
 
 # Dev mode: auto-rebuild on save. Requires `cargo-watch`; falls back to a
 # plain `cargo run` if it's not installed. Extra args pass through.
+# `--refresh` keeps the tray in the loop: every (re)build uses the tray
+# feature (FEATURES= overrides; FEATURES='' minimal), and — when the
+# target is the daemon — `--replace` is appended so each restart takes
+# over from the previous instance instead of trying to join it.
 # Ctrl-C kills the process.
+#   just dev daemon --refresh     # watch-rebuild the daemon, tray on
+#   just dev app                  # plain dev loop, no tray
 dev *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    refresh=0
+    pass=()
+    for a in "$@"; do
+        if [[ "$a" == "--refresh" ]]; then refresh=1; else pass+=("$a"); fi
+    done
+    run_args=("${pass[@]}")
+    feat=()
+    if [[ "$refresh" == 1 ]]; then
+        just _refresh-build
+        features="${FEATURES-tray}"
+        if [[ -n "$features" ]]; then
+            feat=(--features "$features")
+        fi
+        if [[ "${pass[0]-}" == "daemon" && " ${pass[*]-} " != *" --replace "* ]]; then
+            run_args+=(--replace)
+        fi
+    fi
     if cargo watch --version >/dev/null 2>&1; then
-        cargo watch -x "run -- {{ args }}"
+        cargo watch -x "run ${feat[*]-} -- ${run_args[*]-}"
     else
         echo "note: cargo-watch not installed; backend won't auto-reload. Run 'just bootstrap' or 'cargo install cargo-watch' to enable." >&2
-        cargo run -- {{ args }}
+        cargo run "${feat[@]}" -- "${run_args[@]}"
     fi
