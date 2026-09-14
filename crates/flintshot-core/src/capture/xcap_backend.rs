@@ -16,6 +16,12 @@ use crate::error::{FlintshotError, Result};
 /// Never gated by availability probes in `auto` mode — [`super`]'s
 /// selection treats it as the terminal fallback so a grab always has
 /// somewhere to land.
+///
+/// No native selection capability: [`super::Capturer::supports_selection`]
+/// keeps its `false` default and [`super::Capturer::capture_selection`]
+/// its `NotImplemented` default — `xcap` has no OS-picker mechanism,
+/// so callers run their own selection flow (editor overlay) over a
+/// [`Capturer::capture_monitor`] grab.
 pub struct XcapCapturer;
 
 impl Capturer for XcapCapturer {

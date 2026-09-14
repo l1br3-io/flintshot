@@ -22,6 +22,58 @@ use flintshot_core::{capture_fullscreen, FlintshotError};
 #[cfg(target_os = "linux")]
 use flintshot_core::capture::{CaptureOptions, Capturer, PortalScreenshotCapturer};
 
+/// Live portal-backend **interactive** grab: the OS's own selection UI
+/// must appear; select any region and press Enter. Also exercises the
+/// dismissal path (Escape) as a separate run. Manual, per
+/// `docs/TEST_MATRIX.md`:
+///
+/// ```sh
+/// cargo test -p flintshot-core --test capture -- --ignored \
+///     portal_interactive
+/// ```
+///
+/// Spike C caveats (`docs/specs/native-capture-ux/tasks/001-spike-interactive.md`):
+/// on `xdg-desktop-portal-cosmic 0.1.0pop1~abf258b` Escape is
+/// unreliable (spurious code-0 captures, and one observed no-Response
+/// hang) — this test soft-skips on those outcomes with a diagnostic so
+/// it stays usable across portal builds.
+#[test]
+#[ignore]
+#[cfg(target_os = "linux")]
+fn portal_interactive_grabs_selection() {
+    let capturer = PortalScreenshotCapturer;
+    if let Err(FlintshotError::Capture { detail }) = capturer.available() {
+        eprintln!("SKIP: portal unavailable ({detail})");
+        return;
+    }
+    assert!(
+        capturer.supports_selection(),
+        "portal backend must advertise the selection capability"
+    );
+
+    eprintln!("INSTRUCTIONS: select a region in the portal UI, then press Enter");
+    let img = match capturer.capture_selection(&CaptureOptions::default()) {
+        Ok(img) => img,
+        Err(FlintshotError::Capture { detail }) if detail.contains("cancelled") => {
+            eprintln!("SKIP: interactive request was dismissed ({detail})");
+            return;
+        }
+        Err(FlintshotError::Capture { detail }) if detail.contains("timed out") => {
+            eprintln!("SKIP: portal never responded (known cosmic hang quirk: {detail})");
+            return;
+        }
+        Err(e) => panic!("portal capture_selection failed: {e}"),
+    };
+
+    assert!(
+        img.width() > 1 && img.height() > 1,
+        "interactive capture returned a degenerate image: {}x{} \
+         (spike C: a collapsed drag can yield 1x1; retry with a deliberate drag)",
+        img.width(),
+        img.height(),
+    );
+}
+
 /// Grab the primary monitor and sanity-check that we got a non-empty
 /// image back. Marked `#[ignore]` so CI doesn't fail on a headless
 /// runner; humans invoke it explicitly per `docs/TEST_MATRIX.md`.

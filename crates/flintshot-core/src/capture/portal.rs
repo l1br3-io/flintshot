@@ -38,10 +38,23 @@
 //!   (`handle_token`, `modal`, `interactive` only) — grabs via this
 //!   backend are always cursor-less. [`CaptureOptions::include_cursor`]
 //!   cannot be honored here; a permanent, documented gap.
+//! - **Interactive mode** ([`Capturer::capture_selection`]): the
+//!   compositor's own selection UI does the region picking. Spike C
+//!   (`docs/specs/native-capture-ux/tasks/001-spike-interactive.md`)
+//!   verified on COSMIC that the Response returns **exactly the
+//!   selection** (passthrough — no composite crop), that files land
+//!   in `~/Pictures/Screenshots` (read-then-delete), and that
+//!   Escape/dismissal is unreliable on the installed portal build:
+//!   code 1 (proper `"cancelled"`), spurious code 0 captures, and a
+//!   no-Response hang were all observed. Hence the dedicated
+//!   [`INTERACTIVE_RESPONSE_TIMEOUT`] and the `"timed out"` substring
+//!   in that error for quiet-exit callers.
 //!
 //! Budgets: every method call is bounded by the connection's
-//! `method_timeout` and the Response wait by [`RESPONSE_TIMEOUT`] — a
-//! wedged portal errors out instead of hanging the worker.
+//! `method_timeout` and the Response wait by [`RESPONSE_TIMEOUT`]
+//! (non-interactive) or [`INTERACTIVE_RESPONSE_TIMEOUT`]
+//! (interactive) — a wedged portal errors out instead of hanging the
+//! worker.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -77,6 +90,14 @@ const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
 /// leaves room for a slow GNOME/KDE impl while never hanging the
 /// worker.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Response ceiling for the **interactive** path: the user is mid-drag
+/// in the compositor's selection UI, so this budgets human think-time,
+/// not machine latency. Spike C observed interactions up to ~33 s;
+/// 5 min keeps the grab alive for a distracted user while still
+/// bounding a wedged portal (whose no-Response hang would otherwise
+/// park forever). The timeout error carries the `"timed out"`
+/// substring so callers can exit quietly.
+const INTERACTIVE_RESPONSE_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Cross-desktop portal screenshot backend
 /// (`org.freedesktop.portal.Screenshot`, non-interactive).
@@ -110,6 +131,24 @@ impl Capturer for PortalScreenshotCapturer {
         let target = resolve_target_monitor(&monitors, monitor)?;
         let composite = grab_whole_desktop()?;
         crop_composite_to_monitor(composite, target, &monitors)
+    }
+
+    fn supports_selection(&self) -> bool {
+        true
+    }
+
+    fn capture_selection(&self, opts: &CaptureOptions) -> Result<RgbaImage> {
+        if opts.include_cursor {
+            tracing::debug!(
+                "portal screenshot backend: protocol has no cursor option; \
+                 grabbing cursor-less (CaptureOptions::include_cursor is a documented gap)"
+            );
+        }
+        // GOTCHA: passthrough by design — spike C verified the portal's
+        // interactive Response returns exactly the selected region (dims
+        // track the drag), never an all-outputs composite, so the
+        // crop_composite_to_monitor dance must NOT run on this path.
+        grab_portal_screenshot(true)
     }
 }
 
@@ -159,10 +198,40 @@ fn probe_portal() -> Result<()> {
     Ok(())
 }
 
+/// Build the `Screenshot` options map for a grab.
+///
+/// Pure seam so the `interactive` key is unit-testable headless.
+/// GOTCHA (spike C, `xdg-desktop-portal-cosmic 0.1.0pop1~abf258b`):
+/// `interactive: true` opens the compositor's own selection UI whose
+/// Escape handling is unreliable — code 1 (proper cancel), a spurious
+/// code 0 capture of a stale rect, and a no-Response hang were all
+/// observed. Code 1 keeps flowing as the `"cancelled"` error; the
+/// hang is bounded by [`INTERACTIVE_RESPONSE_TIMEOUT`].
+fn screenshot_options(token: &str, interactive: bool) -> HashMap<&str, Value<'_>> {
+    let mut options: HashMap<&str, Value> = HashMap::new();
+    options.insert("handle_token", token.into());
+    if interactive {
+        options.insert("interactive", true.into());
+    }
+    options
+}
+
 /// Run the non-interactive Screenshot dance and return the decoded
 /// composite of **all outputs** (logical-resolution coordinate space —
 /// see the module docs on coverage).
 fn grab_whole_desktop() -> Result<RgbaImage> {
+    grab_portal_screenshot(false)
+}
+
+/// Shared `Screenshot` dance for both modes. `interactive = true`
+/// opens the compositor's selection UI and (per spike C) returns the
+/// exact selection; `false` returns the all-outputs composite.
+fn grab_portal_screenshot(interactive: bool) -> Result<RgbaImage> {
+    let response_budget = if interactive {
+        INTERACTIVE_RESPONSE_TIMEOUT
+    } else {
+        RESPONSE_TIMEOUT
+    };
     let conn = connect(METHOD_TIMEOUT)?;
 
     // Request handle path derived from our unique name (portal
@@ -195,8 +264,7 @@ fn grab_whole_desktop() -> Result<RgbaImage> {
     let mut signals =
         zbus::blocking::MessageIterator::for_match_rule(rule, &conn, Some(64)).map_err(dbus_err)?;
 
-    let mut options: HashMap<&str, Value> = HashMap::new();
-    options.insert("handle_token", token.as_str().into());
+    let options = screenshot_options(&token, interactive);
     let proxy =
         zbus::blocking::Proxy::new(&conn, PORTAL_NAME, PORTAL_DESKTOP_PATH, SCREENSHOT_IFACE)
             .map_err(dbus_err)?;
@@ -223,7 +291,7 @@ fn grab_whole_desktop() -> Result<RgbaImage> {
         let _ = tx.send(signals.next());
     });
 
-    let msg = match rx.recv_timeout(RESPONSE_TIMEOUT) {
+    let msg = match rx.recv_timeout(response_budget) {
         Ok(Some(Ok(m))) => m,
         Ok(Some(Err(e))) => {
             return Err(FlintshotError::Capture {
@@ -239,7 +307,7 @@ fn grab_whole_desktop() -> Result<RgbaImage> {
             return Err(FlintshotError::Capture {
                 detail: format!(
                     "portal screenshot timed out after {} s (no Response signal)",
-                    RESPONSE_TIMEOUT.as_secs()
+                    response_budget.as_secs(),
                 ),
             });
         }
@@ -263,7 +331,10 @@ fn grab_whole_desktop() -> Result<RgbaImage> {
     let bytes = std::fs::read(&path).map_err(|e| FlintshotError::Capture {
         detail: format!("portal screenshot file {} unreadable: {e}", path.display()),
     })?;
-    // The portal writes 0600 files into the temp dir; we own cleanup.
+    // We own cleanup after decode: non-interactive files are 0600
+    // temp files, but GOTCHA interactive (cosmic) responses point into
+    // the user-visible ~/Pictures/Screenshots — leaving them would
+    // litter the dir on every grab, so both modes read-then-delete.
     if let Err(e) = std::fs::remove_file(&path) {
         tracing::debug!("portal screenshot {} not removed: {e}", path.display());
     }
@@ -443,6 +514,35 @@ mod tests {
             y,
             width,
             height,
+        }
+    }
+
+    #[test]
+    fn portal_advertises_selection_capability() {
+        assert!(PortalScreenshotCapturer.supports_selection());
+    }
+
+    #[test]
+    fn options_map_plain_carries_token_only() {
+        let options = screenshot_options("tok", false);
+        assert_eq!(
+            options.get("handle_token"),
+            Some(&Value::from("tok")),
+            "handle_token must always ride the options map"
+        );
+        assert!(
+            !options.contains_key("interactive"),
+            "non-interactive grabs must not send the interactive key: {options:?}"
+        );
+    }
+
+    #[test]
+    fn options_map_interactive_carries_true() {
+        let options = screenshot_options("tok", true);
+        assert_eq!(options.get("handle_token"), Some(&Value::from("tok")));
+        match options.get("interactive") {
+            Some(Value::Bool(true)) => {}
+            other => panic!("interactive must be Bool(true), got {other:?}"),
         }
     }
 

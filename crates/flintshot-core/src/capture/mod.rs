@@ -156,6 +156,36 @@ pub trait Capturer: Send + Sync {
     /// - [`FlintshotError::Capture`] if the grab fails, the monitor
     ///   index is out of range, or the provider refuses the call.
     fn capture_monitor(&self, monitor: Option<u32>, opts: &CaptureOptions) -> Result<RgbaImage>;
+
+    /// Whether this backend can hand region selection to the OS's own
+    /// UI (compositor selection overlay, system picker). Backends
+    /// without such a mechanism keep the `false` default and callers
+    /// fall back to their own selection flow (e.g. the editor
+    /// overlay).
+    fn supports_selection(&self) -> bool {
+        false
+    }
+
+    /// Grab a user-selected region via the OS's own selection UI.
+    ///
+    /// Blocks for as long as the user interacts with the native UI —
+    /// implementations must budget for human think-time, not machine
+    /// latency. A dismissal (Escape / cancel) surfaces as
+    /// [`FlintshotError::Capture`] whose `detail` contains the
+    /// substring `"cancelled"` so callers can exit quietly.
+    ///
+    /// # Errors
+    /// - [`FlintshotError::NotImplemented`] on backends that don't
+    ///   support native selection (the trait default).
+    /// - [`FlintshotError::Capture`] if the user dismissed the
+    ///   selection, the provider failed, or no answer arrived within
+    ///   the backend's interactive budget.
+    fn capture_selection(&self, opts: &CaptureOptions) -> Result<RgbaImage> {
+        let _ = opts;
+        Err(FlintshotError::NotImplemented(
+            "backend does not support native region selection",
+        ))
+    }
 }
 
 /// The kind of display session we're running under, from
@@ -755,6 +785,22 @@ mod tests {
     /// provider. Confirms both the empty and negative rejection paths.
     /// The happy-path capture is covered by the `#[ignore]`'d
     /// `tests/capture.rs::smoke_can_grab_primary` integration test.
+    #[test]
+    fn selection_defaults_are_off() {
+        let fake = FakeCapturer::available("xcap");
+        assert!(
+            !fake.supports_selection(),
+            "trait default must advertise no selection capability"
+        );
+        let err = fake
+            .capture_selection(&CaptureOptions::default())
+            .expect_err("trait default must refuse capture_selection");
+        assert!(
+            matches!(err, FlintshotError::NotImplemented(_)),
+            "expected NotImplemented, got {err:?}"
+        );
+    }
+
     #[test]
     fn invalid_rect_rejected() {
         let negative = Rect {
