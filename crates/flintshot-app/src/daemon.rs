@@ -266,10 +266,15 @@ fn run_event_loop(
         service_tray_gate(tray_gate, tray);
 
         // Prepare-gate tick: drive any armed pre-grab handshake
-        // (app-ack, live-capture re-assert) toward its reply.
+        // (app-ack, live-capture re-assert) toward its reply. The
+        // app-alive input ORs two liveness sources: the registry's
+        // daemon-spawned app worker, and any directly-launched app
+        // window holding a presence connection (AnnounceAppWindow —
+        // the registry cannot see those, and the handshake must still
+        // wait for their hide-ack).
         prepare.step(
             Instant::now(),
-            capture.sessions().app_alive(),
+            capture.sessions().app_alive() || prepare.app_window_present(),
             capture.sessions().live_captures(),
         );
 

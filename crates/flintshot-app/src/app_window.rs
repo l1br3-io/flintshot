@@ -112,9 +112,14 @@ struct SharedInner {
     /// The window closed for a hide directive (not a user quit): the
     /// outer loop must wait for the reopen instead of exiting.
     hide_requested: bool,
-    /// The window was just destroyed: the outer loop marks it after
-    /// every close; the pump consumes it before acking a hide.
-    window_destroyed: bool,
+    /// Whether a home window currently exists, per the outer loop
+    /// (set open before [`EguiShell::run_home`], closed after it
+    /// returns). **State, not a one-shot mark**: the pump's hide-ack
+    /// reads it fresh, so it can only ever attest the *current*
+    /// window — a stale "destroyed" flag from an earlier close cycle
+    /// can no longer ack a handshake while a fresh window is open
+    /// (the race that put the app window in shots).
+    window_open: bool,
     should_open: bool,
     pump_dead: bool,
 }
@@ -166,23 +171,29 @@ impl Shared {
         std::mem::take(&mut self.lock().hide_requested)
     }
 
-    /// The window was destroyed (the outer loop marks this after
-    /// every close). Consumed by the pump's hide-ack.
-    fn mark_window_destroyed(&self) {
-        self.lock().window_destroyed = true;
+    /// The outer loop's window-state updates: open before a
+    /// [`EguiShell::run_home`] iteration, closed after it returns.
+    /// No notification on open (nothing waits for open).
+    fn set_window_open(&self) {
+        self.lock().window_open = true;
+    }
+
+    fn set_window_closed(&self) {
+        self.lock().window_open = false;
         self.changed.notify_all();
     }
 
-    /// Block (bounded) until the window was destroyed, then consume
-    /// the mark. The pump uses this to ack only after the pixels are
-    /// actually gone (the window closed) — ack-then-grace, the
-    /// ADR-0047 lesson.
-    fn wait_window_destroyed(&self, bound: Duration) -> bool {
+    /// Block (bounded) until no window exists, then report success.
+    /// The pump uses this to ack only while the screen is *actually*
+    /// windowless — ack-then-grace, the ADR-0047 lesson. Reading
+    /// current state (rather than consuming a mark) is the
+    /// correctness core: an ack can only ever describe the present,
+    /// never a remembered close from an earlier cycle.
+    fn wait_window_closed(&self, bound: Duration) -> bool {
         let deadline = std::time::Instant::now() + bound;
         let mut guard = self.lock();
         loop {
-            if guard.window_destroyed {
-                guard.window_destroyed = false;
+            if !guard.window_open {
                 return true;
             }
             let now = std::time::Instant::now();
@@ -377,6 +388,7 @@ pub(crate) fn run() -> eyre::Result<()> {
         let bridge = Bridge {
             shared: Arc::clone(&shared),
         };
+        shared.set_window_open();
         let ran = crate::ambient::with_ambient_runtime(|| {
             flintshot_editor_egui::EguiShell::new().run_home(Box::new(bridge), initial_status)
         });
@@ -388,9 +400,9 @@ pub(crate) fn run() -> eyre::Result<()> {
             break;
         }
 
-        // The window is destroyed — the pump's hide-ack waits on
-        // this mark, and every close reason below assumes it.
-        shared.mark_window_destroyed();
+        // The window is destroyed — the pump's hide-ack waits on this
+        // state, and every close reason below assumes it.
+        shared.set_window_closed();
 
         match close_reason(&shared) {
             CloseReason::UserQuit => break,
@@ -488,6 +500,23 @@ fn pump_main(mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>, shared: &Shared) {
     runtime.block_on(async {
         let mut core = HomeCore::default();
         if let Some(stream) = ensure_subscribed(shared).await {
+            // The presence connection: tells the daemon this app
+            // window exists so its pre-grab handshake waits for our
+            // hide-ack (the session registry only tracks
+            // daemon-spawned windows). Parked for the pump's whole
+            // connected life; daemon death ends it, and no reconnect
+            // happens in this effort (same stance as the
+            // subscription). Best-effort: a failure degrades the
+            // handshake to grace-only, never the window.
+            tokio::spawn(async {
+                if let Err(e) = crate::ipc_client::announce_app_window(None).await {
+                    tracing::warn!(
+                        error = %e,
+                        "app window presence connection failed; the pre-grab \
+                         handshake degrades to grace-only"
+                    );
+                }
+            });
             shared.push_directive(HomeDirective::SetStatus("connected".to_string()));
             if connected_loop(stream, &mut cmd_rx, shared, &mut core).await
                 == LoopExit::Disconnected
@@ -605,10 +634,10 @@ async fn connected_loop(
                     }
                     if hide_requested {
                         // The daemon's pre-grab handshake is armed and
-                        // waiting for our ack. Ack only once the window
-                        // is actually destroyed — ack-then-grace, the
-                        // ADR-0047 lesson — best-effort end to end.
-                        if shared.wait_window_destroyed(HIDE_ACK_WINDOW) {
+                        // waiting for our ack. Ack only while no window
+                        // actually exists — ack-then-grace, the ADR-0047
+                        // lesson — best-effort end to end.
+                        if shared.wait_window_closed(HIDE_ACK_WINDOW) {
                             if let Err(e) = crate::ipc_client::delegate_async(
                                 None,
                                 &Request::ReportAppHidden,
@@ -964,19 +993,48 @@ mod tests {
     }
 
     #[test]
-    fn window_destroyed_mark_is_consumed_once() {
-        // The pump's ack waits on this mark; the outer loop sets it
-        // after every window close.
+    fn window_closed_state_is_truthful_not_a_consumed_mark() {
+        // The ack waits on *current* state, never a remembered close:
+        // no window → closed; open → the bounded wait gives up; a
+        // close after a reopen cycle is a fresh, truthful reading —
+        // the stale-mark race (an ack consumed from an earlier
+        // close's mark while a new window was open) is structurally
+        // gone.
         let shared = Shared::default();
         assert!(
-            !shared.wait_window_destroyed(Duration::from_millis(10)),
-            "nothing marked: the bounded wait gives up"
+            shared.wait_window_closed(Duration::from_millis(10)),
+            "no window exists: vacuously closed"
         );
-        shared.mark_window_destroyed();
-        assert!(shared.wait_window_destroyed(Duration::from_secs(1)));
+        shared.set_window_open();
         assert!(
-            !shared.wait_window_destroyed(Duration::from_millis(10)),
-            "consumed by the first ack wait"
+            !shared.wait_window_closed(Duration::from_millis(10)),
+            "an open window must not be acked away"
+        );
+        shared.set_window_closed();
+        assert!(shared.wait_window_closed(Duration::from_secs(1)));
+        // State persists: repeated reads stay true (a one-shot mark
+        // would have been consumed by the first).
+        assert!(shared.wait_window_closed(Duration::from_millis(10)));
+        // Reopen re-arms the wait.
+        shared.set_window_open();
+        assert!(!shared.wait_window_closed(Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn a_close_wakes_a_blocked_ack_wait() {
+        // Cross-thread shape of the real handshake: the pump blocks
+        // on the wait while the outer loop closes the window.
+        let shared = Arc::new(Shared::default());
+        shared.set_window_open();
+        let waiter = {
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || shared.wait_window_closed(Duration::from_secs(5)))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        shared.set_window_closed();
+        assert!(
+            waiter.join().expect("ack waiter thread"),
+            "the close must release the blocked ack wait"
         );
     }
 

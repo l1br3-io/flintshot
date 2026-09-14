@@ -35,6 +35,13 @@ Categories used below:
   *Capture region* / *Capture fullscreen* items and per-monitor
   submenu (one **Capture** item), and the COSMIC applet's
   per-monitor entries (one **Capture** action).
+- **Editor Copy closes the window on Wayland sessions**: the
+  stay-open-after-Copy rule existed solely for X11's owner-based
+  clipboard (the process must keep serving the selection); under
+  Wayland's compositor-owned `zwlr_data_control` the selection
+  survives the process, so the editor closes immediately after a
+  copy (Flameshot/Win11 semantics) instead of lingering for a rule
+  the session never needed. X11 behavior is unchanged.
 - **Breaking — `[hotkeys]` collapses to one binding**: `capture =
   "Ctrl+Shift+PrintScreen"` (the former `region` default) replaces
   the `region` / `fullscreen` pair on X11/macOS/Windows and as the
@@ -126,6 +133,29 @@ Categories used below:
   existing variants).
 
 ### Fixed
+
+- **App-window capture races** (ADR-0052, spec
+  `docs/specs/fix-app-window-capture-races/`) — the "window in the
+  shot" guarantee now holds for every trigger and every app-window
+  lifecycle: (1) the pre-grab handshake learns about
+  **directly-launched** app windows (`flintshot app` auto-starts the
+  daemon, so the registry never saw them) via a parked presence
+  connection (`Request::AnnounceAppWindow`) whose liveness **is**
+  the signal — the handshake waits for their hide-ack instead of
+  blessing the grab on a 250 ms grace alone; (2) the app window's
+  ack now reads *current* window state (`window_open`) instead of
+  consuming a one-shot "destroyed" mark that a later handshake
+  could consume stale while a fresh window was open.
+- **A dropped window-close no longer wedges the capture flow**: the
+  home window latches its Capture click and re-issues
+  `ViewportCommand::Close` after 500 ms (warned, idempotent) if the
+  compositor dropped the first one — previously the armed capture
+  intent sat stuck until the user closed the window by hand.
+- **The tray icon returns the moment pixels are taken on the native
+  path**: the prepare guard's scope is now the grab only (the
+  fallback path's shape), not the whole editor session — annotating
+  for minutes no longer hides the tray (and the cancel affordance
+  with it) while no capture is in flight.
 
 - **No flintshot surface lands in a capture anymore, no matter who
   triggered it** (ADR-0048): a grab now clears *every* flintshot

@@ -505,6 +505,27 @@ where
             continue;
         }
 
+        // AnnounceAppWindow (fix-app-window-capture-races): the app
+        // window's presence connection. The frame is the whole
+        // protocol — the daemon parks on the next read until the
+        // socket dies, and the connection's lifetime IS the presence
+        // signal (a crashed or exited app window closes the socket,
+        // withdrawing it). Feeds the prepare gate's app-alive input so
+        // the pre-grab handshake waits for a hide-ack even from an
+        // app window the daemon never spawned. Old-daemon skew: a
+        // daemon without this interception falls through to the
+        // dispatch tail (an "unsupported" broadcast), the connection
+        // parks in its read loop all the same — harmless.
+        if matches!(request, IpcRequest::AnnounceAppWindow) {
+            tracing::info!("app window presence connection established");
+            let _presence = AppWindowPresenceGuard::new(Arc::clone(&prepare));
+            // Park until the peer goes away. Stray frames (there are
+            // none today) are drained and ignored so only the
+            // connection's death ends the presence.
+            while read_frame(&mut stream).await.is_ok() {}
+            return Ok(());
+        }
+
         // PrepareCapture (smart-window-hiding): the generalized
         // pre-grab handshake. The connection layer broadcasts the
         // hide, arms both gates (prepare + tray), and awaits both —
@@ -589,6 +610,28 @@ where
             shutdown.notify_waiters();
             return Ok(());
         }
+    }
+}
+
+/// RAII presence slot for one `AnnounceAppWindow` connection:
+/// construction registers the app window with the prepare gate,
+/// `Drop` withdraws it. The guard pattern (rather than paired manual
+/// calls) makes every exit path from the parked read loop — EOF,
+/// transport error, task drop — release the slot exactly once.
+struct AppWindowPresenceGuard {
+    gate: Arc<crate::prepare_gate::PrepareGate>,
+}
+
+impl AppWindowPresenceGuard {
+    fn new(gate: Arc<crate::prepare_gate::PrepareGate>) -> Self {
+        gate.app_window_connected();
+        Self { gate }
+    }
+}
+
+impl Drop for AppWindowPresenceGuard {
+    fn drop(&mut self) {
+        self.gate.app_window_disconnected();
     }
 }
 
@@ -1074,6 +1117,50 @@ mod tests {
         task.abort();
         stepper.abort();
         tray_stepper.abort();
+    }
+
+    // ── AnnounceAppWindow presence (fix-app-window-capture-races) ──
+
+    #[tokio::test]
+    async fn announce_app_window_presence_tracks_the_connection() {
+        // The presence connection registers the app window with the
+        // prepare gate, and the connection's death (crash, exit —
+        // either closes the socket) withdraws it. That liveness is
+        // what lets the handshake wait for a hide-ack from an app
+        // window the daemon never spawned.
+        let prepare = Arc::new(crate::prepare_gate::PrepareGate::new());
+        let (mut client, task) = bind_test_connection(
+            crate::hotkeys_portal::PortalHandle::unavailable("unused in this test"),
+            Arc::new(crate::tray_gate::TrayGate::new()),
+            None,
+            Some(Arc::clone(&prepare)),
+        );
+        write_frame(
+            &mut client,
+            &encode_msg(&Request::AnnounceAppWindow).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let registered_by = || async {
+            while !prepare.app_window_present() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), registered_by())
+            .await
+            .expect("the announce registers presence");
+
+        drop(client);
+        let withdrawn_by = || async {
+            while prepare.app_window_present() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), withdrawn_by())
+            .await
+            .expect("the connection's death withdraws presence");
+        task.abort();
     }
 
     // ── Real EditorOpened (smart-window-hiding Task 008) ─────────
