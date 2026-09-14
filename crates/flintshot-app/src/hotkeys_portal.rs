@@ -136,15 +136,14 @@ fn gdk_key_name(code: &str) -> Option<String> {
 }
 
 /// Map a portal `Activated::shortcut_id` to the [`Request`] it should
-/// dispatch. Mirrors the chord → request mapping `HotkeyRegistry` uses
-/// on X11. `None` for unknown ids (logged + dropped by the caller).
+/// dispatch. Both legacy shortcut ids (`region`, `fullscreen`) map to
+/// the single [`Request::Capture`] — the OS UI or the editor owns
+/// selection (native-capture-ux Task 005). Mirrors the chord →
+/// request mapping `HotkeyRegistry` uses on X11. `None` for unknown
+/// ids (logged + dropped by the caller).
 pub(crate) fn request_for_shortcut_id(id: &str) -> Option<Request> {
     match id {
-        REGION_ID => Some(Request::CaptureRegion {
-            monitor: None,
-            delay_ms: 0,
-        }),
-        FULLSCREEN_ID => Some(Request::CaptureFullscreen { monitor: None }),
+        REGION_ID | FULLSCREEN_ID => Some(Request::Capture { delay_ms: 0 }),
         _ => None,
     }
 }
@@ -717,21 +716,18 @@ mod tests {
     // ── request_for_shortcut_id ──────────────────────────────────
 
     #[test]
-    fn region_id_maps_to_region_capture() {
+    fn region_id_maps_to_capture() {
         assert!(matches!(
             request_for_shortcut_id(REGION_ID),
-            Some(Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0
-            })
+            Some(Request::Capture { delay_ms: 0 })
         ));
     }
 
     #[test]
-    fn fullscreen_id_maps_to_fullscreen_capture() {
+    fn fullscreen_id_maps_to_capture() {
         assert!(matches!(
             request_for_shortcut_id(FULLSCREEN_ID),
-            Some(Request::CaptureFullscreen { monitor: None })
+            Some(Request::Capture { delay_ms: 0 })
         ));
     }
 

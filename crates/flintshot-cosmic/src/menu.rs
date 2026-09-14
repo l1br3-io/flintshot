@@ -55,21 +55,21 @@ pub enum Action {
 }
 
 /// Map a popup-menu click to the action it triggers. Mirrors
-/// `flintshot-app::tray::action_for` item-for-item. Every [`MenuMessage`]
-/// variant resolves to a concrete [`Action`]; the match is exhaustive
-/// within this crate, so adding a future variant is a compile error
-/// here (forcing a conscious decision) rather than a silent `None`.
+/// `flintshot-app::tray::action_for` item-for-item. Every
+/// capture-flavored [`MenuMessage`] maps to the single
+/// [`Request::Capture`] (native-capture-ux Task 005; monitor indices
+/// are dropped — selection belongs to the OS UI or the editor). The
+/// popup keeps its per-monitor entries until the Task 8 UX collapse.
+/// Every variant resolves to a concrete [`Action`]; the match is
+/// exhaustive within this crate, so adding a future variant is a
+/// compile error here (forcing a conscious decision) rather than a
+/// silent `None`.
 #[must_use]
 pub fn action_for(message: &MenuMessage) -> Action {
     let request = match message {
-        MenuMessage::CaptureRegion => Request::CaptureRegion {
-            monitor: None,
-            delay_ms: 0,
-        },
-        MenuMessage::CaptureFullscreen => Request::CaptureFullscreen { monitor: None },
-        MenuMessage::CaptureFullscreenMonitor(index) => Request::CaptureFullscreen {
-            monitor: Some(*index),
-        },
+        MenuMessage::CaptureRegion
+        | MenuMessage::CaptureFullscreen
+        | MenuMessage::CaptureFullscreenMonitor(_) => Request::Capture { delay_ms: 0 },
         MenuMessage::OpenLast => Request::OpenLast,
         MenuMessage::Quit => Request::Quit,
         MenuMessage::OpenConfig => return Action::OpenConfig,
@@ -77,8 +77,8 @@ pub fn action_for(message: &MenuMessage) -> Action {
     Action::Request(request)
 }
 
-/// Does acting on this [`Request`] spawn a capture worker (region /
-/// fullscreen — anything that freezes the screen)? Mirrors
+/// Does acting on this [`Request`] spawn a capture worker (anything
+/// that freezes the screen)? Mirrors
 /// `flintshot_app::worker::spawns_capture_worker`; the applet cannot
 /// depend on the daemon's bin crate, so the match is replicated here
 /// and pinned to the same request set by test. For exactly these the
@@ -87,10 +87,7 @@ pub fn action_for(message: &MenuMessage) -> Action {
 /// lands in the grabbed frame (ADR-0041).
 #[must_use]
 pub fn request_spawns_capture(request: &Request) -> bool {
-    matches!(
-        request,
-        Request::CaptureRegion { .. } | Request::CaptureFullscreen { .. }
-    )
+    matches!(request, Request::Capture { .. })
 }
 
 /// Human label for a monitor entry in the *Fullscreen on monitor →*
@@ -174,29 +171,26 @@ mod tests {
     // ── action_for: the menu-item → Action mapping ──────────────────
 
     #[test]
-    fn capture_region_maps_to_default_monitor_request() {
-        let Action::Request(Request::CaptureRegion { monitor, delay_ms }) =
-            action_for(&MenuMessage::CaptureRegion)
-        else {
-            panic!("expected CaptureRegion request");
-        };
-        assert!(monitor.is_none(), "popup region uses the default monitor");
-        assert_eq!(delay_ms, 0);
-    }
-
-    #[test]
-    fn capture_fullscreen_maps_to_default_monitor_request() {
+    fn capture_region_maps_to_capture_request() {
         assert!(matches!(
-            action_for(&MenuMessage::CaptureFullscreen),
-            Action::Request(Request::CaptureFullscreen { monitor: None })
+            action_for(&MenuMessage::CaptureRegion),
+            Action::Request(Request::Capture { delay_ms: 0 })
         ));
     }
 
     #[test]
-    fn capture_fullscreen_monitor_carries_the_index() {
+    fn capture_fullscreen_maps_to_capture_request() {
+        assert!(matches!(
+            action_for(&MenuMessage::CaptureFullscreen),
+            Action::Request(Request::Capture { delay_ms: 0 })
+        ));
+    }
+
+    #[test]
+    fn capture_fullscreen_monitor_maps_to_capture_with_index_dropped() {
         assert_eq!(
             action_for(&MenuMessage::CaptureFullscreenMonitor(3)),
-            Action::Request(Request::CaptureFullscreen { monitor: Some(3) })
+            Action::Request(Request::Capture { delay_ms: 0 })
         );
     }
 
@@ -224,16 +218,8 @@ mod tests {
     #[test]
     fn request_spawns_capture_is_true_only_for_captures() {
         let captures = [
-            Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
-            Request::CaptureRegion {
-                monitor: Some(2),
-                delay_ms: 500,
-            },
-            Request::CaptureFullscreen { monitor: None },
-            Request::CaptureFullscreen { monitor: Some(1) },
+            Request::Capture { delay_ms: 0 },
+            Request::Capture { delay_ms: 500 },
         ];
         for request in &captures {
             assert!(

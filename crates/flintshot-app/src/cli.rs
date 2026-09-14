@@ -1,10 +1,10 @@
 //! CLI definition and subcommand dispatch.
 //!
-//! Phase 1 Task 3 wired `region` / `fullscreen` to real capture calls
-//! and added the `config` subcommand. Task 6 rerouted both through
-//! [`EguiShell::run_editor`] when no `--out` is given; with `--out`,
-//! Task 3's PNG-write path is preserved (headless / scripting escape
-//! hatch). The editor path is gated on the `egui` Cargo feature.
+//! `capture` is the single Capture action (native-capture-ux): the OS's
+//! own selection UI where the backend supports it, else today's
+//! monitor-grab → editor/overlay flow — one command for every surface.
+//! With `--out`, the PNG-write path is preserved (headless / scripting
+//! escape hatch). The editor path is gated on the `egui` Cargo feature.
 //!
 //! [`EguiShell::run_editor`]: flintshot_editor_egui::EguiShell::run_editor
 
@@ -42,10 +42,6 @@ pub struct Cli {
 pub enum Command {
     /// Start the long-running daemon (tray, hotkeys, IPC server). [Phase 2]
     Daemon(DaemonArgs),
-    /// Capture a region and open the editor. [Phase 1]
-    Region(RegionArgs),
-    /// Capture a full monitor and open the editor. [Phase 1]
-    Fullscreen(FullscreenArgs),
     /// The single Capture action: the OS's own selection UI where the
     /// selected backend supports it (portal interactive on Wayland),
     /// else today's monitor-grab → editor/overlay flow.
@@ -54,8 +50,8 @@ pub enum Command {
     Config,
     /// List registered capture backends, their availability, and what
     /// `auto` would select right now (probes only — never grabs
-    /// pixels). Override via `--backend <ID>` on `region`/`fullscreen`
-    /// or the `[capture] backend` config key.
+    /// pixels). Override via `--backend <ID>` on `capture` or the
+    /// `[capture] backend` config key.
     Backends,
     /// Open an existing image in the editor. [Phase 3]
     Open(OpenArgs),
@@ -88,8 +84,8 @@ pub struct DaemonArgs {
 /// Shared capture-output flags, flattened into each capture subcommand.
 ///
 /// Flattening (rather than inheriting) keeps `clap`'s `--help` output
-/// per-subcommand: `flintshot region --help` shows `--out` alongside
-/// the region-specific flags, which reads better than a shared
+/// per-subcommand: `flintshot capture --help` shows `--out` alongside
+/// the capture-specific flags, which reads better than a shared
 /// "COMMON OPTIONS" section.
 #[derive(Debug, Args)]
 pub struct OutputArgs {
@@ -98,8 +94,8 @@ pub struct OutputArgs {
     ///
     /// When omitted, the captured screenshot is opened in the editor
     /// (requires the `egui` Cargo feature, which is on by default;
-    /// `--no-default-features` builds reject `region` / `fullscreen`
-    /// without `--out` with a clear error).
+    /// `--no-default-features` builds reject `capture` without
+    /// `--out` with a clear error).
     ///
     /// Format is always PNG regardless of the extension; a non-`.png`
     /// path still yields valid PNG bytes.
@@ -247,51 +243,14 @@ fn resolve_interaction_mode(
 }
 
 /// Decide whether the editor window opens selection-first (the
-/// `region` capture landing experience): yes iff the capture is a
-/// `region` *and* the resolved shell is the editor window. This is
-/// the single app-crate decision point (plan decision 4) — it covers
-/// the default `editor` mode on all platforms, the `--editor` flag,
-/// and the Wayland demotion of config-set `overlay` (the demoted
-/// editor is still region's editor path). Fullscreen stays plain even
-/// when demoted (spec Open Question 1: "the whole monitor is the
-/// shot"); `open` never requests the phase.
+/// fallback capture landing experience): yes iff the flow label is
+/// `region` (the `capture` fallback arm — selection happens in the
+/// editor there) *and* the resolved shell is the editor window. The
+/// native path's label `capture` stays plain (selection already
+/// happened in the OS UI); `open` and `recapture`-of-fullscreen never
+/// request the phase.
 fn selection_first_for(mode: &str, resolved: InteractionMode) -> bool {
     mode == "region" && resolved == InteractionMode::Editor
-}
-
-/// Arguments for `flintshot region`.
-#[derive(Debug, Args)]
-pub struct RegionArgs {
-    /// Index of the monitor to capture (0-based). Defaults to the active monitor.
-    #[arg(long, value_name = "N")]
-    pub monitor: Option<u32>,
-    /// Delay before capturing, in milliseconds.
-    #[arg(long, default_value_t = 0, value_name = "MILLIS")]
-    pub delay_ms: u32,
-    /// Capture backend override (`auto`, `xcap`, `portal` on Linux).
-    /// Defaults to config's `[capture] backend`.
-    #[arg(long, value_name = "BACKEND")]
-    pub backend: Option<String>,
-    #[command(flatten)]
-    pub interaction: InteractionArgs,
-    #[command(flatten)]
-    pub output: OutputArgs,
-}
-
-/// Arguments for `flintshot fullscreen`.
-#[derive(Debug, Args)]
-pub struct FullscreenArgs {
-    /// Index of the monitor to capture (0-based). Defaults to the active monitor.
-    #[arg(long, value_name = "N")]
-    pub monitor: Option<u32>,
-    /// Capture backend override (`auto`, `xcap`, `portal` on Linux).
-    /// Defaults to config's `[capture] backend`.
-    #[arg(long, value_name = "BACKEND")]
-    pub backend: Option<String>,
-    #[command(flatten)]
-    pub interaction: InteractionArgs,
-    #[command(flatten)]
-    pub output: OutputArgs,
 }
 
 /// Arguments for `flintshot capture` — the single Capture action.
@@ -427,66 +386,6 @@ pub fn run_daemon(args: &DaemonArgs) -> Result<()> {
     crate::daemon::run(args.replace)
 }
 
-/// `flintshot region` — Phase 1 capture+editor, with Phase 2
-/// detect-and-delegate.
-///
-/// If a daemon is running (and `--standalone`/`--out` aren't set), the
-/// request is handed to it so the capture's `Event`s reach subscribers
-/// and the daemon's worker opens the editor. Otherwise the in-process
-/// Phase 1 capture+editor path runs (or a PNG is written with `--out`).
-pub fn run_region(args: &RegionArgs) -> Result<()> {
-    validate_capture_backend_arg(args.backend.as_deref())?;
-    let interaction = args.interaction.mode_override();
-    if delegate_to_daemon(
-        &Request::CaptureRegion {
-            monitor: args.monitor,
-            delay_ms: args.delay_ms,
-        },
-        &args.output,
-        "region",
-        interaction,
-        false,
-    ) {
-        return Ok(());
-    }
-    if args.delay_ms > 0 {
-        tracing::debug!(delay_ms = args.delay_ms, "sleeping before capture");
-        std::thread::sleep(Duration::from_millis(u64::from(args.delay_ms)));
-    }
-    capture_and_dispatch(
-        args.monitor,
-        "region",
-        &args.output,
-        interaction,
-        args.backend.as_deref(),
-    )
-}
-
-/// `flintshot fullscreen` — Phase 1 capture+editor, with Phase 2
-/// detect-and-delegate. See [`run_region`].
-pub fn run_fullscreen(args: &FullscreenArgs) -> Result<()> {
-    validate_capture_backend_arg(args.backend.as_deref())?;
-    let interaction = args.interaction.mode_override();
-    if delegate_to_daemon(
-        &Request::CaptureFullscreen {
-            monitor: args.monitor,
-        },
-        &args.output,
-        "fullscreen",
-        interaction,
-        false,
-    ) {
-        return Ok(());
-    }
-    capture_and_dispatch(
-        args.monitor,
-        "fullscreen",
-        &args.output,
-        interaction,
-        args.backend.as_deref(),
-    )
-}
-
 /// `flintshot capture` — the single Capture action
 /// (native-capture-ux). One command on every surface: the selected
 /// backend (CLI `--backend` > `[capture] backend` > auto) decides the
@@ -550,13 +449,7 @@ pub fn run_capture(args: &CaptureArgs) -> Result<()> {
         // on `after_grab`. The mode label stays "region" so the
         // editor's selection-first landing phase and logs stay
         // byte-identical.
-        capture_and_dispatch(
-            None,
-            "region",
-            &args.output,
-            interaction,
-            args.backend.as_deref(),
-        )
+        capture_and_dispatch("region", &args.output, interaction, args.backend.as_deref())
     }
 }
 
@@ -758,7 +651,7 @@ fn quiet_capture_exit(err: &flintshot_core::FlintshotError) -> bool {
     }
 }
 
-/// Validate a `--backend` value for `region`/`fullscreen`: `auto`,
+/// Validate a `--backend` value for `capture`: `auto`,
 /// any id registered in this build, or nothing. Unlike the config
 /// field (which tolerates unknown strings), a bad CLI value is a hard
 /// error — the user just typed it, mirroring `validate_auth_backend`
@@ -849,20 +742,20 @@ fn delegate_to_daemon(
     }
 }
 
-/// Capture a monitor and either write a PNG (`--out`) or open the
-/// interaction shell (no `--out`). Shared by [`run_region`] /
-/// [`run_fullscreen`]; `mode` is just the log label ("region" /
-/// "fullscreen"). `interaction` is the resolved CLI-flag override, if
-/// any — the config value joins in [`run_capture_shell`].
-/// `backend_pin` is the CLI `--backend` override (config joins in
-/// [`capture_prepared`], CLI > config per the upload `--backend`
-/// precedent).
+/// Capture the primary monitor and either write a PNG (`--out`) or
+/// open the interaction shell (no `--out`) — [`run_capture`]'s
+/// fallback arm (backend without selection support). `mode` is the
+/// log label ("region": the fallback keeps today's byte-identical
+/// flow, selection-first landing included). `interaction` is the
+/// resolved CLI-flag override, if any — the config value joins in
+/// [`run_capture_shell`]. `backend_pin` is the CLI `--backend`
+/// override (config joins in [`capture_prepared`], CLI > config per
+/// the upload `--backend` precedent).
 ///
 /// The worker subscribes to daemon events for its whole lifetime: a
 /// supersede before the shell opens cancels the worker instead
 /// (never open a window the replacing capture would grab through).
 fn capture_and_dispatch(
-    monitor: Option<u32>,
     mode: &str,
     output: &OutputArgs,
     interaction: Option<InteractionMode>,
@@ -873,7 +766,7 @@ fn capture_and_dispatch(
         tracing::info!("{mode} worker superseded before its grab; exiting");
         return Ok(());
     }
-    let Some(img) = capture_prepared(monitor, mode, &watch, None, backend_pin)? else {
+    let Some(img) = capture_prepared(mode, &watch, None, backend_pin)? else {
         tracing::info!("{mode} worker superseded during the prepare handshake; exiting");
         return Ok(());
     };
@@ -891,10 +784,10 @@ fn capture_and_dispatch(
     Ok(())
 }
 
-/// Grab the monitor with every flintshot surface cleared from the
-/// screen (smart-window-hiding; the ADR-0036 tray-hide generalized):
-/// the prepare handshake, the capture, and the restore report all sit
-/// inside the guard's scope, so the tray returns the
+/// Grab the primary monitor with every flintshot surface cleared from
+/// the screen (smart-window-hiding; the ADR-0036 tray-hide
+/// generalized): the prepare handshake, the capture, and the restore
+/// report all sit inside the guard's scope, so the tray returns the
 /// instant the pixels are taken — success or failure — while the
 /// editor / overlay session beyond this function never holds anything
 /// hostage. No daemon (standalone capture) costs one socket probe.
@@ -909,7 +802,6 @@ fn capture_and_dispatch(
 /// registry; the chosen id is logged so a mis-pinned backend is
 /// diagnosable from the worker log.
 fn capture_prepared(
-    monitor: Option<u32>,
     mode: &str,
     watch: &SupersedeWatch,
     override_path: Option<&std::path::Path>,
@@ -934,10 +826,10 @@ fn capture_prepared(
     let mut opts = CaptureOptions::default();
     opts.include_cursor = cfg.capture.include_cursor;
     backend
-        .capture_monitor(monitor, &opts)
+        .capture_monitor(None, &opts)
         .map(Some)
         .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
-        .with_context(|| format!("capturing {mode} on monitor {monitor:?}"))
+        .with_context(|| format!("capturing {mode} on the primary monitor"))
 }
 
 /// RAII screen-clear for one capture: on construction, asks a running
@@ -1322,7 +1214,7 @@ enum SessionNext {
 #[cfg(feature = "egui")]
 fn recapture_image(watch: &SupersedeWatch) -> Result<Option<image::RgbaImage>> {
     std::thread::sleep(Duration::from_millis(crate::app_window::HIDE_GRACE_MS));
-    capture_prepared(None, "recapture", watch, None, None)
+    capture_prepared("recapture", watch, None, None)
         .with_context(|| "recapturing for a new editor session")
 }
 
@@ -2266,7 +2158,6 @@ mod tests {
             .flag()
             .store(true, std::sync::atomic::Ordering::Release);
         let outcome = capture_prepared(
-            None,
             "region",
             &watch,
             Some(std::path::Path::new(
@@ -2288,8 +2179,7 @@ mod tests {
         }
         let watch = SupersedeWatch::inert();
         let outcome = capture_prepared(
-            None,
-            "fullscreen",
+            "region",
             &watch,
             Some(std::path::Path::new(
                 "/this/does/not/exist/flintshot-test-grab.sock",
@@ -2403,22 +2293,26 @@ mod tests {
         assert!(msg.contains("xcap"), "error must list xcap: {msg}");
     }
 
+    /// Pinned (native-capture-ux Task 005): the clean break —
+    /// `region` and `fullscreen` are **removed**, no aliases. The
+    /// single Capture action replaces both; `capture` must keep
+    /// parsing.
     #[test]
-    fn region_and_fullscreen_parse_backend_flag() {
-        let cli = Cli::parse_from(["flintshot", "region", "--backend", "xcap"]);
-        match cli.command {
-            Some(Command::Region(args)) => {
-                assert_eq!(args.backend.as_deref(), Some("xcap"));
-            }
-            other => panic!("expected region, got {other:?}"),
+    fn region_and_fullscreen_fail_to_parse() {
+        for argv in [
+            vec!["flintshot", "region"],
+            vec!["flintshot", "region", "--standalone"],
+            vec!["flintshot", "fullscreen"],
+            vec!["flintshot", "fullscreen", "--monitor", "1"],
+        ] {
+            let err =
+                Cli::try_parse_from(argv.clone()).expect_err(&format!("must not parse: {argv:?}"));
+            assert!(
+                err.to_string().to_lowercase().contains("unrecognized"),
+                "expected an unrecognized-subcommand error for {argv:?}, got: {err}"
+            );
         }
-        let cli = Cli::parse_from(["flintshot", "fullscreen", "--backend", "auto"]);
-        match cli.command {
-            Some(Command::Fullscreen(args)) => {
-                assert_eq!(args.backend.as_deref(), Some("auto"));
-            }
-            other => panic!("expected fullscreen, got {other:?}"),
-        }
+        assert!(Cli::try_parse_from(["flintshot", "capture"]).is_ok());
     }
 
     #[test]
@@ -2665,24 +2559,6 @@ mod tests {
     }
 
     #[test]
-    fn run_region_rejects_unknown_backend_before_any_delegation() {
-        let args = RegionArgs {
-            monitor: None,
-            delay_ms: 0,
-            backend: Some("nope".into()),
-            interaction: InteractionArgs {
-                overlay: false,
-                editor: false,
-            },
-            output: OutputArgs {
-                out: None,
-                standalone: false,
-            },
-        };
-        assert!(run_region(&args).is_err());
-    }
-
-    #[test]
     fn run_auth_rejects_unknown_backend() {
         let args = AuthArgs {
             backend: "nope".to_string(),
@@ -2899,8 +2775,8 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_editor_shell_is_not_selection_first() {
-        assert!(!selection_first_for("fullscreen", InteractionMode::Editor));
+    fn native_capture_shell_is_not_selection_first() {
+        assert!(!selection_first_for("capture", InteractionMode::Editor));
     }
 
     #[test]
@@ -2919,20 +2795,19 @@ mod tests {
     }
 
     #[test]
-    fn wayland_fullscreen_overlay_demotion_stays_plain_editor() {
-        // Spec Open Question 1 (lean no): fullscreen's contract is
-        // "the whole monitor is the shot" — its demotion must not
-        // grow a spotlight.
+    fn wayland_native_capture_demotion_stays_plain_editor() {
+        // The native path's contract: selection already happened in
+        // the OS UI — its demotion must not grow a spotlight.
         let (resolved, _source) = resolve_interaction_mode(None, "overlay", true);
         assert_eq!(resolved, InteractionMode::Editor);
-        assert!(!selection_first_for("fullscreen", resolved));
+        assert!(!selection_first_for("capture", resolved));
     }
 
     #[test]
-    fn region_parses_overlay_flag() {
-        let cli = Cli::parse_from(["flintshot", "region", "--overlay"]);
+    fn capture_parses_overlay_flag() {
+        let cli = Cli::parse_from(["flintshot", "capture", "--overlay"]);
         match cli.command {
-            Some(Command::Region(args)) => {
+            Some(Command::Capture(args)) => {
                 assert!(args.interaction.overlay);
                 assert!(!args.interaction.editor);
                 assert_eq!(
@@ -2940,38 +2815,38 @@ mod tests {
                     Some(InteractionMode::Overlay)
                 );
             }
-            other => panic!("expected Region, got {other:?}"),
+            other => panic!("expected Capture, got {other:?}"),
         }
     }
 
     #[test]
-    fn fullscreen_parses_editor_flag() {
-        let cli = Cli::parse_from(["flintshot", "fullscreen", "--editor"]);
+    fn capture_parses_editor_flag() {
+        let cli = Cli::parse_from(["flintshot", "capture", "--editor"]);
         match cli.command {
-            Some(Command::Fullscreen(args)) => {
+            Some(Command::Capture(args)) => {
                 assert_eq!(
                     args.interaction.mode_override(),
                     Some(InteractionMode::Editor)
                 );
             }
-            other => panic!("expected Fullscreen, got {other:?}"),
+            other => panic!("expected Capture, got {other:?}"),
         }
     }
 
     #[test]
     fn interaction_flags_default_to_no_override() {
-        let cli = Cli::parse_from(["flintshot", "region"]);
+        let cli = Cli::parse_from(["flintshot", "capture"]);
         match cli.command {
-            Some(Command::Region(args)) => {
+            Some(Command::Capture(args)) => {
                 assert_eq!(args.interaction.mode_override(), None);
             }
-            other => panic!("expected Region, got {other:?}"),
+            other => panic!("expected Capture, got {other:?}"),
         }
     }
 
     #[test]
     fn overlay_and_editor_flags_are_mutually_exclusive() {
-        let err = Cli::try_parse_from(["flintshot", "region", "--overlay", "--editor"]);
+        let err = Cli::try_parse_from(["flintshot", "capture", "--overlay", "--editor"]);
         assert!(
             err.is_err(),
             "--overlay and --editor together must be rejected"
@@ -2989,12 +2864,9 @@ mod tests {
         };
         assert!(
             !delegate_to_daemon(
-                &Request::CaptureRegion {
-                    monitor: None,
-                    delay_ms: 0
-                },
+                &Request::Capture { delay_ms: 0 },
                 &output,
-                "region",
+                "capture",
                 Some(InteractionMode::Overlay),
                 false,
             ),

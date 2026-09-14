@@ -680,10 +680,7 @@ mod tests {
         // A duplex pair gives us connected in-memory async buffers — no
         // real socket needed to exercise the framing path.
         let (mut client, mut server) = duplex(8 * 1024);
-        let original = Request::CaptureRegion {
-            monitor: Some(2),
-            delay_ms: 500,
-        };
+        let original = Request::Capture { delay_ms: 500 };
 
         let bytes = encode_msg(&original).unwrap();
         write_frame(&mut client, &bytes).await.unwrap();

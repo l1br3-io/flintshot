@@ -51,26 +51,26 @@ pub(crate) enum TrayAction {
 
 /// Map a menu event to the action it should trigger, or `None` for an
 /// unknown id (e.g. events not from our menu).
+///
+/// Every capture-flavored item — *Capture region*, *Capture
+/// fullscreen*, and the per-monitor submenu — maps to the single
+/// [`Request::Capture`] (native-capture-ux Task 005; the monitor is
+/// dropped: selection belongs to the OS UI or the editor). The menu
+/// itself keeps both labels until the Task 7 UX collapse.
 #[must_use]
 pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
     let id = event.id.as_ref();
     // Per-monitor submenu: "flintshot.fullscreen-monitor.<N>".
     if let Some(num) = id.strip_prefix(ID_FULLSCREEN_MONITOR_PREFIX) {
-        if let Ok(index) = num.parse::<u32>() {
-            return Some(TrayAction::Request(Request::CaptureFullscreen {
-                monitor: Some(index),
-            }));
+        if num.parse::<u32>().is_ok() {
+            return Some(TrayAction::Request(Request::Capture { delay_ms: 0 }));
         }
     }
     match id {
         ID_OPEN_APP => Some(TrayAction::Request(Request::OpenApp)),
-        ID_CAPTURE_REGION => Some(TrayAction::Request(Request::CaptureRegion {
-            monitor: None,
-            delay_ms: 0,
-        })),
-        ID_CAPTURE_FULLSCREEN => Some(TrayAction::Request(Request::CaptureFullscreen {
-            monitor: None,
-        })),
+        ID_CAPTURE_REGION | ID_CAPTURE_FULLSCREEN => {
+            Some(TrayAction::Request(Request::Capture { delay_ms: 0 }))
+        }
         ID_BIND_SHORTCUTS => Some(TrayAction::BindShortcuts),
         ID_OPEN_CONFIG => Some(TrayAction::OpenConfig),
         ID_QUIT => Some(TrayAction::Request(Request::Quit)),
@@ -237,23 +237,20 @@ mod tests {
     }
 
     #[test]
-    fn capture_region_maps_to_request() {
-        let Some(TrayAction::Request(Request::CaptureRegion { monitor, delay_ms })) =
+    fn capture_region_maps_to_capture_request() {
+        let Some(TrayAction::Request(Request::Capture { delay_ms })) =
             action_for(&event(ID_CAPTURE_REGION))
         else {
-            panic!("expected CaptureRegion");
+            panic!("expected Capture");
         };
-        assert!(monitor.is_none(), "tray region uses the default monitor");
-        assert_eq!(delay_ms, 0);
+        assert_eq!(delay_ms, 0, "tray region uses the single Capture action");
     }
 
     #[test]
-    fn capture_fullscreen_maps_to_request() {
+    fn capture_fullscreen_maps_to_capture_request() {
         assert!(matches!(
             action_for(&event(ID_CAPTURE_FULLSCREEN)),
-            Some(TrayAction::Request(Request::CaptureFullscreen {
-                monitor: None
-            }))
+            Some(TrayAction::Request(Request::Capture { delay_ms: 0 }))
         ));
     }
 
@@ -287,13 +284,16 @@ mod tests {
     }
 
     #[test]
-    fn monitor_submenu_item_maps_to_fullscreen_with_index() {
-        let Some(TrayAction::Request(Request::CaptureFullscreen { monitor })) =
+    fn monitor_submenu_item_maps_to_capture_with_index_dropped() {
+        let Some(TrayAction::Request(Request::Capture { delay_ms })) =
             action_for(&event("flintshot.fullscreen-monitor.3"))
         else {
-            panic!("expected CaptureFullscreen for a monitor submenu click");
+            panic!("expected Capture for a monitor submenu click");
         };
-        assert_eq!(monitor, Some(3));
+        assert_eq!(
+            delay_ms, 0,
+            "the monitor index is dropped: selection is the OS UI's / editor's job"
+        );
     }
 
     #[test]

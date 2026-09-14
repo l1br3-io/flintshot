@@ -337,7 +337,7 @@ mod tests {
         // A path that doesn't exist → immediate NoDaemon, no network.
         let outcome = delegate_to(
             Some(Path::new("/this/does/not/exist/flintshot-test.sock")),
-            &Request::CaptureFullscreen { monitor: None },
+            &Request::Capture { delay_ms: 0 },
         )
         .expect("absent path should not error");
         assert_eq!(outcome, DelegateOutcome::NoDaemon);

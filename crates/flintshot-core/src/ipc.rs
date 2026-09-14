@@ -32,21 +32,6 @@ const PIPE_NAME: &str = "flintshot";
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Request {
-    /// Capture a region (interactive selection) and open the editor.
-    /// `monitor` selects the source monitor when set; `delay_ms` is the
-    /// pre-capture delay in milliseconds.
-    CaptureRegion {
-        /// Index of the monitor to capture, or the primary when `None`.
-        monitor: Option<u32>,
-        /// Pre-capture delay in milliseconds.
-        delay_ms: u32,
-    },
-    /// Capture an entire monitor and open the editor. `monitor` selects
-    /// the source monitor when set; primary otherwise.
-    CaptureFullscreen {
-        /// Index of the monitor to capture, or the primary when `None`.
-        monitor: Option<u32>,
-    },
     /// Tell the daemon to quit (used by `flintshot daemon --replace` and
     /// the tray *Quit* item).
     Quit,
@@ -142,8 +127,9 @@ pub enum Request {
     /// the backend (CLI > config > auto), runs the OS's own selection
     /// UI when the backend supports it, else today's monitor-grab →
     /// editor/overlay flow. `delay_ms` is the pre-capture delay.
-    /// Replaces `CaptureRegion`/`CaptureFullscreen` (0.x schema, all
-    /// consumers ship together).
+    /// The 0.x schema ships all consumers together, so the old
+    /// `CaptureRegion`/`CaptureFullscreen` variants were removed
+    /// outright rather than deprecated.
     Capture {
         /// Pre-capture delay in milliseconds.
         delay_ms: u32,
@@ -219,8 +205,8 @@ pub enum Event {
     /// the daemon's worker reaper. Crash-safe by construction: a
     /// killed worker still "reports" (unlike a worker self-report,
     /// which a crash would swallow). Subscribers that hide for grabs
-    /// (the app window) restore on this. Only `region` / `fullscreen`
-    /// workers emit it.
+    /// (the app window) restore on this. Only `capture` workers emit
+    /// it.
     SessionEnded,
     /// Someone asked the app window to come forward (tray *Open app*,
     /// a second `flintshot app`, launcher entry). Broadcast on
@@ -320,16 +306,6 @@ mod tests {
     #[test]
     fn request_postcard_roundtrip() {
         let cases = [
-            Request::CaptureRegion {
-                monitor: None,
-                delay_ms: 0,
-            },
-            Request::CaptureRegion {
-                monitor: Some(2),
-                delay_ms: 500,
-            },
-            Request::CaptureFullscreen { monitor: None },
-            Request::CaptureFullscreen { monitor: Some(1) },
             Request::Quit,
             Request::Subscribe,
             Request::ReportSaved {
