@@ -1,7 +1,7 @@
 //! Single-instance lock for the daemon role.
 //!
 //! Only the daemon acquires this lock (see ADR-0020 — workers such as
-//! `flintshot region` never take it, so multiple editors can run at
+//! `flintshot capture` never take it, so multiple editors can run at
 //! once). A second `flintshot daemon` against the same id fails the
 //! acquire and exits.
 //!

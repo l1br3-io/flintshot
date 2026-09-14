@@ -146,42 +146,73 @@ impl Default for CaptureConfig {
     }
 }
 
-/// Global-hotkey chords (X11/macOS/Windows). Wayland's portal-based
-/// global hotkeys are Phase 6 — on Wayland the daemon logs the
-/// compositor-keybind workaround and the `[hotkeys]` section is simply
-/// unused. Chord strings use `global-hotkey`'s accelerator format
-/// (`"Ctrl+Shift+Print"`, case-insensitive modifier names, `+`-joined).
+/// Global-hotkey chord, X11/macOS/Windows (`global-hotkey`) and the
+/// Wayland portal bind suggestion alike. One binding fires the single
+/// Capture action (native-capture-ux; the former `region` /
+/// `fullscreen` pair was removed — legacy keys warn at load via
+/// [`Config::load_from`]'s raw-table inspection and bind nothing).
+/// Chord strings use `global-hotkey`'s accelerator format
+/// (`"Ctrl+Shift+Print"`, case-insensitive modifier names,
+/// `+`-joined).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub struct HotkeyConfig {
-    /// Chord that captures a region (interactive selection), e.g.
-    /// `"Ctrl+Shift+Print"`.
-    #[serde(default = "default_region_hotkey")]
-    pub region: String,
-    /// Chord that captures the primary monitor fullscreen, e.g.
-    /// `"Ctrl+Alt+Print"`.
-    #[serde(default = "default_fullscreen_hotkey")]
-    pub fullscreen: String,
+    /// Chord that fires the single Capture action, e.g.
+    /// `"Ctrl+Shift+PrintScreen"` (the former `region` default).
+    #[serde(default = "default_capture_hotkey")]
+    pub capture: String,
 }
 
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
-            region: default_region_hotkey(),
-            fullscreen: default_fullscreen_hotkey(),
+            capture: default_capture_hotkey(),
         }
     }
 }
 
-fn default_region_hotkey() -> String {
+fn default_capture_hotkey() -> String {
     // global-hotkey's parser names the key `PrintScreen` (not `Print`);
     // ARCHITECTURE.md's example used the shorter form.
     "Ctrl+Shift+PrintScreen".into()
 }
 
-fn default_fullscreen_hotkey() -> String {
-    "Ctrl+Alt+PrintScreen".into()
+/// Legacy `[hotkeys]` keys from the pre-native-capture-ux config
+/// (removed with the `region`/`fullscreen` subcommands).
+const LEGACY_HOTKEY_KEYS: [&str; 2] = ["region", "fullscreen"];
+
+/// The legacy keys present in a raw `[hotkeys]` table (pure detection
+/// seam for the load-time warn).
+#[must_use]
+fn legacy_hotkey_keys(table: Option<&toml_edit::Table>) -> Vec<String> {
+    match table {
+        Some(table) => LEGACY_HOTKEY_KEYS
+            .iter()
+            .filter(|key| table.contains_key(key))
+            .map(std::string::ToString::to_string)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Warn once per legacy key found in the raw `[hotkeys]` table.
+///
+/// GOTCHA: serde ignores unknown fields silently, so a config still
+/// carrying `region`/`fullscreen` chords would load with no signal —
+/// and bind nothing (the fields no longer exist). Inspecting the
+/// `toml_edit` document *before* deserializing is what makes the
+/// rename visible (the string-tolerance policy's inspection
+/// precedent, without the tolerance: these keys are dead, not
+/// pass-through).
+fn warn_legacy_hotkeys(doc: &toml_edit::DocumentMut) {
+    for key in legacy_hotkey_keys(doc.get("hotkeys").and_then(toml_edit::Item::as_table)) {
+        tracing::warn!(
+            key = %key,
+            "[hotkeys] `{key}` was removed with the region/fullscreen split; \
+             set `[hotkeys] capture` instead — nothing binds from `{key}`"
+        );
+    }
 }
 
 /// Upload defaults (Phase 4). Mirrors the `[upload]` config section.
@@ -284,13 +315,22 @@ impl Config {
     ///   parse as valid TOML or fails to deserialize.
     pub fn load_from(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => match toml::from_str::<Self>(&contents) {
-                Ok(cfg) => Ok(cfg),
-                Err(e) => Err(FlintshotError::Config {
-                    path: path.to_path_buf(),
-                    detail: e.to_string(),
-                }),
-            },
+            Ok(contents) => {
+                // Legacy-key inspection first: `toml_edit` parses any
+                // syntactically valid TOML (more lenient than the
+                // serde pass), and a parse failure there simply falls
+                // through to the real error below.
+                if let Ok(doc) = contents.parse::<toml_edit::DocumentMut>() {
+                    warn_legacy_hotkeys(&doc);
+                }
+                match toml::from_str::<Self>(&contents) {
+                    Ok(cfg) => Ok(cfg),
+                    Err(e) => Err(FlintshotError::Config {
+                        path: path.to_path_buf(),
+                        detail: e.to_string(),
+                    }),
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(FlintshotError::Io(e)),
         }
@@ -384,13 +424,8 @@ impl Config {
         if let Some(hk) = doc.get_mut("hotkeys").and_then(|i| i.as_table_mut()) {
             set_value(
                 hk,
-                "region",
-                toml_edit::Value::from(self.hotkeys.region.as_str()),
-            );
-            set_value(
-                hk,
-                "fullscreen",
-                toml_edit::Value::from(self.hotkeys.fullscreen.as_str()),
+                "capture",
+                toml_edit::Value::from(self.hotkeys.capture.as_str()),
             );
         }
         if let Some(upload) = doc.get_mut("upload").and_then(|i| i.as_table_mut()) {
@@ -624,14 +659,26 @@ include-cursor = true  # hide cursor when capturing presentations
             path
         })
         .unwrap();
-        assert_eq!(cfg.hotkeys.region, "Ctrl+Shift+PrintScreen");
-        assert_eq!(cfg.hotkeys.fullscreen, "Ctrl+Alt+PrintScreen");
+        assert_eq!(cfg.hotkeys.capture, "Ctrl+Shift+PrintScreen");
         let d = Config::default();
-        assert_eq!(d.hotkeys.region, "Ctrl+Shift+PrintScreen");
+        assert_eq!(d.hotkeys.capture, "Ctrl+Shift+PrintScreen");
     }
 
     #[test]
     fn custom_hotkeys_load_from_toml() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[hotkeys]\ncapture = \"Super+F\"\n").unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.hotkeys.capture, "Super+F");
+    }
+
+    /// Pinned (native-capture-ux Task 009): a config still carrying
+    /// the legacy `[hotkeys]` region/fullscreen chords loads — the
+    /// warn fires (detection pinned below) — but nothing binds from
+    /// them: `capture` falls back to its default.
+    #[test]
+    fn legacy_hotkeys_load_with_default_capture() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
@@ -640,8 +687,55 @@ include-cursor = true  # hide cursor when capturing presentations
         )
         .unwrap();
         let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.hotkeys.region, "Ctrl+Shift+KeyA");
-        assert_eq!(cfg.hotkeys.fullscreen, "Super+F");
+        assert_eq!(
+            cfg.hotkeys.capture,
+            HotkeyConfig::default().capture,
+            "legacy keys must not seed the capture binding"
+        );
+    }
+
+    /// The detection seam behind the load-time warn: exactly the two
+    /// legacy keys, only when present.
+    #[test]
+    fn legacy_hotkey_keys_are_detected_from_the_raw_table() {
+        let doc: toml_edit::DocumentMut =
+            "[hotkeys]\nregion = \"X\"\nfullscreen = \"Y\"\ncapture = \"Z\"\n"
+                .parse()
+                .unwrap();
+        let table = doc.get("hotkeys").and_then(toml_edit::Item::as_table);
+        assert_eq!(
+            legacy_hotkey_keys(table),
+            vec!["region".to_string(), "fullscreen".to_string()]
+        );
+        let doc: toml_edit::DocumentMut = "[hotkeys]\ncapture = \"Z\"\n".parse().unwrap();
+        let table = doc.get("hotkeys").and_then(toml_edit::Item::as_table);
+        assert!(
+            legacy_hotkey_keys(table).is_empty(),
+            "no legacy keys, no warn"
+        );
+        assert!(
+            legacy_hotkey_keys(None).is_empty(),
+            "no [hotkeys] table at all"
+        );
+    }
+
+    /// A save→load round-trip carries the single capture chord.
+    #[test]
+    fn hotkeys_capture_roundtrip_via_save() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.hotkeys.capture = "Ctrl+Alt+F9".into();
+        cfg.save_to(&path).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("capture = \"Ctrl+Alt+F9\""),
+            "capture chord not persisted:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.hotkeys.capture, "Ctrl+Alt+F9");
     }
 
     #[test]

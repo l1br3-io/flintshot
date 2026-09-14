@@ -22,7 +22,7 @@ use global_hotkey::GlobalHotKeyManager;
 
 /// Registered global hotkeys + the id → request map. Holds the manager
 /// alive for the daemon's lifetime (dropping the manager unregisters
-/// everything). Remembers the chords it registered so config hot-reload
+/// everything). Remembers the chord it registered so config hot-reload
 /// (Task 010) can skip a costly re-registration when `[hotkeys]` is
 /// unchanged.
 pub(crate) struct HotkeyRegistry {
@@ -31,15 +31,14 @@ pub(crate) struct HotkeyRegistry {
     #[allow(dead_code)]
     manager: Option<GlobalHotKeyManager>,
     by_id: HashMap<u32, Request>,
-    region: String,
-    fullscreen: String,
+    capture: String,
 }
 
 /// Pure check: has the `[hotkeys]` section changed relative to the
-/// currently-registered chords? (Separate from [`HotkeyRegistry`] so it
+/// currently-registered chord? (Separate from [`HotkeyRegistry`] so it
 /// is unit-testable without a display / `global-hotkey`.)
-fn hotkeys_changed(config: &HotkeyConfig, region: &str, fullscreen: &str) -> bool {
-    config.region != region || config.fullscreen != fullscreen
+fn hotkeys_changed(config: &HotkeyConfig, capture: &str) -> bool {
+    config.capture != capture
 }
 
 impl HotkeyRegistry {
@@ -55,33 +54,22 @@ impl HotkeyRegistry {
                 tracing::warn!(
                     error = %e,
                     "global hotkeys unavailable on this platform (likely Wayland); \
-                     bind a compositor keybinding to `flintshot region` / \
-                     `flintshot fullscreen` instead"
+                     bind a compositor keybinding to `flintshot capture` instead"
                 );
                 return Self::empty();
             }
         };
         let mut by_id = HashMap::new();
-        // Both legacy chords fire the single Capture action
-        // (native-capture-ux Task 005); the [hotkeys] collapse to one
-        // `capture` binding lands with Task 9.
         Self::register(
             &manager,
             &mut by_id,
-            &config.region,
-            Request::Capture { delay_ms: 0 },
-        );
-        Self::register(
-            &manager,
-            &mut by_id,
-            &config.fullscreen,
+            &config.capture,
             Request::Capture { delay_ms: 0 },
         );
         Self {
             manager: Some(manager),
             by_id,
-            region: config.region.clone(),
-            fullscreen: config.fullscreen.clone(),
+            capture: config.capture.clone(),
         }
     }
 
@@ -93,8 +81,7 @@ impl HotkeyRegistry {
         Self {
             manager: None,
             by_id: HashMap::new(),
-            region: String::new(),
-            fullscreen: String::new(),
+            capture: String::new(),
         }
     }
 
@@ -104,7 +91,7 @@ impl HotkeyRegistry {
     /// reload clears the chords so the next change retries; the daemon
     /// keeps running.
     pub(crate) fn refresh(&mut self, config: &HotkeyConfig) -> bool {
-        if !hotkeys_changed(config, &self.region, &self.fullscreen) {
+        if !hotkeys_changed(config, &self.capture) {
             return false;
         }
         // Drop the old manager — global-hotkey unregisters its hotkeys
@@ -121,26 +108,18 @@ impl HotkeyRegistry {
                      hotkeys disabled until the next config change"
                 );
                 // Force a rebuild attempt next time.
-                self.region.clear();
-                self.fullscreen.clear();
+                self.capture.clear();
                 return true;
             }
         };
         Self::register(
             &manager,
             &mut self.by_id,
-            &config.region,
-            Request::Capture { delay_ms: 0 },
-        );
-        Self::register(
-            &manager,
-            &mut self.by_id,
-            &config.fullscreen,
+            &config.capture,
             Request::Capture { delay_ms: 0 },
         );
         self.manager = Some(manager);
-        self.region.clone_from(&config.region);
-        self.fullscreen.clone_from(&config.fullscreen);
+        self.capture.clone_from(&config.capture);
         tracing::info!("re-registered global hotkeys after a config change");
         true
     }
@@ -203,8 +182,7 @@ mod tests {
         let reg = HotkeyRegistry {
             manager: None,
             by_id,
-            region: String::new(),
-            fullscreen: String::new(),
+            capture: String::new(),
         };
         assert!(matches!(
             reg.lookup(42),
@@ -216,33 +194,25 @@ mod tests {
     #[test]
     fn hotkeys_changed_detects_a_real_change() {
         let mut cfg = flintshot_core::HotkeyConfig::default();
-        cfg.region = "Ctrl+Shift+A".into();
-        cfg.fullscreen = "Ctrl+Alt+B".into();
-        assert!(hotkeys_changed(&cfg, "Ctrl+Shift+Old", "Ctrl+Alt+B"));
-        assert!(hotkeys_changed(&cfg, "Ctrl+Shift+A", "Ctrl+Alt+Old"));
-        assert!(hotkeys_changed(&cfg, "", ""));
+        cfg.capture = "Ctrl+Shift+A".into();
+        assert!(hotkeys_changed(&cfg, "Ctrl+Shift+Old"));
+        assert!(hotkeys_changed(&cfg, ""));
     }
 
     #[test]
     fn hotkeys_unchanged_is_detected() {
         let mut cfg = flintshot_core::HotkeyConfig::default();
-        cfg.region = "Ctrl+Shift+PrintScreen".into();
-        cfg.fullscreen = "Ctrl+Alt+PrintScreen".into();
-        assert!(!hotkeys_changed(
-            &cfg,
-            "Ctrl+Shift+PrintScreen",
-            "Ctrl+Alt+PrintScreen"
-        ));
+        cfg.capture = "Ctrl+Shift+PrintScreen".into();
+        assert!(!hotkeys_changed(&cfg, "Ctrl+Shift+PrintScreen"));
     }
 
     #[test]
-    fn default_chords_parse_validly() {
-        // The default config chords must be accepted by global-hotkey's
+    fn default_chord_parses_validly() {
+        // The default config chord must be accepted by global-hotkey's
         // parser (pure — no display/registration needed).
         use global_hotkey::hotkey::HotKey;
         use std::str::FromStr;
         assert!(HotKey::from_str("Ctrl+Shift+PrintScreen").is_ok());
-        assert!(HotKey::from_str("Ctrl+Alt+PrintScreen").is_ok());
     }
 
     #[test]

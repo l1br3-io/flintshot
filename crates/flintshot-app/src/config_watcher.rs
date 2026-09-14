@@ -84,7 +84,7 @@ mod tests {
     #[ignore = "exercises the real kernel file watcher; run explicitly"]
     fn watcher_fires_on_config_write() {
         let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, "[hotkeys]\nregion = \"Ctrl+Shift+PrintScreen\"\n").unwrap();
+        writeln!(tmp, "[hotkeys]\ncapture = \"Ctrl+Shift+PrintScreen\"\n").unwrap();
         tmp.flush().unwrap();
 
         let watcher = ConfigWatcher::start(tmp.path()).unwrap();
@@ -94,7 +94,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         let mut tmp2 = tempfile::NamedTempFile::new().unwrap();
-        writeln!(tmp2, "[hotkeys]\nregion = \"Ctrl+Alt+A\"\n").unwrap();
+        writeln!(tmp2, "[hotkeys]\ncapture = \"Ctrl+Alt+A\"\n").unwrap();
         std::fs::copy(tmp2.path(), tmp.path()).unwrap();
 
         // Give the kernel watcher a moment to deliver.
