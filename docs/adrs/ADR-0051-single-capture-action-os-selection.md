@@ -88,7 +88,9 @@ actual value-add — stays as the default post-grab destination.
   path and recaptures still use it) — no code was deleted there.
 - The editor remains the default post-grab destination everywhere;
   `after_grab = "clipboard"` is the window-less flow (notification
-  as the only feedback).
+  as the only feedback). Superseded (2026-09-14,
+  `docs/specs/clipboard-opens-editor/`): `clipboard` now copies and
+  opens the editor too — only `upload` stays window-less.
 - Spike B's "we have our own editor" note is superseded *as a UX
   stance* (the OS UI is the better selector); its protocol findings
   (prompt-free non-interactive path, client-lifetime gotcha) stand.
