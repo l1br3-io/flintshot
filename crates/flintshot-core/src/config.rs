@@ -123,6 +123,16 @@ pub struct CaptureConfig {
     /// never bricks config loading).
     #[serde(default = "default_capture_backend")]
     pub backend: String,
+    /// Post-grab action on the **native** capture path:
+    /// `"editor"` (default; the grab opens in the editor),
+    /// `"clipboard"` (image copied, no windows), or `"upload"`
+    /// (default upload backend; URL → clipboard). The fallback
+    /// (`xcap`) path always routes into the editor flow regardless.
+    /// Unknown values load verbatim, warn at dispatch time, and
+    /// resolve `editor` — same string-tolerant policy as
+    /// [`Self::backend`].
+    #[serde(default = "default_after_grab")]
+    pub after_grab: String,
 }
 
 impl Default for CaptureConfig {
@@ -131,6 +141,7 @@ impl Default for CaptureConfig {
             include_cursor: default_include_cursor(),
             default_delay_ms: default_delay_ms(),
             backend: default_capture_backend(),
+            after_grab: default_after_grab(),
         }
     }
 }
@@ -237,6 +248,10 @@ fn default_delay_ms() -> u32 {
 
 fn default_capture_backend() -> String {
     "auto".into()
+}
+
+fn default_after_grab() -> String {
+    "editor".into()
 }
 
 impl Config {
@@ -932,6 +947,59 @@ default-backend = \"imgur\"
         let written = fs::read_to_string(&path).unwrap();
         assert!(
             written.contains("backend = \"gnome-shell-legacy\""),
+            "save must preserve the user's (unknown) value verbatim:\n{written}"
+        );
+    }
+
+    #[test]
+    fn after_grab_defaults_to_editor_when_absent() {
+        let cfg = Config::load_from(&{
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            fs::write(&path, "[capture]\nbackend = \"auto\"\n").unwrap();
+            path
+        })
+        .unwrap();
+        assert_eq!(cfg.capture.after_grab, "editor");
+        assert_eq!(CaptureConfig::default().after_grab, "editor");
+    }
+
+    #[test]
+    fn after_grab_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.capture.after_grab = "clipboard".into();
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("after-grab = \"clipboard\""),
+            "after-grab not persisted:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.capture.after_grab, "clipboard");
+    }
+
+    #[test]
+    fn after_grab_unknown_value_loads_and_resaves_verbatim() {
+        // Same string-tolerant policy as `backend`: an unknown action
+        // (future release, typo) loads verbatim, never bricks config,
+        // and a save must not rewrite it. Dispatch warns + resolves
+        // `editor`.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[capture]\nafter-grab = \"print-it\"\n").unwrap();
+
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.capture.after_grab, "print-it");
+
+        cfg.save_to(&path).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("after-grab = \"print-it\""),
             "save must preserve the user's (unknown) value verbatim:\n{written}"
         );
     }
