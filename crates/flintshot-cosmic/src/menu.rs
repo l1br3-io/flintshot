@@ -4,37 +4,30 @@
 //! `action_for` (`flintshot-app::tray`): it maps a popup-menu click to
 //! either a daemon [`Request`] (sent via [`crate::ipc::send_request`])
 //! or a local "open config" side-effect. Keeping the mapping pure lets
-//! Task 7's acceptance test exercise every menu item without a display
+//! the acceptance tests exercise every menu item without a display
 //! or a running daemon; the libcosmic wiring in [`crate::app`] just
 //! feeds button presses in and performs the resulting actions.
 //!
-//! Mirrors the tray menu set: *Capture region*, *Capture fullscreen*,
-//! *Fullscreen on monitor →* (per-monitor submenu), *Open last*,
-//! *Open config*, *Quit*. See ADR-0005 (applet is a pure
-//! IPC client) and the Phase 3 plan's "applet shells out to `$EDITOR`"
-//! decision.
+//! Mirrors the tray menu set (native-capture-ux): one **Capture**
+//! action, *Open last*, *Open config*, *Quit*. See ADR-0005 (applet
+//! is a pure IPC client) and the Phase 3 plan's "applet shells out to
+//! `$EDITOR`" decision."
 
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
 use flintshot_core::ipc::Request;
-use flintshot_core::MonitorInfo;
 
 /// A popup-menu click, before it is resolved to an [`Action`].
 ///
-/// One variant per button in the popup. The per-monitor submenu carries
-/// the monitor index; the applet builds the submenu entries from
-/// [`monitor_entries`] and emits this variant on click.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One variant per button in the popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MenuMessage {
-    /// *Capture region* — interactive selection on the primary monitor.
-    CaptureRegion,
-    /// *Capture fullscreen* — primary monitor.
-    CaptureFullscreen,
-    /// *Fullscreen on monitor →* submenu, entry `index`.
-    CaptureFullscreenMonitor(u32),
+    /// *Capture* — the single Capture action: the OS's own selection
+    /// UI where the backend supports it, else the editor flow.
+    Capture,
     /// *Open last* — re-open the most recently saved capture.
     OpenLast,
     /// *Open config* — edit `config.toml` in `$EDITOR`.
@@ -55,21 +48,14 @@ pub enum Action {
 }
 
 /// Map a popup-menu click to the action it triggers. Mirrors
-/// `flintshot-app::tray::action_for` item-for-item. Every
-/// capture-flavored [`MenuMessage`] maps to the single
-/// [`Request::Capture`] (native-capture-ux Task 005; monitor indices
-/// are dropped — selection belongs to the OS UI or the editor). The
-/// popup keeps its per-monitor entries until the Task 8 UX collapse.
-/// Every variant resolves to a concrete [`Action`]; the match is
-/// exhaustive within this crate, so adding a future variant is a
-/// compile error here (forcing a conscious decision) rather than a
-/// silent `None`.
+/// `flintshot-app::tray::action_for` item-for-item. Every variant
+/// resolves to a concrete [`Action`]; the match is exhaustive within
+/// this crate, so adding a future variant is a compile error here
+/// (forcing a conscious decision) rather than a silent `None`.
 #[must_use]
-pub fn action_for(message: &MenuMessage) -> Action {
+pub fn action_for(message: MenuMessage) -> Action {
     let request = match message {
-        MenuMessage::CaptureRegion
-        | MenuMessage::CaptureFullscreen
-        | MenuMessage::CaptureFullscreenMonitor(_) => Request::Capture { delay_ms: 0 },
+        MenuMessage::Capture => Request::Capture { delay_ms: 0 },
         MenuMessage::OpenLast => Request::OpenLast,
         MenuMessage::Quit => Request::Quit,
         MenuMessage::OpenConfig => return Action::OpenConfig,
@@ -88,39 +74,6 @@ pub fn action_for(message: &MenuMessage) -> Action {
 #[must_use]
 pub fn request_spawns_capture(request: &Request) -> bool {
     matches!(request, Request::Capture { .. })
-}
-
-/// Human label for a monitor entry in the *Fullscreen on monitor →*
-/// submenu: `"<N> · <name>"`, or `"<N> · <name> (primary)"` for the
-/// primary monitor. Mirrors `flintshot-app::tray`'s label format
-/// (`tray.rs:117`) so the applet and tray read identically.
-#[must_use]
-pub fn monitor_label(monitor: &MonitorInfo) -> String {
-    monitor_label_parts(monitor.index, &monitor.name, monitor.is_primary)
-}
-
-/// Pure label builder behind [`monitor_label`]. Factored out so the
-/// format is unit-testable without constructing a [`MonitorInfo`] (which
-/// is `#[non_exhaustive]` with geometry fields this crate can't set).
-#[must_use]
-fn monitor_label_parts(index: u32, name: &str, is_primary: bool) -> String {
-    if is_primary {
-        format!("{index} · {name} (primary)")
-    } else {
-        format!("{index} · {name}")
-    }
-}
-
-/// All monitor entries for the submenu, as `(index, label)` pairs.
-/// Returns an empty vector if `flintshot_core::monitors()` errors or
-/// reports no monitors — the popup then shows a disabled "no monitors"
-/// placeholder instead.
-#[must_use]
-pub fn monitor_entries() -> Vec<(u32, String)> {
-    match flintshot_core::monitors() {
-        Ok(list) if !list.is_empty() => list.iter().map(|m| (m.index, monitor_label(m))).collect(),
-        _ => Vec::new(),
-    }
 }
 
 /// Build the `$EDITOR <path>` command for opening the config file.
@@ -171,46 +124,30 @@ mod tests {
     // ── action_for: the menu-item → Action mapping ──────────────────
 
     #[test]
-    fn capture_region_maps_to_capture_request() {
+    fn capture_maps_to_capture_request() {
         assert!(matches!(
-            action_for(&MenuMessage::CaptureRegion),
+            action_for(MenuMessage::Capture),
             Action::Request(Request::Capture { delay_ms: 0 })
         ));
-    }
-
-    #[test]
-    fn capture_fullscreen_maps_to_capture_request() {
-        assert!(matches!(
-            action_for(&MenuMessage::CaptureFullscreen),
-            Action::Request(Request::Capture { delay_ms: 0 })
-        ));
-    }
-
-    #[test]
-    fn capture_fullscreen_monitor_maps_to_capture_with_index_dropped() {
-        assert_eq!(
-            action_for(&MenuMessage::CaptureFullscreenMonitor(3)),
-            Action::Request(Request::Capture { delay_ms: 0 })
-        );
     }
 
     #[test]
     fn open_last_maps_to_request() {
         assert_eq!(
-            action_for(&MenuMessage::OpenLast),
+            action_for(MenuMessage::OpenLast),
             Action::Request(Request::OpenLast)
         );
     }
 
     #[test]
     fn open_config_maps_directly() {
-        assert_eq!(action_for(&MenuMessage::OpenConfig), Action::OpenConfig);
+        assert_eq!(action_for(MenuMessage::OpenConfig), Action::OpenConfig);
     }
 
     #[test]
     fn quit_maps_to_request() {
         assert_eq!(
-            action_for(&MenuMessage::Quit),
+            action_for(MenuMessage::Quit),
             Action::Request(Request::Quit)
         );
     }
@@ -234,18 +171,6 @@ mod tests {
                 "{request:?} never grabs the screen: the popup stays for its status line"
             );
         }
-    }
-
-    // ── monitor_label_parts: submenu text (pure, no MonitorInfo) ────
-
-    #[test]
-    fn monitor_label_non_primary_is_index_dot_name() {
-        assert_eq!(monitor_label_parts(2, "HDMI-A-1", false), "2 · HDMI-A-1");
-    }
-
-    #[test]
-    fn monitor_label_primary_appends_primary_marker() {
-        assert_eq!(monitor_label_parts(0, "eDP-1", true), "0 · eDP-1 (primary)");
     }
 
     // ── editor_command: pure command builder ────────────────────────

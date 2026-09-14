@@ -1,10 +1,9 @@
 //! COSMIC panel applet: panel button + popup menu.
 //!
-//! This is the Task 7 UI layer, extended in Task 8 with a live event
-//! stream. It builds a [`cosmic::Application`] that shows a panel
-//! button; clicking it opens a popup mirroring the tray menu —
-//! *Capture region*, *Capture fullscreen*, per-monitor entries,
-//! *Open last*, *Open config*, *Quit*. Menu clicks are resolved
+//! It builds a [`cosmic::Application`] that shows a panel button;
+//! clicking it opens a popup mirroring the tray menu (native-capture-ux
+//! collapse) — one **Capture** action, *Open last*, *Open config*,
+//! *Quit*. Menu clicks are resolved
 //! by the pure [`crate::menu`] dispatch (unit-tested headless) and
 //! performed here as side-effects: daemon [`Request`]s go out via
 //! [`crate::ipc::send_request`], and *Open config* shells out to
@@ -137,7 +136,7 @@ impl cosmic::Application for App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Menu(menu_msg) => match menu::action_for(&menu_msg) {
+            Message::Menu(menu_msg) => match menu::action_for(menu_msg) {
                 menu::Action::Request(req) => {
                     // A capture is about to freeze the screen: destroy
                     // the popup at the click and let the settle window
@@ -261,44 +260,22 @@ impl cosmic::Application for App {
 
 impl App {
     /// Build the popup body: a status line at the top, then a column of
-    /// menu buttons with dividers between the capture / monitor /
-    /// system groups. Mirrors the tray's menu structure item-for-item;
-    /// each button emits a [`MenuMessage`] that [`menu::action_for`]
-    /// resolves.
+    /// menu buttons with dividers between the capture / system groups.
+    /// Mirrors the tray's menu structure item-for-item (the
+    /// native-capture-ux single-Capture collapse); each button emits a
+    /// [`MenuMessage`] that [`menu::action_for`] resolves.
     ///
     /// When the daemon is absent (`daemon_up == false`), the status line
     /// is replaced with a *"daemon not running"* message and all
     /// daemon-dependent buttons are rendered without `on_press`
     /// (disabled). *Open config* stays enabled — it's a local action.
     fn popup_content(&self) -> Element<'_, Message> {
-        let monitors = menu::monitor_entries();
         let up = self.daemon_up;
 
-        let mut col = cosmic::widget::Column::new().push(status_line(&self.status, up));
-
-        col = col
+        let col = cosmic::widget::Column::new()
+            .push(status_line(&self.status, up))
             .push(divider::horizontal::default())
-            .push(action_btn("Capture region", MenuMessage::CaptureRegion, up))
-            .push(action_btn(
-                "Capture fullscreen",
-                MenuMessage::CaptureFullscreen,
-                up,
-            ))
-            .push(divider::horizontal::default());
-
-        if monitors.is_empty() {
-            col = col.push(disabled_item("no monitors"));
-        } else {
-            for (index, label) in monitors {
-                col = col.push(action_btn(
-                    label,
-                    MenuMessage::CaptureFullscreenMonitor(index),
-                    up,
-                ));
-            }
-        }
-
-        col = col
+            .push(action_btn("Capture", MenuMessage::Capture, up))
             .push(divider::horizontal::default())
             .push(action_btn("Open last", MenuMessage::OpenLast, up))
             .push(divider::horizontal::default())
@@ -359,12 +336,6 @@ fn menu_btn<'a>(label: impl Into<String>, msg: MenuMessage) -> Element<'a, Messa
 /// for daemon-dependent actions when the daemon is absent.
 fn disabled_btn<'a>(label: impl Into<String>) -> Element<'a, Message> {
     applet::menu_button(text(label.into())).into()
-}
-
-/// A disabled (non-interactive) menu row, used for the "no monitors"
-/// placeholder. Visually matches [`menu_btn`] but produces no message.
-fn disabled_item<'a>(label: impl Into<String>) -> Element<'a, Message> {
-    applet::padded_control(text(label.into())).into()
 }
 
 /// Build the popup's `anchor_rect` from the button's offset + bounds.
@@ -500,18 +471,8 @@ mod tests {
         // (settled) request leaves — or it lands in the grab
         // (ADR-0041).
         let mut app = test_app(Some(Id::unique()));
-        let _ = cosmic::Application::update(&mut app, Message::Menu(MenuMessage::CaptureRegion));
+        let _ = cosmic::Application::update(&mut app, Message::Menu(MenuMessage::Capture));
         assert!(app.popup.is_none(), "capture click must destroy the popup");
-    }
-
-    #[test]
-    fn per_monitor_capture_click_closes_the_popup() {
-        let mut app = test_app(Some(Id::unique()));
-        let _ = cosmic::Application::update(
-            &mut app,
-            Message::Menu(MenuMessage::CaptureFullscreenMonitor(1)),
-        );
-        assert!(app.popup.is_none());
     }
 
     #[test]
@@ -526,8 +487,7 @@ mod tests {
     #[test]
     fn capture_click_without_a_popup_is_inert() {
         let mut app = test_app(None);
-        let _ =
-            cosmic::Application::update(&mut app, Message::Menu(MenuMessage::CaptureFullscreen));
+        let _ = cosmic::Application::update(&mut app, Message::Menu(MenuMessage::Capture));
         assert!(app.popup.is_none());
     }
 }
