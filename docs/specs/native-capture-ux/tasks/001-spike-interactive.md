@@ -120,3 +120,32 @@ snapshot diverges. Consequences for Task 2:
 reuse needed). Cancellation (code 1) is reachable but **not
 reliable on the installed COSMIC build** — design for quiet-exit on
 code 1 *and* on Response timeout.
+
+### Addendum: the interactive path wedges under sustained hammering
+
+After ~7 interactive requests in one session, every subsequent
+interactive call hung (UI opens, user selects + presses Enter or the
+capture button, **no Response ever arrives**). Began at run 7 and
+persisted across: portal-impl restart, broker restart, cosmic
+screenshot-config clearing (probe + `cargo test` clients alike).
+The **non-interactive portal grab kept working** (2560×1440, ~0.1 s)
+throughout — the wedge is specific to the selection-UI path, almost
+certainly layer-surface/keyboard state in `cosmic-comp` (only
+process not restarted; survives everything short of a comp restart
+or reboot).
+
+Implications (already reflected in Task 2):
+
+- `capture_selection` must treat "no Response within budget" as a
+  first-class quiet-exit outcome (`"timed out"` substring), not an
+  error toast — on a wedged session every interactive grab ends
+  there until the user reboots.
+- The live `#[ignore]`'d test soft-skips on the hang with a
+  diagnostic (verified twice on the wedged session).
+
+Also recorded: cosmic persists screenshot UI state to
+`~/.config/cosmic/com.system76.CosmicPortal/v1/screenshot`
+(`choice: Rectangle`, `last_rectangle`) — restored selections explain
+the "stale rect" spurious captures in runs 2–3. Clearing this file
+was verified **not** to unwedge the session (backed up under
+`/tmp/opencode/spike-c-portal/config-backup/`).

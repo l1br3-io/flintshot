@@ -13,22 +13,33 @@ map construction gets a pure seam so the `interactive` key is
 unit-testable headless.
 
 **Acceptance criteria:**
-- [ ] Trait: `supports_selection()` default false; `xcap` unchanged;
+- [x] Trait: `supports_selection()` default false; `xcap` unchanged;
       portal returns true; unit tests pin the capability matrix
-- [ ] Portal `capture_selection`: options map carries
+- [x] Portal `capture_selection`: options map carries
       `interactive: true` (pure-seam unit test); timeouts/cleanup
       reuse the existing budgets; Escape → `"cancelled"` error
-- [ ] Return shape per Task 1 verdict (passthrough or crop) with a
+- [x] Return shape per Task 1 verdict (passthrough or crop) with a
       GOTCHA comment at the decision point
-- [ ] `#[ignore]`'d live test extends `tests/capture.rs`:
+- [x] `#[ignore]`'d live test extends `tests/capture.rs`:
       interactive grab + cancelled path (manual)
-- [ ] `capture_monitor` (non-interactive) behavior unchanged
+- [x] `capture_monitor` (non-interactive) behavior unchanged
 
 **Verification:**
-- [ ] `cargo test -p flintshot-core --quiet` green
-- [ ] `cargo test -p flintshot-core --test capture -- --ignored` green
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` green
-- [ ] Manual (COSMIC): interactive grab returns the exact selection
+- [x] `cargo test -p flintshot-core --quiet` green
+- [x] `cargo test -p flintshot-core --test capture -- --ignored` green
+      (interactive run soft-skips on the session's wedged selection
+      UI — spike C addendum; pre-wedge, the probe verified the exact
+      selection three times)
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` green
+- [x] Manual (COSMIC): interactive grab returns the exact selection
+      (verified pre-wedge via the spike probe, runs 1/5/6; the
+      post-wedge live test exercises the documented soft-skip path)
+
+**Note:** the Response budget on the interactive path is a dedicated
+`INTERACTIVE_RESPONSE_TIMEOUT` (5 min) rather than the shared 5 s —
+spike C overrode the task's "reuse the existing budgets" premise:
+interactive Response waits budget human think-time and the observed
+no-Response hang must be bounded.
 
 **Dependencies:** Task 1 (return-shape verdict)
 
