@@ -72,3 +72,7 @@ the alternatives on a live session (findings:
 
 Supersedes ADR-0003: `xcap` remains the default provider and
 universal fallback, now behind the trait.
+
+Extended by ADR-0051: the trait's selection capability
+(`supports_selection` / `capture_selection`) drives the single
+Capture action's native flow.

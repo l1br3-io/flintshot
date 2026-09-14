@@ -73,10 +73,10 @@ egui   = ["dep:flintshot-editor-egui"]
 **Owns:** a separate binary that runs as a COSMIC panel applet. It is a
 pure IPC client — it connects to the daemon socket, sends `Request`s,
 and reads the live `Event` stream over a persistent `Subscribe`
-connection. The popup mirrors the tray's action set (capture, per-
-monitor capture, open last, config, quit) plus a status line fed by
-the event stream, and degrades to a clear *"daemon not running"* state
-when the socket is absent.
+connection. The popup mirrors the tray's action set (one Capture
+action, open last, config, quit) plus a status line fed by the event
+stream, and degrades to a clear *"daemon not running"* state when the
+socket is absent.
 
 **Does not own:** capture, editor, anything beyond the popup UI. It
 depends on `flintshot-core` (types + `monitors()`) + `libcosmic` only —
@@ -119,12 +119,16 @@ leaf binaries. A future `flintshot-editor-iced` would slot in beside
 A single binary handles both roles; behavior is selected by subcommand:
 
 - `flintshot daemon` — long-running, owns tray + hotkeys + IPC server
-- `flintshot region [--monitor N] [--delay SECS] [--backend ID]` — one-shot:
-  capture region, open editor
-- `flintshot fullscreen [--monitor N] [--backend ID]` — one-shot: capture full screen,
-  open editor
+- `flintshot capture [--delay-ms M] [--backend ID] [--after ACTION]` —
+  one-shot: **the single Capture action** (ADR-0051). The OS's own
+  selection UI where the selected backend supports it (portal
+  interactive on Wayland), else the primary-monitor grab →
+  editor/overlay flow. `--after editor|clipboard|upload` routes the
+  native grab (default `editor`; also `[capture] after_grab`)
 - `flintshot open <path>` — open an existing image in the editor (no capture)
 - `flintshot upload <path> --backend=imgur` — upload and exit
+- `flintshot app` — open the app window (the capture home: Capture /
+  Open; auto-starts the daemon)
 - `flintshot config` — print or edit config
 - `flintshot backends` — list capture backends, their availability, and
   what `auto` selects right now (diagnostic; exits 0)
@@ -141,8 +145,7 @@ size and zero-copy friendliness). Schema lives in
 
 ```rust
 pub enum Request {
-    CaptureRegion { monitor: Option<u32>, delay_ms: u32 },
-    CaptureFullscreen { monitor: Option<u32> },
+    Capture { delay_ms: u32 },        // the single Capture action (every surface)
     OpenLast,
     UploadLast { backend: String },
     ReportSaved { path: PathBuf },   // worker → daemon: best-effort save report
@@ -296,10 +299,10 @@ interaction_mode = "editor"  # or "overlay" (Phase 5)
 include_cursor = true
 default_delay_ms = 0
 backend = "auto"  # auto | xcap | portal (Linux)
+after_grab = "editor"  # editor | clipboard | upload (native path only)
 
 [hotkeys]
-region = "Ctrl+Shift+PrintScreen"
-fullscreen = "Ctrl+Alt+PrintScreen"
+capture = "Ctrl+Shift+PrintScreen"
 
 [upload]
 default_backend = "imgur"
@@ -399,16 +402,20 @@ All choices are documented in [decision records](adr/).
 
 ### Linux
 - **X11**: full feature set; `global-hotkey` and live overlay both work
-- **Wayland**: `auto` capture prefers the XDG Screenshot Portal
-  (`org.freedesktop.portal.Screenshot`, prompt-free on COSMIC,
-  ~75–120 ms; cursor-less — protocol has no option); `xcap` remains
-  the fallback (its ScreenCast path may show a per-session portal
-  dialog). `--backend xcap` / `[capture] backend = "xcap"` pins the
-  old path; `flintshot backends` shows the live pick. Global hotkeys
-  require Phase 6 portal integration — the daemon detects this and
-  logs a "bind a compositor keybinding to `flintshot
-  region`/`flintshot fullscreen`" notice instead of failing (tray +
-  IPC still work); live overlay falls back to editor-window
+- **Wayland**: `auto` capture prefers the XDG Screenshot Portal.
+  The single Capture action uses the portal's *interactive* mode —
+  the compositor's own select-and-confirm UI (ADR-0051; COSMIC
+  verified, prompt-free, Escape = quiet cancel); non-interactive
+  portal grabs remain cursor-less (protocol has no option). `xcap`
+  remains the fallback (its ScreenCast path may show a per-session
+  portal dialog) — the fallback flow is today's monitor-grab →
+  editor/overlay path, unchanged. `--backend xcap` /
+  `[capture] backend = "xcap"` pins the old path; `flintshot
+  backends` shows the live pick. Global hotkeys require the Phase 6
+  portal integration — the daemon detects this and logs a "bind a
+  compositor keybinding to `flintshot capture`" notice instead of
+  failing (tray + IPC still work); live overlay falls back to
+  editor-window
 - **System tray**: `tray-icon` (libappindicator) needs an SNI host; on
   compositors without one the daemon logs a warning and continues
   (best-effort — IPC + hotkeys are unaffected)

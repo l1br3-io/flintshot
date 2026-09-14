@@ -60,3 +60,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0048 | [Capture sessions — Replace policy + a generalized pre-grab handshake](ADR-0048-capture-session-replace-and-prepare.md) |
 | ADR-0049 | [Remove pin-to-desktop](ADR-0049-remove-pin-to-desktop.md) |
 | ADR-0050 | [`Capturer` trait — `xcap` default behind a registry, portal native on Wayland](ADR-0050-capturer-trait-native-backends.md) |
+| ADR-0051 | [One Capture action — the OS's selection UI, post-grab routing, clean break](ADR-0051-single-capture-action-os-selection.md) |
