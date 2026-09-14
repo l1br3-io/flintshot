@@ -104,6 +104,45 @@ pub(crate) async fn subscribe_to(override_path: Option<&Path>) -> eyre::Result<O
     }
 }
 
+/// Open the app window's **presence connection**: sends
+/// [`Request::AnnounceAppWindow`] and parks on the stream until the
+/// daemon goes away. The connection's lifetime is the presence
+/// signal — the daemon withdraws it the moment the socket dies
+/// (crash, exit), no dead-man bookkeeping on either side.
+///
+/// Callers spawn this as a long-lived task on their own reactor;
+/// dropping the task (runtime shutdown) closes the socket and
+/// withdraws the presence just the same. No daemon is a silent no-op
+/// (presence is an optimization; the handshake's bounds cover its
+/// absence). Old daemons never reply and park us in their read loop —
+/// identical behavior.
+pub(crate) async fn announce_app_window(override_path: Option<&Path>) -> eyre::Result<()> {
+    let path = socket_path(override_path);
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let name = socket_name(&path)?;
+    let mut stream =
+        match <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name).await {
+            Ok(s) => s,
+            Err(e) if is_no_daemon(&e) => return Ok(()),
+            Err(e) => {
+                return Err(eyre::eyre!(
+                    "connecting to daemon at {}: {e}",
+                    path.display()
+                ))
+            }
+        };
+    let bytes = encode_msg(&Request::AnnounceAppWindow)?;
+    write_frame(&mut stream, &bytes).await?;
+    tracing::debug!("app window presence announced; parking the connection");
+    // Park: the daemon sends nothing on this connection; its death (or
+    // this task's) ends the read and the presence with it.
+    while crate::ipc_server::read_frame(&mut stream).await.is_ok() {}
+    Ok(())
+}
+
 /// Does this connect error mean "no daemon" (fall back) vs a real fault?
 fn is_no_daemon(error: &std::io::Error) -> bool {
     use std::io::ErrorKind;

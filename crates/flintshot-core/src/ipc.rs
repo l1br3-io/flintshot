@@ -134,6 +134,22 @@ pub enum Request {
         /// Pre-capture delay in milliseconds.
         delay_ms: u32,
     },
+    // fix-app-window-capture-races effort — appended (postcard
+    // variant-index rule):
+    /// App window → daemon: "I exist, on this connection." The daemon
+    /// tracks the sender's liveness by the connection itself — the
+    /// frame after this one blocks until the app window's process
+    /// exits (or the socket dies), at which point the presence is
+    /// withdrawn. Feeds the pre-grab handshake
+    /// ([`Request::PrepareCapture`]): a live app window owes a
+    /// [`Request::ReportAppHidden`] ack before a grab is blessed,
+    /// which only works if the daemon knows the window exists even
+    /// when it spawned the app itself (the registry only tracks
+    /// daemon-spawned workers). A daemon that predates this variant
+    /// answers `unsupported` — the app window logs it once and
+    /// continues (the handshake degrades to today's grace-only
+    /// behavior).
+    AnnounceAppWindow,
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -332,6 +348,8 @@ mod tests {
             // native-capture-ux — appended (postcard variant-index rule)
             Request::Capture { delay_ms: 0 },
             Request::Capture { delay_ms: 2_500 },
+            // fix-app-window-capture-races — appended
+            Request::AnnounceAppWindow,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");

@@ -36,6 +36,15 @@ use crate::theme;
 /// changes, focus pings arrive independent of input).
 const REPOLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long after a Capture click the window re-issues its close
+/// command if it is somehow still alive. A dropped
+/// `ViewportCommand::Close` strands the armed capture intent — the
+/// outer loop only delegates once the window dies (ADR-0047), so a
+/// stuck close wedges the whole flow until the user closes the
+/// window by hand. The repaint heartbeat guarantees the check runs
+/// within one [`REPOLL_INTERVAL`] of the delay elapsing.
+const CLOSE_WATCHDOG_DELAY: Duration = Duration::from_millis(500);
+
 /// Whether the **Paste** control renders (and its `P` accelerator
 /// arms). The clipboard→editor feature is a later effort; the
 /// button, accelerator, and [`HomeBridge::request_paste`] plumbing
@@ -104,6 +113,13 @@ pub(crate) struct HomeApp {
     /// Keyboard shortcut: P → paste (only consumed while
     /// [`SHOW_PASTE`] is `true`).
     paste_shortcut: KeyboardShortcut,
+    /// When the Capture control was last clicked — the close that
+    /// must follow it is armed. Feeds the stuck-close watchdog; the
+    /// latch never clears (the window dies instead).
+    capture_clicked_at: Option<std::time::Instant>,
+    /// The watchdog has warned once (subsequent re-issues are silent
+    /// repeats of an idempotent command).
+    close_watchdog_warned: bool,
 }
 
 /// Pure UI state of the home window — the part directives mutate.
@@ -138,6 +154,8 @@ impl HomeApp {
             capture_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::C),
             open_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::O),
             paste_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::P),
+            capture_clicked_at: None,
+            close_watchdog_warned: false,
         }
     }
 
@@ -148,6 +166,7 @@ impl HomeApp {
     /// this app down.
     fn start_capture(&mut self, ctx: &Context) {
         self.bridge.request_capture();
+        self.capture_clicked_at = Some(std::time::Instant::now());
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
@@ -171,6 +190,13 @@ fn pick_image_path() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("Image files", &["png", "jpg", "jpeg", "webp", "bmp"])
         .pick_file()
+}
+
+/// Whether the stuck-close watchdog fires at `now` for a Capture
+/// click at `clicked_at`. Pure so the bound is unit-testable without
+/// sleeping.
+fn close_watchdog_overdue(clicked_at: std::time::Instant, now: std::time::Instant) -> bool {
+    now.duration_since(clicked_at) >= CLOSE_WATCHDOG_DELAY
 }
 
 impl App for HomeApp {
@@ -211,6 +237,8 @@ impl HomeApp {
             }
         }
 
+        self.run_close_watchdog(ctx);
+
         if ctx.input_mut(|i| i.consume_shortcut(&self.capture_shortcut)) {
             self.start_capture(ctx);
         } else if ctx.input_mut(|i| i.consume_shortcut(&self.open_shortcut)) {
@@ -218,6 +246,26 @@ impl HomeApp {
         } else if SHOW_PASTE && ctx.input_mut(|i| i.consume_shortcut(&self.paste_shortcut)) {
             self.bridge.request_paste();
         }
+    }
+
+    /// Re-issue the close when the window outlives its Capture click
+    /// by [`CLOSE_WATCHDOG_DELAY`] — a compositor dropping the first
+    /// `ViewportCommand::Close` would otherwise strand the armed
+    /// capture intent (the outer loop delegates only once the window
+    /// dies). Warns once; the re-issue itself repeats every frame —
+    /// idempotent, and the window's death is the only real exit.
+    fn run_close_watchdog(&mut self, ctx: &Context) {
+        let Some(clicked_at) = self.capture_clicked_at else {
+            return;
+        };
+        if !close_watchdog_overdue(clicked_at, std::time::Instant::now()) {
+            return;
+        }
+        if !self.close_watchdog_warned {
+            self.close_watchdog_warned = true;
+            tracing::warn!("home window still alive after a Capture click; re-issuing the close");
+        }
+        ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
     /// Headless-callable core of `App::ui` (mirrors `EditorApp`'s
@@ -338,6 +386,49 @@ mod tests {
             app.bridge.poll_directive().is_none(),
             "the Hide directive was consumed by the frame"
         );
+    }
+
+    #[test]
+    fn close_watchdog_bound_is_half_a_second() {
+        // Long enough that a busy frame never trips it on a healthy
+        // close, short enough that a wedged window recovers in
+        // ~an instant of user time.
+        assert_eq!(CLOSE_WATCHDOG_DELAY, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn close_watchdog_fires_only_past_the_bound() {
+        let t0 = std::time::Instant::now();
+        assert!(!close_watchdog_overdue(t0, t0 + Duration::from_millis(499)));
+        assert!(close_watchdog_overdue(t0, t0 + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn an_aged_capture_click_runs_the_watchdog_without_panicking() {
+        // Headless shape of the stuck close: the latch aged past the
+        // bound, a default context stands in for the real one — the
+        // re-issued Close queues, the frame completes. A panic (e.g.
+        // a None mishandled) fails this.
+        let bridge = RecordingBridge::default();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        app.capture_clicked_at = Some(
+            std::time::Instant::now()
+                .checked_sub(CLOSE_WATCHDOG_DELAY)
+                .expect("an Instant older than 500 ms always exists on this platform"),
+        );
+        let ctx = egui::Context::default();
+        app.logic_impl(&ctx);
+        assert!(app.close_watchdog_warned, "the overdue latch warned");
+    }
+
+    #[test]
+    fn a_fresh_capture_click_does_not_fire_the_watchdog() {
+        let bridge = RecordingBridge::default();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        app.capture_clicked_at = Some(std::time::Instant::now());
+        let ctx = egui::Context::default();
+        app.logic_impl(&ctx);
+        assert!(!app.close_watchdog_warned, "within the bound: quiet");
     }
 
     /// Pinned: the Paste control stays dark on this branch — the

@@ -18,6 +18,7 @@
 //! asynchronously, and an ack that races the repaint would let the
 //! worker grab its window's ghost.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -120,6 +121,10 @@ pub(crate) struct PrepareGate {
     resolved: Notify,
     bound: Duration,
     grace: Duration,
+    /// Live app-window **presence connections** (see
+    /// [`Self::app_window_connected`]). Atomic: pure inc/dec/read,
+    /// no invariant couples it to `inner`.
+    app_windows: AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -151,7 +156,36 @@ impl PrepareGate {
             resolved: Notify::new(),
             bound,
             grace,
+            app_windows: AtomicUsize::new(0),
         }
+    }
+
+    /// An app-window presence connection came up: `AnnounceAppWindow`
+    /// was received, and the connection staying open **is** the
+    /// liveness signal (see [`Self::app_window_disconnected`]). This
+    /// closes the directly-launched-app gap: the session registry only
+    /// knows app workers the daemon itself spawned, so a user-run
+    /// `flintshot app` would otherwise be invisible to
+    /// [`PrepareGate::step`]'s ack wait — and the handshake would
+    /// bless the grab while the window is still on screen.
+    pub(crate) fn app_window_connected(&self) {
+        self.app_windows.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// A presence connection went away (EOF, error, or the daemon's
+    /// runtime dropping the task). Withdraws exactly one presence
+    /// slot; process death closes the socket, so no dead-man flag is
+    /// needed.
+    pub(crate) fn app_window_disconnected(&self) {
+        self.app_windows.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Whether any app-window presence connection is live. The
+    /// daemon's main loop ORs this into the machine's `app_alive`
+    /// input alongside the registry's daemon-spawned-app check.
+    #[must_use]
+    pub(crate) fn app_window_present(&self) -> bool {
+        self.app_windows.load(Ordering::Acquire) > 0
     }
 
     /// Arm a handshake (IPC side, on `PrepareCapture` receipt).
@@ -373,6 +407,43 @@ mod tests {
         let g = gate();
         g.step(Instant::now(), false, 0);
         assert_eq!(g.resolution(), None);
+    }
+
+    #[test]
+    fn presence_toggles_with_connections_and_never_goes_negative() {
+        // Connection liveness is the app-window presence signal: +1 on
+        // announce, −1 on connection death, clamped at 0 by
+        // construction (each disconnect pairs with exactly one
+        // announce — the IPC layer's drop guard).
+        let g = gate();
+        assert!(!g.app_window_present(), "no connection: not present");
+        g.app_window_connected();
+        assert!(g.app_window_present());
+        g.app_window_connected();
+        assert!(g.app_window_present(), "two connections: still present");
+        g.app_window_disconnected();
+        g.app_window_disconnected();
+        assert!(!g.app_window_present(), "both gone: withdrawn");
+    }
+
+    #[test]
+    fn presence_feeds_the_machine_through_the_app_alive_input() {
+        // The composition the daemon's main loop performs:
+        // registry-app-alive OR presence. A present-but-unregistered
+        // app window must keep the machine waiting for the ack.
+        let g = gate();
+        let t0 = Instant::now();
+        g.app_window_connected();
+        let app_alive_via_presence = g.app_window_present();
+        assert!(app_alive_via_presence, "fixture: presence is armed");
+        g.begin(t0);
+        g.step(at(t0, 20), app_alive_via_presence, 1);
+        assert_eq!(g.resolution(), None, "presence holds the handshake");
+        g.report_app_hidden();
+        g.step(at(t0, 21), app_alive_via_presence, 1);
+        assert_eq!(g.resolution(), None, "acked but the grace re-armed");
+        g.step(at(t0, 32), app_alive_via_presence, 1);
+        assert_eq!(g.resolution(), Some(PrepareResolution::Ready));
     }
 
     #[tokio::test]

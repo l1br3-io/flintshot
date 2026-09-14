@@ -2372,6 +2372,79 @@ byte-identical. Live smoke (incl. interactive):
   chrome never lands in the grab (it composites before the file is
   written — verified in Spike C).
 
+## App-window capture races — presence, truthful acks, self-healing close
+
+Spec: `docs/specs/fix-app-window-capture-races/`; design: ADR-0052.
+The "no flintshot surface in the shot" guarantee for **every**
+trigger while an app window exists, plus the phase-transition
+hygiene around it. Run on a live session with a display (Wayland
+first-class — the races were reported on COSMIC; X11 rows confirm
+no regression).
+
+### Test setup
+
+```sh
+cargo build --release
+pkill -f flintshot || true
+RUST_LOG=flintshot=debug ./target/release/flintshot app   # window opens, daemon auto-starts
+# watch for: "app window presence connection established" in the daemon's log
+```
+
+### Test script
+
+1. **Presence registered**: with the app window open, the daemon
+   log shows the presence line; `flintshot app` exit (window X)
+   withdraws it (next capture's handshake no longer waits for an
+   app ack — visible as the handshake clearing on grace alone).
+2. **Self-trigger, ×5**: click *Capture* → the window closes → the
+   OS selection UI's frozen frame contains **no app window** →
+   editor → close it → the window returns. Repeat five times
+   (varying speed); every freeze must be clean.
+3. **External trigger with the window open, ×5**: fire the capture
+   hotkey while the app window is open → the frozen frame contains
+   no app window; the window returns when the session ends. This is
+   the row the vacuous-handshake race broke (pre-ADR-0052 the
+   daemon never waited for the app's ack on this path).
+4. **Stuck-close healing**: with `RUST_LOG=flintshot=debug`, click
+   *Capture* — normally the window closes in a frame. If a close is
+   ever dropped (repro or natural), the log shows
+   `home window still alive after a Capture click; re-issuing the
+   close` and the flow recovers without a manual close.
+5. **Tray returns after the grab**: trigger a capture → the tray
+   icon is back **while the editor is still open** (it must not
+   stay hidden through the annotation session).
+6. **Copy closes on Wayland**: capture → editor → *Copy* → the
+   editor closes immediately; paste into another app yields the
+   image (the compositor owns the selection). On X11 the editor
+   still stays open after Copy (owner-clipboard rule) — that row
+   belongs to X11 columns.
+7. **Supersede chain**: start a capture, leave the editor open,
+   fire the hotkey → the old editor closes, the new capture's
+   frozen frame contains no flintshot chrome, the app window
+   (if hidden) still restores only at the chain's end.
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Presence line on connect; withdrawn on app exit             | | | | | | | | | | |
+| Self-trigger ×5: no app window in any frozen frame          | | | | | | | | | | |
+| Hotkey with window open ×5: window absent, returns after    | | | | | | | | | | |
+| Stuck close self-heals (watchdog log, no manual close)      | | | | | | | | | | |
+| Tray returns while the editor is open (native path)         | | | | | | | | | | |
+| Copy closes the editor on Wayland; paste still works        | | | | | | | | | | |
+| Supersede chain: no chrome in the new grab; restore at end  | | | | | | | | | | |
+
+### Known caveats
+
+- The COSMIC portal's interactive wedge (Spike C) can still hang a
+  capture until the 5-minute budget expires — recovery is the
+  supersede path (row 7), not this fix.
+- The watchdog cannot recover a close that *no* command can close
+  (a compositor ignoring `ViewportCommand::Close` entirely); it
+  makes the wedge visible and retries, and the armed intent still
+  fires on the eventual manual close.
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).

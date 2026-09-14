@@ -498,42 +498,15 @@ fn native_capture_and_dispatch(
     backend: &dyn flintshot_core::capture::Capturer,
     post_grab: PostGrabAction,
 ) -> Result<()> {
-    // The guard mirrors `capture_prepared`: the handshake, the grab,
-    // and the restore all sit inside its scope so the tray returns the
-    // instant the portal takes its pixels.
-    let _prepared = CaptureGuard::request_at(None);
-    if watch.superseded() {
-        tracing::info!("native capture superseded before the grab; exiting");
+    // The grab — and only the grab — sits inside the prepare guard's
+    // scope (see `native_grab_prepared`): the tray returns the instant
+    // the portal takes its pixels, exactly like the fallback path's
+    // `capture_prepared`. The editor session below must not hold the
+    // icon hostage — annotation takes minutes, and a hidden tray
+    // removes the user's only cancel affordance while a capture is
+    // not even in flight.
+    let Some(img) = native_grab_prepared(watch, backend)? else {
         return Ok(());
-    }
-    let cfg = match Config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not load config; using built-in defaults");
-            Config::default()
-        }
-    };
-    // `CaptureOptions` is `#[non_exhaustive]`: mutate-from-default is
-    // the cross-crate construction path.
-    let mut opts = CaptureOptions::default();
-    opts.include_cursor = cfg.capture.include_cursor;
-
-    tracing::info!(
-        backend = backend.id(),
-        "opening the OS selection UI (native capture)"
-    );
-    let img = match backend.capture_selection(&opts) {
-        Ok(img) => img,
-        Err(e) if quiet_capture_exit(&e) => {
-            // Dismissal / Response timeout: not an error UX (spec
-            // Flow). One log line, exit 0, no notification.
-            tracing::info!(error = %e, "native capture dismissed; exiting quietly");
-            return Ok(());
-        }
-        Err(e) => {
-            return Err(color_eyre::eyre::eyre!(e.to_string()))
-                .with_context(|| "native capture via the OS selection UI");
-        }
     };
 
     if let Some(path) = &output.out {
@@ -562,6 +535,52 @@ fn native_capture_and_dispatch(
         }
     }
     Ok(())
+}
+
+/// The native grab under the prepare handshake — the twin of
+/// [`capture_prepared`] for backends that select in the OS's own UI.
+/// The guard's scope ends with this function: handshake → grab →
+/// release, so the tray is restored the moment the pixels are taken
+/// and never outlives the grab into the editor session. `None` is a
+/// quiet exit (superseded before the grab, the OS selection UI
+/// dismissed, or its Response timed out — the COSMIC wedge); each
+/// carries one info log here.
+fn native_grab_prepared(
+    watch: &SupersedeWatch,
+    backend: &dyn flintshot_core::capture::Capturer,
+) -> Result<Option<image::RgbaImage>> {
+    let _prepared = CaptureGuard::request_at(None);
+    if watch.superseded() {
+        tracing::info!("native capture superseded before the grab; exiting");
+        return Ok(None);
+    }
+    let cfg = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load config; using built-in defaults");
+            Config::default()
+        }
+    };
+    // `CaptureOptions` is `#[non_exhaustive]`: mutate-from-default is
+    // the cross-crate construction path.
+    let mut opts = CaptureOptions::default();
+    opts.include_cursor = cfg.capture.include_cursor;
+
+    tracing::info!(
+        backend = backend.id(),
+        "opening the OS selection UI (native capture)"
+    );
+    match backend.capture_selection(&opts) {
+        Ok(img) => Ok(Some(img)),
+        Err(e) if quiet_capture_exit(&e) => {
+            // Dismissal / Response timeout: not an error UX (spec
+            // Flow). One log line, exit 0, no notification.
+            tracing::info!(error = %e, "native capture dismissed; exiting quietly");
+            Ok(None)
+        }
+        Err(e) => Err(color_eyre::eyre::eyre!(e.to_string()))
+            .with_context(|| "native capture via the OS selection UI"),
+    }
 }
 
 /// Copy the grab to the system clipboard as an RGBA image. Unlike the

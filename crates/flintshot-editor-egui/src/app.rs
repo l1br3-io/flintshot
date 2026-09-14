@@ -971,21 +971,30 @@ impl EditorApp {
     /// the selection must stay alive and keep its `Clipboard` handle
     /// alive, or the data is lost the moment the process exits. Closing
     /// the editor window would terminate the process and wipe the
-    /// clipboard before the user can paste.
+    /// clipboard before the user can paste — so on X11 we **do not
+    /// close the window**; the handle lives in `self.clipboard`, the
+    /// Copy button shows "Copied!" feedback, and the user closes the
+    /// editor (Esc / X button) after pasting. The outcome is
+    /// pre-published either way, so a user-initiated close still
+    /// reports the copy.
     ///
-    /// Therefore, on success we **do not close the window**. The
-    /// `arboard::Clipboard` is stored in `self.clipboard` to keep the
-    /// selection alive, and the Copy button shows "Copied!" feedback.
-    /// The user pastes into the target application and then closes the
-    /// editor (Esc / X button). The outcome was pre-published as
-    /// `CopiedToClipboard`, so the shell returns the correct result
-    /// even though the close was user-initiated.
+    /// On Wayland (and by construction macOS/Windows, where the OS
+    /// owns the clipboard) the selection survives the process:
+    /// `arboard` drives the `zwlr_data_control` protocol there and
+    /// the compositor takes ownership when the selection is set. The
+    /// window closes immediately after the copy — Flameshot/Win11
+    /// semantics — instead of lingering for an X11 rule the session
+    /// never needed.
     fn handle_copy(&mut self, ctx: &Context) {
         match copy_to_clipboard(&self.state, &mut self.clipboard) {
             Ok(()) => {
                 tracing::info!("editor copied to clipboard");
                 self.copied = true;
                 self.publish_outcome(Ok(EditorOutcome::CopiedToClipboard));
+                if close_after_copy(std::env::var_os("WAYLAND_DISPLAY").is_some()) {
+                    tracing::debug!("compositor-owned clipboard; closing after copy");
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
             Err(err) => {
                 tracing::error!(error = %err, "copy failed");
@@ -1148,6 +1157,16 @@ pub(crate) fn compose_selection_aware(state: &EditorState) -> image::RgbaImage {
 
 /// Compose the final image and place it on the system clipboard.
 ///
+/// Whether a successful Copy should close the editor window, given
+/// that the session sets `WAYLAND_DISPLAY`. Pure seam over the env
+/// read at the call site so the platform policy is pinned by tests:
+/// the X11 owner-clipboard rule is the *only* reason to linger (the
+/// process must keep serving the selection), and it does not apply
+/// under Wayland's compositor-owned `zwlr_data_control`.
+fn close_after_copy(wayland_display_set: bool) -> bool {
+    wayland_display_set
+}
+
 /// When a non-degenerate `state.selection` is active, Copy emits just
 /// the selected region (Flameshot-style): the user expects the active
 /// selection to define what gets copied, separate from the Crop tool
@@ -2039,6 +2058,15 @@ mod tests {
             ),
             "the prior copy wins over the Esc cancel"
         );
+    }
+
+    #[test]
+    fn copy_closes_on_wayland_and_lingers_on_x11() {
+        // The X11 owner-clipboard rule is the only reason the editor
+        // ever stayed open after a copy; a Wayland session (where the
+        // env var is set) closes immediately.
+        assert!(close_after_copy(true), "Wayland: close after copy");
+        assert!(!close_after_copy(false), "X11: keep serving the selection");
     }
 
     #[test]
