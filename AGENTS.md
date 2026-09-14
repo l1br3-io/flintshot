@@ -72,8 +72,8 @@ go unchecked.
 
 ```sh
 cargo run -- --help              # see subcommand surface
-cargo run -- region              # Phase 1 (currently a stub)
-cargo run -- fullscreen          # Phase 1 (currently a stub)
+cargo run -- capture             # the single Capture action (OS selection UI on
+                                 # Wayland; fallback: monitor grab -> editor)
 cargo run -- app                 # app window (capture home; auto-starts the daemon)
 cargo run -- backends            # capture-backend diagnostics (probes + auto pick)
 ```

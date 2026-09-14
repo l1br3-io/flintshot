@@ -9,4 +9,4 @@
 - [x] Task 7: Tray — single Capture item (tasks/007-tray-menu.md)
 - [x] Task 8: COSMIC applet — single Capture action (tasks/008-cosmic-applet.md)
 - [x] Task 9: Hotkeys — single capture binding + legacy warn (tasks/009-hotkeys.md)
-- [ ] Task 10: ADR + docs sweep + CHANGELOG (tasks/010-adr-docs.md)
+- [x] Task 10: ADR + docs sweep + CHANGELOG (tasks/010-adr-docs.md)

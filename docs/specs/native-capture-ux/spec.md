@@ -51,9 +51,10 @@ User stories:
    there; a raw monitor dump to clipboard is never right).
 3. **`flintshot capture` subcommand**: replaces `region` and
    `fullscreen`, which are **purged** (clean break, per decision).
-   Carries `--delay`, `--backend`, `--out`, `--standalone`, and the
-   interaction flags; `--monitor` is dropped (selection is the OS
-   UI's job; fallback uses the primary monitor).
+   Carries `--delay-ms`, `--backend`, `--after`, `--out`,
+   `--standalone`, and the interaction flags; `--monitor` is dropped
+   (selection is the OS UI's job; fallback uses the primary
+   monitor).
 4. **IPC fold**: `Request::Capture { delay_ms }` replaces
    `CaptureRegion`/`CaptureFullscreen` (schema is 0.x and all
    consumers ship together); `worker.rs` gains one `capture_argv`
@@ -164,7 +165,7 @@ capture = "Ctrl+Shift+PrintScreen"   # single binding (region/fullscreen keys go
 
 ```rust
 // cli.rs
-Capture(CaptureArgs);   // --delay, --backend, --after, --out, --standalone, interaction flags
+Capture(CaptureArgs);   // --delay-ms, --backend, --after, --out, --standalone, interaction flags
 
 // ipc.rs
 pub enum Request {
@@ -257,6 +258,6 @@ core, no comments restating code). See
 - **GNOME/KDE/wlr interactive behavior**: unmeasured; their UIs and
   prompt behavior may differ (TEST_MATRIX rows). Auto keeps xcap as
   the terminal fallback; pinning remains the escape hatch.
-- **`--delay` on the native path**: keep (sleep before the
-  interactive call) or reject with a clear error? Lean: keep —
-  harmless, and scripts use it.
+- ~~**`--delay` on the native path`**~~ **Resolved (shipped):**
+  kept as `--delay-ms` — a plain sleep before the interactive call.
+  Harmless, and scripts use it.

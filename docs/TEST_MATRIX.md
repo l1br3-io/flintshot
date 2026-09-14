@@ -2300,6 +2300,78 @@ portal_smoke_grabs_primary`.
   its COSMIC geometry quirk (3× inflated `MonitorInfo`) is handled
   by the bbox-ratio crop in `portal.rs`.
 
+## Native capture UX — one Capture action, the OS's selection UI
+
+Spec: `docs/specs/native-capture-ux/`; design: ADR-0051. The single
+Capture action on every surface (CLI, tray, applet, app window,
+hotkey): the selected backend's OS selection UI where it supports
+one (portal interactive on Wayland — capability-based, so a pinned
+`--backend portal` gets it on X11 too), else today's fallback flow
+byte-identical. Live smoke (incl. interactive):
+`cargo test -p flintshot-core --test capture -- --ignored`.
+
+### Test script
+
+1. **Native flow (Wayland)**: `flintshot capture` opens the
+   compositor's select-and-confirm UI; drag, Enter → the editor opens
+   with exactly the selection (dims track the drag — no composite
+   crop). Tray / applet / app-window / hotkey triggers all take the
+   same path.
+2. **Cancellation is quiet**: Escape in the OS UI → exit 0, one
+   `native capture dismissed` info log, no notification, no error.
+   A wedged interactive Response (COSMIC frontend caveat) exits
+   quietly at the hard timeout.
+3. **after_grab variants**: `flintshot capture --after clipboard`
+   copies the grab with no windows (notification is the only
+   feedback); `--after upload` prints + copies the URL;
+   `[capture] after_grab = "clipboard"` in config behaves the same.
+4. **Fallback flow pinned**: `flintshot capture --backend xcap`
+   reproduces today's flow — primary-monitor grab → editor/overlay,
+   selection-first landing, no OS UI. The fallback ignores
+   `after_grab`.
+5. **Clean break**: `flintshot region` / `flintshot fullscreen` fail
+   to parse ("unrecognized subcommand"); `--monitor` is gone.
+6. **Surfaces collapsed**: tray shows one *Capture* item (no
+   per-monitor submenu); the COSMIC applet shows one *Capture*
+   action; the home window shows *Capture* + *Open* (no monitor
+   picker); Paste stays hidden.
+7. **Hotkeys**: `[hotkeys] capture = "…"` binds and fires; a config
+   still carrying legacy `region`/`fullscreen` keys logs a warning
+   naming the rename and binds nothing from them. Portal re-bind
+   (`flintshot hotkeys bind` / tray item) shows the single
+   *Capture* shortcut.
+8. **Temp hygiene**: after interactive grabs, the portal's screenshot
+   files (COSMIC writes to `~/Pictures/Screenshots`) are read then
+   deleted; no orphans.
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| `capture`: OS UI opens, Enter → editor with the selection   | | | | | | | | | | |
+| Escape / timeout: quiet exit 0, one log, no notification    | | | | | | | | | | |
+| `--after clipboard` / `upload`: windowless flow             | | | | | | | | | | |
+| `--backend xcap`: fallback flow unchanged, ignores after    | | | | | | | | | | |
+| `region` / `fullscreen` fail to parse (pinned)              | | | | | | | | | | |
+| Tray / applet / home: one Capture action, no monitor items  | | | | | | | | | | |
+| `[hotkeys] capture` binds + fires; legacy keys warn only    | | | | | | | | | | |
+| Interactive grab files read-then-deleted (no orphans)       | | | | | | | | | | |
+
+### Known caveats
+
+- Interactive behavior per desktop is unmeasured beyond COSMIC
+  (first-class): GNOME/KDE/wlr compositors may render their own
+  selection UI, prompt, or not implement interactive selection at
+  all — pin `--backend xcap` there and note the row (that's data).
+- The installed `xdg-desktop-portal-cosmic` (0.1.0pop1) has flaky
+  Escape (sometimes a spurious code-0 capture of a stale rect,
+  sometimes no Response): the native path carries a long Response
+  budget with a quiet hard timeout (Spike C,
+  `docs/specs/native-capture-ux/tasks/001-spike-interactive.md`).
+- Portal grabs remain cursor-less (ADR-0050); the OS selection UI's
+  chrome never lands in the grab (it composites before the file is
+  written — verified in Spike C).
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).

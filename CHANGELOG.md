@@ -18,9 +18,51 @@ Categories used below:
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking — one Capture action replaces `region` / `fullscreen`**
+  (ADR-0051, spec `docs/specs/native-capture-ux/`): `flintshot
+  capture` is the single Capture action on every surface — the OS's
+  own selection UI where the selected backend supports it (portal
+  *interactive* on Wayland; Enter returns exactly the selection,
+  Escape is a quiet exit), else today's monitor-grab → editor/overlay
+  fallback, byte-identical. Removed with no aliases (0.x, all
+  consumers ship together): the `region` / `fullscreen` subcommands
+  (now "unrecognized subcommand", pinned by test), `--monitor`
+  (selection is the OS UI's or the editor's job), the
+  `Request::CaptureRegion` / `CaptureFullscreen` IPC variants
+  (replaced by `Request::Capture { delay_ms }`), the tray's
+  *Capture region* / *Capture fullscreen* items and per-monitor
+  submenu (one **Capture** item), and the COSMIC applet's
+  per-monitor entries (one **Capture** action).
+- **Breaking — `[hotkeys]` collapses to one binding**: `capture =
+  "Ctrl+Shift+PrintScreen"` (the former `region` default) replaces
+  the `region` / `fullscreen` pair on X11/macOS/Windows and as the
+  portal bind suggestion (one shortcut, id `capture`). Legacy
+  `region` / `fullscreen` keys in an existing config load with a
+  warning naming the rename and bind nothing; pre-collapse portal
+  bindings need one re-bind (`flintshot hotkeys bind`). The daemon's
+  Wayland advice text now points at `flintshot capture`.
+
 ### Added
 
-- **Capture backend selection**: `region` / `fullscreen` gain
+- **Post-grab routing** (`after_grab`): `[capture] after_grab =
+  "editor" (default) | "clipboard" | "upload"` (CLI `--after`) —
+  native-path grabs can land straight on the clipboard (window-less,
+  notification as the only feedback) or upload via the default
+  backend (URL printed + copied). Unknown values warn and resolve
+  `editor`. The fallback path ignores it: selection happens in the
+  editor there, and a raw monitor dump to the clipboard is never
+  right.
+- **Home window — *Open* control** (`flintshot app`): a native file
+  dialog picks an image and opens it in a `flintshot open` worker
+  (its own process — native event loops do not nest); the home
+  window stays open. The two capture buttons + monitor picker
+  collapse into one prominent **Capture** control (`C`
+  accelerator); a fully-built *Paste* control stays hidden behind a
+  compile-time const for the future clipboard→editor feature.
+
+- **Capture backend selection**: the capture subcommand carries
   `--backend <BACKEND>` (`auto`, `xcap`, `portal` on Linux; unknown
   ids are a hard CLI error naming the valid set), and config gains
   `[capture] backend` (default `"auto"`; unknown values load and
@@ -29,6 +71,15 @@ Categories used below:
   never-failing fallback; the chosen backend id is logged on every
   grab. Selection groundwork for the native Wayland portal backend
   (spec `docs/specs/native-capture-backends/`).
+- **Portal interactive selection** (Linux): `Capturer` gained a
+  selection capability (`supports_selection` / `capture_selection`);
+  the portal backend implements it with `interactive: true` — the
+  compositor's own select-and-confirm UI (Spike C-verified on COSMIC:
+  Enter returns exactly the selected region, Escape surfaces the
+  existing `"cancelled"` error as a quiet exit; a long Response
+  budget with a quiet hard timeout covers the COSMIC frontend's
+  wedged-session caveat, and grab files are read-then-deleted
+  wherever the frontend writes them).
 - **Portal capture backend** (Linux): the XDG Screenshot Portal
   backend is live — prompt-free on Wayland/COSMIC (~75–120 ms
   end-to-end), so `auto` now resolves to `portal` before `xcap` on
