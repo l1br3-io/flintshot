@@ -18,28 +18,28 @@ Update `parse_portal_uri`'s doc comment to name the clipboard
 form. Keep `native_capture_and_dispatch` untouched.
 
 **Acceptance criteria:**
-- [ ] `parse_portal_uri("clipboard:///")` errors with a detail
+- [x] `parse_portal_uri("clipboard:///")` errors with a detail
       containing `PORTAL_GRAB_ON_CLIPBOARD`; `file:///` and
       `file:////` forms, empty-path, and foreign schemes behave
       exactly as before (existing tests still pass)
-- [ ] `portal_grab_on_clipboard` classifies the marker detail
+- [x] `portal_grab_on_clipboard` classifies the marker detail
       true; near-miss details ("non-file uri", "cancelled",
       decode-failure) false
-- [ ] `native_grab_prepared` marker arm returns the read-back
+- [x] `native_grab_prepared` marker arm returns the read-back
       image as the grab; read-back failure is a contextual hard
       error (mentions clipboard read-back)
-- [ ] No `Capturer` trait change; xcap backend, fallback path,
+- [x] No `Capturer` trait change; xcap backend, fallback path,
       and all `PostGrabAction` arms untouched
-- [ ] `flintshot-core` gains no new dependencies
+- [x] `flintshot-core` gains no new dependencies
 
 **Verification:**
-- [ ] `cargo test -p flintshot-core portal` (new + existing URI tests)
-- [ ] `cargo test -p flintshot-app clipboard`
-- [ ] `cargo build`
-- [ ] `cargo fmt --all --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace --all-targets`
-- [ ] `cargo test --doc -p flintshot-core -p flintshot-editor-egui`
+- [x] `cargo test -p flintshot-core portal` (new + existing URI tests)
+- [x] `cargo test -p flintshot-app clipboard`
+- [x] `cargo build`
+- [x] `cargo fmt --all --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test --workspace --all-targets`
+- [x] `cargo test --doc -p flintshot-core -p flintshot-editor-egui`
 - [ ] Manual (COSMIC session, human): `flintshot capture` confirmed
       with **Copy** → post-grab action runs, daemon.log clean;
       **Save/Enter** unchanged

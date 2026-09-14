@@ -50,7 +50,7 @@ mod portal;
 mod xcap_backend;
 
 #[cfg(target_os = "linux")]
-pub use portal::PortalScreenshotCapturer;
+pub use portal::{PortalScreenshotCapturer, PORTAL_GRAB_ON_CLIPBOARD};
 pub use xcap_backend::XcapCapturer;
 
 /// A discoverable monitor, for UI surfaces (e.g. the tray's per-monitor

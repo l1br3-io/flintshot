@@ -34,10 +34,10 @@ back via arboard, and continues normal dispatch. Spec:
 ## Task Index
 
 ### Phase 1 — Behavior
-- [ ] Task 1: Portal marks `clipboard:///`; app reads the grab back → `tasks/001-marker-and-read-back.md`
+- [x] Task 1: Portal marks `clipboard:///`; app reads the grab back → `tasks/001-marker-and-read-back.md`
 
 ### Checkpoint: behavior live (HUMAN GATE)
-- [ ] Full gate green (`fmt`, `clippy -D warnings`, `test --workspace --all-targets`, doc-tests)
+- [x] Full gate green (`fmt`, `clippy -D warnings`, `test --workspace --all-targets`, doc-tests)
 - [ ] Human confirms on the COSMIC session: OS screenshot UI **Copy** → capture completes (post-grab action runs, no `non-file uri` error in daemon.log); **Save/Enter** path unchanged
 
 ### Phase 2 — Record

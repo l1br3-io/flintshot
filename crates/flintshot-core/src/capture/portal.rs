@@ -24,6 +24,12 @@
 //!   the scheme and any extra leading slashes. Percent-encoded URIs
 //!   are not decoded — no portal impl we know of encodes; revisit if
 //!   one does (`TEST_MATRIX`).
+//! - **Clipboard delivery**: confirming the interactive UI with
+//!   its Copy button makes the portal write the grab to the system
+//!   clipboard itself and answer `clipboard:///` — no file exists.
+//!   [`parse_portal_uri`] reports that as a marker error
+//!   ([`PORTAL_GRAB_ON_CLIPBOARD`]); the app layer reads the
+//!   pixels back from the clipboard.
 //! - **Coverage**: the returned image composites **all outputs** at
 //!   logical coordinates (`HiDPI` multi-monitor frames are Lanczos3-
 //!   downscaled to logical size by the portal — unavoidable).
@@ -371,12 +377,30 @@ fn uri_path_from_results(results: &HashMap<String, OwnedValue>) -> Result<PathBu
     parse_portal_uri(&s)
 }
 
+/// Marker in a [`FlintshotError::Capture`] detail when the portal
+/// answered `clipboard:///` (COSMIC's Copy-confirmed interactive
+/// screenshot): the portal already wrote the grab to the system
+/// clipboard and no file exists. The consumer
+/// (`native_grab_prepared` in `flintshot-app`) reads the pixels
+/// back from the clipboard instead of failing. Producer and
+/// consumer both reference this constant so the classification
+/// cannot drift.
+pub const PORTAL_GRAB_ON_CLIPBOARD: &str = "portal grab is on the system clipboard";
+
 /// Parse the URI the portal returns into a filesystem path.
 ///
 /// Robust to the observed 3-slash (`file:///tmp/x`) and cosmic's
 /// 4-slash (`file:////tmp/x`) forms; anything but a `file://` scheme
-/// is an error.
+/// is an error. The one exception: `clipboard:///` means the grab
+/// was delivered to the system clipboard by the portal (no file) —
+/// surfaced as the [`PORTAL_GRAB_ON_CLIPBOARD`] marker error for
+/// read-back by the caller.
 fn parse_portal_uri(uri: &str) -> Result<PathBuf> {
+    if uri == "clipboard:///" {
+        return Err(FlintshotError::Capture {
+            detail: PORTAL_GRAB_ON_CLIPBOARD.into(),
+        });
+    }
     let Some(rest) = uri.strip_prefix("file://") else {
         return Err(FlintshotError::Capture {
             detail: format!("portal returned a non-file uri: {uri}"),
@@ -562,6 +586,20 @@ mod tests {
     fn parse_uri_rejects_non_file_and_empty() {
         assert!(parse_portal_uri("http://example.com/x.png").is_err());
         assert!(parse_portal_uri("file:///").is_err());
+    }
+
+    #[test]
+    fn parse_uri_marks_clipboard_delivery() {
+        let err = parse_portal_uri("clipboard:///").unwrap_err();
+        match err {
+            FlintshotError::Capture { detail } => {
+                assert!(
+                    detail.contains(PORTAL_GRAB_ON_CLIPBOARD),
+                    "detail must carry the on-clipboard marker: {detail}"
+                );
+            }
+            other => panic!("clipboard:/// must be a Capture error, got {other:?}"),
+        }
     }
 
     #[test]
