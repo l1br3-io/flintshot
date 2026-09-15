@@ -589,6 +589,18 @@ where
                 bus.clone(),
             )
             .await?
+        } else if crate::worker::forwards_to_app_window(&request) {
+            // Open intents forward to a present app window
+            // (single-window) or spawn the open worker — the same
+            // presence oracle as captures. Non-blocking, so the sync
+            // method is fine in this async context.
+            let spawner = crate::worker::CommandSpawner::with_bus_and_sessions(
+                bus.clone(),
+                capture.sessions(),
+            );
+            capture.dispatch_open_blocking(&request, &spawner, &state, &mut |ev| {
+                bus.broadcast(ev);
+            })?
         } else {
             crate::worker::dispatch(
                 &request,

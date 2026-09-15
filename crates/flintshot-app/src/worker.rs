@@ -262,6 +262,15 @@ pub fn dispatch(
             }
             Ok(DispatchOutcome::Continue)
         }
+        // The CLI `open` delegation's landing (single-window): with
+        // no app window the daemon spawns the same open worker the
+        // `OpenLast` path uses.
+        Request::OpenImage { path } => {
+            let argv = open_argv(path);
+            spawn_argv(spawner, &argv)?;
+            // The open worker reports its own EditorOpened.
+            Ok(DispatchOutcome::Continue)
+        }
         Request::UploadLast { backend } => {
             if let Some(path) = state.last_saved.get() {
                 let argv = upload_argv(&path, backend);
@@ -390,7 +399,14 @@ fn upload_argv(path: &std::path::Path, backend: &str) -> Vec<String> {
 
 /// Build the `flintshot open <path>` argv for [`Request::OpenLast`].
 fn open_argv(path: &std::path::Path) -> Vec<String> {
-    vec!["open".to_string(), path.to_string_lossy().into_owned()]
+    // The trailing `--standalone` breaks the delegation loop
+    // (capture_argv's rule): without it the daemon-spawned open
+    // worker would delegate back, which spawns the next worker.
+    vec![
+        "open".to_string(),
+        path.to_string_lossy().into_owned(),
+        "--standalone".to_string(),
+    ]
 }
 
 /// Hand an owned-string argv to [`Spawner::spawn`] (which takes `&[&str]`).
@@ -432,6 +448,14 @@ fn variant_name(request: &Request) -> &'static str {
 #[must_use]
 pub fn spawns_capture_worker(request: &Request) -> bool {
     matches!(request, Request::Capture { .. })
+}
+
+/// Does this request route to a present app window instead of a
+/// worker (single-window open-forwarding)? Mirrors
+/// [`spawns_capture_worker`]'s role at the dispatch table.
+#[must_use]
+pub fn forwards_to_app_window(request: &Request) -> bool {
+    matches!(request, Request::OpenImage { .. } | Request::OpenLast)
 }
 
 /// Supersede-wait poll cadence: the machine owns the deadlines; this
@@ -567,6 +591,41 @@ impl CaptureDispatch {
         }
         dispatch(request, spawner, state, sink)
     }
+
+    /// **Forward-or-spawn for open intents** (single-window): with an
+    /// app window present, [`Request::OpenImage`] and
+    /// [`Request::OpenLast`] broadcast [`Event::OpenRequested`] with
+    /// the resolved path instead of spawning the open worker; without
+    /// one, today's spawn path runs byte-identical. No supersede
+    /// cycle — opens replace nothing (the window swaps its page).
+    /// Non-blocking (unlike the capture path's bounded waits), so
+    /// async entry points may call it directly.
+    ///
+    /// # Errors
+    /// Propagates a [`Spawner::spawn`] failure from the dispatch arm.
+    pub fn dispatch_open_blocking(
+        &self,
+        request: &Request,
+        spawner: &dyn Spawner,
+        state: &DispatchState,
+        sink: &mut impl FnMut(Event),
+    ) -> eyre::Result<DispatchOutcome> {
+        if self.app_window_present() {
+            let forwarded = match request {
+                Request::OpenImage { path } => Some(path.clone()),
+                // The no-last-save error must surface identically
+                // whether forwarded or spawned — resolve it here.
+                Request::OpenLast => state.last_saved.get(),
+                _ => None,
+            };
+            if let Some(path) = forwarded {
+                tracing::info!(path = %path.display(), "app window present; forwarding the open");
+                sink(Event::OpenRequested { path });
+                return Ok(DispatchOutcome::Continue);
+            }
+        }
+        dispatch(request, spawner, state, sink)
+    }
 }
 
 /// Async wrapper around [`CaptureDispatch::dispatch_capture_blocking`]
@@ -699,6 +758,101 @@ mod tests {
         // spawn behavior — the default stays byte-identical.
         let ctx = CaptureDispatch::new();
         assert!(!ctx.app_window_present());
+    }
+
+    // --- Open forwarding (single-window Task 008) ---
+
+    #[test]
+    fn open_image_forwards_when_a_window_is_present() {
+        let gate = Arc::new(crate::prepare_gate::PrepareGate::new());
+        gate.app_window_connected();
+        let ctx = CaptureDispatch::new().with_prepare_gate(gate);
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        ctx.dispatch_open_blocking(
+            &Request::OpenImage {
+                path: "/tmp/shot 1.png".into(),
+            },
+            &spawner,
+            &DispatchState::new(),
+            &mut |ev| events.push(ev),
+        )
+        .expect("open dispatch");
+        assert!(spawner.snapshot().is_empty(), "no open worker");
+        assert_eq!(
+            events,
+            vec![Event::OpenRequested {
+                path: "/tmp/shot 1.png".into()
+            }],
+            "the open rides the bus with its path"
+        );
+    }
+
+    #[test]
+    fn open_last_forwards_the_last_saved_path_when_present() {
+        let gate = Arc::new(crate::prepare_gate::PrepareGate::new());
+        gate.app_window_connected();
+        let ctx = CaptureDispatch::new().with_prepare_gate(gate);
+        let state = DispatchState::new();
+        state
+            .last_saved
+            .set(std::path::PathBuf::from("/tmp/last.png"));
+        let mut events = Vec::new();
+        ctx.dispatch_open_blocking(
+            &Request::OpenLast,
+            &RecordingSpawner::new(),
+            &state,
+            &mut |ev| events.push(ev),
+        )
+        .expect("open dispatch");
+        assert_eq!(
+            events,
+            vec![Event::OpenRequested {
+                path: "/tmp/last.png".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn open_without_a_window_spawns_the_worker_unchanged() {
+        let ctx = CaptureDispatch::new();
+        let spawner = RecordingSpawner::new();
+        ctx.dispatch_open_blocking(
+            &Request::OpenImage {
+                path: "/tmp/x.png".into(),
+            },
+            &spawner,
+            &DispatchState::new(),
+            &mut |_| {},
+        )
+        .expect("open dispatch");
+        assert_eq!(spawner.snapshot().len(), 1, "the open worker spawns");
+    }
+
+    #[test]
+    fn open_last_with_no_save_errors_identically_when_present() {
+        // The no-last-capture error must surface whether forwarded or
+        // spawned — same code, same event.
+        let gate = Arc::new(crate::prepare_gate::PrepareGate::new());
+        gate.app_window_connected();
+        let ctx = CaptureDispatch::new().with_prepare_gate(gate);
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        ctx.dispatch_open_blocking(
+            &Request::OpenLast,
+            &spawner,
+            &DispatchState::new(),
+            &mut |ev| events.push(ev),
+        )
+        .expect("open dispatch");
+        assert!(
+            spawner.snapshot().is_empty(),
+            "nothing to open, nothing to spawn"
+        );
+        assert!(
+            matches!(&events[..], [Event::Error { code, .. }] if code == "no-last-capture"),
+            "the error surfaces: {events:?}"
+        );
     }
 
     /// A spawner that always fails — proves spawn errors propagate
@@ -1102,8 +1256,12 @@ mod tests {
         assert_eq!(outcome, DispatchOutcome::Continue);
         assert_eq!(
             spawner.snapshot(),
-            vec![vec!["open".to_string(), "/tmp/editor.png".into()]],
-            "OpenLast spawns `flintshot open <last-saved>`"
+            vec![vec![
+                "open".to_string(),
+                "/tmp/editor.png".into(),
+                "--standalone".into()
+            ]],
+            "OpenLast spawns `flintshot open <last-saved> --standalone`"
         );
         assert!(
             events.is_empty(),

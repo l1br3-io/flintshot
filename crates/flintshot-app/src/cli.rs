@@ -358,6 +358,14 @@ pub struct AuthArgs {
 pub struct OpenArgs {
     /// Path to the image file to open in the editor.
     pub path: PathBuf,
+    /// Skip daemon detect-and-delegate: open the editor in this
+    /// process. Daemon-spawned open workers carry it (the same
+    /// loop-breaker rule as `capture --standalone` — without it the
+    /// worker would delegate back to the daemon, which spawns the
+    /// next worker); humans reach it only as the debugging escape
+    /// hatch.
+    #[arg(long)]
+    pub standalone: bool,
 }
 
 /// Arguments for `flintshot hotkeys`.
@@ -622,6 +630,23 @@ pub fn run_open(args: &OpenArgs) -> Result<()> {
             "no such file: {}",
             args.path.display()
         ));
+    }
+    // Delegate to a running daemon when one answers: with an app
+    // window present it forwards the open into the window
+    // (`Event::OpenRequested`, single-window); otherwise the daemon
+    // spawns today's open worker. `--standalone` (daemon-spawned
+    // workers carry it) skips delegation — the loop-breaker rule. No
+    // daemon → decode and edit here, exactly as before.
+    if !args.standalone {
+        match crate::ipc_client::try_delegate(&Request::OpenImage {
+            path: args.path.clone(),
+        }) {
+            Ok(crate::ipc_client::DelegateOutcome::Delegated) => return Ok(()),
+            Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "delegating the open; editing in-process instead");
+            }
+        }
     }
     let img = image::open(&args.path)
         .with_context(|| format!("loading image {}", args.path.display()))?
