@@ -82,12 +82,14 @@ pub trait HomeBridge {
     /// the reopen decision).
     fn request_capture(&mut self);
 
-    /// Open `path` in the editor — the `flintshot open` path. The
-    /// editor must not run on this thread (the home window's eframe
-    /// loop owns it and native loops do not nest), so the
-    /// implementation opens it as its own window/process; the home
-    /// window stays open and untouched.
-    fn open_image(&mut self, path: PathBuf);
+    /// Open `path` in the editor — the `flintshot open` path. Returns
+    /// whether the image routed (`true`: the window closes right
+    /// after and the editor takes over as the same window;
+    /// `false`: the file could not be loaded — a status line
+    /// explains, and the window stays exactly as it was). The decode
+    /// runs on the UI thread right here (after the blocking `rfd`
+    /// dialog returns).
+    fn open_image(&mut self, path: PathBuf) -> bool;
 
     /// Placeholder for the future clipboard→editor feature: read the
     /// system clipboard image into a fresh editor session. Only
@@ -173,11 +175,15 @@ impl HomeApp {
 
     /// The Open control: native file dialog, then hand the picked
     /// path to the bridge. Cancelling the dialog is a plain no-op —
-    /// the window stays exactly as it was. The window does **not**
-    /// close: the editor opens elsewhere (see [`HomeBridge::open_image`]).
-    fn handle_open(&mut self) {
+    /// the window stays exactly as it was. A routed image closes the
+    /// window: the editor page is the same window's next lifetime
+    /// (single-window spec), and a destroyed surface — not a hide —
+    /// is the not-in-the-shot guarantee that carries across epochs.
+    fn handle_open(&mut self, ctx: &Context) {
         if let Some(path) = pick_image_path() {
-            self.bridge.open_image(path);
+            if self.bridge.open_image(path) {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
         }
     }
 }
@@ -243,7 +249,7 @@ impl HomeApp {
         if ctx.input_mut(|i| i.consume_shortcut(&self.capture_shortcut)) {
             self.start_capture(ctx);
         } else if ctx.input_mut(|i| i.consume_shortcut(&self.open_shortcut)) {
-            self.handle_open();
+            self.handle_open(ctx);
         } else if SHOW_PASTE && ctx.input_mut(|i| i.consume_shortcut(&self.paste_shortcut)) {
             self.bridge.request_paste();
         }
@@ -303,7 +309,7 @@ impl HomeApp {
             )
             .min_size(egui::vec2(ui.available_width(), 34.0));
             if ui.add(open).clicked() {
-                self.handle_open();
+                self.handle_open(ui.ctx());
                 return;
             }
 
@@ -454,6 +460,7 @@ mod tests {
     struct Recorder {
         capture_requests: usize,
         opened: Vec<PathBuf>,
+        open_routes: Vec<bool>,
         paste_requests: usize,
     }
 
@@ -469,8 +476,17 @@ mod tests {
             self.rec.0.lock().expect("recorder mutex").capture_requests += 1;
         }
 
-        fn open_image(&mut self, path: PathBuf) {
-            self.rec.0.lock().expect("recorder mutex").opened.push(path);
+        fn open_image(&mut self, path: PathBuf) -> bool {
+            let mut rec = self.rec.0.lock().expect("recorder mutex");
+            rec.opened.push(path);
+            // Fail (false) for paths containing "bad", route otherwise
+            // — lets one double cover both contract arms.
+            let routed = !rec
+                .opened
+                .last()
+                .is_some_and(|p| p.to_string_lossy().contains("bad"));
+            rec.open_routes.push(routed);
+            routed
         }
 
         fn request_paste(&mut self) {
@@ -488,12 +504,21 @@ mod tests {
         let rec = bridge.rec.clone();
         let mut boxed: Box<dyn HomeBridge> = Box::new(bridge);
         boxed.request_capture();
-        boxed.open_image(PathBuf::from("/tmp/shot.png"));
+        assert!(boxed.open_image(PathBuf::from("/tmp/shot.png")));
         boxed.request_paste();
         let guard = rec.0.lock().expect("recorder mutex");
         assert_eq!(guard.capture_requests, 1);
         assert_eq!(guard.opened, [PathBuf::from("/tmp/shot.png")]);
         assert_eq!(guard.paste_requests, 1);
+    }
+
+    #[test]
+    fn open_image_failure_reports_false() {
+        // The contract the window acts on: false = the file did not
+        // load, the window must NOT close for it.
+        let bridge = RecordingBridge::default();
+        let mut boxed: Box<dyn HomeBridge> = Box::new(bridge);
+        assert!(!boxed.open_image(PathBuf::from("/tmp/bad.png")));
     }
 
     #[test]

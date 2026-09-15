@@ -1,13 +1,25 @@
-//! The app window (`flintshot app`): a Win11-Snipping-Tool-style
-//! capture home.
+//! The app window (`flintshot app`): a single window routing between
+//! a three-button home page and the editor page (single-window spec,
+//! `docs/specs/single-window/`).
 //!
 //! Process model (spec `docs/specs/app-window/`): the window is an
 //! IPC **client** — same stance as the tray helper (ADR-0042). A
 //! background **pump thread** owns a current-thread tokio runtime,
 //! holds the daemon subscription, delegates capture requests, and
-//! pushes [`HomeDirective`]s. No capture ever runs in this process
-//! — the daemon spawns the standard worker, so tray-hide
-//! handshakes and Event fan-out apply unchanged.
+//! pushes [`HomeDirective`]s. The pump never touches a window: every
+//! epoch (`run_home` / `run_editor_page`) polls the directives it
+//! pushed.
+//!
+//! ## The router (page epochs)
+//!
+//! [`run`]'s outer loop is the page router: one eframe lifetime per
+//! [`Page`] — the three-button home, or the image-sized editor —
+//! with per-epoch viewport geometry and title. A page transition is
+//! window close + recreate (no runtime resize); the post-close
+//! classification ([`CloseReason`]) picks the next page. `Esc` in
+//! the editor routes home; the window X / Alt+F4 exits the process
+//! (daemon unaffected); Save / Copy / Upload apply their side
+//! effects and the editor page stays.
 //!
 //! ## Auto-start
 //!
@@ -43,10 +55,24 @@ use std::time::Duration;
 use color_eyre::eyre;
 use flintshot_core::ipc::Event as IpcEvent;
 use flintshot_core::ipc::Request;
-use flintshot_editor_egui::{HomeBridge, HomeDirective};
+use flintshot_core::{EditorOutcome, EditorState};
+use flintshot_editor_egui::{EditorPageBridge, EditorPageExit, HomeBridge, HomeDirective};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::ipc_server::{decode_event, read_frame};
+
+/// What the single window shows for its next lifetime — the router's
+/// state. A value, not baked-in window assumptions, so future
+/// tab/workspace models stay additive (spec: out-of-scope note).
+#[derive(Debug, Clone)]
+enum Page {
+    /// Empty state: three centered actions.
+    Home,
+    /// Editor session over one image (boxed: `EditorState` carries
+    /// its image buffer inline, and the unit variants need not pay
+    /// for it).
+    Editor(Box<EditorState>),
+}
 
 /// Pause between the window closing and the capture delegating, so
 /// the compositor has destroyed the surface before the worker
@@ -102,19 +128,25 @@ struct Shared {
 }
 
 #[derive(Default)]
-// Four independent rendezvous flags, each with its own producer and
+// Independent rendezvous flags, each with its own producer and
 // consumer; a state enum would couple unrelated lifecycles.
 #[allow(clippy::struct_excessive_bools)]
 struct SharedInner {
     directives: std::collections::VecDeque<HomeDirective>,
     status: String,
     pending_capture: Option<PumpCommand>,
+    /// The Open control decoded an image: the next epoch is the
+    /// editor page over it (same window, new lifetime).
+    pending_editor: Option<EditorState>,
+    /// The editor page exited to home (`Esc`): the next epoch is the
+    /// home page, distinct from a user quit (X / Alt+F4).
+    go_home: bool,
     /// The window closed for a hide directive (not a user quit): the
     /// outer loop must wait for the reopen instead of exiting.
     hide_requested: bool,
-    /// Whether a home window currently exists, per the outer loop
-    /// (set open before [`EguiShell::run_home`], closed after it
-    /// returns). **State, not a one-shot mark**: the pump's hide-ack
+    /// Whether a window currently exists, per the outer loop
+    /// (set open before an epoch runs, closed after it returns).
+    /// **State, not a one-shot mark**: the pump's hide-ack
     /// reads it fresh, so it can only ever attest the *current*
     /// window — a stale "destroyed" flag from an earlier close cycle
     /// can no longer ack a handshake while a fresh window is open
@@ -164,6 +196,30 @@ impl Shared {
     /// Take the capture intent, if the window closed for one.
     fn take_pending_capture(&self) -> Option<PumpCommand> {
         self.lock().pending_capture.take()
+    }
+
+    /// Register the editor page the next epoch runs over (the Open
+    /// control's routed image).
+    fn set_pending_editor(&self, state: EditorState) {
+        self.lock().pending_editor = Some(state);
+        self.changed.notify_all();
+    }
+
+    /// Take the pending editor state, if the window closed to open
+    /// one.
+    fn take_pending_editor(&self) -> Option<EditorState> {
+        self.lock().pending_editor.take()
+    }
+
+    /// Arm the home route (the editor page's `Esc` exit).
+    fn set_go_home(&self) {
+        self.lock().go_home = true;
+        self.changed.notify_all();
+    }
+
+    /// Whether the home route is armed (the classifier consumes it).
+    fn take_go_home(&self) -> bool {
+        std::mem::take(&mut self.lock().go_home)
     }
 
     /// Take the hide request (the outer loop's close classification).
@@ -372,37 +428,71 @@ pub(crate) fn run() -> eyre::Result<()> {
         .map_err(|e| eyre::eyre!("spawning the app pump thread: {e}"))?;
 
     let mut result = Ok(());
+    let mut page = Page::Home;
 
-    // One iteration = one window lifetime. A capture intent closes
-    // the window; the grace + delegation + the wait-for-Show live
-    // here (the window is gone, so blocking this thread is free).
-    // A hide-by-event close (external capture) waits for the same
-    // reopen. Any other close is the user quitting.
+    // One iteration = one window lifetime (a page epoch). A capture
+    // intent closes the window; the grace + delegation + the
+    // wait-for-Show live here (the window is gone, so blocking this
+    // thread is free). A hide-by-event close (external capture) waits
+    // for the same reopen. Any other close is the user quitting.
     loop {
-        let status = shared.status();
-        let initial_status = if status.is_empty() {
-            "connecting…".to_string()
-        } else {
-            status
+        let exit = match page {
+            Page::Home => {
+                let status = shared.status();
+                let initial_status = if status.is_empty() {
+                    "connecting…".to_string()
+                } else {
+                    status
+                };
+                let bridge = Bridge {
+                    shared: Arc::clone(&shared),
+                };
+                shared.set_window_open();
+                let ran = crate::ambient::with_ambient_runtime(|| {
+                    flintshot_editor_egui::EguiShell::new()
+                        .run_home(Box::new(bridge), initial_status)
+                });
+                let ran = ran
+                    .map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))
+                    .and_then(|ran| ran.map_err(|e| eyre::eyre!("running the app window: {e}")));
+                if let Err(e) = ran {
+                    result = Err(e);
+                    break;
+                }
+                None
+            }
+            Page::Editor(state) => {
+                let bridge = PageBridge {
+                    shared: Arc::clone(&shared),
+                };
+                shared.set_window_open();
+                let ran = crate::ambient::with_ambient_runtime(|| {
+                    flintshot_editor_egui::EguiShell::new()
+                        .run_editor_page(*state, Box::new(bridge))
+                });
+                let ran = ran
+                    .map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))
+                    .and_then(|ran| ran.map_err(|e| eyre::eyre!("running the editor page: {e}")));
+                match ran {
+                    Ok(exit) => Some(exit),
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
+                }
+            }
         };
-        let bridge = Bridge {
-            shared: Arc::clone(&shared),
-        };
-        shared.set_window_open();
-        let ran = crate::ambient::with_ambient_runtime(|| {
-            flintshot_editor_egui::EguiShell::new().run_home(Box::new(bridge), initial_status)
-        });
-        let ran = ran
-            .map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))
-            .and_then(|ran| ran.map_err(|e| eyre::eyre!("running the app window: {e}")));
-        if let Err(e) = ran {
-            result = Err(e);
-            break;
-        }
 
         // The window is destroyed — the pump's hide-ack waits on this
         // state, and every close reason below assumes it.
         shared.set_window_closed();
+
+        // The editor epoch's exit value arms the shared intents;
+        // home arms its own through the bridge. One classification
+        // then picks the next page for either epoch.
+        if let Some(exit) = &exit {
+            arm_editor_exit(&shared, exit);
+        }
 
         match close_reason(&shared) {
             CloseReason::UserQuit => break,
@@ -419,6 +509,7 @@ pub(crate) fn run() -> eyre::Result<()> {
                     tracing::warn!("app pump died before the capture session ended");
                     break;
                 }
+                page = Page::Home;
             }
             CloseReason::HiddenByEvent => {
                 // An externally triggered capture hid us (HideForCapture
@@ -428,6 +519,13 @@ pub(crate) fn run() -> eyre::Result<()> {
                     tracing::warn!("app pump died while hidden for a capture");
                     break;
                 }
+                page = Page::Home;
+            }
+            CloseReason::OpenImage(state) => {
+                page = Page::Editor(state);
+            }
+            CloseReason::GoHome => {
+                page = Page::Home;
             }
         }
     }
@@ -438,26 +536,58 @@ pub(crate) fn run() -> eyre::Result<()> {
     result
 }
 
-/// Why the window closed — the outer loop's post-close decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why the window closed — the outer loop's post-close decision,
+/// uniform across page epochs.
+#[derive(Debug, Clone)]
 enum CloseReason {
-    /// The user closed the window: exit the process.
+    /// The user closed the window (X / Alt+F4): exit the process.
     UserQuit,
     /// A capture the window itself requested (grace + delegate).
     CaptureIntent(PumpCommand),
     /// A hide directive (external capture / pre-grab handshake):
     /// wait for the reopen, not a quit.
     HiddenByEvent,
+    /// The Open control routed an image: the next epoch is the
+    /// editor page over it (boxed — see [`Page::Editor`]).
+    OpenImage(Box<EditorState>),
+    /// The editor page exited to home (`Esc`): the next epoch is the
+    /// home page — never a user quit.
+    GoHome,
+}
+
+/// Arm the shared intents an editor page's exit value encodes, so
+/// [`close_reason`] classifies every epoch uniformly.
+fn arm_editor_exit(shared: &Shared, exit: &EditorPageExit) {
+    match exit {
+        EditorPageExit::Home => shared.set_go_home(),
+        EditorPageExit::Capture(_) => {
+            // Interim (single-window task 004): the in-process grab
+            // lands in task 006; until then the editor's `+` chip
+            // rides the daemon delegation — the worker path, with
+            // the window closed for it exactly like a home-triggered
+            // capture.
+            shared.set_pending_capture(PumpCommand::Capture);
+        }
+        EditorPageExit::Closed => {}
+        _ => tracing::warn!(?exit, "editor page returned an unknown exit"),
+    }
 }
 
 /// Classify a window close: a pending capture command wins, then a
-/// hide request, else the user quit. Consumes exactly one flag.
+/// pending editor page (the Open route), then a hide request, then
+/// the go-home route; else the user quit. Consumes exactly one flag.
 fn close_reason(shared: &Shared) -> CloseReason {
     if let Some(command) = shared.take_pending_capture() {
         return CloseReason::CaptureIntent(command);
     }
+    if let Some(state) = shared.take_pending_editor() {
+        return CloseReason::OpenImage(Box::new(state));
+    }
     if shared.take_hide_requested() {
         return CloseReason::HiddenByEvent;
+    }
+    if shared.take_go_home() {
+        return CloseReason::GoHome;
     }
     CloseReason::UserQuit
 }
@@ -693,10 +823,10 @@ fn report_delegate_failure(shared: &Shared, core: &mut HomeCore, message: &str) 
     shared.push_directive(HomeDirective::SetStatus(message.to_string()));
 }
 
-/// [`HomeBridge`] impl joining the egui window to the shared state:
+/// [`HomeBridge`] impl joining the home page to the shared state:
 /// capture intents register here (the window is about to close; the
-/// outer loop services the intent once it does), directives poll
-/// every frame.
+/// outer loop services the intent once it does), the Open control
+/// decodes and routes its image here, directives poll every frame.
 struct Bridge {
     shared: Arc<Shared>,
 }
@@ -706,20 +836,29 @@ impl HomeBridge for Bridge {
         self.shared.set_pending_capture(PumpCommand::Capture);
     }
 
-    fn open_image(&mut self, path: std::path::PathBuf) {
-        if let Err(e) = spawn_open_worker(&path) {
-            tracing::warn!(error = %e, "spawning the open worker");
-            self.shared.push_directive(HomeDirective::SetStatus(format!(
-                "could not open {}: {e}",
-                path.display()
-            )));
+    fn open_image(&mut self, path: std::path::PathBuf) -> bool {
+        match decode_image_file(&path) {
+            Ok(state) => {
+                tracing::info!(path = %path.display(), "image routed to the editor page");
+                self.shared.set_pending_editor(state);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "decoding the picked image");
+                self.shared.push_directive(HomeDirective::SetStatus(format!(
+                    "could not open {}: {e}",
+                    path.display()
+                )));
+                false
+            }
         }
     }
 
     fn request_paste(&mut self) {
-        // Placeholder for the future clipboard→editor feature; the
-        // home window gates this behind its SHOW_PASTE const (false
-        // on this branch), so it is unreachable in practice.
+        // Placeholder until task 005 wires the clipboard→editor
+        // route; the home window gates this behind its SHOW_PASTE
+        // const (false on this branch), so it is unreachable in
+        // practice.
         tracing::warn!("Paste is not available yet (future clipboard→editor feature)");
     }
 
@@ -728,27 +867,48 @@ impl HomeBridge for Bridge {
     }
 }
 
-/// Build the `flintshot open <path>` argv (pure; unit-tested).
-fn open_argv(path: &std::path::Path) -> Vec<String> {
-    vec!["open".to_string(), path.to_string_lossy().into_owned()]
+/// Decode a picked image file into the editor state the editor page
+/// runs over — the `flintshot open` decode (same `image::open` +
+/// `to_rgba8`), in-process: no child, no relay.
+fn decode_image_file(path: &std::path::Path) -> eyre::Result<EditorState> {
+    let img = image::open(path)
+        .map_err(|e| eyre::eyre!("could not load image {}: {e}", path.display()))?;
+    Ok(EditorState::new(img.to_rgba8()))
 }
 
-/// Spawn `flintshot open <path>` detached (via `current_exe`, the
-/// worker pattern — same binary as this window). Why a child and not
-/// this process: the home window's eframe loop owns the thread, and
-/// native event loops do not nest — the editor needs a process of
-/// its own (exactly the argv the daemon spawns for `OpenLast`).
-fn spawn_open_worker(path: &std::path::Path) -> eyre::Result<()> {
-    let exe = std::env::current_exe()
-        .map_err(|e| eyre::eyre!("resolving current_exe for the open worker: {e}"))?;
-    let argv = open_argv(path);
-    std::process::Command::new(exe)
-        .args(&argv)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| eyre::eyre!("spawning the open worker {argv:?}: {e}"))
+/// [`EditorPageBridge`] impl joining the editor page to the shared
+/// state: side-effect outcomes report to the daemon from here (the
+/// worker path's equivalent — save reports feed `OpenLast`), status
+/// lands on the shared line, directives poll every frame.
+struct PageBridge {
+    shared: Arc<Shared>,
+}
+
+impl EditorPageBridge for PageBridge {
+    fn report_outcome(&mut self, outcome: &EditorOutcome) {
+        // Mirrors the worker's `report_editor_outcome`: only a save
+        // has a daemon report (last-saved tracking); copies and
+        // uploads report through their own paths (the upload worker
+        // self-reports; a copy has nothing to track).
+        if let EditorOutcome::Saved(path) = outcome {
+            match crate::ipc_client::delegate_to(None, &Request::ReportSaved { path: path.clone() })
+            {
+                Ok(_) => tracing::debug!(path = %path.display(), "reported the page's save"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "reporting the page's save; ignoring");
+                }
+            }
+        }
+    }
+
+    fn set_status(&mut self, status: &str) {
+        self.shared
+            .push_directive(HomeDirective::SetStatus(status.to_string()));
+    }
+
+    fn poll_directive(&mut self) -> Option<HomeDirective> {
+        self.shared.poll_directive()
+    }
 }
 
 #[cfg(test)]
@@ -945,13 +1105,12 @@ mod tests {
         // The outer loop's post-close decision: a pending capture
         // command wins, then a hide request, else the user quit.
         let shared = Shared::default();
-        assert_eq!(
-            close_reason(&shared),
-            CloseReason::UserQuit,
+        assert!(
+            matches!(close_reason(&shared), CloseReason::UserQuit),
             "a plain close is the user quitting"
         );
         shared.push_directive(HomeDirective::Hide);
-        assert_eq!(close_reason(&shared), CloseReason::HiddenByEvent);
+        assert!(matches!(close_reason(&shared), CloseReason::HiddenByEvent));
         shared.set_pending_capture(PumpCommand::Capture);
         shared.push_directive(HomeDirective::Hide);
         assert!(matches!(
@@ -1124,11 +1283,146 @@ mod tests {
     }
 
     #[test]
-    fn open_argv_is_the_flintshot_open_path() {
-        assert_eq!(
-            open_argv(std::path::Path::new("/tmp/shot 1.png")),
-            vec!["open".to_string(), "/tmp/shot 1.png".to_string()]
+    fn open_image_routes_to_a_pending_editor_page() {
+        // The Open control's contract: a readable file decodes into
+        // the next page's editor state (same window, new epoch).
+        let shared = Arc::new(Shared::default());
+        let mut bridge = Bridge {
+            shared: Arc::clone(&shared),
+        };
+        let png = fixture_png();
+        assert!(
+            bridge.open_image(png.path.clone()),
+            "a readable image must route"
         );
+        let state = shared
+            .take_pending_editor()
+            .expect("the editor state is pending for the outer loop");
+        assert_eq!(state.image.dimensions(), png.dims);
+    }
+
+    #[test]
+    fn open_image_failure_sets_status_and_stays_home() {
+        // Unreadable file: status line on home, no route — the window
+        // stays exactly where it is (spec: never a dead end).
+        let shared = Arc::new(Shared::default());
+        let mut bridge = Bridge {
+            shared: Arc::clone(&shared),
+        };
+        assert!(
+            !bridge.open_image(std::path::PathBuf::from("/nonexistent/does-not-exist.png")),
+            "an unreadable image must not route"
+        );
+        assert!(
+            shared.take_pending_editor().is_none(),
+            "no editor page pending"
+        );
+        assert!(
+            matches!(
+                shared.poll_directive(),
+                Some(HomeDirective::SetStatus(text)) if text.contains("does-not-exist")
+            ),
+            "the failure lands on the status line"
+        );
+    }
+
+    #[test]
+    fn close_reason_open_image_routes_the_editor_epoch() {
+        let shared = Shared::default();
+        let state = fixture_png_state((3, 2));
+        shared.set_pending_editor(state);
+        assert!(matches!(
+            close_reason(&shared),
+            CloseReason::OpenImage(state) if state.image.dimensions() == (3, 2)
+        ));
+    }
+
+    #[test]
+    fn close_reason_go_home_is_never_a_user_quit() {
+        // The editor page's Esc exit arms the home route; without this
+        // classification a plain "nothing else pending" read would
+        // kill the process instead of routing home.
+        let shared = Shared::default();
+        shared.set_go_home();
+        assert!(matches!(close_reason(&shared), CloseReason::GoHome));
+        assert!(!shared.take_go_home(), "consumed by the classifier");
+    }
+
+    #[test]
+    fn close_reason_capture_beats_open_and_hide() {
+        // A capture intent is the strongest close reason: the newest
+        // capture owns the screen (Replace policy).
+        let shared = Shared::default();
+        shared.set_pending_editor(fixture_png_state((2, 2)));
+        shared.push_directive(HomeDirective::Hide);
+        shared.set_pending_capture(PumpCommand::Capture);
+        assert!(matches!(
+            close_reason(&shared),
+            CloseReason::CaptureIntent(PumpCommand::Capture)
+        ));
+    }
+
+    #[test]
+    fn close_reason_open_beats_hide_and_go_home() {
+        // The user's explicit Open routes even if an external capture
+        // raced it — the capture's own worker will supersede.
+        let shared = Shared::default();
+        shared.push_directive(HomeDirective::Hide);
+        shared.set_go_home();
+        shared.set_pending_editor(fixture_png_state((2, 2)));
+        assert!(matches!(close_reason(&shared), CloseReason::OpenImage(_)));
+    }
+
+    #[test]
+    fn editor_exit_arms_the_matching_close_intent() {
+        // The router's uniform post-epoch step: the editor page's exit
+        // value arms the shared flags, then one classification picks
+        // the next page.
+        let shared = Shared::default();
+        arm_editor_exit(&shared, &EditorPageExit::Home);
+        assert!(matches!(close_reason(&shared), CloseReason::GoHome));
+        arm_editor_exit(
+            &shared,
+            &EditorPageExit::Capture(flintshot_core::NewCaptureMode::Region),
+        );
+        assert!(matches!(
+            close_reason(&shared),
+            CloseReason::CaptureIntent(PumpCommand::Capture)
+        ));
+        arm_editor_exit(&shared, &EditorPageExit::Closed);
+        assert!(matches!(close_reason(&shared), CloseReason::UserQuit));
+    }
+
+    /// A tiny PNG written to a temp file (the decode path needs real
+    /// image bytes on disk).
+    struct FixturePng {
+        path: std::path::PathBuf,
+        dims: (u32, u32),
+        _dir: tempfile::TempDir,
+    }
+
+    fn fixture_png() -> FixturePng {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("fixture.png");
+        image::RgbaImage::from_raw(4, 3, vec![255; 4 * 3 * 4])
+            .expect("raw buffer")
+            .save(&path)
+            .expect("save fixture png");
+        FixturePng {
+            path,
+            dims: (4, 3),
+            _dir: dir,
+        }
+    }
+
+    fn fixture_png_state(dims: (u32, u32)) -> flintshot_core::EditorState {
+        let img = image::RgbaImage::from_raw(
+            dims.0,
+            dims.1,
+            vec![255; (dims.0 as usize) * (dims.1 as usize) * 4],
+        )
+        .expect("raw buffer");
+        flintshot_core::EditorState::new(img)
     }
 
     #[test]

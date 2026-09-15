@@ -82,13 +82,17 @@ impl CloseHandle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EditorPageExit {
-    /// Back to the three-button home (Esc, window close, or a
-    /// terminal error — the empty state).
+    /// Back to the three-button home (Esc) — the empty state.
     Home,
     /// The user asked for a new capture from inside the editor
     /// (`+` chip / Ctrl+N); `mode` carries the selection-first label
     /// the recapture flow keys on.
     Capture(NewCaptureMode),
+    /// The window closed with no explicit editor outcome — X button,
+    /// Alt+F4, or a Hide directive's close. Not a home route: the
+    /// router classifies this via its own state (user quit vs
+    /// external capture).
+    Closed,
 }
 
 /// The editor page's only seam to the outside world — the single
@@ -120,17 +124,20 @@ pub trait EditorPageBridge {
 /// native loop owns the whole lifetime.
 pub(crate) type PageBridgeSlot = Rc<RefCell<Box<dyn EditorPageBridge>>>;
 
-/// Resolve the page exit from the editor epoch's terminal outcome
-/// (the slot the closed window left). Pure, headless-testable seam
-/// of [`EguiShell::run_editor_page`].
-#[must_use]
-pub(crate) fn page_exit_for(resolved: &flintshot_core::Result<EditorOutcome>) -> EditorPageExit {
+/// Resolve the page exit from the epoch's terminal outcome (what the
+/// closed window's slot holds). Pure, headless-testable seam of
+/// [`EguiShell::run_editor_page`].
+pub(crate) fn resolve_page_exit(
+    resolved: Option<flintshot_core::Result<EditorOutcome>>,
+    bridge: &PageBridgeSlot,
+) -> EditorPageExit {
     match resolved {
-        Ok(EditorOutcome::NewCapture { mode }) => EditorPageExit::Capture(*mode),
-        // Esc / X (Cancelled), side-effect closes, and terminal
-        // errors all route home — the empty state; the error case
-        // adds a bridge status first (see `settle_page_exit`).
-        Ok(_) | Err(_) => EditorPageExit::Home,
+        Some(resolved) => settle_page_exit(&resolved, bridge),
+        // Nothing published: X button / Alt+F4 / a Hide-directive
+        // close. Deliberately NOT defaulted to a cancel — the router
+        // must tell a user quit apart from an external capture's
+        // close, and only its own state can.
+        None => EditorPageExit::Closed,
     }
 }
 
@@ -146,7 +153,12 @@ pub(crate) fn settle_page_exit(
             .borrow_mut()
             .set_status(&format!("editor closed on error: {e}"));
     }
-    page_exit_for(resolved)
+    match resolved {
+        Ok(EditorOutcome::NewCapture { mode }) => EditorPageExit::Capture(*mode),
+        // Esc (Cancelled), side-effect closes, and terminal errors all
+        // route home — the empty state.
+        Ok(_) | Err(_) => EditorPageExit::Home,
+    }
 }
 
 /// egui implementation of the [`EditorShell`] trait.
@@ -320,13 +332,10 @@ impl EguiShell {
         eframe::run_native(WINDOW_TITLE, options, app_creator)
             .map_err(|e| eframe_err_to_flintshot(&e))?;
 
-        // Same defaulting as the worker path: a close with nothing
-        // published (X button, Alt+F4) is a cancel → Home.
-        let resolved = outcome
-            .borrow_mut()
-            .take()
-            .unwrap_or(Ok(EditorOutcome::Cancelled));
-        Ok(settle_page_exit(&resolved, &page_bridge))
+        // A close with nothing published is `Closed` (X / Alt+F4 / a
+        // Hide-directive close) — the router classifies it.
+        let resolved = outcome.borrow_mut().take();
+        Ok(resolve_page_exit(resolved, &page_bridge))
     }
 }
 
@@ -610,6 +619,10 @@ mod tests {
         statuses: Vec<String>,
     }
 
+    fn blank_bridge() -> PageBridgeSlot {
+        Rc::new(RefCell::new(Box::new(RecordingPageBridge::default())))
+    }
+
     #[derive(Default, Clone)]
     struct RecordingPageBridge {
         rec: std::sync::Arc<std::sync::Mutex<PageRecorder>>,
@@ -644,34 +657,57 @@ mod tests {
         // outcome — Cancelled (Esc / X), Saved, CopiedToClipboard,
         // Uploaded — exits to Home.
         assert_eq!(
-            page_exit_for(&Ok(EditorOutcome::NewCapture {
-                mode: NewCaptureMode::Region
-            })),
+            resolve_page_exit(
+                Some(Ok(EditorOutcome::NewCapture {
+                    mode: NewCaptureMode::Region
+                })),
+                &blank_bridge()
+            ),
             EditorPageExit::Capture(NewCaptureMode::Region)
         );
         assert_eq!(
-            page_exit_for(&Ok(EditorOutcome::NewCapture {
-                mode: NewCaptureMode::Fullscreen
-            })),
+            resolve_page_exit(
+                Some(Ok(EditorOutcome::NewCapture {
+                    mode: NewCaptureMode::Fullscreen
+                })),
+                &blank_bridge()
+            ),
             EditorPageExit::Capture(NewCaptureMode::Fullscreen)
         );
         assert_eq!(
-            page_exit_for(&Ok(EditorOutcome::Cancelled)),
+            resolve_page_exit(Some(Ok(EditorOutcome::Cancelled)), &blank_bridge()),
             EditorPageExit::Home
         );
         assert_eq!(
-            page_exit_for(&Ok(EditorOutcome::CopiedToClipboard)),
+            resolve_page_exit(Some(Ok(EditorOutcome::CopiedToClipboard)), &blank_bridge()),
             EditorPageExit::Home
         );
         assert_eq!(
-            page_exit_for(&Ok(EditorOutcome::Saved(std::path::PathBuf::from(
-                "/tmp/x.png"
-            )))),
+            resolve_page_exit(
+                Some(Ok(EditorOutcome::Saved(std::path::PathBuf::from(
+                    "/tmp/x.png"
+                )))),
+                &blank_bridge()
+            ),
             EditorPageExit::Home
         );
         assert_eq!(
-            page_exit_for(&Ok(EditorOutcome::Uploaded(String::new()))),
+            resolve_page_exit(
+                Some(Ok(EditorOutcome::Uploaded(String::new()))),
+                &blank_bridge()
+            ),
             EditorPageExit::Home
+        );
+    }
+
+    #[test]
+    fn page_close_without_an_outcome_is_closed_not_home() {
+        // X / Alt+F4 / a Hide-directive close publish nothing — the
+        // router must classify quit vs external capture itself, so
+        // this may NOT default to a cancel.
+        assert_eq!(
+            resolve_page_exit(None, &blank_bridge()),
+            EditorPageExit::Closed
         );
     }
 
