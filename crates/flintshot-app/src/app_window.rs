@@ -7,7 +7,7 @@
 //! background **pump thread** owns a current-thread tokio runtime,
 //! holds the daemon subscription, delegates capture requests, and
 //! pushes [`HomeDirective`]s. The pump never touches a window: every
-//! epoch (`run_home` / `run_editor_page`) polls the directives it
+//! epoch (`run_window` / `run_editor_page`) polls the directives it
 //! pushed.
 //!
 //! ## The router (page epochs)
@@ -236,7 +236,7 @@ impl Shared {
     }
 
     /// The outer loop's window-state updates: open before a
-    /// [`EguiShell::run_home`] iteration, closed after it returns.
+    /// [`EguiShell::run_window`] iteration, closed after it returns.
     /// No notification on open (nothing waits for open).
     fn set_window_open(&self) {
         self.lock().window_open = true;
@@ -770,7 +770,12 @@ fn next_page_after_reopen(shared: &Shared) -> Page {
     shared.take_restore_page().unwrap_or(Page::Home)
 }
 
-/// Run one home epoch (the three-button window) to its close.
+/// Run one home epoch (the three-button window) to its close. The
+/// epoch spawns through the window router (`run_window`): one
+/// eframe lifetime per window generation with pages as routes —
+/// this task still opens Home-only (the editor page joins the
+/// router in editor-capture-ux Task 006; the outer loop's shape is
+/// unchanged until then).
 fn run_home_epoch(shared: &Arc<Shared>) -> eyre::Result<()> {
     let status = shared.status();
     let initial_status = if status.is_empty() {
@@ -783,10 +788,14 @@ fn run_home_epoch(shared: &Arc<Shared>) -> eyre::Result<()> {
     };
     shared.set_window_open();
     let ran = crate::ambient::with_ambient_runtime(|| {
-        flintshot_editor_egui::EguiShell::new().run_home(Box::new(bridge), initial_status)
+        flintshot_editor_egui::EguiShell::new().run_window(Box::new(bridge), initial_status)
     });
-    ran.map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))?
-        .map_err(|e| eyre::eyre!("running the app window: {e}"))
+    let _route = ran
+        .map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))?
+        .map_err(|e| eyre::eyre!("running the app window: {e}"))?;
+    // Home-only generations close on Home; the route-at-close input
+    // becomes meaningful once transitions stop closing the window.
+    Ok(())
 }
 
 /// Run one editor epoch to its close, returning the page exit the
