@@ -9,6 +9,7 @@
 mod ambient;
 #[cfg(feature = "egui")]
 mod app_window;
+mod capture_flow;
 mod cli;
 mod config_watcher;
 mod daemon;
