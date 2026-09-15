@@ -21,14 +21,44 @@ Categories used below:
 ### Changed
 
 - **One window for everything — `flintshot app` routes instead of
-  spawning** (ADR-0053, spec `docs/specs/single-window/`): the app
-  window is a page router (three-button home ↔ image-sized editor),
+  spawning** (ADR-0053/0054, specs `docs/specs/single-window/`,
+  `docs/specs/editor-capture-ux/`): the app window is a page router
+  (three-button home ↔ fitted editor ↔ capture-progress loading),
   captures run in its own process (no worker spawn, no image relay),
   and external triggers — hotkeys, tray, `flintshot capture`,
   `flintshot open`, tray *Open last* — forward into the running
   window when one exists (`Event::CaptureTriggered` /
   `OpenRequested`). With no window running, every path behaves
   exactly as before (worker editors, byte-identical argvs).
+- **Page transitions keep the window** (ADR-0054): home → editor
+  (Open…/Paste), editor → home (`Esc`), image swaps, and the
+  loading → image hand-off all swap routes inside one window
+  lifetime — same surface identity to the WM (no taskbar / pinning /
+  open-close churn), one resize per home ↔ editor hop. Window
+  destruction now happens only where it must: every capture
+  (not-in-the-shot, ADR-0047) and user quit.
+- **The editor opens at a stable size**: a fixed 1024×640 logical
+  default (clamped to small monitors at open) instead of resizing to
+  every image's pixel dimensions; the image renders fitted (never
+  upscaled) and centered inside, refitting live on window resizes
+  and crops. Annotations, the magnifier, and move-chrome track the
+  fit through one shared view transform.
+- **Capture progress indicator**: after confirming a selection in
+  the OS UI, the editor window is on screen immediately — spinner,
+  "retrieving capture…" — while the portal's clipboard write lands
+  (observed over 1 s); the image swaps in-place the moment it
+  delivers. Direct grabs (image in hand) skip the spinner; a wedged
+  read-back surfaces its timeout error on the page and `Esc`
+  returns home — never a hang, never a stranded spinner.
+- **The editor `+` popup mirrors home**: Capture / Open… / Paste
+  with the home-parity labels and the Replace-semantics hints on
+  Open/Paste (the retired Region/Fullscreen entries and the
+  duplicate chrome strip are gone — OQ-1; `C` / `O` keyboard
+  accelerators stay, `Ctrl+N` keeps the popup's Capture). On the
+  dev Wayland+portal session `+` → Capture opens the compositor's
+  own selection UI (`backends` reports portal available and
+  auto-selected; the xcap monitor-grab fallback runs only when the
+  portal is genuinely unavailable).
 - **Paste**: the home's third button (and the editor chrome's) reads
   the system clipboard image straight into the editor page; an empty
   or text clipboard is a status-line note, not an error.
