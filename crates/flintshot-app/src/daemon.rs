@@ -93,9 +93,12 @@ pub fn run(replace: bool) -> eyre::Result<()> {
     // (IPC server, X11 hotkeys, portal hotkeys) — the Replace
     // policy's home. The prepare gate is the pre-grab handshake's
     // coordination state (stepped by this loop, awaited by the IPC
-    // side) — the tray-gate pattern, generalized to every surface.
-    let capture = crate::worker::CaptureDispatch::new();
+    // side) — the tray-gate pattern, generalized to every surface —
+    // and the presence oracle for forward-or-spawn (single-window:
+    // a present app window receives capture triggers instead of a
+    // spawned worker).
     let prepare = Arc::new(crate::prepare_gate::PrepareGate::new());
+    let capture = crate::worker::CaptureDispatch::new().with_prepare_gate(Arc::clone(&prepare));
     // The live `[hotkeys]` section: written by the config hot-reload
     // below, read by the portal task at bind time (fresh suggestions
     // without a daemon restart). The tray's bind trigger crosses the

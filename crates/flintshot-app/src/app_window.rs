@@ -154,6 +154,11 @@ struct SharedInner {
     /// can no longer ack a handshake while a fresh window is open
     /// (the race that put the app window in shots).
     window_open: bool,
+    /// The page the current epoch runs (a clone) — the same-page
+    /// restore target when an external capture closes the window
+    /// (plan decision 8: restores return to the page that was open,
+    /// not always home; a routed grab's fresh image wins over it).
+    restore_page: Option<Page>,
     should_open: bool,
     pump_dead: bool,
 }
@@ -272,6 +277,17 @@ impl Shared {
         self.lock().status.clone()
     }
 
+    /// Stash the page an epoch is about to run (the same-page restore
+    /// target — plan decision 8).
+    fn set_restore_page(&self, page: Page) {
+        self.lock().restore_page = Some(page);
+    }
+
+    /// Take the stashed restore page, if any.
+    fn take_restore_page(&self) -> Option<Page> {
+        self.lock().restore_page.take()
+    }
+
     /// Block until a `Show` armed the reopen flag (or the pump
     /// died). Returns whether a window should open; the flag is
     /// consumed either way.
@@ -336,6 +352,16 @@ impl HomeCore {
                 self.supersede_pending = false;
                 // Any capture must not find this window on screen —
                 // self-triggered or not (the ADR-0047 gap).
+                self.hidden = true;
+                Some(HomeDirective::Hide)
+            }
+            IpcEvent::CaptureTriggered { .. } => {
+                // A forwarded capture (single-window): the daemon
+                // handed the trigger to this window — no worker will
+                // run, so no `SessionEnded` will balance the
+                // `CaptureStarted` it rode in on. Undo the count now;
+                // the pump's grab delivery restores.
+                self.in_flight = self.in_flight.saturating_sub(1);
                 self.hidden = true;
                 Some(HomeDirective::Hide)
             }
@@ -558,6 +584,12 @@ fn route_grab(shared: &Shared, core: &mut HomeCore, grab: AppGrab) {
 /// ack leaves immediately — the pump's select loop handles it while
 /// the grab thread blocks on `CaptureReady`.
 fn start_grab(router: &mut GrabRouter, shared: &Shared) {
+    start_grab_with(router, shared, 0);
+}
+
+/// [`start_grab`] with an explicit pre-capture delay (the forwarded
+/// trigger's `delay_ms`; the button path passes 0).
+fn start_grab_with(router: &mut GrabRouter, shared: &Shared, delay_ms: u32) {
     let generation = router.trigger();
     let watch = Arc::new(SupersedeWatch::subscribe_at(None));
     let Some(tx) = router.grabs_tx.clone() else {
@@ -568,7 +600,7 @@ fn start_grab(router: &mut GrabRouter, shared: &Shared) {
     if let Err(e) = std::thread::Builder::new()
         .name("flintshot-app-grab".into())
         .spawn(move || {
-            let grab = crate::capture_flow::grab_for_app_window(&grab_watch);
+            let grab = crate::capture_flow::grab_for_app_window(&grab_watch, delay_ms);
             // A closed channel means the pump is gone (process on its
             // way out) — dropping the outcome is correct then.
             let _ = tx.blocking_send((generation, grab));
@@ -612,6 +644,9 @@ pub(crate) fn run() -> eyre::Result<()> {
     // thread is free). A hide-by-event close (external capture) waits
     // for the same reopen. Any other close is the user quitting.
     loop {
+        // The same-page restore target: whatever this epoch runs is
+        // what an external capture's close brings back.
+        shared.set_restore_page(page.clone());
         let exit = match page {
             Page::Home => match run_home_epoch(&shared) {
                 Ok(()) => None,
@@ -655,22 +690,19 @@ pub(crate) fn run() -> eyre::Result<()> {
                     tracing::warn!("app pump died before the capture session ended");
                     break;
                 }
-                // The pump's grab may have routed an editor page (an
-                // image landed); a quiet exit or failure reopens home.
-                page = match shared.take_pending_editor() {
-                    Some(pending) => Page::Editor(Box::new(pending)),
-                    None => Page::Home,
-                };
+                page = next_page_after_reopen(&shared);
             }
             CloseReason::HiddenByEvent => {
                 // An externally triggered capture hid us (HideForCapture
                 // / CaptureStarted): not a user quit. The pump acked the
-                // hide; reopen when the session ends.
+                // hide; reopen when the session ends — back on the page
+                // that was open, unless the trigger routed a fresh
+                // image (a forwarded grab's editor page).
                 if !shared.wait_for_reopen() {
                     tracing::warn!("app pump died while hidden for a capture");
                     break;
                 }
-                page = Page::Home;
+                page = next_page_after_reopen(&shared);
             }
             CloseReason::OpenImage(state) => {
                 page = Page::Editor(state);
@@ -685,6 +717,16 @@ pub(crate) fn run() -> eyre::Result<()> {
     let _ = pump.join();
 
     result
+}
+
+/// The post-reopen page: a routed grab's fresh image (the editor
+/// page it armed) wins; else the page that was open (the same-page
+/// restore); else home.
+fn next_page_after_reopen(shared: &Shared) -> Page {
+    if let Some(pending) = shared.take_pending_editor() {
+        return Page::Editor(Box::new(pending));
+    }
+    shared.take_restore_page().unwrap_or(Page::Home)
 }
 
 /// Run one home epoch (the three-button window) to its close.
@@ -967,8 +1009,21 @@ async fn connected_loop(
                 let decoded = frame.and_then(|payload| decode_event(&payload));
                 if let Ok(event) = decoded {
                     let hide_requested = matches!(event, IpcEvent::HideForCapture);
+                    // A forwarded capture trigger (single-window): the
+                    // daemon handed us the grab. GOTCHA (echo): every
+                    // trigger — hotkey, tray, delegated CLI, even one
+                    // that raced our own button click — lands here
+                    // exactly once per daemon dispatch, and the
+                    // generation machine folds repeats into one grab.
+                    let triggered = match &event {
+                        IpcEvent::CaptureTriggered { delay_ms } => Some(*delay_ms),
+                        _ => None,
+                    };
                     if let Some(directive) = core.on_event(&event) {
                         shared.push_directive(directive);
+                    }
+                    if let Some(delay_ms) = triggered {
+                        start_grab_with(router, shared, delay_ms);
                     }
                     if hide_requested {
                         // The daemon's pre-grab handshake is armed and
@@ -1232,6 +1287,78 @@ mod tests {
             "the last worker exiting restores the window"
         );
         assert!(!core.hidden);
+    }
+
+    #[test]
+    fn forwarded_trigger_recounts_and_hides() {
+        // Single-window: the daemon forwarded the capture (no worker
+        // will SessionEnded). The CaptureStarted it rode in on must
+        // not linger in the in-flight count, and the trigger hides
+        // like any capture.
+        let mut core = HomeCore::default();
+        core.on_event(&IpcEvent::CaptureStarted);
+        assert_eq!(core.in_flight, 1);
+        assert_eq!(
+            core.on_event(&IpcEvent::CaptureTriggered { delay_ms: 0 }),
+            Some(HomeDirective::Hide)
+        );
+        assert_eq!(core.in_flight, 0, "the forwarded start is uncounted");
+        assert!(core.hidden);
+        // The pump's grab delivery restores via force_show.
+        assert_eq!(core.force_show(), Some(HomeDirective::Show));
+    }
+
+    #[test]
+    fn a_forwarded_trigger_without_its_start_still_hides_safely() {
+        // Event races (subscription joined mid-dispatch) may deliver
+        // the trigger without the start: saturating, never negative,
+        // still hides.
+        let mut core = HomeCore::default();
+        assert_eq!(
+            core.on_event(&IpcEvent::CaptureTriggered { delay_ms: 2_500 }),
+            Some(HomeDirective::Hide)
+        );
+        assert_eq!(core.in_flight, 0);
+    }
+
+    #[test]
+    fn hidden_close_restores_the_page_that_was_open() {
+        // Plan decision 8: an external capture's close brings back
+        // the page that was open — home if home, the editor page if
+        // editing (the pre-epoch image; in-session annotations are
+        // the Replace policy's loss).
+        let shared = Shared::default();
+        shared.set_restore_page(Page::Editor(Box::new(pending_over((2, 2), false))));
+        let next = next_page_after_reopen(&shared);
+        assert!(matches!(next, Page::Editor(_)), "the editor page restores");
+    }
+
+    #[test]
+    fn a_routed_grab_beats_the_stashed_restore() {
+        // A forwarded grab that landed an image routes the editor
+        // page over the fresh capture, not the stale stash.
+        let shared = Shared::default();
+        shared.set_restore_page(Page::Home);
+        shared.set_pending_editor(pending_over((5, 4), true));
+        match next_page_after_reopen(&shared) {
+            Page::Editor(pending) => {
+                assert!(
+                    pending.selection_first,
+                    "the routed grab's landing phase wins"
+                );
+                assert_eq!(pending.state.image.dimensions(), (5, 4));
+            }
+            Page::Home => panic!("a routed image must win over the stash"),
+        }
+    }
+
+    #[test]
+    fn a_quiet_grab_after_a_home_close_restores_home() {
+        let shared = Shared::default();
+        shared.set_restore_page(Page::Home);
+        assert!(matches!(next_page_after_reopen(&shared), Page::Home));
+        // And with nothing stashed at all: home (the empty state).
+        assert!(matches!(next_page_after_reopen(&shared), Page::Home));
     }
 
     #[test]

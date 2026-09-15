@@ -448,6 +448,11 @@ const SUPERSEDE_POLL: Duration = Duration::from_millis(25);
 pub struct CaptureDispatch {
     sessions: Arc<CaptureSessions>,
     serialize: Arc<Mutex<()>>,
+    /// The pre-grab handshake's coordination state — the app-window
+    /// **presence** source for forward-or-spawn (single-window). The
+    /// daemon wires it at start; `None` (tests, pre-wiring sites)
+    /// never forwards.
+    prepare: Option<Arc<crate::prepare_gate::PrepareGate>>,
 }
 
 impl CaptureDispatch {
@@ -464,7 +469,18 @@ impl CaptureDispatch {
         Self {
             sessions: Arc::new(CaptureSessions::with_graces(grace, kill_wait)),
             serialize: Arc::new(Mutex::new(())),
+            prepare: None,
         }
+    }
+
+    /// Attach the daemon's prepare gate — the presence oracle for
+    /// forward-or-spawn: a connected app window (`announce_app_window`)
+    /// or a live daemon-spawned app process means capture triggers
+    /// forward to the window instead of spawning a worker.
+    #[must_use]
+    pub fn with_prepare_gate(mut self, gate: Arc<crate::prepare_gate::PrepareGate>) -> Self {
+        self.prepare = Some(gate);
+        self
     }
 
     /// The shared session registry (spawner wiring + assertions).
@@ -473,12 +489,33 @@ impl CaptureDispatch {
         Arc::clone(&self.sessions)
     }
 
+    /// Whether an app window would receive a forwarded capture: a
+    /// presence connection is live OR the daemon-spawned app process
+    /// is alive (the connection covers user-launched windows the
+    /// registry never tracked — ADR-0052).
+    fn app_window_present(&self) -> bool {
+        self.sessions.app_alive()
+            || self
+                .prepare
+                .as_ref()
+                .is_some_and(|gate| gate.app_window_present())
+    }
+
     /// **Supersede-then-spawn**, serialized: broadcast
     /// [`Event::CaptureSuperseded`], wait (bounded) for the old
     /// session's graceful exit, hard-kill stragglers, wait (bounded)
     /// again — then run the normal dispatch arm that spawns the new
     /// worker. The mutex makes two simultaneous triggers line up;
     /// latest wins once serialized, no queue (Replace policy).
+    ///
+    /// **Forward-or-spawn** (single-window): when an app window is
+    /// present ([`Self::app_window_present`]), the supersede cycle
+    /// still runs against live *workers*, but the trigger then
+    /// broadcasts [`Event::CaptureStarted`] (subscriber semantics
+    /// stay stable — the tray pre-hide, applet status all key on it)
+    /// plus [`Event::CaptureTriggered`] instead of spawning. The
+    /// window runs the grab in its own process; no worker, and so no
+    /// `SessionEnded` — the window's pump owns the accounting.
     ///
     /// Blocking (worst case grace + kill wait, ~2 s). Async entry
     /// points must use [`dispatch_capture`], which parks this on the
@@ -516,6 +553,17 @@ impl CaptureDispatch {
                         .wait_no_captures(Instant::now() + SUPERSEDE_POLL);
                 }
             }
+        }
+        if let (true, Request::Capture { delay_ms }) = (self.app_window_present(), request) {
+            tracing::info!(
+                delay_ms,
+                "app window present; forwarding the capture trigger"
+            );
+            sink(Event::CaptureStarted);
+            sink(Event::CaptureTriggered {
+                delay_ms: *delay_ms,
+            });
+            return Ok(DispatchOutcome::Continue);
         }
         dispatch(request, spawner, state, sink)
     }
@@ -574,6 +622,83 @@ mod tests {
                 .push(argv.iter().map(|s| (*s).to_string()).collect());
             Ok(())
         }
+    }
+
+    // --- Forward-or-spawn (single-window Task 007) ---
+
+    #[test]
+    fn forwarded_when_an_app_window_is_present() {
+        // A present app window (presence connection) receives the
+        // trigger instead of a worker: CaptureStarted (stable
+        // subscriber semantics) + CaptureTriggered with the delay —
+        // and no spawn.
+        let gate = Arc::new(crate::prepare_gate::PrepareGate::new());
+        gate.app_window_connected();
+        let ctx = CaptureDispatch::new().with_prepare_gate(gate);
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        let mut events = Vec::new();
+        ctx.dispatch_capture_blocking(
+            &Request::Capture { delay_ms: 250 },
+            &spawner,
+            &state,
+            &mut |ev| events.push(ev),
+        )
+        .expect("forwarding dispatch");
+        assert_eq!(spawner.snapshot(), Vec::<Vec<String>>::new(), "no worker");
+        assert_eq!(
+            events,
+            vec![
+                Event::CaptureStarted,
+                Event::CaptureTriggered { delay_ms: 250 },
+            ],
+            "the trigger rides the bus with its delay"
+        );
+    }
+
+    #[test]
+    fn spawned_when_no_app_window_is_present() {
+        // No window: today's supersede-then-spawn, byte-identical.
+        let ctx = CaptureDispatch::new();
+        let spawner = RecordingSpawner::new();
+        let state = DispatchState::new();
+        let mut events = Vec::new();
+        ctx.dispatch_capture_blocking(
+            &Request::Capture { delay_ms: 0 },
+            &spawner,
+            &state,
+            &mut |ev| events.push(ev),
+        )
+        .expect("spawn dispatch");
+        assert_eq!(spawner.snapshot().len(), 1, "the worker spawns");
+        assert_eq!(events, vec![Event::CaptureStarted], "no trigger event");
+    }
+
+    #[test]
+    fn presence_connection_withdraw_stops_forwarding() {
+        // Presence is connection-truthful: the window's connection
+        // dying withdraws it and the next trigger spawns a worker.
+        let gate = Arc::new(crate::prepare_gate::PrepareGate::new());
+        gate.app_window_connected();
+        gate.app_window_disconnected();
+        let ctx = CaptureDispatch::new().with_prepare_gate(gate);
+        let spawner = RecordingSpawner::new();
+        ctx.dispatch_capture_blocking(
+            &Request::Capture { delay_ms: 0 },
+            &spawner,
+            &DispatchState::new(),
+            &mut |_| {},
+        )
+        .expect("spawn dispatch");
+        assert_eq!(spawner.snapshot().len(), 1, "back to spawning");
+    }
+
+    #[test]
+    fn a_gateless_dispatch_context_never_forwards() {
+        // Tests and pre-wiring sites (no gate attached) keep the
+        // spawn behavior — the default stays byte-identical.
+        let ctx = CaptureDispatch::new();
+        assert!(!ctx.app_window_present());
     }
 
     /// A spawner that always fails — proves spawn errors propagate
