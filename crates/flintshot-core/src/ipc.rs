@@ -150,6 +150,16 @@ pub enum Request {
     /// continues (the handshake degrades to today's grace-only
     /// behavior).
     AnnounceAppWindow,
+    // single-window effort — appended (postcard variant-index rule):
+    /// CLI `open` → daemon: open `path` in an editor. When an app
+    /// window is present the daemon broadcasts
+    /// [`Event::OpenRequested`] instead of spawning the open worker
+    /// (the window routes itself to its editor page); without one,
+    /// today's worker path runs unchanged.
+    OpenImage {
+        /// Filesystem path of the image to open.
+        path: PathBuf,
+    },
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -245,6 +255,25 @@ pub enum Event {
     /// ack with [`Request::ReportAppHidden`] once the window is
     /// destroyed. Pairs with [`Request::PrepareCapture`].
     HideForCapture,
+    // single-window effort — appended (postcard variant-index rule):
+    /// Broadcast to the app window: run a capture in-process. The
+    /// daemon emits this instead of spawning a capture worker when an
+    /// app window is present; the window closes, grabs via the shared
+    /// capture flow, and reopens on its editor page. `delay_ms`
+    /// carries the pre-capture delay of the forwarded
+    /// [`Request::Capture`].
+    CaptureTriggered {
+        /// Pre-capture delay in milliseconds.
+        delay_ms: u32,
+    },
+    /// Broadcast to the app window: open `path` on the editor page.
+    /// Forwarded from [`Request::OpenImage`] (and tray *Open last*
+    /// with the last-saved path); without an app window the daemon
+    /// spawns today's open worker instead.
+    OpenRequested {
+        /// Filesystem path of the image to open.
+        path: PathBuf,
+    },
 }
 
 /// One entry of an [`Event::ShortcutsBound`] reply: a bound shortcut's
@@ -350,6 +379,10 @@ mod tests {
             Request::Capture { delay_ms: 2_500 },
             // fix-app-window-capture-races — appended
             Request::AnnounceAppWindow,
+            // single-window — appended (postcard variant-index rule)
+            Request::OpenImage {
+                path: PathBuf::from("/tmp/my shots/screen 1.png"),
+            },
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");
@@ -393,6 +426,11 @@ mod tests {
             Event::CaptureSuperseded,
             Event::CaptureReady,
             Event::HideForCapture,
+            // single-window — appended (postcard variant-index rule)
+            Event::CaptureTriggered { delay_ms: 2_500 },
+            Event::OpenRequested {
+                path: PathBuf::from("/tmp/my shots/screen 1.png"),
+            },
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode event");
