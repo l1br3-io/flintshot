@@ -588,6 +588,12 @@ impl EditorApp {
             return;
         }
 
+        // Page chrome accelerators (single-window): plain C / O
+        // mirror the home's actions; P stays the Pencil tool key.
+        if self.page_action_shortcut(ctx, modifiers) {
+            return;
+        }
+
         // Selection-first phase: the dispatcher's Enter-crop is one
         // of the two phase-ending sites (the other is `ui`'s toolbar
         // Crop button). Checked immediately after the dispatch so the
@@ -830,6 +836,14 @@ impl EditorApp {
         let gate = self.rail_gate();
         let action = toolbar::show(ui, &mut self.state, self.copied, gate);
 
+        // The page's chrome actions (single-window): the home's three
+        // intents as a compact strip. Worker windows draw none.
+        let page_action = if self.page.is_some() {
+            toolbar::show_page_actions(ui)
+        } else {
+            None
+        };
+
         // Selection-first phase: the toolbar's "Crop · Enter" button
         // crops through `confirm_selection`, bypassing `logic` — so
         // this is the second latch site, checked before this frame's
@@ -948,6 +962,19 @@ impl EditorApp {
             ToolbarAction::NewCapture(mode) => self.handle_new_capture(mode, ui.ctx()),
             ToolbarAction::None => {}
         }
+
+        // The page chrome's fired action, if any (drawn above the
+        // canvas; handled after the toolbar so both can fire in one
+        // frame only by explicit double-click).
+        if let Some(page_action) = page_action {
+            match page_action {
+                toolbar::PageChromeAction::Capture => {
+                    self.handle_new_capture(NewCaptureMode::Region, ui.ctx());
+                }
+                toolbar::PageChromeAction::Open => self.handle_page_open(ui.ctx()),
+                toolbar::PageChromeAction::Paste => self.handle_page_paste(ui.ctx()),
+            }
+        }
     }
 }
 
@@ -982,6 +1009,61 @@ impl EditorApp {
     /// Whether the current page is a single-window page epoch.
     fn is_page(&self) -> bool {
         self.page.is_some()
+    }
+
+    /// The page chrome's Open action, dialog already answered:
+    /// hand the picked path to the bridge and close on a route (the
+    /// fresh editor epoch replaces this page's image). A failed
+    /// decode keeps the page exactly as it was.
+    fn apply_page_open(&self, ctx: &Context, path: std::path::PathBuf) {
+        let Some(bridge) = self.page.clone() else {
+            return;
+        };
+        if bridge.borrow_mut().open_image(path) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// The page chrome's Open action: in-window file dialog, then
+    /// [`Self::apply_page_open`]. Cancelling the dialog is a no-op.
+    fn handle_page_open(&self, ctx: &Context) {
+        if let Some(path) = crate::home::pick_image_path() {
+            self.apply_page_open(ctx, path);
+        }
+    }
+
+    /// The page chrome's Paste action: clipboard image via the
+    /// bridge; a routed image closes the window for the fresh epoch,
+    /// an empty clipboard keeps the page.
+    fn handle_page_paste(&self, ctx: &Context) {
+        let Some(bridge) = self.page.clone() else {
+            return;
+        };
+        if bridge.borrow_mut().request_paste() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// The page chrome's keyboard accelerators: `C` capture, `O`
+    /// open — matching the home's letters (both are unclaimed by
+    /// tool keys). `P` stays the Pencil tool key (tool keys win over
+    /// home parity; Paste is button-only in the editor). Chords
+    /// (Ctrl+C copy) are untouched — the plain-key guard.
+    fn page_action_shortcut(&mut self, ctx: &Context, modifiers: Modifiers) -> bool {
+        if self.page.is_none() || modifiers != Modifiers::default() {
+            return false;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::C)) {
+            // The `+` chip's exit: publishes NewCapture (mode label
+            // intact) and closes — the router runs the grab flow.
+            self.handle_new_capture(NewCaptureMode::Region, ctx);
+            return true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::O)) {
+            self.handle_page_open(ctx);
+            return true;
+        }
+        false
     }
 
     /// Publish a side-effect outcome (Save / Copy / Upload success)
@@ -2193,6 +2275,9 @@ mod tests {
     struct PageRecorder {
         reported: Vec<EditorOutcome>,
         statuses: Vec<String>,
+        /// Chrome-open calls (path, routed).
+        opened: Vec<(PathBuf, bool)>,
+        pastes: usize,
     }
 
     /// Bridge double: records reports/statuses, replays directives.
@@ -2221,6 +2306,24 @@ mod tests {
 
         fn poll_directive(&mut self) -> Option<HomeDirective> {
             self.pending.lock().expect("pending mutex").pop_front()
+        }
+
+        fn open_image(&mut self, path: PathBuf) -> bool {
+            // Fail (false) for paths containing "bad" — one double,
+            // both contract arms.
+            let routed = !path.to_string_lossy().contains("bad");
+            self.rec
+                .lock()
+                .expect("recorder mutex")
+                .opened
+                .push((path, routed));
+            routed
+        }
+
+        fn request_paste(&mut self) -> bool {
+            let mut rec = self.rec.lock().expect("recorder mutex");
+            rec.pastes += 1;
+            true
         }
     }
 
@@ -2428,6 +2531,141 @@ mod tests {
         assert!(
             bridge.pending.lock().expect("pending mutex").is_empty(),
             "SetStatus drains in page mode"
+        );
+    }
+
+    #[test]
+    fn page_capture_accelerator_fires_the_new_capture_exit() {
+        // The chrome's Capture is the `+` chip's exit: plain C
+        // publishes NewCapture with its mode label and closes.
+        let mut app = page_app(RecordingPageBridge::default());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::C,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.logic_impl(ui.ctx()),
+        );
+        assert!(
+            matches!(
+                &*app.outcome.borrow(),
+                Some(Ok(EditorOutcome::NewCapture {
+                    mode: NewCaptureMode::Region
+                }))
+            ),
+            "plain C must fire the capture exit with its mode label"
+        );
+        assert!(close_command_issued(&full));
+    }
+
+    #[test]
+    fn page_paste_key_stays_the_pencil_tool() {
+        // Collision resolution, pinned: P is the Pencil tool key and
+        // tool keys win over home parity — Paste is button-only in
+        // the editor.
+        let bridge = RecordingPageBridge::default();
+        let rec = bridge.rec.clone();
+        let mut app = page_app(bridge);
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::P,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.logic_impl(ui.ctx()),
+        );
+        assert_eq!(
+            rec.lock().expect("recorder mutex").pastes,
+            0,
+            "P must not fire the paste action"
+        );
+        assert_eq!(app.state.tool, Tool::Pencil, "P arms the Pencil tool");
+    }
+
+    #[test]
+    fn page_open_apply_closes_on_a_route_and_stays_on_failure() {
+        // The chrome Open's contract at the apply seam: a routed
+        // image closes the window for the swap; a failed decode
+        // keeps the page exactly as it was.
+        let bridge = RecordingPageBridge::default();
+        let rec = bridge.rec.clone();
+        let app = page_app(bridge);
+        let ctx = egui::Context::default();
+        let routed = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.apply_page_open(ui.ctx(), PathBuf::from("/tmp/good.png"));
+        });
+        assert!(
+            close_command_issued(&routed),
+            "a routed open closes the page"
+        );
+        let kept = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.apply_page_open(ui.ctx(), PathBuf::from("/tmp/bad.png"));
+        });
+        assert!(
+            !close_command_issued(&kept),
+            "a failed decode keeps the page"
+        );
+        let guard = rec.lock().expect("recorder mutex");
+        assert_eq!(
+            guard.opened,
+            vec![
+                (PathBuf::from("/tmp/good.png"), true),
+                (PathBuf::from("/tmp/bad.png"), false),
+            ],
+            "each action reaches the bridge exactly once"
+        );
+    }
+
+    #[test]
+    fn page_paste_closes_on_a_route() {
+        let bridge = RecordingPageBridge::default();
+        let rec = bridge.rec.clone();
+        let app = page_app(bridge);
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_page_paste(ui.ctx());
+        });
+        assert!(close_command_issued(&full), "a routed paste closes");
+        assert_eq!(rec.lock().expect("recorder mutex").pastes, 1);
+    }
+
+    #[test]
+    fn worker_windows_have_no_page_accelerators() {
+        // The chrome actions are single-window page furniture: a
+        // worker window's plain C is nothing (it is not a tool key
+        // there either — no accidental capture from the recapture
+        // editor).
+        let mut app = phase_app(false);
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::C,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.logic_impl(ui.ctx()),
+        );
+        assert!(
+            app.outcome.borrow().is_none(),
+            "plain C in a worker window does nothing"
         );
     }
 

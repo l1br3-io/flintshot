@@ -1269,6 +1269,45 @@ impl EditorPageBridge for PageBridge {
     fn poll_directive(&mut self) -> Option<HomeDirective> {
         self.shared.poll_directive()
     }
+
+    fn open_image(&mut self, path: std::path::PathBuf) -> bool {
+        // Same contract as the home's Open: decode, arm the editor
+        // page, close for the swap (the routed image replaces the
+        // page's — Replace semantics, geometry recreated per image).
+        match decode_image_file(&path) {
+            Ok(state) => {
+                tracing::info!(path = %path.display(), "editor chrome open routed");
+                self.shared.set_pending_editor(PendingEditor {
+                    state,
+                    selection_first: false,
+                });
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "decoding the chrome-opened image");
+                self.shared.push_directive(HomeDirective::SetStatus(format!(
+                    "could not open {}: {e}",
+                    path.display()
+                )));
+                false
+            }
+        }
+    }
+
+    fn request_paste(&mut self) -> bool {
+        if let Some(state) = paste_clipboard_image() {
+            tracing::info!("editor chrome paste routed");
+            self.shared.set_pending_editor(PendingEditor {
+                state,
+                selection_first: false,
+            });
+            true
+        } else {
+            self.shared
+                .push_directive(HomeDirective::SetStatus("clipboard has no image".into()));
+            false
+        }
+    }
 }
 
 #[cfg(test)]

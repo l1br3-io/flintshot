@@ -108,7 +108,7 @@ pub trait EditorPageBridge {
     /// status feedback. The page stays open — no close follows.
     fn report_outcome(&mut self, outcome: &EditorOutcome);
 
-    /// Replace the app's status line text (surfaced by the home page
+    /// Replace the status line text (surfaced by the home page
     /// when the window routes there).
     fn set_status(&mut self, status: &str);
 
@@ -116,6 +116,20 @@ pub trait EditorPageBridge {
     /// [`HomeDirective`] — `Hide` means "external capture, close
     /// now"; the page drains the rest).
     fn poll_directive(&mut self) -> Option<HomeDirective>;
+
+    /// The editor chrome's **Open** action (single-window): decode
+    /// `path` and replace the page's image. Returns whether it
+    /// routed (`true`: the window closes for the fresh editor epoch;
+    /// `false`: a status line explains, the page keeps its image).
+    /// The Capture action deliberately does **not** ride the bridge
+    /// — it is the `+` chip's [`EditorOutcome::NewCapture`] exit,
+    /// which carries the selection-first mode label.
+    fn open_image(&mut self, path: std::path::PathBuf) -> bool;
+
+    /// The editor chrome's **Paste** action: read the clipboard
+    /// image and replace the page's image. Same contract as
+    /// [`Self::open_image`].
+    fn request_paste(&mut self) -> bool;
 }
 
 /// Shared handle to the boxed [`EditorPageBridge`]: the shell keeps
@@ -617,6 +631,8 @@ mod tests {
     struct PageRecorder {
         reported: Vec<EditorOutcome>,
         statuses: Vec<String>,
+        opened: Vec<std::path::PathBuf>,
+        pastes: usize,
     }
 
     fn blank_bridge() -> PageBridgeSlot {
@@ -647,6 +663,16 @@ mod tests {
 
         fn poll_directive(&mut self) -> Option<HomeDirective> {
             None
+        }
+
+        fn open_image(&mut self, path: std::path::PathBuf) -> bool {
+            self.rec.lock().expect("recorder mutex").opened.push(path);
+            true
+        }
+
+        fn request_paste(&mut self) -> bool {
+            self.rec.lock().expect("recorder mutex").pastes += 1;
+            true
         }
     }
 

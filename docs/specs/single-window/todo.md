@@ -8,5 +8,5 @@
 - [x] 006 in-process-capture
 - [x] 007 daemon-forwarding
 - [x] 008 open-routing
-- [ ] 009 editor-chrome-actions
+- [x] 009 editor-chrome-actions
 - [ ] 010 adr-changelog
