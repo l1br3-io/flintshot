@@ -106,17 +106,28 @@ leaf binaries. A future `flintshot-editor-iced` would slot in beside
 │  - IPC server (socket) │
 │  - config watcher      │
 └─────────┬──────────────┘
-          │ spawn / signal
-          ▼
-┌────────────────────────┐
-│  flintshot (worker)    │ (short-lived per action)
-│  - capture             │
-│  - editor window       │
-│  - upload              │
+           │ forward trigger (window present) / spawn worker
+           ▼
+┌────────────────────────┐     ┌────────────────────────┐
+│  flintshot app         │     │  flintshot (worker)    │
+│  (single window)       │     │  (short-lived, no      │
+│  - pump thread (IPC)   │     │   app window running)  │
+│  - page router:        │     │  - capture + editor    │
+│    Home ↔ Editor       │     │  - open / upload       │
+│  - in-process grabs    │     └────────────────────────┘
 └────────────────────────┘
 ```
 
-A single binary handles both roles; behavior is selected by subcommand:
+The **single window** (ADR-0053) routes between a three-button home
+page and the editor page — one eframe lifetime per page, close +
+recreate per transition. The app's pump thread holds the daemon
+subscription, runs grabs in-process (shared `capture_flow` module),
+and receives forwarded triggers (`CaptureTriggered`,
+`OpenRequested`) whenever a window is present; without one, the
+daemon spawns the worker paths below, byte-identical to the
+pre-single-window behavior.
+
+A single binary handles every role; behavior is selected by subcommand:
 
 - `flintshot daemon` — long-running, owns tray + hotkeys + IPC server
 - `flintshot capture [--delay-ms M] [--backend ID] [--after ACTION]` —
@@ -124,11 +135,13 @@ A single binary handles both roles; behavior is selected by subcommand:
   selection UI where the selected backend supports it (portal
   interactive on Wayland), else the primary-monitor grab →
   editor/overlay flow. `--after editor|clipboard|upload` routes the
-  native grab (default `editor`; also `[capture] after_grab`)
-- `flintshot open <path>` — open an existing image in the editor (no capture)
+  native grab (default `editor`; also `[capture] after_grab`). With a
+  window present, the delegation forwards into it (ADR-0053)
+- `flintshot open <path>` — open an existing image in the editor (no
+  capture); delegates into the running window when one exists
 - `flintshot upload <path> --backend=imgur` — upload and exit
-- `flintshot app` — open the app window (the capture home: Capture /
-  Open; auto-starts the daemon)
+- `flintshot app` — the single window (Capture / Open… / Paste home ↔
+  editor pages; auto-starts the daemon)
 - `flintshot config` — print or edit config
 - `flintshot backends` — list capture backends, their availability, and
   what `auto` selects right now (diagnostic; exits 0)

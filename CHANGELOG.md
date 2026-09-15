@@ -20,6 +20,30 @@ Categories used below:
 
 ### Changed
 
+- **One window for everything — `flintshot app` routes instead of
+  spawning** (ADR-0053, spec `docs/specs/single-window/`): the app
+  window is a page router (three-button home ↔ image-sized editor),
+  captures run in its own process (no worker spawn, no image relay),
+  and external triggers — hotkeys, tray, `flintshot capture`,
+  `flintshot open`, tray *Open last* — forward into the running
+  window when one exists (`Event::CaptureTriggered` /
+  `OpenRequested`). With no window running, every path behaves
+  exactly as before (worker editors, byte-identical argvs).
+- **Paste**: the home's third button (and the editor chrome's) reads
+  the system clipboard image straight into the editor page; an empty
+  or text clipboard is a status-line note, not an error.
+- **The editor stays open after Save / Copy / Upload**: side effects
+  apply (file written, clipboard set, upload spawned + reported) and
+  the page keeps the image — Capture / Open… / Paste are reachable
+  from the editor chrome (`C` / `O`; `P` stays the Pencil tool key),
+  `Esc` returns to the home, window X exits the app (daemon
+  unaffected). New content replacing an image drops unsaved
+  annotations (the existing Replace/supersede semantics).
+- **CLI `open` delegates**: `flintshot open <path>` hands off to the
+  daemon (forwarded into the window, or the open worker when none).
+  The daemon-spawned open worker carries `--standalone` — the same
+  loop-breaker rule capture argvs always had; humans can pass it as
+  the debugging escape hatch.
 - **Breaking — one Capture action replaces `region` / `fullscreen`**
   (ADR-0051, spec `docs/specs/native-capture-ux/`): `flintshot
   capture` is the single Capture action on every surface — the OS's

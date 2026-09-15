@@ -171,7 +171,8 @@ Authoritative style detail lives in
 | You're touching…                | Go to                                                       |
 | ------------------------------- | ---------------------------------------------------------- |
 | CLI subcommands                 | `crates/flintshot-app/src/cli.rs`                          |
-| App window (capture home)       | `crates/flintshot-app/src/app_window.rs` + `flintshot-editor-egui/src/home.rs` |
+| App window (page router)        | `crates/flintshot-app/src/app_window.rs` (`Page`, epochs, pump, grab router) + `flintshot-editor-egui/src/home.rs` |
+| Shared grab flow (worker + app) | `crates/flintshot-app/src/capture_flow.rs`                 |
 | Geometry / data model           | `crates/flintshot-core/src/{geom,editor}.rs`              |
 | Capture backends / registry     | `crates/flintshot-core/src/capture/` (`Capturer` trait, `xcap` + portal, `select_backend`) |
 | `Canvas` / `EditorShell` traits | `crates/flintshot-core/src/{render,shell}.rs`             |
