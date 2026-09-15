@@ -33,8 +33,9 @@ use egui::{Context, Key, KeyboardShortcut, Modifiers, ViewportCommand};
 use crate::theme;
 
 /// How often an idle home window re-polls directives (status
-/// changes, focus pings arrive independent of input).
-const REPOLL_INTERVAL: Duration = Duration::from_millis(250);
+/// changes, focus pings arrive independent of input). Shared by the
+/// editor page's directive pump (single-window).
+pub(crate) const REPOLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// How long after a Capture click the window re-issues its close
 /// command if it is somehow still alive. A dropped
