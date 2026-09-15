@@ -191,8 +191,9 @@ impl HomeApp {
 /// save path's blocking-modal pattern (`crates/flintshot-editor-egui`
 /// already depends on `rfd`; the eframe event loop is already
 /// blocking, and the dialog is what the user is driving anyway).
-/// `None` when the user cancels.
-fn pick_image_path() -> Option<PathBuf> {
+/// `None` when the user cancels. Shared by the home's Open control
+/// and the editor page's chrome action (single-window).
+pub(crate) fn pick_image_path() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("Image files", &["png", "jpg", "jpeg", "webp", "bmp"])
         .pick_file()
