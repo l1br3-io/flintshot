@@ -62,3 +62,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0050 | [`Capturer` trait — `xcap` default behind a registry, portal native on Wayland](ADR-0050-capturer-trait-native-backends.md) |
 | ADR-0051 | [One Capture action — the OS's selection UI, post-grab routing, clean break](ADR-0051-single-capture-action-os-selection.md) |
 | ADR-0052 | [App-window presence by connection liveness](ADR-0052-app-window-presence-by-connection.md) |
+| ADR-0053 | [Single-window app — routed pages, in-process grabs, forwarded triggers](ADR-0053-single-window-app.md) |

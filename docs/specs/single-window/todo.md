@@ -9,4 +9,4 @@
 - [x] 007 daemon-forwarding
 - [x] 008 open-routing
 - [x] 009 editor-chrome-actions
-- [ ] 010 adr-changelog
+- [x] 010 adr-changelog
