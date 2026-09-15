@@ -719,9 +719,50 @@ pub(crate) fn run() -> eyre::Result<()> {
     result
 }
 
-/// The post-reopen page: a routed grab's fresh image (the editor
-/// page it armed) wins; else the page that was open (the same-page
-/// restore); else home.
+/// An `OpenRequested` event's outcome, applied to the shared state
+/// (pure seam of [`handle_open_requested`], which decodes off-thread).
+fn apply_open_outcome(shared: &Shared, decoded: eyre::Result<EditorState>, path: &str) {
+    match decoded {
+        Ok(state) => {
+            shared.set_pending_editor(PendingEditor {
+                state,
+                selection_first: false,
+            });
+            shared.push_directive(HomeDirective::Show);
+        }
+        Err(e) => {
+            shared.push_directive(HomeDirective::SetStatus(format!(
+                "could not open {path}: {e}"
+            )));
+            shared.push_directive(HomeDirective::Show);
+        }
+    }
+}
+/// Handle a forwarded open (single-window): close whatever page is
+/// open (the editor epoch's geometry is per-image), decode on a plain
+/// thread (the pump must keep answering handshakes), then route — a
+/// good decode arms the editor page; a failure reopens the prior
+/// page with the reason on the status line. Replaces an open editor
+/// image wholesale (an open intent, not a capture — no supersede
+/// machinery applies).
+fn handle_open_requested(shared: &Arc<Shared>, path: std::path::PathBuf) {
+    shared.push_directive(HomeDirective::Hide);
+    let thread_shared = Arc::clone(shared);
+    if let Err(e) = std::thread::Builder::new()
+        .name("flintshot-app-open".into())
+        .spawn(move || {
+            let decoded = decode_image_file(&path);
+            apply_open_outcome(&thread_shared, decoded, &path.display().to_string());
+        })
+    {
+        tracing::warn!(error = %e, "spawning the open decode thread; reopening");
+        shared.push_directive(HomeDirective::Show);
+    }
+}
+
+/// The post-reopen page: a routed image (a grab's capture or a
+/// forwarded open — whichever armed the editor page) wins; else the
+/// page that was open (the same-page restore); else home.
 fn next_page_after_reopen(shared: &Shared) -> Page {
     if let Some(pending) = shared.take_pending_editor() {
         return Page::Editor(Box::new(pending));
@@ -847,7 +888,7 @@ fn focus_existing() -> eyre::Result<()> {
 /// then pump commands → in-process grabs and events → directives.
 /// Marks the shared state dead on the way out so the outer loop
 /// can't wait forever.
-fn pump_main(mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>, shared: &Shared) {
+fn pump_main(mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>, shared: &Arc<Shared>) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -981,7 +1022,7 @@ async fn connected_loop(
     mut stream: crate::ipc_server::Stream,
     cmd_rx: &mut tokio_mpsc::Receiver<PumpCommand>,
     grabs_rx: &mut tokio_mpsc::Receiver<(u64, AppGrab)>,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     core: &mut HomeCore,
     router: &mut GrabRouter,
 ) -> LoopExit {
@@ -1019,11 +1060,21 @@ async fn connected_loop(
                         IpcEvent::CaptureTriggered { delay_ms } => Some(*delay_ms),
                         _ => None,
                     };
+                    // A forwarded open (single-window): decode + route
+                    // off-thread; the Hide directive closes whatever
+                    // page is open so the editor epoch takes over.
+                    let open_requested = match &event {
+                        IpcEvent::OpenRequested { path } => Some(path.clone()),
+                        _ => None,
+                    };
                     if let Some(directive) = core.on_event(&event) {
                         shared.push_directive(directive);
                     }
                     if let Some(delay_ms) = triggered {
                         start_grab_with(router, shared, delay_ms);
+                    }
+                    if let Some(path) = open_requested {
+                        handle_open_requested(shared, path);
                     }
                     if hide_requested {
                         // The daemon's pre-grab handshake is armed and
@@ -1359,6 +1410,35 @@ mod tests {
         assert!(matches!(next_page_after_reopen(&shared), Page::Home));
         // And with nothing stashed at all: home (the empty state).
         assert!(matches!(next_page_after_reopen(&shared), Page::Home));
+    }
+
+    #[test]
+    fn forwarded_open_routes_the_editor_page() {
+        let shared = Shared::default();
+        apply_open_outcome(&shared, Ok(fixture_png_state((3, 3))), "/tmp/shot.png");
+        let pending = shared
+            .take_pending_editor()
+            .expect("a good decode arms the editor page");
+        assert!(!pending.selection_first, "opens land plain");
+        assert!(shared.wait_for_reopen(), "the router wake fired");
+    }
+
+    #[test]
+    fn forwarded_open_failure_reopens_with_status() {
+        let shared = Shared::default();
+        apply_open_outcome(&shared, Err(eyre::eyre!("decode failed")), "/tmp/bad.png");
+        assert!(
+            shared.take_pending_editor().is_none(),
+            "no route on failure"
+        );
+        assert!(
+            matches!(
+                shared.poll_directive(),
+                Some(HomeDirective::SetStatus(text)) if text.contains("bad.png")
+            ),
+            "the failure lands on the status line"
+        );
+        assert!(shared.wait_for_reopen(), "the prior page reopens");
     }
 
     #[test]

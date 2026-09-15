@@ -7,6 +7,6 @@
 - [x] 005 paste-from-home
 - [x] 006 in-process-capture
 - [x] 007 daemon-forwarding
-- [ ] 008 open-routing
+- [x] 008 open-routing
 - [ ] 009 editor-chrome-actions
 - [ ] 010 adr-changelog
