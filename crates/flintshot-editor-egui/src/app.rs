@@ -91,6 +91,10 @@ enum SelectionPhase {
 /// handle, runs `render()` each frame, and translates `Esc` (and any
 /// future shortcut) into an [`EditorOutcome`] that the shell reads
 /// back after the window closes.
+// The four bools are independent per-frame lifecycle flags, not a
+// combinational state machine — a bitflags dependency would not
+// clarify anything.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct EditorApp {
     /// Source screenshot + annotation model.
     state: EditorState,
@@ -166,6 +170,10 @@ pub(crate) struct EditorApp {
     /// the page stays; see [`EditorPageBridge`]). `None` = the worker
     /// window lifecycle of every pre-single-window path.
     page: Option<crate::shell::PageBridgeSlot>,
+    /// Whether the stable editor viewport still owes its one-shot
+    /// open-time clamp to the monitor (page epochs only; see
+    /// [`Self::update_fit`]).
+    open_clamp_pending: bool,
 }
 
 impl EditorApp {
@@ -242,6 +250,7 @@ impl EditorApp {
             } else {
                 SelectionPhase::Off
             },
+            open_clamp_pending: page.is_some(),
             page,
         }
     }
@@ -380,18 +389,27 @@ impl EditorApp {
         }
     }
 
-    /// Detect image-dimension changes (crop) and respond by
-    /// invalidating the bg texture cache and resizing the window.
-    ///
-    /// Without the resize, a cropped image renders at its true pixel
-    /// size in the corner of the original (larger) window — the user
-    /// sees a tiny screenshot. Resizing to `image_dims + toolbar_h`
-    /// makes the canvas area exactly fit the new image.
+    /// Detect image-dimension changes (crop / open / paste swaps)
+    /// and drop the bg texture + blur caches: the stale pixels must
+    /// not survive the image they were derived from.
+    fn invalidate_caches_on_dims_change(&mut self) {
+        let current_dims = self.state.image.dimensions();
+        if current_dims != self.img_dims {
+            self.bg = None;
+            self.blur_cache.clear();
+            self.img_dims = current_dims;
+        }
+    }
+
+    /// The worker window's image-sized viewport policy (unchanged,
+    /// spec: out of scope): resize until the panel exactly fits the
+    /// image, invalidating the caches when its dimensions change.
     #[allow(
         clippy::cast_precision_loss,
         reason = "image dims ≤ 2^24 are exact in f32"
     )]
     fn handle_image_resize(&mut self, ctx: &Context) {
+        self.invalidate_caches_on_dims_change();
         let current_dims = self.state.image.dimensions();
         // Target panel size in logical px = image physical dims / ppp.
         let ppp = ctx.pixels_per_point();
@@ -405,18 +423,76 @@ impl EditorApp {
         if (cur_w - target_w).abs() < 1.0 && (cur_h - target_h).abs() < 1.0 {
             return;
         }
-        // Image dimensions changed OR the prior resize hasn't landed yet:
-        // invalidate the bg texture cache (image may have changed) and
-        // keep issuing InnerSize until the panel reports the right size.
-        if current_dims != self.img_dims {
-            self.bg = None;
-            self.blur_cache.clear();
-            self.img_dims = current_dims;
-        }
+        // The prior resize hasn't landed yet: keep issuing InnerSize
+        // until the panel reports the right size.
         let toolbar_h = self.canvas_rect.map_or(0.0, |r| r.min.y);
         let new_size = egui::vec2(target_w, target_h + toolbar_h);
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
         ctx.request_repaint();
+    }
+
+    /// The stable viewport's per-frame fit (page epochs): compute
+    /// the fit-to-view scale from the live canvas rect and center
+    /// the image inside it (letterbox). Never issues a resize — the
+    /// window's size is the user's; only the view transform moves.
+    /// Also owns the one-shot open-time clamp of the default window
+    /// size to a small monitor (egui reports `monitor_size` only
+    /// once the loop runs; the default fits real panels).
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "image dims ≤ 2^24 are exact in f32"
+    )]
+    fn update_fit(&mut self, ctx: &Context) {
+        self.clamp_open_to_monitor_once(ctx);
+        self.invalidate_caches_on_dims_change();
+        let Some(rect) = self.canvas_rect else {
+            return;
+        };
+        let (w, h) = self.state.image.dimensions();
+        let scale = crate::canvas::fit_scale((w as f32, h as f32), (rect.width(), rect.height()))
+            .unwrap_or(self.canvas.scale());
+        let ppp = ctx.pixels_per_point();
+        let img_logical = egui::vec2(w as f32 * scale / ppp, h as f32 * scale / ppp);
+        let offset = egui::vec2(
+            ((rect.width() - img_logical.x) / 2.0).max(0.0),
+            ((rect.height() - img_logical.y) / 2.0).max(0.0),
+        );
+        // "Changed" tolerates float jitter: sub-epsilon drift must
+        // not request repaints every frame, and a quarter-pixel
+        // letterbox shift is invisible.
+        let scale_drifted = (scale - self.canvas.scale()).abs() > 1e-4;
+        let offset_drifted = (offset - self.canvas.content_offset()).length_sq() > 0.25_f32 * 0.25;
+        if scale_drifted || offset_drifted {
+            self.canvas.set_scale(scale);
+            self.canvas.set_content_offset(offset);
+            // The correcting frame must come immediately (window
+            // resizes and crop landings otherwise wait for input).
+            ctx.request_repaint();
+        }
+    }
+
+    /// Pull the freshly-opened editor window inside a small monitor
+    /// (VM / embedded), once. Never fights a user resize: the flag
+    /// clears the first frame the monitor is known, and a maximized
+    /// or fullscreen state is left alone.
+    fn clamp_open_to_monitor_once(&mut self, ctx: &Context) {
+        if !self.open_clamp_pending {
+            return;
+        }
+        let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) else {
+            return;
+        };
+        self.open_clamp_pending = false;
+        if ctx.input(|i| i.viewport().maximized == Some(true))
+            || ctx.input(|i| i.viewport().fullscreen == Some(true))
+        {
+            return;
+        }
+        let clamped =
+            crate::shell::clamp_default_size(crate::shell::EDITOR_PAGE_DEFAULT_SIZE, Some(monitor));
+        if clamped != crate::shell::EDITOR_PAGE_DEFAULT_SIZE {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(clamped));
+        }
     }
 
     /// Paint the magnifier inset when its trigger is active and the
@@ -849,10 +925,15 @@ impl EditorApp {
         // render paints the mask.
         self.end_phase_on_crop();
 
-        // Invalidate the bg texture cache and resize the window when
-        // the image dimensions change (crop replaces state.image with
-        // a different-sized sub-image).
-        self.handle_image_resize(ui.ctx());
+        // Viewport policy by lifecycle: page epochs fit the image
+        // into the stable window (no resize commands); worker
+        // windows keep the image-sized window (resize until the
+        // panel matches).
+        if self.page.is_some() {
+            self.update_fit(ui.ctx());
+        } else {
+            self.handle_image_resize(ui.ctx());
+        }
 
         // Per-frame render: bind the painter, then walk the shared
         // render path. Render failure is terminal — publish `Err(_)`
@@ -1841,8 +1922,18 @@ mod tests {
     /// One eframe-shaped frame for the editor window: `logic_impl`
     /// then `ui_impl` inside a single egui pass over the given extra
     /// input events. Screen is 200×200 so the toolbar strip leaves
-    /// the 64×64 canvas room to breathe.
+    /// the 64×64 canvas room to breathe. Returns the frame's full
+    /// output so tests can inspect viewport commands.
     fn editor_frame(ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>) {
+        let _ = editor_frame_output(ctx, app, events);
+    }
+
+    /// [`editor_frame`], keeping the [`egui::FullOutput`].
+    fn editor_frame_output(
+        ctx: &egui::Context,
+        app: &mut EditorApp,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -1851,10 +1942,10 @@ mod tests {
             events,
             ..egui::RawInput::default()
         };
-        let _ = ctx.run_ui(raw, |ui| {
+        ctx.run_ui(raw, |ui| {
             app.logic_impl(ui.ctx());
             app.ui_impl(ui);
-        });
+        })
     }
 
     /// An editor state on the default Move tool with one committed
@@ -2337,6 +2428,121 @@ mod tests {
             false,
             slot,
         )
+    }
+
+    // --- Stable viewport fit (editor-capture-ux Task 004) ---
+
+    /// A page-mode app over an arbitrarily sized image.
+    fn page_app_sized(w: u32, h: u32) -> EditorApp {
+        let slot: PageBridgeSlot = Rc::new(RefCell::new(Box::new(RecordingPageBridge::default())));
+        EditorApp::new_page(
+            blank_state(w, h),
+            &egui::Context::default(),
+            Rc::new(RefCell::new(None)),
+            false,
+            slot,
+        )
+    }
+
+    /// Whether the frame's output asked the viewport to resize.
+    fn inner_size_command_issued(full: &egui::FullOutput) -> bool {
+        full.viewport_output
+            .values()
+            .flat_map(|v| v.commands.iter())
+            .any(|c| matches!(c, egui::ViewportCommand::InnerSize(_)))
+    }
+
+    /// A big image in the 200×200 synthetic screen must render
+    /// scaled down (fit < 1) and centered in the canvas panel.
+    #[test]
+    fn page_large_image_fits_scaled_and_centered() {
+        let ctx = egui::Context::default();
+        let mut app = page_app_sized(400, 300);
+        for _ in 0..3 {
+            editor_frame(&ctx, &mut app, vec![]);
+        }
+        let scale = app.canvas.scale();
+        assert!(
+            scale > 0.0 && scale < 1.0,
+            "a 400×300 image in a ~200-wide panel must scale down, got {scale}"
+        );
+        let rect = app.canvas_rect.expect("frames cached the canvas rect");
+        let view = app.canvas.view_over(rect);
+        let center = view.image_to_logical(flintshot_core::Point::new(200.0, 150.0));
+        assert!(
+            (center - rect.center()).length() < 1.0,
+            "the fitted image centres in the panel: {center:?} vs {:?}",
+            rect.center()
+        );
+    }
+
+    /// A tiny image must never upscale: it renders 1:1, letterboxed
+    /// and centered inside the panel.
+    #[test]
+    fn page_tiny_image_stays_1_to_1_and_letterboxes() {
+        let ctx = egui::Context::default();
+        let mut app = page_app_sized(64, 64);
+        for _ in 0..3 {
+            editor_frame(&ctx, &mut app, vec![]);
+        }
+        assert!(
+            (app.canvas.scale() - 1.0).abs() < 1e-6,
+            "never upscale: scale stays 1.0, got {}",
+            app.canvas.scale()
+        );
+        let offset = app.canvas.content_offset();
+        assert!(
+            offset.x > 0.0 && offset.y > 0.0,
+            "a 64×64 image letterboxes in the panel, got offset {offset:?}"
+        );
+    }
+
+    /// Crop keeps the window: the smaller image re-fits inside the
+    /// unchanged viewport, caches invalidate, and no resize command
+    /// ever fires in page mode.
+    #[test]
+    fn page_crop_refits_without_a_resize_command() {
+        let ctx = egui::Context::default();
+        let mut app = page_app_sized(400, 300);
+        for _ in 0..3 {
+            editor_frame(&ctx, &mut app, vec![]);
+        }
+        assert!(app.canvas.scale() < 1.0, "fixture: the big image fitted");
+        // Simulate a crop: the image shrinks in place.
+        app.state.image = blank_state(100, 80).image;
+        let full = editor_frame_output(&ctx, &mut app, vec![]);
+        assert!(
+            !inner_size_command_issued(&full),
+            "crop must not resize the stable editor window"
+        );
+        assert_eq!(
+            app.img_dims,
+            (100, 80),
+            "the dims change still invalidates the bg + blur caches"
+        );
+        let scale = app.canvas.scale();
+        assert!(
+            scale > 0.99 && scale <= 1.0,
+            "the smaller image re-fits (1:1 here), got {scale}"
+        );
+    }
+
+    /// Worker windows keep the image-sized lifecycle: a big image
+    /// still issues the resize command (out of scope by spec).
+    #[test]
+    fn worker_window_still_resizes_to_the_image() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        let full = editor_frame_output(&ctx, &mut app, vec![]);
+        assert!(
+            inner_size_command_issued(&full),
+            "the worker window keeps its image-sized resize behavior"
+        );
     }
 
     /// Whether the frame's full output asked the viewport to close.

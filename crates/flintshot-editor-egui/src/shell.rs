@@ -23,6 +23,44 @@ const WINDOW_TITLE: &str = "flintshot — annotate";
 /// `.desktop` `StartupWMClass` can route it separately.
 const HOME_WINDOW_TITLE: &str = "flintshot";
 
+/// The editor page's default logical size (OQ-2's decision):
+/// roomy enough for the toolbar plus annotation chrome, small
+/// enough for any laptop panel. The image fits inside (Task 003's
+/// transform) — the window no longer tracks image dimensions.
+pub(crate) const EDITOR_PAGE_DEFAULT_SIZE: egui::Vec2 = egui::vec2(1024.0, 640.0);
+
+/// Margin reserved against the monitor edge when clamping the
+/// default editor-page size — approximates WM panels and
+/// decorations (egui exposes the full monitor size, not the work
+/// area).
+const MONITOR_MARGIN: f32 = 48.0;
+
+/// Floor for a clamped size — a degenerate monitor must not
+/// collapse the editor window.
+const SIZE_FLOOR: egui::Vec2 = egui::vec2(320.0, 240.0);
+
+/// Clamp a desired window size to a monitor (pure seam behind the
+/// editor page's open-time clamp). `None` monitor (headless / not
+/// yet reported by eframe) keeps the desired size; a small monitor
+/// pulls each axis in by [`MONITOR_MARGIN`], never below
+/// [`SIZE_FLOOR`].
+#[must_use]
+pub(crate) fn clamp_default_size(desired: egui::Vec2, monitor: Option<egui::Vec2>) -> egui::Vec2 {
+    let Some(monitor) = monitor else {
+        return desired;
+    };
+    egui::vec2(
+        desired
+            .x
+            .min((monitor.x - MONITOR_MARGIN).max(SIZE_FLOOR.x))
+            .max(SIZE_FLOOR.x),
+        desired
+            .y
+            .min((monitor.y - MONITOR_MARGIN).max(SIZE_FLOOR.y))
+            .max(SIZE_FLOOR.y),
+    )
+}
+
 /// Thread-safe handle for closing an egui window from **another
 /// thread** — the graceful-close seam for superseded capture workers
 /// (smart-window-hiding). The worker's IPC listener thread calls
@@ -291,11 +329,13 @@ impl EguiShell {
         Ok(())
     }
 
-    /// Open the editor as a **page** of the single window: the same
-    /// image-sized viewport and title as [`EditorShell::run_editor`],
-    /// but the single-window outcome lifecycle — Save / Copy /
-    /// Upload apply their side effect and the page stays open
-    /// (reported through the [`EditorPageBridge`]), `Esc` exits to
+    /// Open the editor as a **page** of the single window: a stable
+    /// default-sized viewport ([`EDITOR_PAGE_DEFAULT_SIZE`],
+    /// open-time clamped to the monitor) with the image fitted and
+    /// centered inside (the canvas's fit transform), the
+    /// single-window outcome lifecycle — Save / Copy / Upload apply
+    /// their side effect and the page stays open (reported through
+    /// the [`EditorPageBridge`]), `Esc` exits to
     /// [`EditorPageExit::Home`], and `NewCapture` exits with
     /// [`EditorPageExit::Capture`] so the router can run the grab
     /// flow. Blocks until the page epoch ends.
@@ -309,16 +349,9 @@ impl EguiShell {
         state: EditorState,
         bridge: Box<dyn EditorPageBridge>,
     ) -> flintshot_core::Result<EditorPageExit> {
-        let (img_w, img_h) = state.image.dimensions();
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "image dims ≤ 2^24 are exact in f32"
-        )]
-        let inner_size = egui::vec2(img_w as f32, img_h as f32);
-
         let viewport = egui::ViewportBuilder::default()
             .with_title(WINDOW_TITLE)
-            .with_inner_size(inner_size)
+            .with_inner_size(EDITOR_PAGE_DEFAULT_SIZE)
             .with_resizable(true);
 
         let options = NativeOptions {
@@ -776,6 +809,60 @@ mod tests {
         assert!(
             rec.lock().expect("recorder mutex").statuses.is_empty(),
             "no status on a clean exit"
+        );
+    }
+
+    // --- Stable editor viewport (editor-capture-ux Task 004) ---
+
+    #[test]
+    fn editor_page_default_size_is_pinned() {
+        // OQ-2's decision: ~1024×640 logical — big enough for the
+        // toolbar + annotation chrome, small enough for any laptop.
+        assert_eq!(EDITOR_PAGE_DEFAULT_SIZE, egui::vec2(1024.0, 640.0));
+    }
+
+    #[test]
+    fn clamp_keeps_default_when_monitor_unknown() {
+        assert_eq!(
+            clamp_default_size(EDITOR_PAGE_DEFAULT_SIZE, None),
+            EDITOR_PAGE_DEFAULT_SIZE
+        );
+    }
+
+    #[test]
+    fn clamp_keeps_default_on_roomy_monitors() {
+        assert_eq!(
+            clamp_default_size(EDITOR_PAGE_DEFAULT_SIZE, Some(egui::vec2(1920.0, 1080.0))),
+            EDITOR_PAGE_DEFAULT_SIZE
+        );
+        // Exactly at the margin boundary: still fits.
+        assert_eq!(
+            clamp_default_size(EDITOR_PAGE_DEFAULT_SIZE, Some(egui::vec2(1072.0, 688.0))),
+            EDITOR_PAGE_DEFAULT_SIZE
+        );
+    }
+
+    #[test]
+    fn clamp_shrinks_on_small_monitors_per_axis() {
+        // A tiny panel (VM / embedded): both axes pull in, keeping
+        // the margin for WM chrome.
+        assert_eq!(
+            clamp_default_size(EDITOR_PAGE_DEFAULT_SIZE, Some(egui::vec2(800.0, 600.0))),
+            egui::vec2(752.0, 552.0)
+        );
+        // Only one axis too small: the other keeps the default.
+        assert_eq!(
+            clamp_default_size(EDITOR_PAGE_DEFAULT_SIZE, Some(egui::vec2(4000.0, 600.0))),
+            egui::vec2(1024.0, 552.0)
+        );
+    }
+
+    #[test]
+    fn clamp_never_collapses_below_the_floor() {
+        // A degenerate monitor still leaves a usable editor window.
+        assert_eq!(
+            clamp_default_size(EDITOR_PAGE_DEFAULT_SIZE, Some(egui::vec2(300.0, 200.0))),
+            egui::vec2(320.0, 240.0)
         );
     }
 }
