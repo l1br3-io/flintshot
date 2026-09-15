@@ -59,7 +59,7 @@ use flintshot_core::{Config, EditorOutcome, EditorState};
 use flintshot_editor_egui::{EditorPageBridge, HomeBridge, HomeDirective};
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::capture_flow::AppGrab;
+use crate::capture_flow::{AppGrab, AppGrabEvent};
 use crate::cli::SupersedeWatch;
 use crate::ipc_server::{decode_event, read_frame};
 
@@ -482,7 +482,7 @@ struct GrabRouter {
     active: Option<ActiveGrab>,
     /// Cloned per spawned grab thread; the router keeps the original
     /// so the channel never closes under the pump.
-    grabs_tx: Option<tokio_mpsc::Sender<(u64, AppGrab)>>,
+    grabs_tx: Option<tokio_mpsc::Sender<(u64, AppGrabEvent)>>,
 }
 
 impl GrabRouter {
@@ -506,9 +506,32 @@ impl GrabRouter {
         self.active = Some(ActiveGrab { generation, watch });
     }
 
-    /// A grab thread delivered its outcome. Stale generations
-    /// (superseded mid-flight) are discarded; the current one routes.
-    fn deliver(&mut self, shared: &Shared, core: &mut HomeCore, generation: u64, grab: AppGrab) {
+    /// A grab thread delivered one phase. Stale generations
+    /// (superseded mid-flight) fold silently at either phase; the
+    /// current one's `Finished` routes (a `Confirmed` is the early
+    /// open signal — Task 008 routes the loading page on it; today
+    /// it logs).
+    fn deliver(
+        &mut self,
+        shared: &Shared,
+        core: &mut HomeCore,
+        generation: u64,
+        event: AppGrabEvent,
+    ) {
+        let grab = match event {
+            AppGrabEvent::Confirmed => {
+                if self.flow.current(generation) {
+                    tracing::debug!(
+                        generation,
+                        "grab confirmed; the portal's clipboard write is landing"
+                    );
+                } else {
+                    tracing::info!(generation, "discarding a superseded grab's confirmation");
+                }
+                return;
+            }
+            AppGrabEvent::Finished(grab) => grab,
+        };
         if !self.flow.finished(generation) {
             tracing::info!(generation, "discarding a superseded grab's outcome");
             return;
@@ -588,10 +611,13 @@ fn start_grab_with(router: &mut GrabRouter, shared: &Shared, delay_ms: u32) {
     if let Err(e) = std::thread::Builder::new()
         .name("flintshot-app-grab".into())
         .spawn(move || {
-            let grab = crate::capture_flow::grab_for_app_window(&grab_watch, delay_ms);
-            // A closed channel means the pump is gone (process on its
-            // way out) — dropping the outcome is correct then.
-            let _ = tx.blocking_send((generation, grab));
+            // Two-phase delivery (editor-capture-ux Task 007): the
+            // clipboard path announces Confirmed before its read-back
+            // blocks, then Finished; a closed channel (pump gone)
+            // drops the rest — correct then.
+            crate::capture_flow::emit_grab_events(&grab_watch, delay_ms, &mut |event| {
+                let _ = tx.blocking_send((generation, event));
+            });
         })
     {
         tracing::warn!(error = %e, "spawning the grab thread; reopening the prior page");
@@ -909,7 +935,7 @@ fn pump_main(mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>, shared: &Arc<Shared>
 
     // Grab threads deliver their outcomes through this channel
     // (`blocking_send` from plain threads is the blessed direction).
-    let (grabs_tx, mut grabs_rx) = tokio_mpsc::channel::<(u64, AppGrab)>(8);
+    let (grabs_tx, mut grabs_rx) = tokio_mpsc::channel::<(u64, AppGrabEvent)>(8);
     let mut router = GrabRouter {
         grabs_tx: Some(grabs_tx),
         ..GrabRouter::default()
@@ -1027,7 +1053,7 @@ enum LoopExit {
 async fn connected_loop(
     mut stream: crate::ipc_server::Stream,
     cmd_rx: &mut tokio_mpsc::Receiver<PumpCommand>,
-    grabs_rx: &mut tokio_mpsc::Receiver<(u64, AppGrab)>,
+    grabs_rx: &mut tokio_mpsc::Receiver<(u64, AppGrabEvent)>,
     shared: &Arc<Shared>,
     core: &mut HomeCore,
     router: &mut GrabRouter,
@@ -1048,8 +1074,8 @@ async fn connected_loop(
                 }
             }
             delivered = grabs_rx.recv() => {
-                if let Some((generation, grab)) = delivered {
-                    router.deliver(shared, core, generation, grab);
+                if let Some((generation, event)) = delivered {
+                    router.deliver(shared, core, generation, event);
                 }
             }
             frame = read_frame(&mut stream) => {
@@ -1121,7 +1147,7 @@ async fn connected_loop(
 /// windowless.
 async fn degraded_loop(
     mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>,
-    mut grabs_rx: tokio_mpsc::Receiver<(u64, AppGrab)>,
+    mut grabs_rx: tokio_mpsc::Receiver<(u64, AppGrabEvent)>,
     shared: &Shared,
     core: &mut HomeCore,
     router: &mut GrabRouter,
@@ -2005,6 +2031,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn confirmed_phase_folds_silently_for_stale_and_never_routes() {
+        // Task 007's interim contract: Confirmed never routes (Task
+        // 008 wires the loading route); a stale generation's
+        // confirmation discards without touching the active grab.
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        let mut router = GrabRouter::default();
+        let stale = router.trigger();
+        router.arm(stale, Arc::new(SupersedeWatch::inert()));
+        let gen = router.trigger();
+        router.arm(gen, Arc::new(SupersedeWatch::inert()));
+
+        // The stale generation's Confirmed: discarded, active stays.
+        router.deliver(&shared, &mut core, stale, AppGrabEvent::Confirmed);
+        assert!(router.active.is_some(), "a confirmation never ends a grab");
+
+        // The current generation's Confirmed: logged only — the grab
+        // stays in flight until Finished.
+        router.deliver(&shared, &mut core, gen, AppGrabEvent::Confirmed);
+        assert!(router.active.is_some(), "still waiting on the read-back");
+
+        // And Finished still routes for the current generation.
+        router.deliver(
+            &shared,
+            &mut core,
+            gen,
+            AppGrabEvent::Finished(tiny_grab_image(false)),
+        );
+        assert!(router.active.is_none(), "Finished ends the grab");
+        assert!(shared.take_pending_editor().is_some(), "the image routed");
+    }
+
     fn tiny_grab_image(selection_first: bool) -> AppGrab {
         let img = image::RgbaImage::from_raw(2, 2, vec![255; 16]).expect("2×2×4 bytes");
         AppGrab::Image {
@@ -2021,7 +2080,12 @@ mod tests {
         let mut router = GrabRouter::default();
         let gen = router.trigger();
         router.arm(gen, Arc::new(SupersedeWatch::inert()));
-        router.deliver(&shared, &mut core, gen, tiny_grab_image(true));
+        router.deliver(
+            &shared,
+            &mut core,
+            gen,
+            AppGrabEvent::Finished(tiny_grab_image(true)),
+        );
         let pending = shared
             .take_pending_editor()
             .expect("the image routes an editor page");
@@ -2039,7 +2103,12 @@ mod tests {
         core.capture_requested();
         let mut router = GrabRouter::default();
         let gen = router.trigger();
-        router.deliver(&shared, &mut core, gen, AppGrab::Quiet);
+        router.deliver(
+            &shared,
+            &mut core,
+            gen,
+            AppGrabEvent::Finished(AppGrab::Quiet),
+        );
         assert!(
             shared.take_pending_editor().is_none(),
             "a quiet exit routes nothing"
@@ -2058,7 +2127,7 @@ mod tests {
             &shared,
             &mut core,
             gen,
-            AppGrab::Failed("shm screencopy failed".into()),
+            AppGrabEvent::Finished(AppGrab::Failed("shm screencopy failed".into())),
         );
         assert!(shared.take_pending_editor().is_none());
         assert!(matches!(
@@ -2078,7 +2147,12 @@ mod tests {
         let mut router = GrabRouter::default();
         let stale = router.trigger();
         let current = router.trigger();
-        router.deliver(&shared, &mut core, stale, tiny_grab_image(false));
+        router.deliver(
+            &shared,
+            &mut core,
+            stale,
+            AppGrabEvent::Finished(tiny_grab_image(false)),
+        );
         assert!(shared.take_pending_editor().is_none());
         shared.mark_pump_dead(); // a wait would block otherwise
         assert!(!shared.wait_for_reopen(), "no wake from a stale grab");

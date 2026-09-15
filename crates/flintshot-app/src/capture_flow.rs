@@ -44,6 +44,46 @@ pub(crate) fn native_grab_prepared(
     backend: &dyn flintshot_core::capture::Capturer,
     override_path: Option<&std::path::Path>,
 ) -> Result<Option<image::RgbaImage>> {
+    match native_grab_split(watch, backend, override_path)? {
+        Some(NativeGrab::Ready(img)) => Ok(Some(img)),
+        Some(NativeGrab::AwaitClipboard { pre_grab }) => {
+            read_portal_clipboard_grab(pre_grab).map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+/// One OS-selection grab's split outcome (editor-capture-ux Task
+/// 007): pixels in hand vs awaiting the portal's clipboard write.
+/// The split lets the app window open the moment the OS UI answers
+/// (`Confirmed`), bridging the portal's >1 s Response-to-write gap
+/// (Task 008 routes it); the single-shot paths compose the phases
+/// back-to-back.
+#[derive(Debug)]
+pub(crate) enum NativeGrab {
+    /// The direct path: a decoded image (the file URI read).
+    Ready(image::RgbaImage),
+    /// The portal answered `clipboard:///` (COSMIC's Copy-confirmed
+    /// selection): the pixels are frozen in the compositor, but the
+    /// write lands on the system clipboard some time later (observed
+    /// over 1 s after the Response in the wild). The field is the
+    /// pre-UI clipboard digest snapshot for the stale-image guard.
+    AwaitClipboard {
+        /// Digest of the clipboard's image before the OS UI opened.
+        pre_grab: Option<u64>,
+    },
+}
+
+/// Phase one of the native grab, split at the `capture_selection`
+/// return: run the OS selection UI under the prepare handshake and
+/// classify. `Ok(None)` is a quiet exit (superseded before the grab,
+/// the UI dismissed, or its Response timed out) — one info log each,
+/// unchanged from the single-shot shape.
+pub(crate) fn native_grab_split(
+    watch: &SupersedeWatch,
+    backend: &dyn flintshot_core::capture::Capturer,
+    override_path: Option<&std::path::Path>,
+) -> Result<Option<NativeGrab>> {
     // Snapshotted before the OS UI opens: after a `clipboard:///`
     // answer, the read-back wait must distinguish the portal's write
     // from an image already sitting on the clipboard (the user's
@@ -74,14 +114,8 @@ pub(crate) fn native_grab_prepared(
         backend.capture_selection(&opts)
     };
     match grab {
-        Ok(img) => Ok(Some(img)),
-        // The portal already put the grab on the clipboard and
-        // answered `clipboard:///` (no file) — but it sends that
-        // Response *before* its queued clipboard-write task runs (and
-        // that task sits behind the overlay's layer-surface teardown),
-        // so the write lands some time after this arm: observed >1 s
-        // after the Response in the wild. The wait rides that out.
-        Err(e) if portal_grab_on_clipboard(&e) => read_portal_clipboard_grab(pre_grab).map(Some),
+        Ok(img) => Ok(Some(NativeGrab::Ready(img))),
+        Err(e) if portal_grab_on_clipboard(&e) => Ok(Some(NativeGrab::AwaitClipboard { pre_grab })),
         Err(e) if quiet_capture_exit(&e) => {
             // Dismissal / Response timeout: not an error UX (spec
             // Flow). One log line, exit 0, no notification.
@@ -91,6 +125,43 @@ pub(crate) fn native_grab_prepared(
         Err(e) => Err(color_eyre::eyre::eyre!(e.to_string()))
             .with_context(|| "native capture via the OS selection UI"),
     }
+}
+
+/// The clipboard read-back as an injectable seam (tests ride fakes;
+/// production runs [`read_portal_clipboard_grab`]).
+type ClipboardWait = fn(Option<u64>) -> color_eyre::Result<image::RgbaImage>;
+
+/// Phase one + phase two over an already-resolved selection backend,
+/// emitting each delivery phase through `emit` as it happens. The
+/// clipboard path emits `Confirmed` the moment the OS UI answers,
+/// then its read-back's `Finished`; every other path is a single
+/// `Finished`.
+pub(crate) fn run_native_grab(
+    watch: &SupersedeWatch,
+    backend: &dyn flintshot_core::capture::Capturer,
+    override_path: Option<&std::path::Path>,
+    wait: ClipboardWait,
+    mut emit: impl FnMut(AppGrabEvent),
+) {
+    let events = match native_grab_split(watch, backend, override_path) {
+        Ok(Some(NativeGrab::Ready(img))) => AppGrab::Image {
+            img,
+            selection_first: false,
+        },
+        Ok(Some(NativeGrab::AwaitClipboard { pre_grab })) => {
+            emit(AppGrabEvent::Confirmed);
+            match wait(pre_grab) {
+                Ok(img) => AppGrab::Image {
+                    img,
+                    selection_first: false,
+                },
+                Err(e) => AppGrab::Failed(format!("{e:#}")),
+            }
+        }
+        Ok(None) => AppGrab::Quiet,
+        Err(e) => AppGrab::Failed(format!("{e:#}")),
+    };
+    emit(AppGrabEvent::Finished(events));
 }
 
 /// Wait out the portal's Response-before-write race and read the
@@ -271,6 +342,19 @@ fn read_image_from_clipboard() -> Result<image::RgbaImage> {
     })
 }
 
+/// One phase of an app-window grab's delivery through the pump's
+/// channel (editor-capture-ux Task 007): `Confirmed` opens the
+/// window early while the portal's clipboard write is still landing
+/// (Task 008 routes it); `Finished` carries the routing outcome.
+#[derive(Debug)]
+pub(crate) enum AppGrabEvent {
+    /// The OS selection UI answered and the pixels are frozen — only
+    /// the clipboard path emits this, before its read-back runs.
+    Confirmed,
+    /// The grab ended: an image, a quiet exit, or a failure.
+    Finished(AppGrab),
+}
+
 /// One in-process grab's outcome for the app window's page router
 /// (single-window): what the pump should route when its grab thread
 /// finishes.
@@ -302,20 +386,69 @@ pub(crate) enum AppGrab {
 /// forwarded trigger's pre-capture delay; the button path passes 0).
 /// Blocking (the OS UI blocks for human think-time); run on a
 /// dedicated thread so the pump keeps pumping.
-pub(crate) fn grab_for_app_window(watch: &SupersedeWatch, delay_ms: u32) -> AppGrab {
+/// The grab thread's two-phase driver (editor-capture-ux Task 007):
+/// resolve the backend, then emit each delivery phase through
+/// `emit` the moment it happens — a clipboard-path grab announces
+/// `Confirmed` before its read-back blocks, so the pump can open the
+/// window while the write lands. Direct and monitor-fallback paths
+/// emit their single `Finished` alone. `delay_ms` sleeps before
+/// anything runs (the forwarded trigger's pre-capture delay).
+pub(crate) fn emit_grab_events(
+    watch: &SupersedeWatch,
+    delay_ms: u32,
+    emit: &mut dyn FnMut(AppGrabEvent),
+) {
     if delay_ms > 0 {
         tracing::debug!(delay_ms, "sleeping before the app-window capture");
         std::thread::sleep(std::time::Duration::from_millis(u64::from(delay_ms)));
     }
-    match resolve_capture_backend(None) {
-        Ok(backend) => grab_with_backend(watch, backend.as_ref(), None),
-        Err(e) => AppGrab::Failed(format!("{e:#}")),
+    let backend = match resolve_capture_backend(None) {
+        Ok(backend) => backend,
+        Err(e) => {
+            emit(AppGrabEvent::Finished(AppGrab::Failed(format!("{e:#}"))));
+            return;
+        }
+    };
+    if watch.superseded() {
+        tracing::info!("app-window capture superseded before the grab; exiting quietly");
+        emit(AppGrabEvent::Finished(AppGrab::Quiet));
+        return;
+    }
+    if backend.supports_selection() {
+        run_native_grab(
+            watch,
+            backend.as_ref(),
+            None,
+            read_portal_clipboard_grab,
+            emit,
+        );
+    } else {
+        let cfg = match Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not load config; using built-in defaults");
+                Config::default()
+            }
+        };
+        let grab = match monitor_grab_prepared("region", watch, None, backend.as_ref(), &cfg) {
+            Ok(Some(img)) => AppGrab::Image {
+                img,
+                selection_first: true,
+            },
+            Ok(None) => AppGrab::Quiet,
+            Err(e) => AppGrab::Failed(format!("{e:#}")),
+        };
+        emit(AppGrabEvent::Finished(grab));
     }
 }
 
-/// The testable seam under [`grab_for_app_window`]: the grab shape
-/// per already-resolved backend. A superseded watch short-circuits
-/// before any backend call — the newest intent owns the screen.
+/// The single-shot grab shape per already-resolved backend — the
+/// testable seam under the phased driver ([`emit_grab_events`]
+/// composes the same phases for the thread). A superseded watch
+/// short-circuits before any backend call — the newest intent owns
+/// the screen.
+// Production rides emit_grab_events; the fakes exercise this seam.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn grab_with_backend(
     watch: &SupersedeWatch,
     backend: &dyn flintshot_core::capture::Capturer,
@@ -326,14 +459,19 @@ pub(crate) fn grab_with_backend(
         return AppGrab::Quiet;
     }
     if backend.supports_selection() {
-        match native_grab_prepared(watch, backend, override_path) {
-            Ok(Some(img)) => AppGrab::Image {
-                img,
-                selection_first: false,
+        let mut finished = AppGrab::Quiet;
+        run_native_grab(
+            watch,
+            backend,
+            override_path,
+            read_portal_clipboard_grab,
+            |event| {
+                if let AppGrabEvent::Finished(grab) = event {
+                    finished = grab;
+                }
             },
-            Ok(None) => AppGrab::Quiet,
-            Err(e) => AppGrab::Failed(format!("{e:#}")),
-        }
+        );
+        finished
     } else {
         let cfg = match Config::load() {
             Ok(c) => c,
@@ -687,6 +825,9 @@ mod tests {
         Ok,
         Cancelled,
         Fail,
+        /// The portal's `clipboard:///` marker (the on-clipboard
+        /// delivery path).
+        ClipboardMarker,
     }
 
     /// Inert backend double: no bus, no display — the grab result is
@@ -709,7 +850,27 @@ mod tests {
             FakeGrab::Fail => Err(FlintshotError::Capture {
                 detail: "shm screencopy failed".into(),
             }),
+            FakeGrab::ClipboardMarker => Err(FlintshotError::Capture {
+                detail: flintshot_core::capture::PORTAL_GRAB_ON_CLIPBOARD.into(),
+            }),
         }
+    }
+
+    /// A read-back double that never runs (for single-phase paths).
+    fn unreachable_wait(_pre: Option<u64>) -> color_eyre::Result<image::RgbaImage> {
+        panic!("the direct path must not run a clipboard wait")
+    }
+
+    /// A read-back double that delivers instantly.
+    // The ClipboardWait fn-pointer seam demands the Result shape.
+    #[allow(clippy::unnecessary_wraps)]
+    fn instant_wait(_pre: Option<u64>) -> color_eyre::Result<image::RgbaImage> {
+        Ok(tiny_img())
+    }
+
+    /// A read-back double whose delivery never lands.
+    fn failing_wait(_pre: Option<u64>) -> color_eyre::Result<image::RgbaImage> {
+        color_eyre::eyre::bail!("the portal's clipboard write never became readable")
     }
 
     impl Capturer for FakeCapturer {
@@ -747,6 +908,138 @@ mod tests {
     /// the dev machine.
     fn bogus_socket() -> &'static std::path::Path {
         std::path::Path::new("/this/does/not/exist/flintshot-test-grab-flow.sock")
+    }
+
+    // --- Grab outcome split (editor-capture-ux Task 007) ---
+
+    /// A selection fake whose outcome the test picks, including the
+    /// portal's on-clipboard marker.
+    fn split_fake(outcome: FakeGrab) -> FakeCapturer {
+        FakeCapturer {
+            selection: true,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn split_classifies_a_direct_image_as_ready() {
+        let split = native_grab_split(
+            &SupersedeWatch::inert(),
+            &split_fake(FakeGrab::Ok),
+            Some(bogus_socket()),
+        )
+        .expect("a direct grab is Ok");
+        match split {
+            Some(NativeGrab::Ready(img)) => assert_eq!(img.dimensions(), (2, 2)),
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_classifies_dismissal_and_timeout_as_quiet() {
+        assert!(native_grab_split(
+            &SupersedeWatch::inert(),
+            &split_fake(FakeGrab::Cancelled),
+            Some(bogus_socket()),
+        )
+        .expect("quiet exits are Ok")
+        .is_none());
+    }
+
+    #[test]
+    fn split_classifies_a_hard_failure_as_an_error() {
+        assert!(native_grab_split(
+            &SupersedeWatch::inert(),
+            &split_fake(FakeGrab::Fail),
+            Some(bogus_socket()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn split_classifies_the_clipboard_marker_as_await_clipboard() {
+        let split = native_grab_split(
+            &SupersedeWatch::inert(),
+            &split_fake(FakeGrab::ClipboardMarker),
+            Some(bogus_socket()),
+        )
+        .expect("the marker path is Ok");
+        match split {
+            Some(NativeGrab::AwaitClipboard { pre_grab }) => {
+                // No image was readable before the grab in this
+                // environment — the digest snapshot is None.
+                assert_eq!(pre_grab, None);
+            }
+            other => panic!("expected AwaitClipboard, got {other:?}"),
+        }
+    }
+
+    /// Collect the events one grab emits through the shared runner.
+    fn events_of(
+        backend: &dyn flintshot_core::capture::Capturer,
+        wait: ClipboardWait,
+    ) -> Vec<AppGrabEvent> {
+        let mut events = Vec::new();
+        run_native_grab(
+            &SupersedeWatch::inert(),
+            backend,
+            Some(bogus_socket()),
+            wait,
+            |event| events.push(event),
+        );
+        events
+    }
+
+    /// The direct path is single-phase: one Finished, no Confirmed.
+    #[test]
+    fn direct_path_emits_finished_alone() {
+        let events = events_of(&split_fake(FakeGrab::Ok), unreachable_wait);
+        assert_eq!(events.len(), 1, "single-phase: {events:?}");
+        match &events[0] {
+            AppGrabEvent::Finished(AppGrab::Image {
+                selection_first, ..
+            }) => assert!(!selection_first, "the native path opens plain"),
+            other => panic!("expected a finished image, got {other:?}"),
+        }
+    }
+
+    /// The clipboard path is two-phase: Confirmed precedes the
+    /// read-back's Finished image.
+    #[test]
+    fn clipboard_path_emits_confirmed_then_finished() {
+        let events = events_of(&split_fake(FakeGrab::ClipboardMarker), instant_wait);
+        assert!(matches!(events[0], AppGrabEvent::Confirmed), "{events:?}");
+        match &events[1] {
+            AppGrabEvent::Finished(AppGrab::Image { img, .. }) => {
+                assert_eq!(img.dimensions(), (2, 2));
+            }
+            other => panic!("expected a finished image, got {other:?}"),
+        }
+        assert_eq!(events.len(), 2, "exactly two phases: {events:?}");
+    }
+
+    /// A wedged read-back surfaces as a failure event after the
+    /// Confirmed — never a silent hang.
+    #[test]
+    fn failed_clipboard_wait_surfaces_as_failed_after_confirmed() {
+        let events = events_of(&split_fake(FakeGrab::ClipboardMarker), failing_wait);
+        assert!(matches!(events[0], AppGrabEvent::Confirmed));
+        match &events[1] {
+            AppGrabEvent::Finished(AppGrab::Failed(msg)) => {
+                assert!(msg.contains("never became readable"), "{msg}");
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    /// Quiet exits stay single-phase Finished events.
+    #[test]
+    fn quiet_exit_emits_a_single_finished_quiet() {
+        let events = events_of(&split_fake(FakeGrab::Cancelled), unreachable_wait);
+        assert!(matches!(
+            events.as_slice(),
+            &[AppGrabEvent::Finished(AppGrab::Quiet)]
+        ));
     }
 
     #[test]
