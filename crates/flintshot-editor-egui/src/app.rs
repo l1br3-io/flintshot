@@ -916,17 +916,11 @@ impl EditorApp {
         let (action, popup_page) =
             toolbar::show(ui, &mut self.state, self.copied, gate, self.page.is_some());
 
-        // The page's chrome actions (single-window): the strip under
-        // the toolbar plus the `+` popup's entries — both fire the
-        // home's three intents. Worker windows draw neither; the
-        // strip panel still draws every page frame (only its action
-        // is skipped when the popup already fired one).
-        let strip = if self.page.is_some() {
-            toolbar::show_page_actions(ui)
-        } else {
-            None
-        };
-        let page_action = popup_page.or(strip);
+        // The `+` popup's page actions (single-window): the sole
+        // visible home-parity surface on the editor (the chrome strip
+        // it duplicated is gone — editor-capture-ux OQ-1). Worker
+        // windows draw no popup entries beyond Capture.
+        let page_action = popup_page;
 
         // Selection-first phase: the toolbar's "Crop · Enter" button
         // crops through `confirm_selection`, bypassing `logic` — so
@@ -1057,9 +1051,9 @@ impl EditorApp {
             ToolbarAction::None => {}
         }
 
-        // The page chrome's fired action, if any (drawn above the
-        // canvas; handled after the toolbar so both can fire in one
-        // frame only by explicit double-click).
+        // The `+` popup's fired action, if any (handled after the
+        // toolbar so both can fire in one frame only by an explicit
+        // double-click).
         if let Some(page_action) = page_action {
             match page_action {
                 toolbar::PageChromeAction::Capture => {

@@ -262,11 +262,14 @@ pub(crate) fn show(
         .inner
 }
 
-/// A fired editor-page chrome action (single-window): the home's
-/// three intents, reachable while annotating.
+/// A fired `+` popup action (single-window pages): the home's three
+/// intents, reachable while annotating. The popup is the sole
+/// visible home-parity surface on the editor (the chrome strip it
+/// duplicated was removed — editor-capture-ux OQ-1); the C / O page
+/// accelerators stay keyboard-only twins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageChromeAction {
-    /// Close + grab a fresh capture (the `+` chip's big sibling —
+    /// Close + grab a fresh capture (the `+` chip's Capture entry —
     /// same `NewCapture` exit, same Replace semantics).
     Capture,
     /// In-window file dialog → replace the page's image.
@@ -279,66 +282,6 @@ pub(crate) enum PageChromeAction {
 /// the image drops unsaved annotations (consistent with supersede —
 /// the newest intent wins).
 const REPLACE_HINT: &str = "new content replaces the image — unsaved edits are lost";
-
-/// Draw the editor page's chrome actions (single-window): a compact
-/// strip under the toolbar with the home's three intents. Only the
-/// page draws it (worker windows are transient editors — no chrome
-/// actions). Paste is button-only: `P` is the Pencil tool key and
-/// tool keys win over home-parity accelerators (documented
-/// collision); Capture/Open keep their home letters (`C`/`O` are
-/// unclaimed by tools).
-pub(crate) fn show_page_actions(ui: &mut egui::Ui) -> Option<PageChromeAction> {
-    let frame = egui::Frame::new()
-        .fill(theme::GRAPHITE_900)
-        .inner_margin(egui::Margin::symmetric(8, 2));
-    egui::Panel::top("editor_page_actions")
-        .frame(frame)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let capture = egui::Button::new(
-                    egui::RichText::new("Capture  [C]")
-                        .color(theme::INK)
-                        .strong()
-                        .small(),
-                )
-                .fill(theme::EMBER)
-                .small();
-                if ui.add(capture).clicked() {
-                    return Some(PageChromeAction::Capture);
-                }
-                let open = egui::Button::new(
-                    egui::RichText::new("Open…  [O]")
-                        .color(theme::CHALK)
-                        .strong()
-                        .small(),
-                )
-                .small();
-                if ui.add(open).clicked() {
-                    return Some(PageChromeAction::Open);
-                }
-                let paste = egui::Button::new(
-                    egui::RichText::new("Paste")
-                        .color(theme::CHALK)
-                        .strong()
-                        .small(),
-                )
-                .small();
-                if ui.add(paste).on_hover_text(REPLACE_HINT).clicked() {
-                    return Some(PageChromeAction::Paste);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(REPLACE_HINT)
-                            .color(theme::SLATE)
-                            .small(),
-                    );
-                });
-                None
-            })
-            .inner
-        })
-        .inner
-}
 
 // ------------------------------------------------------------------
 // Rail
@@ -491,7 +434,7 @@ fn draw_rail(
 /// (not an immediate action) so the home window's three actions —
 /// Capture / Open… / Paste — hang off one chip (home parity);
 /// Ctrl+N is the keyboard fast path. In a page epoch the popup
-/// entries fire [`PageChromeAction`]s (the chrome strip's twins);
+/// entries fire [`PageChromeAction`]s;
 /// the worker window, with no bridge to route Open/Paste, offers
 /// Capture alone through the classic `NewCapture` exit.
 fn new_capture_chip(
