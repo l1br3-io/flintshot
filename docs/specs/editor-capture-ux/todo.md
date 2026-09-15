@@ -1,6 +1,6 @@
 # Effort: editor-capture-ux
 
-- [ ] 001-plus-popup-home-parity
+- [x] 001-plus-popup-home-parity
 - [ ] 002-portal-first-determinism
 - [ ] 003-fit-to-view-canvas
 - [ ] 004-stable-editor-viewport

@@ -837,11 +837,11 @@ fn arm_editor_exit(shared: &Shared, exit: &EditorPageExit) {
     match exit {
         EditorPageExit::Home => shared.set_go_home(),
         EditorPageExit::Capture(_) => {
-            // Interim (single-window task 004): the in-process grab
-            // lands in task 006; until then the editor's `+` chip
-            // rides the daemon delegation — the worker path, with
-            // the window closed for it exactly like a home-triggered
-            // capture.
+            // The `+` popup / C / Ctrl+N exit: the single Capture
+            // action. The mode label is dropped here — the pump's
+            // in-process grab resolves the backend (portal-first)
+            // itself, and the window is closed for it exactly like a
+            // home-triggered capture.
             shared.set_pending_capture(PumpCommand::Capture);
         }
         EditorPageExit::Closed => {}
