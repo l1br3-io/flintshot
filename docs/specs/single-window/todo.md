@@ -1,6 +1,6 @@
 # single-window — task checklist
 
-- [ ] 001 ipc-additions
+- [x] 001 ipc-additions
 - [ ] 002 extract-capture-flow
 - [ ] 003 editor-page-mode
 - [ ] 004 router-open-in-process

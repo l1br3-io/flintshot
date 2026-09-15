@@ -147,6 +147,7 @@ size and zero-copy friendliness). Schema lives in
 pub enum Request {
     Capture { delay_ms: u32 },        // the single Capture action (every surface)
     OpenLast,
+    OpenImage { path: PathBuf },      // CLI open → daemon; routed to the app window when present
     UploadLast { backend: String },
     ReportSaved { path: PathBuf },   // worker → daemon: best-effort save report
     Quit,
@@ -155,8 +156,10 @@ pub enum Request {
 
 pub enum Event {
     CaptureStarted,
+    CaptureTriggered { delay_ms: u32 },  // daemon → app window: capture in-process (no worker spawn)
     EditorOpened,
     Saved { path: PathBuf },
+    OpenRequested { path: PathBuf },     // daemon → app window: open this image on the editor page
     Uploaded { url: String, delete_handle: Option<String> },
     Error { code: String, message: String },
 }
