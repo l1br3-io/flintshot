@@ -6,7 +6,7 @@
 - [x] 004 router-open-in-process
 - [x] 005 paste-from-home
 - [x] 006 in-process-capture
-- [ ] 007 daemon-forwarding
+- [x] 007 daemon-forwarding
 - [ ] 008 open-routing
 - [ ] 009 editor-chrome-actions
 - [ ] 010 adr-changelog

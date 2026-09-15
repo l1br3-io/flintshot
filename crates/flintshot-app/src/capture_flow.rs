@@ -298,9 +298,15 @@ pub(crate) enum AppGrab {
 /// backend (config > auto — the app window carries no CLI pin), then
 /// the OS's own selection UI where the backend supports it, else the
 /// primary-monitor grab — both under the prepare handshake, both
-/// quiet-exit aware. Blocking (the OS UI blocks for human
-/// think-time); run on a dedicated thread so the pump keeps pumping.
-pub(crate) fn grab_for_app_window(watch: &SupersedeWatch) -> AppGrab {
+/// quiet-exit aware. `delay_ms` sleeps before anything runs (the
+/// forwarded trigger's pre-capture delay; the button path passes 0).
+/// Blocking (the OS UI blocks for human think-time); run on a
+/// dedicated thread so the pump keeps pumping.
+pub(crate) fn grab_for_app_window(watch: &SupersedeWatch, delay_ms: u32) -> AppGrab {
+    if delay_ms > 0 {
+        tracing::debug!(delay_ms, "sleeping before the app-window capture");
+        std::thread::sleep(std::time::Duration::from_millis(u64::from(delay_ms)));
+    }
     match resolve_capture_backend(None) {
         Ok(backend) => grab_with_backend(watch, backend.as_ref(), None),
         Err(e) => AppGrab::Failed(format!("{e:#}")),
