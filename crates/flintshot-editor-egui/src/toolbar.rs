@@ -236,19 +236,26 @@ const LOCK_CLAUSE: &str = "locked — Enter crops to unlock";
 /// region captures can be far narrower than the chips + actions,
 /// and a clipped toolbar hides actions; a scrollbar-less scroll keeps
 /// every control reachable via wheel / drag.
+///
+/// `page_actions` gates the `+` popup's Open/Paste entries: only
+/// single-window page epochs have a bridge to route them (worker
+/// windows offer Capture alone, matching the chrome strip's
+/// worker-draws-none rule). Returns the rail's fired action plus the
+/// popup's fired page action, if any.
 pub(crate) fn show(
     ui: &mut egui::Ui,
     state: &mut EditorState,
     copied: bool,
     gate: ToolGate,
-) -> ToolbarAction {
+    page_actions: bool,
+) -> (ToolbarAction, Option<PageChromeAction>) {
     let frame = egui::Frame::new()
         .fill(theme::GRAPHITE_900)
         .inner_margin(egui::Margin::symmetric(8, 5));
     egui::Panel::top("editor_toolbar")
         .frame(frame)
         .show(ui, |ui| {
-            let action = draw_rail(ui, state, copied, gate);
+            let action = draw_rail(ui, state, copied, gate, page_actions);
             draw_bay(ui, state);
             action
         })
@@ -370,13 +377,15 @@ fn draw_rail(
     state: &mut EditorState,
     copied: bool,
     gate: ToolGate,
-) -> ToolbarAction {
+    page_actions: bool,
+) -> (ToolbarAction, Option<PageChromeAction>) {
     egui::ScrollArea::horizontal()
         .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let mut action = pod_island(ui, new_capture_chip);
+                let (mut action, page_action) =
+                    pod_island(ui, |ui| new_capture_chip(ui, page_actions));
                 pod_gap(ui);
                 for pod in TOOL_PODS {
                     pod_island(ui, |ui| {
@@ -471,7 +480,7 @@ fn draw_rail(
                 if action == ToolbarAction::None {
                     action = output;
                 }
-                action
+                (action, page_action)
             })
             .inner
         })
@@ -479,12 +488,18 @@ fn draw_rail(
 }
 
 /// The Win11-style "new snip" affordance leading the rail. A popup
-/// (not an immediate action) so both capture kinds hang off one
-/// chip; Ctrl+N is the keyboard fast path for the region default.
-/// The editor closes on selection, which tears this popup down with
-/// it — no explicit close needed.
-fn new_capture_chip(ui: &mut egui::Ui) -> ToolbarAction {
+/// (not an immediate action) so the home window's three actions —
+/// Capture / Open… / Paste — hang off one chip (home parity);
+/// Ctrl+N is the keyboard fast path. In a page epoch the popup
+/// entries fire [`PageChromeAction`]s (the chrome strip's twins);
+/// the worker window, with no bridge to route Open/Paste, offers
+/// Capture alone through the classic `NewCapture` exit.
+fn new_capture_chip(
+    ui: &mut egui::Ui,
+    page_actions: bool,
+) -> (ToolbarAction, Option<PageChromeAction>) {
     let mut action = ToolbarAction::None;
+    let mut page_action = None;
     let new_chip = chip(
         ui,
         egui::Id::new("new-capture"),
@@ -493,20 +508,79 @@ fn new_capture_chip(ui: &mut egui::Ui) -> ToolbarAction {
         g_plus,
         true,
     );
+    let popup_id = new_chip.id.with("popup");
     egui::Popup::from_toggle_button_response(&new_chip)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(160.0);
             ui.vertical(|ui| {
-                if ui.button("Region · Ctrl+N").clicked() {
+                let mut fired = false;
+                if page_actions {
+                    if popup_button(ui, egui::Id::new("plus-capture"), "Capture  [C]", None) {
+                        page_action = Some(PageChromeAction::Capture);
+                        fired = true;
+                    }
+                    if popup_button(
+                        ui,
+                        egui::Id::new("plus-open"),
+                        "Open…  [O]",
+                        Some(REPLACE_HINT),
+                    ) {
+                        page_action = Some(PageChromeAction::Open);
+                        fired = true;
+                    }
+                    if popup_button(ui, egui::Id::new("plus-paste"), "Paste", Some(REPLACE_HINT)) {
+                        page_action = Some(PageChromeAction::Paste);
+                        fired = true;
+                    }
+                } else if popup_button(ui, egui::Id::new("plus-capture"), "Capture · Ctrl+N", None)
+                {
                     action = ToolbarAction::NewCapture(NewCaptureMode::Region);
+                    fired = true;
                 }
-                if ui.button("Fullscreen").clicked() {
-                    action = ToolbarAction::NewCapture(NewCaptureMode::Fullscreen);
+                if fired {
+                    // A capture closes the editor (the popup dies with
+                    // it), but page-mode Open/Paste keep the window —
+                    // the popup must not linger open over them.
+                    egui::Popup::close_id(ui.ctx(), popup_id);
                 }
             });
         });
-    action
+    (action, page_action)
+}
+
+/// One text row in the `+` popup: an explicit-id button (the
+/// two-pass click-test pattern reads these ids back), quiet at rest
+/// and graphite on hover — a menu row, not a chip. Fixed-width rows
+/// keep the popup at its `set_min_width` (an `available_width` row
+/// would stretch it toward the screen edge). `hint` rides the hover
+/// tooltip.
+fn popup_button(ui: &mut egui::Ui, id: egui::Id, label: &str, hint: Option<&str>) -> bool {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 20.0), Sense::hover());
+    let mut resp = ui.interact(rect, id, Sense::click());
+    if let Some(hint) = hint {
+        resp = resp.on_hover_text(hint);
+    }
+    let fill = if resp.hovered() {
+        theme::GRAPHITE_500
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(4),
+        fill,
+        Stroke::NONE,
+        StrokeKind::Middle,
+    );
+    ui.painter().text(
+        rect.left_center() + egui::vec2(6.0, 0.0),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.5),
+        theme::CHALK,
+    );
+    resp.clicked()
 }
 
 /// Output actions as the right-aligned outputs island: Save /
@@ -1390,7 +1464,7 @@ mod tests {
         state.tool = Tool::Select;
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = show(ui, &mut state, false, gate);
+            let _ = show(ui, &mut state, false, gate, false);
         });
         let pen = ctx
             .read_response(egui::Id::new(("tool", "P")))
@@ -1415,7 +1489,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(click, |ui| {
-            let _ = show(ui, &mut state, false, gate);
+            let _ = show(ui, &mut state, false, gate, false);
         });
         state.tool
     }
@@ -1485,7 +1559,7 @@ mod tests {
     fn action_after_delete_click(state: &mut EditorState) -> ToolbarAction {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = show(ui, state, false, ToolGate::All);
+            let _ = show(ui, state, false, ToolGate::All, false);
         });
         let del = ctx
             .read_response(egui::Id::new("delete"))
@@ -1511,7 +1585,7 @@ mod tests {
         };
         let mut action = ToolbarAction::None;
         let _ = ctx.run_ui(click, |ui| {
-            action = show(ui, state, false, ToolGate::All);
+            action = show(ui, state, false, ToolGate::All, false).0;
         });
         action
     }
@@ -1536,6 +1610,165 @@ mod tests {
         );
     }
 
+    // --- `+` popup home parity (editor-capture-ux Task 001) ---
+
+    /// A primary click's raw-input event triple (move + press +
+    /// release) at `at`.
+    fn click_events(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    /// Lay the toolbar out once, then click the `+` chip open — the
+    /// popup's entries register in the same pass the chip clicks
+    /// (egui toggles + renders the popup immediately). The roomy
+    /// screen rect keeps the popup's below-the-chip align stable
+    /// once its size is known (a flip between passes would stale the
+    /// entry rects the click pass targets).
+    fn open_plus_popup(page_actions: bool) -> egui::Context {
+        let mut state = rail_state();
+        let ctx = egui::Context::default();
+        let screen = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1600.0, 900.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(screen(), |ui| {
+            let _ = show(ui, &mut state, false, ToolGate::All, page_actions);
+        });
+        let chip = ctx
+            .read_response(egui::Id::new("new-capture"))
+            .expect("pass 1 registered the + chip");
+        let click = egui::RawInput {
+            events: click_events(chip.rect.center()),
+            ..screen()
+        };
+        let _ = ctx.run_ui(click, |ui| {
+            let _ = show(ui, &mut state, false, ToolGate::All, page_actions);
+        });
+        ctx
+    }
+
+    /// The two-pass click-test pattern aimed at a `+` popup entry:
+    /// open the popup, let it settle for a pass (egui gates popup
+    /// contents' interactions off the open pass), then click the
+    /// entry with the given id. Returns the toolbar's fired action
+    /// pair from the click pass.
+    fn plus_popup_action_after_click_on(
+        id: &str,
+        page_actions: bool,
+    ) -> (ToolbarAction, Option<PageChromeAction>) {
+        let ctx = open_plus_popup(page_actions);
+        let screen = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1600.0, 900.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let mut state = rail_state();
+        let _ = ctx.run_ui(screen(), |ui| {
+            let _ = show(ui, &mut state, false, ToolGate::All, page_actions);
+        });
+        let entry = ctx
+            .read_response(egui::Id::new(id))
+            .unwrap_or_else(|| panic!("the open popup registers {id}"));
+        let click = egui::RawInput {
+            events: click_events(entry.rect.center()),
+            ..screen()
+        };
+        let mut state = rail_state();
+        let mut fired = (ToolbarAction::None, None);
+        let _ = ctx.run_ui(click, |ui| {
+            fired = show(ui, &mut state, false, ToolGate::All, page_actions);
+        });
+        fired
+    }
+
+    #[test]
+    fn plus_popup_page_mode_maps_capture_to_the_capture_exit() {
+        assert_eq!(
+            plus_popup_action_after_click_on("plus-capture", true),
+            (ToolbarAction::None, Some(PageChromeAction::Capture)),
+            "the popup's Capture routes the same action the chrome strip's twin does"
+        );
+    }
+
+    #[test]
+    fn plus_popup_page_mode_maps_open_to_the_page_bridge() {
+        assert_eq!(
+            plus_popup_action_after_click_on("plus-open", true),
+            (ToolbarAction::None, Some(PageChromeAction::Open)),
+            "the popup's Open routes the page bridge's open_image contract"
+        );
+    }
+
+    #[test]
+    fn plus_popup_page_mode_maps_paste_to_the_page_bridge() {
+        assert_eq!(
+            plus_popup_action_after_click_on("plus-paste", true),
+            (ToolbarAction::None, Some(PageChromeAction::Paste)),
+            "the popup's Paste routes the page bridge's request_paste contract"
+        );
+    }
+
+    #[test]
+    fn plus_popup_page_mode_offers_exactly_the_home_actions() {
+        let ctx = open_plus_popup(true);
+        for id in ["plus-capture", "plus-open", "plus-paste"] {
+            assert!(
+                ctx.read_response(egui::Id::new(id)).is_some(),
+                "the popup must offer {id}"
+            );
+        }
+        // No capture-kind variants: the popup's only capture entry is
+        // `plus-capture` — a Fullscreen twin must not appear.
+        assert!(
+            ctx.read_response(egui::Id::new("plus-fullscreen"))
+                .is_none(),
+            "the popup must not offer capture-kind variants"
+        );
+    }
+
+    #[test]
+    fn plus_popup_worker_mode_offers_capture_only() {
+        let ctx = open_plus_popup(false);
+        assert!(
+            ctx.read_response(egui::Id::new("plus-capture")).is_some(),
+            "the worker popup keeps its Capture entry"
+        );
+        for id in ["plus-open", "plus-paste"] {
+            assert!(
+                ctx.read_response(egui::Id::new(id)).is_none(),
+                "worker windows have no bridge — {id} must not render"
+            );
+        }
+    }
+
+    #[test]
+    fn plus_popup_worker_mode_capture_is_the_new_capture_exit() {
+        assert_eq!(
+            plus_popup_action_after_click_on("plus-capture", false),
+            (ToolbarAction::NewCapture(NewCaptureMode::Region), None),
+            "worker capture keeps the NewCapture exit (Region is the internal default)"
+        );
+    }
+
     // --- Move hint delete affordance (annotation-delete Task 003) ---
 
     /// The user-approved copy (spec ask-first boundary): the Move
@@ -1556,7 +1789,7 @@ mod tests {
         let mut state = rail_state();
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = show(ui, &mut state, false, ToolGate::All);
+            let _ = show(ui, &mut state, false, ToolGate::All, false);
         });
         assert!(
             ctx.read_response(egui::Id::new("pin")).is_none(),
@@ -1598,7 +1831,7 @@ mod tests {
     fn editor_rail_chip_rects(state: &mut EditorState) -> (Vec<egui::Rect>, usize) {
         let ctx = egui::Context::default();
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = show(ui, state, false, ToolGate::All);
+            let _ = show(ui, state, false, ToolGate::All, false);
         });
         let rect = |id: egui::Id| {
             ctx.read_response(id)
@@ -1704,7 +1937,7 @@ mod tests {
                 ..egui::RawInput::default()
             },
             |ui| {
-                let _ = show(ui, &mut state, false, ToolGate::All);
+                let _ = show(ui, &mut state, false, ToolGate::All, false);
             },
         );
         let rects = {

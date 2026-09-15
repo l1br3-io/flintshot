@@ -830,19 +830,26 @@ impl EditorApp {
     fn ui_impl(&mut self, ui: &mut egui::Ui) {
         // Toolbar. Must come before CentralPanel so egui reserves the
         // horizontal strip at the top. The rail + bay layout, chips,
-        // swatches, and popups live in `crate::toolbar`; the plain
-        // call (no closure) keeps the borrow of `&mut self.state`
-        // disjoint from `self.copied`.
+        // and popups live in `crate::toolbar`; the plain call (no
+        // closure) keeps the borrow of `&mut self.state` disjoint
+        // from `self.copied`. The `+` popup offers the page actions
+        // only when a bridge exists to route them (worker windows
+        // get the Capture-only popup).
         let gate = self.rail_gate();
-        let action = toolbar::show(ui, &mut self.state, self.copied, gate);
+        let (action, popup_page) =
+            toolbar::show(ui, &mut self.state, self.copied, gate, self.page.is_some());
 
-        // The page's chrome actions (single-window): the home's three
-        // intents as a compact strip. Worker windows draw none.
-        let page_action = if self.page.is_some() {
+        // The page's chrome actions (single-window): the strip under
+        // the toolbar plus the `+` popup's entries — both fire the
+        // home's three intents. Worker windows draw neither; the
+        // strip panel still draws every page frame (only its action
+        // is skipped when the popup already fired one).
+        let strip = if self.page.is_some() {
             toolbar::show_page_actions(ui)
         } else {
             None
         };
+        let page_action = popup_page.or(strip);
 
         // Selection-first phase: the toolbar's "Crop · Enter" button
         // crops through `confirm_selection`, bypassing `logic` — so
