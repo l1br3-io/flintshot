@@ -594,8 +594,9 @@ impl EditorApp {
     /// Headless-callable core of [`App::logic`](EditorApp) — the
     /// `eframe::Frame` parameter is unused, so the split (mirroring
     /// `OverlayApp`'s) lets the shell-side event translation be
-    /// unit-tested with a synthetic `egui::Context`.
-    fn logic_impl(&mut self, ctx: &Context) {
+    /// unit-tested with a synthetic `egui::Context`. `pub(crate)`:
+    /// the window router delegates here on the Editor route.
+    pub(crate) fn logic_impl(&mut self, ctx: &Context) {
         // Page mode first: directives (external captures) must land
         // even mid-text-draft, and idle pages keep a slow heartbeat so
         // they do.
@@ -866,7 +867,13 @@ impl EditorApp {
             // `CopiedToClipboard` and kept the window open) is
             // honoured when the user eventually closes via Esc.
             self.publish_outcome_if_unset(Ok(EditorOutcome::Cancelled));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            // Worker window: the close is the exit. Page epoch: the
+            // router consumes the Cancelled and swaps Home in-place —
+            // closing would recreate the window the router exists to
+            // keep.
+            if self.page.is_none() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             return true;
         }
         if matches!(outcome, DispatchOutcome::Save) {
@@ -895,7 +902,9 @@ impl EditorApp {
     /// Headless-callable core of [`App::ui`](EditorApp) — the split
     /// (mirroring `logic_impl` / `OverlayApp`) lets the frame body be
     /// exercised with a synthetic `egui::Context` in tests.
-    fn ui_impl(&mut self, ui: &mut egui::Ui) {
+    /// `pub(crate)`: the window router delegates here on the Editor
+    /// route.
+    pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
         // Toolbar. Must come before CentralPanel so egui reserves the
         // horizontal strip at the top. The rail + bay layout, chips,
         // and popups live in `crate::toolbar`; the plain call (no
@@ -969,7 +978,12 @@ impl EditorApp {
                 "background render failed; closing editor session"
             );
             self.publish_outcome(Err(err));
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            // Worker window: close (the outcome rides the slot).
+            // Page epoch: the router consumes the Err — status
+            // through the bridge, Home route, same window.
+            if self.page.is_none() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             // Return early — Save / Copy handlers below would touch
             // state the render path has already abandoned.
             return;
@@ -1095,13 +1109,14 @@ impl EditorApp {
     /// hand the picked path to the bridge and close on a route (the
     /// fresh editor epoch replaces this page's image). A failed
     /// decode keeps the page exactly as it was.
-    fn apply_page_open(&self, ctx: &Context, path: std::path::PathBuf) {
+    fn apply_page_open(&self, _ctx: &Context, path: std::path::PathBuf) {
         let Some(bridge) = self.page.clone() else {
             return;
         };
-        if bridge.borrow_mut().open_image(path) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
+        // A routed image no longer closes: the window router polls
+        // the armed editor and swaps the route in-place (the fresh
+        // editor app replaces this one behind the same surface).
+        let _ = bridge.borrow_mut().open_image(path);
     }
 
     /// The page chrome's Open action: in-window file dialog, then
@@ -1115,13 +1130,13 @@ impl EditorApp {
     /// The page chrome's Paste action: clipboard image via the
     /// bridge; a routed image closes the window for the fresh epoch,
     /// an empty clipboard keeps the page.
-    fn handle_page_paste(&self, ctx: &Context) {
+    fn handle_page_paste(&self, _ctx: &Context) {
         let Some(bridge) = self.page.clone() else {
             return;
         };
-        if bridge.borrow_mut().request_paste() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
+        // Same no-close contract as the page Open (see
+        // [`Self::apply_page_open`]).
+        let _ = bridge.borrow_mut().request_paste();
     }
 
     /// The page chrome's keyboard accelerators: `C` capture, `O`
@@ -2634,9 +2649,10 @@ mod tests {
     }
 
     #[test]
-    fn page_esc_publishes_cancelled_and_issues_close() {
-        // Esc is the exit-to-home intent: publish Cancelled (the
-        // shell maps it to EditorPageExit::Home) + close the epoch.
+    fn page_esc_publishes_cancelled_and_keeps_the_window() {
+        // Esc is the exit-to-home intent: publish Cancelled — the
+        // window router consumes it and swaps Home in-place
+        // (editor-capture-ux Task 006); the page itself never closes.
         let mut app = page_app(RecordingPageBridge::default());
         let ctx = egui::Context::default();
         let full = ctx.run_ui(
@@ -2654,11 +2670,11 @@ mod tests {
         );
         assert!(
             matches!(&*app.outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
-            "Esc must publish the exit signal"
+            "Esc must publish the route signal"
         );
         assert!(
-            close_command_issued(&full),
-            "Esc must issue the viewport close"
+            !close_command_issued(&full),
+            "the router swaps the route — no close"
         );
     }
 
@@ -2802,10 +2818,11 @@ mod tests {
     }
 
     #[test]
-    fn page_open_apply_closes_on_a_route_and_stays_on_failure() {
-        // The chrome Open's contract at the apply seam: a routed
-        // image closes the window for the swap; a failed decode
-        // keeps the page exactly as it was.
+    fn page_open_apply_routes_without_close_and_stays_on_failure() {
+        // The chrome Open's contract at the apply seam: the bridge
+        // arms the routed editor; the window router swaps the route
+        // in-place (no close — editor-capture-ux Task 006); a failed
+        // decode keeps the page exactly as it was.
         let bridge = RecordingPageBridge::default();
         let rec = bridge.rec.clone();
         let app = page_app(bridge);
@@ -2814,8 +2831,8 @@ mod tests {
             app.apply_page_open(ui.ctx(), PathBuf::from("/tmp/good.png"));
         });
         assert!(
-            close_command_issued(&routed),
-            "a routed open closes the page"
+            !close_command_issued(&routed),
+            "a routed open keeps the window — the router swaps"
         );
         let kept = ctx.run_ui(egui::RawInput::default(), |ui| {
             app.apply_page_open(ui.ctx(), PathBuf::from("/tmp/bad.png"));
@@ -2836,7 +2853,7 @@ mod tests {
     }
 
     #[test]
-    fn page_paste_closes_on_a_route() {
+    fn page_paste_routes_without_close() {
         let bridge = RecordingPageBridge::default();
         let rec = bridge.rec.clone();
         let app = page_app(bridge);
@@ -2844,7 +2861,10 @@ mod tests {
         let full = ctx.run_ui(egui::RawInput::default(), |ui| {
             app.handle_page_paste(ui.ctx());
         });
-        assert!(close_command_issued(&full), "a routed paste closes");
+        assert!(
+            !close_command_issued(&full),
+            "a routed paste keeps the window — the router swaps"
+        );
         assert_eq!(rec.lock().expect("recorder mutex").pastes, 1);
     }
 

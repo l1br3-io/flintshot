@@ -1,6 +1,6 @@
 //! The single window's router: **one eframe lifetime per window
-//! generation**, pages as internal routes (editor-capture-ux Task
-//! 005).
+//! generation**, pages as internal routes (editor-capture-ux Tasks
+//! 005–006).
 //!
 //! [`WindowApp`] holds the live [`Route`] and delegates eframe's
 //! `logic` / `ui` to the route's app. A transition swaps the route
@@ -10,14 +10,30 @@
 //! identity (taskbar entry, pinning, compositor animations) survives
 //! every non-capture transition.
 //!
-//! Window destruction stays exactly where it is mandatory: captures
-//! (the not-in-the-shot guarantee, ADR-0047) and user quit. Those
-//! flows keep closing the window through the app crate's outer loop,
-//! which reopens the next *generation* through
-//! [`EguiShell::run_window`](crate::EguiShell::run_window).
+//! ## What still closes the window
 //!
-//! Task 005 ships the skeleton with the Home route live; the Editor
-//! route joins in Task 006 and Loading in Task 008.
+//! Window destruction stays exactly where it is mandatory: **every
+//! capture** (the not-in-the-shot guarantee, ADR-0047 — surface
+//! destruction is the only portable hide on Wayland) and user quit.
+//! The route apps keep sending those closes themselves; everything
+//! else routes:
+//!
+//! - Open / Paste (home or editor) → the bridge arms a routed
+//!   editor; the router polls [`RouteHost::take_routed_editor`] and
+//!   swaps to (or replaces) the Editor route in place.
+//! - Esc in the editor publishes `Cancelled`; the router consumes it
+//!   per frame and swaps Home — no close.
+//! - A render failure in the editor page publishes `Err`; the router
+//!   surfaces it through the page bridge's status and swaps Home —
+//!   no close.
+//! - A capture intent publishes `NewCapture` **and** closes; the
+//!   router deliberately leaves that outcome in the slot so
+//!   [`EguiShell::run_window`](crate::EguiShell::run_window) returns
+//!   it — the app crate's outer loop runs the grab flow after the
+//!   window dies.
+//!
+//! Task 008 adds the Loading route (progress while the portal
+//! delivers) and in-window grab delivery.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -25,8 +41,10 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 
+use crate::app::{EditorApp, OutcomeSlot};
 use crate::home::{HomeApp, HomeBridge};
-use crate::shell::{EDITOR_PAGE_DEFAULT_SIZE, HOME_WINDOW_TITLE, WINDOW_TITLE};
+use crate::shell::{PageBridgeSlot, EDITOR_PAGE_DEFAULT_SIZE, HOME_WINDOW_TITLE, WINDOW_TITLE};
+use flintshot_core::{EditorOutcome, EditorState};
 
 /// Which page the single window shows.
 #[derive(Debug, Clone)]
@@ -35,12 +53,65 @@ pub enum Route {
     /// The three-button home page (compact, fixed geometry — OQ-4's
     /// lean: its three buttons want a small window).
     Home,
-    /// The editor page over an image, with its selection-first
-    /// landing flag. Stub until Task 006 wires the in-window swap.
-    Editor(Box<flintshot_core::EditorState>, bool),
+    /// The editor page over a routed image, with its selection-first
+    /// landing flag.
+    Editor(Box<RoutedEditor>),
     /// The capture-progress page (spinner + status while the portal
     /// delivers). Stub until Task 008.
     Loading,
+}
+
+/// An editor route waiting to run: the editor state plus its
+/// selection-first landing phase.
+#[derive(Debug, Clone)]
+pub struct RoutedEditor {
+    /// Source screenshot + annotation model.
+    pub state: EditorState,
+    /// Whether the editor route opens selection-first.
+    pub selection_first: bool,
+}
+
+/// What a window generation opens on (the app crate's outer loop
+/// decides from its routing state).
+#[derive(Debug, Clone)]
+pub enum WindowStart {
+    /// The three-button home.
+    Home,
+    /// The editor over a routed image (a delivered grab reopening a
+    /// closed window). Boxed: `RoutedEditor` carries the image
+    /// buffer inline.
+    Editor(Box<RoutedEditor>),
+}
+
+/// How one window generation ended — the post-close input the app
+/// crate's outer loop classifies.
+#[derive(Debug)]
+pub struct WindowExit {
+    /// The route showing at close — the same-page restore input (an
+    /// external capture's close reopens on the route that was open).
+    pub route: Route,
+    /// The editor outcome left unpublished at close: `NewCapture`
+    /// (a capture intent — the window is closing for the grab) is
+    /// the expected value. `Cancelled` never survives (Esc routes
+    /// home in-window); side effects never publish in page mode.
+    pub editor_outcome: Option<flintshot_core::Result<EditorOutcome>>,
+}
+
+/// The router's seam to the app crate's shared routing state: the
+/// routed-editor events the in-window router consumes **without** a
+/// close, plus the editor-opened report. Implemented over the same
+/// state the [`HomeBridge`] / [`EditorPageBridge`](crate::shell::EditorPageBridge)
+/// impls hold; deliberately a separate trait so those contracts stay
+/// unchanged (editor-capture-ux Task 006).
+pub trait RouteHost {
+    /// Take a routed editor image, if one waits (an Open/Paste
+    /// control's decode arming the swap, or a grab's delivery —
+    /// Task 008).
+    fn take_routed_editor(&mut self) -> Option<RoutedEditor>;
+
+    /// The editor route went live (the daemon report parity: one
+    /// `EditorOpened` per editor session, wherever the editor lives).
+    fn editor_route_opened(&mut self);
 }
 
 /// Per-route viewport geometry — the one-time command batch a route
@@ -89,53 +160,143 @@ pub(crate) type RouteSlot = Rc<RefCell<Route>>;
 pub(crate) struct WindowApp {
     /// The live route; transitions swap in place.
     route: Route,
-    /// The home page's app (live while `route` is [`Route::Home`]).
+    /// The home page's app (constructed once — its status line and
+    /// bridges survive editor round-trips).
     home: HomeApp,
+    /// The live editor app, when the Editor route is active. A new
+    /// image replaces it wholesale (Replace semantics).
+    editor: Option<EditorApp>,
+    /// The page bridge shared with every editor construction.
+    page_bridge: PageBridgeSlot,
+    /// The app crate's routing state (routed-editor events).
+    host: Box<dyn RouteHost>,
+    /// The editor outcome slot, shared with every editor
+    /// construction and with the shell (the exit's `editor_outcome`).
+    editor_outcome: OutcomeSlot,
     /// Shared with the shell; the final route survives the window.
-    // Read by the routing transitions that join in Task 006; the
-    // slot write path lands tested ahead of them here.
-    #[cfg_attr(not(test), allow(dead_code))]
     route_slot: RouteSlot,
 }
 
 impl WindowApp {
-    /// Construct the window app on the Home route over the home
-    /// bridge.
+    /// Construct the window app over the home + page bridges and the
+    /// route host, starting on `start`.
+    // Construction-only plumbing: the bridges, host, and shared
+    // slots arrive as flat args once, at the shell's builder.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        bridge: Box<dyn HomeBridge>,
+        ctx: &Context,
+        start: WindowStart,
+        home_bridge: Box<dyn HomeBridge>,
+        page_bridge: PageBridgeSlot,
+        host: Box<dyn RouteHost>,
         initial_status: String,
+        editor_outcome: OutcomeSlot,
         route_slot: RouteSlot,
     ) -> Self {
+        let (route, editor) = match start {
+            WindowStart::Home => (Route::Home, None),
+            WindowStart::Editor(routed) => {
+                let editor = Self::build_editor(&routed, ctx, &page_bridge, &editor_outcome);
+                (Route::Editor(routed), Some(editor))
+            }
+        };
+        *route_slot.borrow_mut() = route.clone();
         Self {
-            route: Route::Home,
-            home: HomeApp::new(bridge, initial_status),
+            route,
+            home: HomeApp::new(home_bridge, initial_status),
+            editor,
+            page_bridge,
+            host,
+            editor_outcome,
             route_slot,
         }
     }
 
-    /// The route the window currently shows.
-    // Task 006's editor-page adoption reads it; pinned now.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn route(&self) -> &Route {
-        &self.route
+    /// Construct the editor app for a routed editor over this
+    /// window's shared slots.
+    fn build_editor(
+        routed: &RoutedEditor,
+        ctx: &Context,
+        page_bridge: &PageBridgeSlot,
+        outcome: &OutcomeSlot,
+    ) -> EditorApp {
+        EditorApp::new_page(
+            routed.state.clone(),
+            ctx,
+            Rc::clone(outcome),
+            routed.selection_first,
+            Rc::clone(page_bridge),
+        )
     }
 
-    /// Swap the route in place and issue the one-time transition
-    /// batch (`InnerSize` + `Resizable` + `Title`). Same-*kind*
-    /// swaps (e.g. an image swap inside the editor route) are
-    /// no-ops — the batch must never churn a window that keeps its
-    /// page kind.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Swap the route in place: construct / drop the route's app and
+    /// issue the one-time geometry batch when the route *kind*
+    /// changes. Same-kind swaps (an image swap inside the editor
+    /// route) replace the editor app without touching the window.
     pub(crate) fn request_route(&mut self, ctx: &Context, route: Route) {
-        if std::mem::discriminant(&self.route) == std::mem::discriminant(&route) {
-            return;
+        let kind_changed = std::mem::discriminant(&self.route) != std::mem::discriminant(&route);
+        match &route {
+            Route::Editor(routed) => {
+                if kind_changed {
+                    self.host.editor_route_opened();
+                }
+                self.editor = Some(Self::build_editor(
+                    routed,
+                    ctx,
+                    &self.page_bridge,
+                    &self.editor_outcome,
+                ));
+                // A fresh editor session starts with a clean outcome
+                // slot — a stale Cancelled must not route the new
+                // page home on its first frame.
+                *self.editor_outcome.borrow_mut() = None;
+            }
+            Route::Home | Route::Loading => {
+                self.editor = None;
+            }
         }
-        let geometry = route_geometry(&route);
         self.route = route.clone();
         *self.route_slot.borrow_mut() = route;
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(geometry.size));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(geometry.resizable));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(geometry.title.into()));
+        if kind_changed {
+            let geometry = route_geometry(&self.route);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(geometry.size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(geometry.resizable));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(geometry.title.into()));
+        }
+    }
+
+    /// The routed-editor poll: an Open/Paste decode (or a grab
+    /// delivery — Task 008) arms the shared state; the router swaps
+    /// without a close.
+    fn poll_routed_editor(&mut self, ctx: &Context) {
+        if let Some(routed) = self.host.take_routed_editor() {
+            self.request_route(ctx, Route::Editor(Box::new(routed)));
+        }
+    }
+
+    /// The editor outcome poll: outcomes that route in-place are
+    /// consumed here; a capture intent is left in the slot for the
+    /// window's exit (its close is already landing).
+    fn poll_editor_outcome(&mut self, ctx: &Context) {
+        let outcome = self.editor_outcome.borrow_mut().take();
+        match outcome {
+            None => {}
+            Some(Ok(EditorOutcome::Cancelled)) => {
+                // Esc from the editor: home, same window.
+                self.request_route(ctx, Route::Home);
+            }
+            Some(Err(e)) => {
+                // Render failure: surface why through the status
+                // line and route home — the window survives.
+                self.page_bridge
+                    .borrow_mut()
+                    .set_status(&format!("editor closed on error: {e}"));
+                self.request_route(ctx, Route::Home);
+            }
+            // A capture intent publishes-and-closes; the outcome
+            // rides the window's exit for the outer loop.
+            Some(other) => *self.editor_outcome.borrow_mut() = Some(other),
+        }
     }
 }
 
@@ -155,10 +316,18 @@ impl WindowApp {
     pub(crate) fn logic_impl(&mut self, ctx: &Context) {
         match &self.route {
             Route::Home => self.home.logic_impl(ctx),
-            // Editor joins the router in Task 006, Loading in Task
-            // 008; the router opens Home-only until then.
+            // Editor: the editor app's own logic handles its input;
+            // its directives (Hide → close) stay its own business.
             Route::Editor(..) | Route::Loading => {}
         }
+        if let Some(editor) = self.editor.as_mut() {
+            editor.logic_impl(ctx);
+        }
+        // Routing polls run after the active route's logic: an
+        // Open/Paste click arms the routed editor here, and the
+        // editor's outcome (Esc / error / capture) settles now too.
+        self.poll_routed_editor(ctx);
+        self.poll_editor_outcome(ctx);
     }
 
     /// Headless-callable core of [`App::ui`].
@@ -167,12 +336,17 @@ impl WindowApp {
             Route::Home => self.home.ui_impl(ui),
             Route::Editor(..) | Route::Loading => {}
         }
+        if let Some(editor) = self.editor.as_mut() {
+            editor.ui_impl(ui);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::home::HomeDirective;
+    use crate::shell::EditorPageBridge;
 
     /// A no-op home bridge — the router tests never click through to
     /// the outside world.
@@ -189,14 +363,97 @@ mod tests {
             false
         }
 
-        fn poll_directive(&mut self) -> Option<crate::home::HomeDirective> {
+        fn poll_directive(&mut self) -> Option<HomeDirective> {
             None
         }
     }
 
+    /// A recording page bridge: statuses are the observable half of
+    /// the error-route contract.
+    #[derive(Clone, Default)]
+    struct StubPageBridge {
+        statuses: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl EditorPageBridge for StubPageBridge {
+        fn report_outcome(&mut self, _outcome: &EditorOutcome) {}
+
+        fn set_status(&mut self, status: &str) {
+            self.statuses.borrow_mut().push(status.into());
+        }
+
+        fn poll_directive(&mut self) -> Option<HomeDirective> {
+            None
+        }
+
+        fn open_image(&mut self, _path: std::path::PathBuf) -> bool {
+            false
+        }
+
+        fn request_paste(&mut self) -> bool {
+            false
+        }
+    }
+
+    /// A recording route host: pre-loaded routed editors replay one
+    /// per poll (the arming the app crate's Shared does). Shared
+    /// interior so the test keeps a handle past the move into the
+    /// app.
+    #[derive(Clone, Default)]
+    struct RecordingHost {
+        inner: Rc<RefCell<RecordingInner>>,
+    }
+
+    #[derive(Default)]
+    struct RecordingInner {
+        queued: std::collections::VecDeque<RoutedEditor>,
+        opened: usize,
+    }
+
+    impl RouteHost for RecordingHost {
+        fn take_routed_editor(&mut self) -> Option<RoutedEditor> {
+            self.inner.borrow_mut().queued.pop_front()
+        }
+
+        fn editor_route_opened(&mut self) {
+            self.inner.borrow_mut().opened += 1;
+        }
+    }
+
+    fn editor_state() -> EditorState {
+        let img = image::RgbaImage::from_raw(4, 4, vec![255; 4 * 4 * 4])
+            .expect("raw buffer matches 4*4*4");
+        EditorState::new(img)
+    }
+
     fn window_app() -> WindowApp {
+        window_app_start(
+            WindowStart::Home,
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        )
+        .0
+    }
+
+    /// The app plus the handles its recordings are readable through.
+    fn window_app_start(
+        start: WindowStart,
+        bridge: StubPageBridge,
+        host: RecordingHost,
+    ) -> (WindowApp, StubPageBridge, RecordingHost) {
         let slot: RouteSlot = Rc::new(RefCell::new(Route::Home));
-        WindowApp::new(Box::new(IdleBridge), "connected".into(), slot)
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let app = WindowApp::new(
+            &egui::Context::default(),
+            start,
+            Box::new(IdleBridge),
+            Rc::new(RefCell::new(Box::new(bridge.clone()))),
+            Box::new(host.clone()),
+            "connected".into(),
+            outcome,
+            slot,
+        );
+        (app, bridge, host)
     }
 
     #[test]
@@ -210,7 +467,10 @@ mod tests {
 
     #[test]
     fn editor_route_uses_the_stable_viewport_geometry() {
-        let g = route_geometry(&Route::Editor(Box::new(editor_state()), false));
+        let g = route_geometry(&Route::Editor(Box::new(RoutedEditor {
+            state: editor_state(),
+            selection_first: false,
+        })));
         assert_eq!(g.size, egui::vec2(1024.0, 640.0));
         assert!(g.resizable);
         assert_eq!(g.title, "flintshot — annotate");
@@ -222,17 +482,14 @@ mod tests {
     fn loading_route_geometry_equals_editor() {
         assert_eq!(
             route_geometry(&Route::Loading),
-            route_geometry(&Route::Editor(Box::new(editor_state()), true))
+            route_geometry(&Route::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: true,
+            })))
         );
     }
 
-    fn editor_state() -> flintshot_core::EditorState {
-        let img = image::RgbaImage::from_raw(4, 4, vec![255; 4 * 4 * 4])
-            .expect("raw buffer matches 4*4*4");
-        flintshot_core::EditorState::new(img)
-    }
-
-    /// The viewport command batch a full output carries, in order.
+    /// The viewport command batch a full output carries.
     fn transition_commands(full: &egui::FullOutput) -> Vec<egui::ViewportCommand> {
         full.viewport_output
             .values()
@@ -241,14 +498,20 @@ mod tests {
             .collect()
     }
 
-    /// A route swap issues exactly the geometry batch — `InnerSize`
-    /// + `Resizable` + `Title` — and latches the slot.
+    /// A Home → Editor swap issues exactly the geometry batch —
+    /// `InnerSize` + `Resizable` + `Title` — and latches the slot.
     #[test]
     fn route_swap_issues_the_transition_batch_once() {
         let ctx = egui::Context::default();
         let mut app = window_app();
         let full = ctx.run_ui(egui::RawInput::default(), |ui| {
-            app.request_route(ui.ctx(), Route::Loading);
+            app.request_route(
+                ui.ctx(),
+                Route::Editor(Box::new(RoutedEditor {
+                    state: editor_state(),
+                    selection_first: false,
+                })),
+            );
         });
         let commands = transition_commands(&full);
         assert!(commands.contains(&egui::ViewportCommand::InnerSize(egui::vec2(1024.0, 640.0))));
@@ -259,29 +522,41 @@ mod tests {
             )),
             "the batch swaps the title too: {commands:?}"
         );
+        assert_eq!(commands.len(), 3, "no other viewport churn: {commands:?}");
         assert!(
-            matches!(app.route(), Route::Loading),
+            matches!(app.route, Route::Editor(..)),
             "the route latched in place"
         );
-        assert_eq!(commands.len(), 3, "no other viewport churn: {commands:?}");
     }
 
-    /// A same-kind swap (an image swap inside the editor route,
-    /// once Task 008 delivers into it) issues nothing.
+    /// A same-kind swap (a second Open/Paste replacing the editor's
+    /// image) issues nothing — the editor app is replaced wholesale
+    /// behind the same surface.
     #[test]
-    fn same_kind_route_swap_is_a_noop_batch() {
+    fn image_swap_replaces_the_editor_without_viewport_churn() {
         let ctx = egui::Context::default();
-        let mut app = window_app();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            app.request_route(ui.ctx(), Route::Editor(Box::new(editor_state()), false));
-        });
+        let (mut app, _bridge, _host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
         let full = ctx.run_ui(egui::RawInput::default(), |ui| {
-            app.request_route(ui.ctx(), Route::Editor(Box::new(editor_state()), true));
+            app.request_route(
+                ui.ctx(),
+                Route::Editor(Box::new(RoutedEditor {
+                    state: editor_state(),
+                    selection_first: true,
+                })),
+            );
         });
         assert!(
             transition_commands(&full).is_empty(),
             "an image swap inside the editor route must not disturb the window"
         );
+        assert!(app.editor.is_some(), "a fresh editor app took over");
     }
 
     /// A repeated identical request is idempotent (a spurious
@@ -302,21 +577,169 @@ mod tests {
         );
     }
 
-    /// The router delegates to the home route: a frame with the home
-    /// active runs its logic (the repaint heartbeat is observable in
-    /// the output's repaint time).
+    /// The router polls the host: an armed routed editor swaps the
+    /// route in-place (the Open control's decode path), and the
+    /// editor-opened report fires once.
     #[test]
-    fn home_route_delegates_frames_to_the_home_app() {
+    fn routed_editor_poll_swaps_to_the_editor_route() {
         let ctx = egui::Context::default();
-        let mut app = window_app();
+        let host = RecordingHost::default();
+        let (mut app, _bridge, host) =
+            window_app_start(WindowStart::Home, StubPageBridge::default(), host);
         let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            // The host queue is empty this frame — no swap.
             app.logic_impl(ui.ctx());
-            app.ui_impl(ui);
         });
         assert!(
-            matches!(app.route(), Route::Home),
-            "fixture: the window still shows home"
+            transition_commands(&full).is_empty(),
+            "fixture: nothing routed yet"
         );
-        let _ = full;
+        host.inner.borrow_mut().queued.push_back(RoutedEditor {
+            state: editor_state(),
+            selection_first: false,
+        });
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Editor(..)),
+            "the armed routed editor swapped the route in-place"
+        );
+        assert!(
+            transition_commands(&full).contains(&egui::ViewportCommand::Title(
+                "flintshot — annotate".to_owned()
+            )),
+            "the transition batch issued"
+        );
+    }
+
+    /// Esc's `Cancelled` routes home in-place — consumed by the
+    /// router, never left for the exit.
+    #[test]
+    fn cancelled_outcome_routes_home_in_place() {
+        let ctx = egui::Context::default();
+        let (mut app, _bridge, _host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        *app.editor_outcome.borrow_mut() = Some(Ok(EditorOutcome::Cancelled));
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Home),
+            "Esc swaps home without closing"
+        );
+        assert!(
+            !transition_commands(&full)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "no close — the window survives the Esc route"
+        );
+        assert!(app.editor_outcome.borrow().is_none(), "consumed");
+    }
+
+    /// A render failure surfaces through the page bridge's status
+    /// and routes home — the window survives.
+    #[test]
+    fn error_outcome_reports_status_and_routes_home() {
+        let ctx = egui::Context::default();
+        let bridge = StubPageBridge::default();
+        let (mut app, bridge, _host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+            })),
+            bridge,
+            RecordingHost::default(),
+        );
+        *app.editor_outcome.borrow_mut() = Some(Err(flintshot_core::FlintshotError::Shell {
+            detail: "render blew up".into(),
+        }));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Home),
+            "a render error routes home, same window"
+        );
+        let statuses = bridge.statuses.borrow();
+        assert_eq!(
+            statuses.len(),
+            1,
+            "the error surfaced through the status line"
+        );
+        assert!(
+            statuses[0].contains("render blew up"),
+            "the status carries the error detail: {}",
+            statuses[0]
+        );
+    }
+
+    /// A capture intent stays in the slot for the window's exit (its
+    /// close is landing — the outer loop runs the grab after).
+    #[test]
+    fn capture_outcome_survives_for_the_exit() {
+        let ctx = egui::Context::default();
+        let (mut app, _bridge, _host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        *app.editor_outcome.borrow_mut() = Some(Ok(EditorOutcome::NewCapture {
+            mode: flintshot_core::NewCaptureMode::Region,
+        }));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Editor(..)),
+            "the capture close is the editor's own; the router does not re-route"
+        );
+        assert!(
+            matches!(
+                app.editor_outcome.borrow().as_ref(),
+                Some(Ok(EditorOutcome::NewCapture { .. }))
+            ),
+            "the capture intent rides the exit"
+        );
+    }
+
+    /// Entering a fresh editor clears a stale outcome — a leftover
+    /// Cancelled must not bounce the new page straight home.
+    #[test]
+    fn fresh_editor_starts_with_a_clean_outcome_slot() {
+        let ctx = egui::Context::default();
+        let mut app = window_app();
+        *app.editor_outcome.borrow_mut() = Some(Ok(EditorOutcome::Cancelled));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.request_route(
+                ui.ctx(),
+                Route::Editor(Box::new(RoutedEditor {
+                    state: editor_state(),
+                    selection_first: false,
+                })),
+            );
+        });
+        assert!(
+            app.editor_outcome.borrow().is_none(),
+            "route entry clears the slot"
+        );
+    }
+
+    /// The router delegates to the home route on Home and drops the
+    /// editor app (a Home-route frame never touches an editor).
+    #[test]
+    fn home_route_delegates_and_holds_no_editor() {
+        let app = window_app();
+        assert!(app.editor.is_none());
+        assert!(matches!(app.route, Route::Home));
     }
 }
