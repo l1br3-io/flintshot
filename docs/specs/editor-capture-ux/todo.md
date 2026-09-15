@@ -6,7 +6,7 @@
 - [x] 004-stable-editor-viewport
 - [x] 005-router-skeleton
 - [x] 006-editor-joins-router
-- [ ] 007-grab-outcome-split
+- [x] 007-grab-outcome-split
 - [ ] 008-loading-route-delivery
 - [ ] 009-chrome-strip-removal
 - [ ] 010-closeout-changelog-adr
