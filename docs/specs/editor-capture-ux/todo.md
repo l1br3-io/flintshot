@@ -8,5 +8,5 @@
 - [x] 006-editor-joins-router
 - [x] 007-grab-outcome-split
 - [x] 008-loading-route-delivery
-- [ ] 009-chrome-strip-removal
+- [x] 009-chrome-strip-removal
 - [ ] 010-closeout-changelog-adr
