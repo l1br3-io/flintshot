@@ -4,7 +4,7 @@
 - [x] 002 extract-capture-flow
 - [x] 003 editor-page-mode
 - [x] 004 router-open-in-process
-- [ ] 005 paste-from-home
+- [x] 005 paste-from-home
 - [ ] 006 in-process-capture
 - [ ] 007 daemon-forwarding
 - [ ] 008 open-routing

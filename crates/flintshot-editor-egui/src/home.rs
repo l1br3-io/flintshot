@@ -4,12 +4,11 @@
 //! prominent **Capture** control (the single Capture action,
 //! native-capture-ux — the OS's own selection UI where the backend
 //! supports it, else the editor flow), an **Open** control (native
-//! file dialog → the picked image opens in an editor window of its
-//! own), and a status line. A **Paste** control is fully built but
-//! hidden behind [`SHOW_PASTE`] for the future clipboard→editor
-//! feature. This crate stays IPC-free — the window talks to the
-//! world exclusively through [`HomeBridge`], which the app crate
-//! implements (subscription pump + daemon delegation live there).
+//! file dialog → the picked image routes the same window to its
+//! editor page, single-window), and a **Paste** control (clipboard
+//! image → the editor page). This crate stays IPC-free — the window
+//! talks to the world exclusively through [`HomeBridge`], which the
+//! app crate implements (subscription pump + routing live there).
 //!
 //! Close/reopen contract (ADR-0047): a Capture click asks the
 //! bridge to start the capture and then sends
@@ -47,12 +46,10 @@ pub(crate) const REPOLL_INTERVAL: Duration = Duration::from_millis(250);
 const CLOSE_WATCHDOG_DELAY: Duration = Duration::from_millis(500);
 
 /// Whether the **Paste** control renders (and its `P` accelerator
-/// arms). The clipboard→editor feature is a later effort; the
-/// button, accelerator, and [`HomeBridge::request_paste`] plumbing
-/// are built now so flipping this const is the whole toggle.
-// TODO(future effort): clipboard → editor — read the system
-// clipboard image straight into a fresh editor session.
-const SHOW_PASTE: bool = false;
+/// arms). Live since the single-window effort: the clipboard image
+/// routes to the editor page in-process (see
+/// [`HomeBridge::request_paste`]).
+const SHOW_PASTE: bool = true;
 
 /// A directive from the app crate into the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,10 +88,12 @@ pub trait HomeBridge {
     /// dialog returns).
     fn open_image(&mut self, path: PathBuf) -> bool;
 
-    /// Placeholder for the future clipboard→editor feature: read the
-    /// system clipboard image into a fresh editor session. Only
-    /// reachable while [`SHOW_PASTE`] is `true`.
-    fn request_paste(&mut self);
+    /// Paste: read the system clipboard's image and route to the
+    /// editor page. Returns whether an image routed (`true`: the
+    /// window closes right after, exactly like [`Self::open_image`]);
+    /// `false` — no image on the clipboard — is a status-line
+    /// message, the window stays.
+    fn request_paste(&mut self) -> bool;
 
     /// Take one pending directive, oldest first. Called every
     /// frame (see [`REPOLL_INTERVAL`]).
@@ -250,8 +249,11 @@ impl HomeApp {
             self.start_capture(ctx);
         } else if ctx.input_mut(|i| i.consume_shortcut(&self.open_shortcut)) {
             self.handle_open(ctx);
-        } else if SHOW_PASTE && ctx.input_mut(|i| i.consume_shortcut(&self.paste_shortcut)) {
-            self.bridge.request_paste();
+        } else if SHOW_PASTE
+            && ctx.input_mut(|i| i.consume_shortcut(&self.paste_shortcut))
+            && self.bridge.request_paste()
+        {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
         }
     }
 
@@ -321,8 +323,8 @@ impl HomeApp {
                         .strong(),
                 )
                 .min_size(egui::vec2(ui.available_width(), 34.0));
-                if ui.add(paste).clicked() {
-                    self.bridge.request_paste();
+                if ui.add(paste).clicked() && self.bridge.request_paste() {
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                 }
             }
 
@@ -438,17 +440,16 @@ mod tests {
         assert!(!app.close_watchdog_warned, "within the bound: quiet");
     }
 
-    /// Pinned: the Paste control stays dark on this branch — the
-    /// clipboard→editor feature is a later effort. Flipping
-    /// [`SHOW_PASTE`] without shipping that feature breaks this test
-    /// on purpose.
+    /// Pinned: the Paste control is live on this branch (single-window
+    /// effort) — its route is [`HomeBridge::request_paste`]. Flipping
+    /// [`SHOW_PASTE`] off breaks this test on purpose.
     #[test]
     #[expect(
         clippy::assertions_on_constants,
         reason = "the constant IS the pinned contract; the test exists to fail on flip"
     )]
-    fn show_paste_const_is_false_on_this_branch() {
-        assert!(!SHOW_PASTE);
+    fn show_paste_const_is_true_on_this_branch() {
+        assert!(SHOW_PASTE);
     }
 
     /// Shared recorder so tests can inspect a bridge handed to
@@ -460,8 +461,9 @@ mod tests {
     struct Recorder {
         capture_requests: usize,
         opened: Vec<PathBuf>,
-        open_routes: Vec<bool>,
         paste_requests: usize,
+        /// Whether the paste double "has an image on the clipboard".
+        clipboard_has_image: bool,
     }
 
     /// Bridge double that records requests and replays directives.
@@ -481,16 +483,15 @@ mod tests {
             rec.opened.push(path);
             // Fail (false) for paths containing "bad", route otherwise
             // — lets one double cover both contract arms.
-            let routed = !rec
-                .opened
+            !rec.opened
                 .last()
-                .is_some_and(|p| p.to_string_lossy().contains("bad"));
-            rec.open_routes.push(routed);
-            routed
+                .is_some_and(|p| p.to_string_lossy().contains("bad"))
         }
 
-        fn request_paste(&mut self) {
-            self.rec.0.lock().expect("recorder mutex").paste_requests += 1;
+        fn request_paste(&mut self) -> bool {
+            let mut rec = self.rec.0.lock().expect("recorder mutex");
+            rec.paste_requests += 1;
+            rec.clipboard_has_image
         }
 
         fn poll_directive(&mut self) -> Option<HomeDirective> {
@@ -546,6 +547,76 @@ mod tests {
             rec.0.lock().expect("recorder mutex").capture_requests,
             1,
             "the C accelerator must fire request_capture exactly once"
+        );
+    }
+
+    #[test]
+    fn paste_accelerator_fires_the_bridge_request() {
+        // Paste is live (single-window): the P accelerator must reach
+        // the bridge. A clipboard without an image routes false — no
+        // close, the window stays (no window churn on a text
+        // clipboard).
+        let bridge = RecordingBridge::default();
+        let rec = bridge.rec.clone();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::P,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.logic_impl(ui.ctx()),
+        );
+        assert_eq!(
+            rec.0.lock().expect("recorder mutex").paste_requests,
+            1,
+            "the P accelerator must fire request_paste exactly once"
+        );
+        assert!(
+            full.viewport_output
+                .values()
+                .flat_map(|v| v.commands.iter())
+                .all(|c| !matches!(c, egui::ViewportCommand::Close)),
+            "an empty clipboard must not close the window"
+        );
+    }
+
+    #[test]
+    fn paste_accelerator_closes_on_a_routed_image() {
+        let bridge = RecordingBridge::default();
+        bridge
+            .rec
+            .0
+            .lock()
+            .expect("recorder mutex")
+            .clipboard_has_image = true;
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::P,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.logic_impl(ui.ctx()),
+        );
+        assert!(
+            full.viewport_output
+                .values()
+                .flat_map(|v| v.commands.iter())
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "a routed paste closes the window for the editor epoch"
         );
     }
 }
