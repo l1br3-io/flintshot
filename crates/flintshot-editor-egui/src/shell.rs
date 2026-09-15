@@ -7,12 +7,12 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use eframe::{AppCreator, NativeOptions};
-use flintshot_core::{EditorOutcome, EditorShell, EditorState, NewCaptureMode};
+use flintshot_core::{EditorOutcome, EditorShell, EditorState};
 
 use crate::app::{eframe_err_to_flintshot, EditorApp, OutcomeSlot};
 use crate::home::{HomeBridge, HomeDirective};
 use crate::overlay::{OverlayApp, OVERLAY_TITLE};
-use crate::window::Route;
+use crate::window::{Route, RouteHost, WindowExit, WindowStart};
 
 /// Window title shown in the titlebar and used as the WM class hint.
 /// Matches the Phase 1 editor-window spec (`"flintshot — annotate"` with
@@ -117,24 +117,6 @@ impl CloseHandle {
     }
 }
 
-/// How the editor page epoch ended — the single window's router (the
-/// app crate's outer loop) reads this to pick the next page.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum EditorPageExit {
-    /// Back to the three-button home (Esc) — the empty state.
-    Home,
-    /// The user asked for a new capture from inside the editor
-    /// (`+` chip / Ctrl+N); `mode` carries the selection-first label
-    /// the recapture flow keys on.
-    Capture(NewCaptureMode),
-    /// The window closed with no explicit editor outcome — X button,
-    /// Alt+F4, or a Hide directive's close. Not a home route: the
-    /// router classifies this via its own state (user quit vs
-    /// external capture).
-    Closed,
-}
-
 /// The editor page's only seam to the outside world — the single
 /// window's analogue of [`HomeBridge`], implemented by the app crate;
 /// every method runs on the UI thread. Side-effect outcomes (Save /
@@ -177,43 +159,6 @@ pub trait EditorPageBridge {
 /// holds the other. Single-threaded like [`OutcomeSlot`] — eframe's
 /// native loop owns the whole lifetime.
 pub(crate) type PageBridgeSlot = Rc<RefCell<Box<dyn EditorPageBridge>>>;
-
-/// Resolve the page exit from the epoch's terminal outcome (what the
-/// closed window's slot holds). Pure, headless-testable seam of
-/// [`EguiShell::run_editor_page`].
-pub(crate) fn resolve_page_exit(
-    resolved: Option<flintshot_core::Result<EditorOutcome>>,
-    bridge: &PageBridgeSlot,
-) -> EditorPageExit {
-    match resolved {
-        Some(resolved) => settle_page_exit(&resolved, bridge),
-        // Nothing published: X button / Alt+F4 / a Hide-directive
-        // close. Deliberately NOT defaulted to a cancel — the router
-        // must tell a user quit apart from an external capture's
-        // close, and only its own state can.
-        None => EditorPageExit::Closed,
-    }
-}
-
-/// Resolve the exit and surface a terminal error through the bridge's
-/// status line (spec: a render error closes with `Home` plus a
-/// status — the returning home page shows why the editor died).
-pub(crate) fn settle_page_exit(
-    resolved: &flintshot_core::Result<EditorOutcome>,
-    bridge: &PageBridgeSlot,
-) -> EditorPageExit {
-    if let Err(e) = resolved {
-        bridge
-            .borrow_mut()
-            .set_status(&format!("editor closed on error: {e}"));
-    }
-    match resolved {
-        Ok(EditorOutcome::NewCapture { mode }) => EditorPageExit::Capture(*mode),
-        // Esc (Cancelled), side-effect closes, and terminal errors all
-        // route home — the empty state.
-        Ok(_) | Err(_) => EditorPageExit::Home,
-    }
-}
 
 /// egui implementation of the [`EditorShell`] trait.
 ///
@@ -298,23 +243,27 @@ impl EguiShell {
         run_overlay_blocking(state, self.close.as_ref())
     }
 
-    /// Open the single window **router** on the Home route and block
-    /// until the window closes (one eframe lifetime per window
-    /// generation; page transitions swap routes in place — see
-    /// [`crate::window`]). Returns the route the window closed on —
-    /// the app crate's outer-loop restore input. The window's
-    /// outside world is entirely `bridge` — this crate stays
-    /// IPC-free (see [`HomeBridge`]).
+    /// Open the single window **router** and block until the window
+    /// closes (one eframe lifetime per window *generation*; page
+    /// transitions swap routes in place — see [`crate::window`]).
+    /// Returns the [`WindowExit`] — the route at close (restore
+    /// input) plus any editor outcome left unpublished (a capture
+    /// intent whose close is landing). The window's outside world is
+    /// entirely the bridges + route host — this crate stays
+    /// IPC-free.
     ///
     /// # Errors
     /// Surfaces [`crate::FlintshotError`] for window-system or
     /// render failures.
     pub fn run_window(
         &self,
-        bridge: Box<dyn HomeBridge>,
+        start: WindowStart,
+        home_bridge: Box<dyn HomeBridge>,
+        page_bridge: Box<dyn EditorPageBridge>,
+        host: Box<dyn RouteHost>,
         initial_status: String,
-    ) -> flintshot_core::Result<Route> {
-        let geometry = crate::window::route_geometry(&Route::Home);
+    ) -> flintshot_core::Result<WindowExit> {
+        let geometry = crate::window::route_geometry(&start_route(&start));
         let viewport = egui::ViewportBuilder::default()
             .with_title(geometry.title)
             .with_inner_size(geometry.size)
@@ -326,12 +275,21 @@ impl EguiShell {
             ..Default::default()
         };
 
-        let route_slot: crate::window::RouteSlot = Rc::new(RefCell::new(Route::Home));
+        let route_slot: crate::window::RouteSlot = Rc::new(RefCell::new(start_route(&start)));
         let slot_for_app = Rc::clone(&route_slot);
-        let app_creator: AppCreator<'_> = Box::new(move |_cc| {
+        let editor_outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let outcome_for_app = Rc::clone(&editor_outcome);
+        let page_bridge_slot: PageBridgeSlot = Rc::new(RefCell::new(page_bridge));
+        let bridge_for_app = Rc::clone(&page_bridge_slot);
+        let app_creator: AppCreator<'_> = Box::new(move |cc| {
             Ok(Box::new(crate::window::WindowApp::new(
-                bridge,
+                &cc.egui_ctx,
+                start,
+                home_bridge,
+                bridge_for_app,
+                host,
                 initial_status,
+                outcome_for_app,
                 slot_for_app,
             )))
         });
@@ -339,63 +297,20 @@ impl EguiShell {
         eframe::run_native(geometry.title, options, app_creator)
             .map_err(|e| eframe_err_to_flintshot(&e))?;
         let route = route_slot.borrow().clone();
-        Ok(route)
+        let editor_outcome = editor_outcome.borrow_mut().take();
+        Ok(WindowExit {
+            route,
+            editor_outcome,
+        })
     }
+}
 
-    /// Open the editor as a **page** of the single window: a stable
-    /// default-sized viewport ([`EDITOR_PAGE_DEFAULT_SIZE`],
-    /// open-time clamped to the monitor) with the image fitted and
-    /// centered inside (the canvas's fit transform), the
-    /// single-window outcome lifecycle — Save / Copy / Upload apply
-    /// their side effect and the page stays open (reported through
-    /// the [`EditorPageBridge`]), `Esc` exits to
-    /// [`EditorPageExit::Home`], and `NewCapture` exits with
-    /// [`EditorPageExit::Capture`] so the router can run the grab
-    /// flow. Blocks until the page epoch ends.
-    ///
-    /// # Errors
-    /// Surfaces [`crate::FlintshotError`] for window-system or
-    /// render failures (render failures exit `Home` with a bridge
-    /// status; the `Err` return is for the loop itself failing).
-    pub fn run_editor_page(
-        &self,
-        state: EditorState,
-        bridge: Box<dyn EditorPageBridge>,
-    ) -> flintshot_core::Result<EditorPageExit> {
-        let viewport = egui::ViewportBuilder::default()
-            .with_title(WINDOW_TITLE)
-            .with_inner_size(EDITOR_PAGE_DEFAULT_SIZE)
-            .with_resizable(true);
-
-        let options = NativeOptions {
-            viewport,
-            centered: true,
-            ..Default::default()
-        };
-
-        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
-        let outcome_for_app = Rc::clone(&outcome);
-        let page_bridge: PageBridgeSlot = Rc::new(RefCell::new(bridge));
-        let bridge_for_app = Rc::clone(&page_bridge);
-
-        let app_creator: AppCreator<'_> = Box::new(move |cc| {
-            let app = EditorApp::new_page(
-                state,
-                &cc.egui_ctx,
-                outcome_for_app,
-                self.selection_first,
-                bridge_for_app,
-            );
-            Ok(Box::new(app))
-        });
-
-        eframe::run_native(WINDOW_TITLE, options, app_creator)
-            .map_err(|e| eframe_err_to_flintshot(&e))?;
-
-        // A close with nothing published is `Closed` (X / Alt+F4 / a
-        // Hide-directive close) — the router classifies it.
-        let resolved = outcome.borrow_mut().take();
-        Ok(resolve_page_exit(resolved, &page_bridge))
+/// The opening [`Route`] for a [`WindowStart`] (the geometry and
+/// slot seeding).
+fn start_route(start: &WindowStart) -> Route {
+    match start {
+        WindowStart::Home => Route::Home,
+        WindowStart::Editor(routed) => Route::Editor(Box::new((**routed).clone())),
     }
 }
 
@@ -665,163 +580,6 @@ mod tests {
             installed_ptr,
             std::ptr::from_ref(&first),
             "the slot holds the most recent install"
-        );
-    }
-
-    // --- Editor page exit (single-window Task 003) ---
-
-    use crate::home::HomeDirective;
-    use flintshot_core::NewCaptureMode;
-
-    #[derive(Default)]
-    struct PageRecorder {
-        reported: Vec<EditorOutcome>,
-        statuses: Vec<String>,
-        opened: Vec<std::path::PathBuf>,
-        pastes: usize,
-    }
-
-    fn blank_bridge() -> PageBridgeSlot {
-        Rc::new(RefCell::new(Box::new(RecordingPageBridge::default())))
-    }
-
-    #[derive(Default, Clone)]
-    struct RecordingPageBridge {
-        rec: std::sync::Arc<std::sync::Mutex<PageRecorder>>,
-    }
-
-    impl EditorPageBridge for RecordingPageBridge {
-        fn report_outcome(&mut self, outcome: &EditorOutcome) {
-            self.rec
-                .lock()
-                .expect("recorder mutex")
-                .reported
-                .push(outcome.clone());
-        }
-
-        fn set_status(&mut self, status: &str) {
-            self.rec
-                .lock()
-                .expect("recorder mutex")
-                .statuses
-                .push(status.into());
-        }
-
-        fn poll_directive(&mut self) -> Option<HomeDirective> {
-            None
-        }
-
-        fn open_image(&mut self, path: std::path::PathBuf) -> bool {
-            self.rec.lock().expect("recorder mutex").opened.push(path);
-            true
-        }
-
-        fn request_paste(&mut self) -> bool {
-            self.rec.lock().expect("recorder mutex").pastes += 1;
-            true
-        }
-    }
-
-    #[test]
-    fn page_exit_maps_every_terminal_outcome() {
-        // NewCapture carries its mode label (the recapture loop's
-        // selection-first decision keys on it); every other terminal
-        // outcome — Cancelled (Esc / X), Saved, CopiedToClipboard,
-        // Uploaded — exits to Home.
-        assert_eq!(
-            resolve_page_exit(
-                Some(Ok(EditorOutcome::NewCapture {
-                    mode: NewCaptureMode::Region
-                })),
-                &blank_bridge()
-            ),
-            EditorPageExit::Capture(NewCaptureMode::Region)
-        );
-        assert_eq!(
-            resolve_page_exit(
-                Some(Ok(EditorOutcome::NewCapture {
-                    mode: NewCaptureMode::Fullscreen
-                })),
-                &blank_bridge()
-            ),
-            EditorPageExit::Capture(NewCaptureMode::Fullscreen)
-        );
-        assert_eq!(
-            resolve_page_exit(Some(Ok(EditorOutcome::Cancelled)), &blank_bridge()),
-            EditorPageExit::Home
-        );
-        assert_eq!(
-            resolve_page_exit(Some(Ok(EditorOutcome::CopiedToClipboard)), &blank_bridge()),
-            EditorPageExit::Home
-        );
-        assert_eq!(
-            resolve_page_exit(
-                Some(Ok(EditorOutcome::Saved(std::path::PathBuf::from(
-                    "/tmp/x.png"
-                )))),
-                &blank_bridge()
-            ),
-            EditorPageExit::Home
-        );
-        assert_eq!(
-            resolve_page_exit(
-                Some(Ok(EditorOutcome::Uploaded(String::new()))),
-                &blank_bridge()
-            ),
-            EditorPageExit::Home
-        );
-    }
-
-    #[test]
-    fn page_close_without_an_outcome_is_closed_not_home() {
-        // X / Alt+F4 / a Hide-directive close publish nothing — the
-        // router must classify quit vs external capture itself, so
-        // this may NOT default to a cancel.
-        assert_eq!(
-            resolve_page_exit(None, &blank_bridge()),
-            EditorPageExit::Closed
-        );
-    }
-
-    #[test]
-    fn page_render_error_exits_home_with_a_bridge_status() {
-        // Spec: a render error closes with Home plus a status through
-        // the bridge, so the returning home page can show why.
-        let bridge = RecordingPageBridge::default();
-        let rec = bridge.rec.clone();
-        let slot: PageBridgeSlot = Rc::new(RefCell::new(Box::new(bridge)));
-        let exit = settle_page_exit(
-            &Err(flintshot_core::FlintshotError::Shell {
-                detail: "render blew up".into(),
-            }),
-            &slot,
-        );
-        assert_eq!(exit, EditorPageExit::Home);
-        let guard = rec.lock().expect("recorder mutex");
-        assert_eq!(
-            guard.statuses.len(),
-            1,
-            "the error surfaced through the bridge's status line"
-        );
-        assert!(
-            guard.statuses[0].contains("render blew up"),
-            "the status carries the error detail: {}",
-            guard.statuses[0]
-        );
-    }
-
-    #[test]
-    fn page_clean_exit_sets_no_status() {
-        // Only errors speak through the status line — a plain Esc
-        // home must not overwrite the app's standing status.
-        let bridge = RecordingPageBridge::default();
-        let rec = bridge.rec.clone();
-        let slot: PageBridgeSlot = Rc::new(RefCell::new(Box::new(bridge)));
-        let exit = settle_page_exit(&Ok(EditorOutcome::Cancelled), &slot);
-        assert_eq!(exit, EditorPageExit::Home);
-        assert!(
-            rec.lock().expect("recorder mutex").statuses.is_empty(),
-            "no status on a clean exit"
         );
     }
 

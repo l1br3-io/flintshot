@@ -56,7 +56,7 @@ use color_eyre::eyre;
 use flintshot_core::ipc::Event as IpcEvent;
 use flintshot_core::ipc::Request;
 use flintshot_core::{Config, EditorOutcome, EditorState};
-use flintshot_editor_egui::{EditorPageBridge, EditorPageExit, HomeBridge, HomeDirective};
+use flintshot_editor_egui::{EditorPageBridge, HomeBridge, HomeDirective};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::capture_flow::AppGrab;
@@ -140,9 +140,6 @@ struct SharedInner {
     /// The Open control decoded an image (or a grab delivered one):
     /// the next epoch is the editor page over it.
     pending_editor: Option<PendingEditor>,
-    /// The editor page exited to home (`Esc`): the next epoch is the
-    /// home page, distinct from a user quit (X / Alt+F4).
-    go_home: bool,
     /// The window closed for a hide directive (not a user quit): the
     /// outer loop must wait for the reopen instead of exiting.
     hide_requested: bool,
@@ -220,16 +217,7 @@ impl Shared {
     }
 
     /// Arm the home route (the editor page's `Esc` exit).
-    fn set_go_home(&self) {
-        self.lock().go_home = true;
-        self.changed.notify_all();
-    }
-
     /// Whether the home route is armed (the classifier consumes it).
-    fn take_go_home(&self) -> bool {
-        std::mem::take(&mut self.lock().go_home)
-    }
-
     /// Take the hide request (the outer loop's close classification).
     fn take_hide_requested(&self) -> bool {
         std::mem::take(&mut self.lock().hide_requested)
@@ -636,43 +624,35 @@ pub(crate) fn run() -> eyre::Result<()> {
         .map_err(|e| eyre::eyre!("spawning the app pump thread: {e}"))?;
 
     let mut result = Ok(());
-    let mut page = Page::Home;
+    let mut start = GenerationStart::Home;
 
-    // One iteration = one window lifetime (a page epoch). A capture
-    // intent closes the window; the grace + delegation + the
-    // wait-for-Show live here (the window is gone, so blocking this
-    // thread is free). A hide-by-event close (external capture) waits
-    // for the same reopen. Any other close is the user quitting.
+    // One iteration = one window **generation** (one eframe
+    // lifetime; pages route inside it). Only captures and user quit
+    // close the window now (editor-capture-ux Task 006): a capture
+    // intent's grace + delegation + wait-for-Show live here, and a
+    // hide-by-event close (external capture) waits for the same
+    // reopen. Any other close is the user quitting.
     loop {
-        // The same-page restore target: whatever this epoch runs is
-        // what an external capture's close brings back.
-        shared.set_restore_page(page.clone());
-        let exit = match page {
-            Page::Home => match run_home_epoch(&shared) {
-                Ok(()) => None,
-                Err(e) => {
-                    result = Err(e);
-                    break;
-                }
-            },
-            Page::Editor(pending) => match run_editor_epoch(&shared, *pending) {
-                Ok(exit) => Some(exit),
-                Err(e) => {
-                    result = Err(e);
-                    break;
-                }
-            },
+        let exit = match run_generation(&shared, start) {
+            Ok(exit) => exit,
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
         };
 
         // The window is destroyed — the pump's hide-ack waits on this
         // state, and every close reason below assumes it.
         shared.set_window_closed();
 
-        // The editor epoch's exit value arms the shared intents;
-        // home arms its own through the bridge. One classification
-        // then picks the next page for either epoch.
-        if let Some(exit) = &exit {
-            arm_editor_exit(&shared, exit);
+        // The route that was on screen at close is the same-page
+        // restore target for an external capture's reopen.
+        shared.set_restore_page(route_to_page(&exit.route));
+
+        // A capture intent publishes NewCapture and closes; the exit
+        // carries it here.
+        if let Some(outcome) = exit.editor_outcome {
+            arm_window_outcome(&shared, outcome);
         }
 
         match close_reason(&shared) {
@@ -690,25 +670,19 @@ pub(crate) fn run() -> eyre::Result<()> {
                     tracing::warn!("app pump died before the capture session ended");
                     break;
                 }
-                page = next_page_after_reopen(&shared);
+                start = next_start_after_reopen(&shared);
             }
             CloseReason::HiddenByEvent => {
                 // An externally triggered capture hid us (HideForCapture
                 // / CaptureStarted): not a user quit. The pump acked the
-                // hide; reopen when the session ends — back on the page
-                // that was open, unless the trigger routed a fresh
-                // image (a forwarded grab's editor page).
+                // hide; reopen when the session ends — back on the
+                // route that was open, unless the trigger routed a
+                // fresh image (a forwarded grab's editor page).
                 if !shared.wait_for_reopen() {
                     tracing::warn!("app pump died while hidden for a capture");
                     break;
                 }
-                page = next_page_after_reopen(&shared);
-            }
-            CloseReason::OpenImage(state) => {
-                page = Page::Editor(state);
-            }
-            CloseReason::GoHome => {
-                page = Page::Home;
+                start = next_start_after_reopen(&shared);
             }
         }
     }
@@ -760,69 +734,123 @@ fn handle_open_requested(shared: &Arc<Shared>, path: std::path::PathBuf) {
     }
 }
 
-/// The post-reopen page: a routed image (a grab's capture or a
-/// forwarded open — whichever armed the editor page) wins; else the
-/// page that was open (the same-page restore); else home.
-fn next_page_after_reopen(shared: &Shared) -> Page {
+/// The post-reopen generation start: a routed image (a grab's
+/// capture or a forwarded open — whichever armed the editor page)
+/// wins; else the route that was open (the same-page restore); else
+/// home.
+fn next_start_after_reopen(shared: &Shared) -> GenerationStart {
     if let Some(pending) = shared.take_pending_editor() {
-        return Page::Editor(Box::new(pending));
+        return GenerationStart::Editor(Box::new(pending));
     }
-    shared.take_restore_page().unwrap_or(Page::Home)
+    match shared.take_restore_page().unwrap_or(Page::Home) {
+        Page::Home => GenerationStart::Home,
+        Page::Editor(pending) => GenerationStart::Editor(pending),
+    }
 }
 
-/// Run one home epoch (the three-button window) to its close. The
-/// epoch spawns through the window router (`run_window`): one
-/// eframe lifetime per window generation with pages as routes —
-/// this task still opens Home-only (the editor page joins the
-/// router in editor-capture-ux Task 006; the outer loop's shape is
-/// unchanged until then).
-fn run_home_epoch(shared: &Arc<Shared>) -> eyre::Result<()> {
+/// What a window generation opens on — the outer loop's routing
+/// state (one generation = one eframe lifetime; pages route inside).
+#[derive(Debug, Clone)]
+enum GenerationStart {
+    /// The three-button home.
+    Home,
+    /// The editor over a routed image (a delivered grab reopening a
+    /// closed window).
+    Editor(Box<PendingEditor>),
+}
+
+/// Run one window generation to its close through the window router:
+/// one eframe lifetime with Home / Editor as internal routes —
+/// non-capture transitions swap in-place, captures and user quit
+/// close. Returns how the generation ended (route at close + any
+/// unpublished editor outcome).
+fn run_generation(
+    shared: &Arc<Shared>,
+    start: GenerationStart,
+) -> eyre::Result<flintshot_editor_egui::WindowExit> {
     let status = shared.status();
     let initial_status = if status.is_empty() {
         "connecting…".to_string()
     } else {
         status
     };
-    let bridge = Bridge {
-        shared: Arc::clone(shared),
+    // One `EditorOpened` per editor *session* — the daemon parity
+    // (subscribers like the applet stay truthful wherever the editor
+    // lives); in-window route entries report through the host.
+    if matches!(start, GenerationStart::Editor(_)) {
+        crate::cli::report_editor_window_opened_to_daemon();
+    }
+    let window_start = match start {
+        GenerationStart::Home => flintshot_editor_egui::WindowStart::Home,
+        GenerationStart::Editor(pending) => {
+            flintshot_editor_egui::WindowStart::Editor(Box::new(to_routed(&pending)))
+        }
     };
     shared.set_window_open();
     let ran = crate::ambient::with_ambient_runtime(|| {
-        flintshot_editor_egui::EguiShell::new().run_window(Box::new(bridge), initial_status)
-    });
-    let _route = ran
-        .map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))?
-        .map_err(|e| eyre::eyre!("running the app window: {e}"))?;
-    // Home-only generations close on Home; the route-at-close input
-    // becomes meaningful once transitions stop closing the window.
-    Ok(())
-}
-
-/// Run one editor epoch to its close, returning the page exit the
-/// router classifies next.
-fn run_editor_epoch(shared: &Arc<Shared>, pending: PendingEditor) -> eyre::Result<EditorPageExit> {
-    // One `EditorOpened` per actual window — the worker parity (the
-    // daemon broadcasts it; subscribers like the applet stay truthful
-    // wherever the editor lives).
-    crate::cli::report_editor_window_opened_to_daemon();
-    let shell = if pending.selection_first {
-        flintshot_editor_egui::EguiShell::new().with_selection_first()
-    } else {
-        flintshot_editor_egui::EguiShell::new()
-    };
-    let bridge = PageBridge {
-        shared: Arc::clone(shared),
-    };
-    shared.set_window_open();
-    let ran = crate::ambient::with_ambient_runtime(|| {
-        shell.run_editor_page(pending.state, Box::new(bridge))
+        flintshot_editor_egui::EguiShell::new().run_window(
+            window_start,
+            Box::new(Bridge {
+                shared: Arc::clone(shared),
+            }),
+            Box::new(PageBridge {
+                shared: Arc::clone(shared),
+            }),
+            Box::new(RouteHostBridge {
+                shared: Arc::clone(shared),
+            }),
+            initial_status,
+        )
     });
     ran.map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))?
-        .map_err(|e| eyre::eyre!("running the editor page: {e}"))
+        .map_err(|e| eyre::eyre!("running the app window: {e}"))
 }
 
-/// Why the window closed — the outer loop's post-close decision,
-/// uniform across page epochs.
+/// Map a pending editor onto the editor-egui routing payload.
+fn to_routed(pending: &PendingEditor) -> flintshot_editor_egui::RoutedEditor {
+    flintshot_editor_egui::RoutedEditor {
+        state: pending.state.clone(),
+        selection_first: pending.selection_first,
+    }
+}
+
+/// Map the route the window closed on back to the outer loop's
+/// restore page (an external capture's close reopens on it). The
+/// Loading route restores home — a reopen after a capture carries
+/// the delivered image through the pending editor, never a spinner.
+fn route_to_page(route: &flintshot_editor_egui::Route) -> Page {
+    match route {
+        flintshot_editor_egui::Route::Editor(routed) => Page::Editor(Box::new(PendingEditor {
+            state: routed.state.clone(),
+            selection_first: routed.selection_first,
+        })),
+        // Loading restores home — a reopen after a capture carries
+        // the delivered image through the pending editor, never a
+        // spinner — and future route kinds restore the empty state.
+        _ => Page::Home,
+    }
+}
+
+/// Arm the shared intents a window exit's editor outcome encodes:
+/// only a capture intent survives to the exit (Esc and render
+/// errors route in-window) — the `+` popup / C / Ctrl+N exit, with
+/// the mode label dropped (the pump's in-process grab resolves the
+/// backend itself).
+fn arm_window_outcome(shared: &Shared, outcome: flintshot_core::Result<EditorOutcome>) {
+    match outcome {
+        Ok(EditorOutcome::NewCapture { .. }) => {
+            shared.set_pending_capture(PumpCommand::Capture);
+        }
+        other => {
+            tracing::warn!(?other, "unexpected editor outcome at window close");
+        }
+    }
+}
+
+/// Why the window (generation) closed — the outer loop's post-close
+/// decision. Non-capture transitions no longer close the window
+/// (they route in-place, editor-capture-ux Task 006), so only three
+/// kinds remain.
 #[derive(Debug, Clone)]
 enum CloseReason {
     /// The user closed the window (X / Alt+F4): exit the process.
@@ -832,47 +860,16 @@ enum CloseReason {
     /// A hide directive (external capture / pre-grab handshake):
     /// wait for the reopen, not a quit.
     HiddenByEvent,
-    /// The Open control routed an image: the next epoch is the
-    /// editor page over it (boxed — see [`Page::Editor`]).
-    OpenImage(Box<PendingEditor>),
-    /// The editor page exited to home (`Esc`): the next epoch is the
-    /// home page — never a user quit.
-    GoHome,
-}
-
-/// Arm the shared intents an editor page's exit value encodes, so
-/// [`close_reason`] classifies every epoch uniformly.
-fn arm_editor_exit(shared: &Shared, exit: &EditorPageExit) {
-    match exit {
-        EditorPageExit::Home => shared.set_go_home(),
-        EditorPageExit::Capture(_) => {
-            // The `+` popup / C / Ctrl+N exit: the single Capture
-            // action. The mode label is dropped here — the pump's
-            // in-process grab resolves the backend (portal-first)
-            // itself, and the window is closed for it exactly like a
-            // home-triggered capture.
-            shared.set_pending_capture(PumpCommand::Capture);
-        }
-        EditorPageExit::Closed => {}
-        _ => tracing::warn!(?exit, "editor page returned an unknown exit"),
-    }
 }
 
 /// Classify a window close: a pending capture command wins, then a
-/// pending editor page (the Open route), then a hide request, then
-/// the go-home route; else the user quit. Consumes exactly one flag.
+/// hide request; else the user quit. Consumes exactly one flag.
 fn close_reason(shared: &Shared) -> CloseReason {
     if let Some(command) = shared.take_pending_capture() {
         return CloseReason::CaptureIntent(command);
     }
-    if let Some(pending) = shared.take_pending_editor() {
-        return CloseReason::OpenImage(Box::new(pending));
-    }
     if shared.take_hide_requested() {
         return CloseReason::HiddenByEvent;
-    }
-    if shared.take_go_home() {
-        return CloseReason::GoHome;
     }
     CloseReason::UserQuit
 }
@@ -1319,6 +1316,28 @@ impl EditorPageBridge for PageBridge {
     }
 }
 
+/// [`flintshot_editor_egui::RouteHost`] impl: the in-window router's
+/// view of the shared routing state — routed editors (Open/Paste
+/// decodes while the window is open; grab deliveries once Task 008
+/// lands) and the editor-opened daemon report.
+struct RouteHostBridge {
+    shared: Arc<Shared>,
+}
+
+impl flintshot_editor_egui::RouteHost for RouteHostBridge {
+    fn take_routed_editor(&mut self) -> Option<flintshot_editor_egui::RoutedEditor> {
+        self.shared
+            .take_pending_editor()
+            .map(|pending| to_routed(&pending))
+    }
+
+    fn editor_route_opened(&mut self) {
+        // The daemon parity: one report per editor session, wherever
+        // the editor lives (route entry inside the window counts).
+        crate::cli::report_editor_window_opened_to_daemon();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1428,8 +1447,11 @@ mod tests {
         // the Replace policy's loss).
         let shared = Shared::default();
         shared.set_restore_page(Page::Editor(Box::new(pending_over((2, 2), false))));
-        let next = next_page_after_reopen(&shared);
-        assert!(matches!(next, Page::Editor(_)), "the editor page restores");
+        let next = next_start_after_reopen(&shared);
+        assert!(
+            matches!(next, GenerationStart::Editor(_)),
+            "the editor page restores"
+        );
     }
 
     #[test]
@@ -1439,15 +1461,15 @@ mod tests {
         let shared = Shared::default();
         shared.set_restore_page(Page::Home);
         shared.set_pending_editor(pending_over((5, 4), true));
-        match next_page_after_reopen(&shared) {
-            Page::Editor(pending) => {
+        match next_start_after_reopen(&shared) {
+            GenerationStart::Editor(pending) => {
                 assert!(
                     pending.selection_first,
                     "the routed grab's landing phase wins"
                 );
                 assert_eq!(pending.state.image.dimensions(), (5, 4));
             }
-            Page::Home => panic!("a routed image must win over the stash"),
+            GenerationStart::Home => panic!("a routed image must win over the stash"),
         }
     }
 
@@ -1455,9 +1477,15 @@ mod tests {
     fn a_quiet_grab_after_a_home_close_restores_home() {
         let shared = Shared::default();
         shared.set_restore_page(Page::Home);
-        assert!(matches!(next_page_after_reopen(&shared), Page::Home));
+        assert!(matches!(
+            next_start_after_reopen(&shared),
+            GenerationStart::Home
+        ));
         // And with nothing stashed at all: home (the empty state).
-        assert!(matches!(next_page_after_reopen(&shared), Page::Home));
+        assert!(matches!(
+            next_start_after_reopen(&shared),
+            GenerationStart::Home
+        ));
     }
 
     #[test]
@@ -1862,32 +1890,10 @@ mod tests {
     }
 
     #[test]
-    fn close_reason_open_image_routes_the_editor_epoch() {
-        let shared = Shared::default();
-        shared.set_pending_editor(pending_over((3, 2), false));
-        assert!(matches!(
-            close_reason(&shared),
-            CloseReason::OpenImage(pending) if pending.state.image.dimensions() == (3, 2)
-        ));
-    }
-
-    #[test]
-    fn close_reason_go_home_is_never_a_user_quit() {
-        // The editor page's Esc exit arms the home route; without this
-        // classification a plain "nothing else pending" read would
-        // kill the process instead of routing home.
-        let shared = Shared::default();
-        shared.set_go_home();
-        assert!(matches!(close_reason(&shared), CloseReason::GoHome));
-        assert!(!shared.take_go_home(), "consumed by the classifier");
-    }
-
-    #[test]
-    fn close_reason_capture_beats_open_and_hide() {
+    fn close_reason_capture_beats_hide() {
         // A capture intent is the strongest close reason: the newest
         // capture owns the screen (Replace policy).
         let shared = Shared::default();
-        shared.set_pending_editor(pending_over((2, 2), false));
         shared.push_directive(HomeDirective::Hide);
         shared.set_pending_capture(PumpCommand::Capture);
         assert!(matches!(
@@ -1897,34 +1903,60 @@ mod tests {
     }
 
     #[test]
-    fn close_reason_open_beats_hide_and_go_home() {
-        // The user's explicit Open routes even if an external capture
-        // raced it — the capture's own worker will supersede.
+    fn close_reason_without_flags_is_the_user_quit() {
+        // Open/Paste route in-window now (no close, no flag); only
+        // captures and hides arm anything — anything else closed the
+        // window, which is the user quitting.
         let shared = Shared::default();
-        shared.push_directive(HomeDirective::Hide);
-        shared.set_go_home();
         shared.set_pending_editor(pending_over((2, 2), false));
-        assert!(matches!(close_reason(&shared), CloseReason::OpenImage(_)));
+        assert!(
+            matches!(close_reason(&shared), CloseReason::UserQuit),
+            "a pending editor no longer classifies a close (the open window consumes it)"
+        );
     }
 
     #[test]
-    fn editor_exit_arms_the_matching_close_intent() {
-        // The router's uniform post-epoch step: the editor page's exit
-        // value arms the shared flags, then one classification picks
-        // the next page.
+    fn window_outcome_arms_only_the_capture_intent() {
+        // The router's uniform post-generation step: a NewCapture at
+        // close arms the grab; anything else is unexpected (Esc and
+        // render errors route in-window and never reach the exit).
         let shared = Shared::default();
-        arm_editor_exit(&shared, &EditorPageExit::Home);
-        assert!(matches!(close_reason(&shared), CloseReason::GoHome));
-        arm_editor_exit(
+        arm_window_outcome(
             &shared,
-            &EditorPageExit::Capture(flintshot_core::NewCaptureMode::Region),
+            Ok(EditorOutcome::NewCapture {
+                mode: flintshot_core::NewCaptureMode::Region,
+            }),
         );
         assert!(matches!(
             close_reason(&shared),
             CloseReason::CaptureIntent(PumpCommand::Capture)
         ));
-        arm_editor_exit(&shared, &EditorPageExit::Closed);
-        assert!(matches!(close_reason(&shared), CloseReason::UserQuit));
+    }
+
+    #[test]
+    fn route_at_close_feeds_the_restore_page() {
+        // The same-page restore rides the window exit's route now:
+        // an external capture closing the editor reopens the editor
+        // over the same image; closing home restores home.
+        let editor =
+            flintshot_editor_egui::Route::Editor(Box::new(flintshot_editor_egui::RoutedEditor {
+                state: pending_over((3, 2), true).state,
+                selection_first: true,
+            }));
+        assert!(matches!(
+            route_to_page(&editor),
+            Page::Editor(p) if p.selection_first && p.state.image.dimensions() == (3, 2)
+        ));
+        assert!(matches!(
+            route_to_page(&flintshot_editor_egui::Route::Home),
+            Page::Home
+        ));
+        // A generation that closed mid-Loading restores home — the
+        // reopen carries the delivered image via the pending editor.
+        assert!(matches!(
+            route_to_page(&flintshot_editor_egui::Route::Loading),
+            Page::Home
+        ));
     }
 
     // --- In-process capture (single-window Task 006) ---

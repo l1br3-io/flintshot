@@ -5,7 +5,7 @@
 - [x] 003-fit-to-view-canvas
 - [x] 004-stable-editor-viewport
 - [x] 005-router-skeleton
-- [ ] 006-editor-joins-router
+- [x] 006-editor-joins-router
 - [ ] 007-grab-outcome-split
 - [ ] 008-loading-route-delivery
 - [ ] 009-chrome-strip-removal

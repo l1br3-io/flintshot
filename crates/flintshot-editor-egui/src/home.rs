@@ -174,15 +174,13 @@ impl HomeApp {
 
     /// The Open control: native file dialog, then hand the picked
     /// path to the bridge. Cancelling the dialog is a plain no-op —
-    /// the window stays exactly as it was. A routed image closes the
-    /// window: the editor page is the same window's next lifetime
-    /// (single-window spec), and a destroyed surface — not a hide —
-    /// is the not-in-the-shot guarantee that carries across epochs.
-    fn handle_open(&mut self, ctx: &Context) {
+    /// the window stays exactly as it was. A routed image also keeps
+    /// the window: the bridge arms the editor route and the window
+    /// router swaps it in-place (editor-capture-ux Task 006 — the
+    /// surface identity survives every non-capture transition).
+    fn handle_open(&mut self, _ctx: &Context) {
         if let Some(path) = pick_image_path() {
-            if self.bridge.open_image(path) {
-                ctx.send_viewport_cmd(ViewportCommand::Close);
-            }
+            let _ = self.bridge.open_image(path);
         }
     }
 }
@@ -252,11 +250,11 @@ impl HomeApp {
             self.start_capture(ctx);
         } else if ctx.input_mut(|i| i.consume_shortcut(&self.open_shortcut)) {
             self.handle_open(ctx);
-        } else if SHOW_PASTE
-            && ctx.input_mut(|i| i.consume_shortcut(&self.paste_shortcut))
-            && self.bridge.request_paste()
-        {
-            ctx.send_viewport_cmd(ViewportCommand::Close);
+        } else if SHOW_PASTE && ctx.input_mut(|i| i.consume_shortcut(&self.paste_shortcut)) {
+            // A routed paste keeps the window: the router swaps the
+            // editor route in-place (same no-close contract as the
+            // Open control).
+            let _ = self.bridge.request_paste();
         }
     }
 
@@ -327,8 +325,11 @@ impl HomeApp {
                         .strong(),
                 )
                 .min_size(egui::vec2(ui.available_width(), 34.0));
-                if ui.add(paste).clicked() && self.bridge.request_paste() {
-                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                if ui.add(paste).clicked() {
+                    // A routed paste keeps the window: the router
+                    // swaps the editor route in-place (same no-close
+                    // contract as the Open control).
+                    let _ = self.bridge.request_paste();
                 }
             }
 
@@ -592,7 +593,10 @@ mod tests {
     }
 
     #[test]
-    fn paste_accelerator_closes_on_a_routed_image() {
+    fn paste_accelerator_keeps_the_window_on_a_routed_image() {
+        // A routed paste no longer closes (editor-capture-ux Task
+        // 006): the bridge arms the editor route and the window
+        // router swaps it in-place.
         let bridge = RecordingBridge::default();
         bridge
             .rec
@@ -619,8 +623,8 @@ mod tests {
             full.viewport_output
                 .values()
                 .flat_map(|v| v.commands.iter())
-                .any(|c| matches!(c, egui::ViewportCommand::Close)),
-            "a routed paste closes the window for the editor epoch"
+                .all(|c| !matches!(c, egui::ViewportCommand::Close)),
+            "a routed paste keeps the window — the router swaps the route"
         );
     }
 }
