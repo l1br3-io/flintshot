@@ -180,6 +180,11 @@ pub struct EguiCanvas {
     /// shell's pointer/chrome sites goes through it via
     /// [`CanvasView`].
     scale: f32,
+    /// Letterbox offset (screen-logical px): where the fitted
+    /// image's top-left sits inside the canvas panel. Zero unless
+    /// the image is smaller than the panel on an axis (fit never
+    /// upscales — a centered 1:1 image letterboxes).
+    content_offset: egui::Vec2,
     /// Cached textures for [`draw_image_region`](Self::draw_image_region)
     /// (the blur path), keyed by pixel content. Phase 5 Task 008:
     /// this path used to re-upload a fresh GPU texture every frame
@@ -221,6 +226,7 @@ impl EguiCanvas {
             origin: egui::Pos2::ZERO,
             clip: None,
             scale: 1.0,
+            content_offset: egui::Vec2::ZERO,
             region_textures: HashMap::new(),
             region_used: HashSet::new(),
         }
@@ -234,23 +240,36 @@ impl EguiCanvas {
         self.scale = scale;
     }
 
+    /// Set the letterbox offset (see [`Self::content_offset`]) —
+    /// the fitted image's top-left inside the panel.
+    pub fn set_content_offset(&mut self, offset: egui::Vec2) {
+        self.content_offset = offset;
+    }
+
+    /// The current letterbox offset.
+    #[must_use]
+    pub fn content_offset(&self) -> egui::Vec2 {
+        self.content_offset
+    }
+
     /// The current fit-to-view scale factor.
     #[must_use]
     pub fn scale(&self) -> f32 {
         self.scale
     }
 
-    /// The view anchored at the canvas's bound origin (the draw
-    /// path's own mapping).
+    /// The view anchored at the canvas's bound origin plus the
+    /// letterbox offset (the draw path's own mapping).
     fn view(&self) -> CanvasView {
-        CanvasView::at_origin(self.origin, self.ppp()).with_scale(self.scale)
+        CanvasView::at_origin(self.origin + self.content_offset, self.ppp()).with_scale(self.scale)
     }
 
     /// The view over the shell's cached canvas rect — the pointer /
-    /// chrome sites' mapping (one source of truth for the scale).
+    /// chrome sites' mapping (one source of truth for the scale and
+    /// letterbox offset).
     #[must_use]
     pub(crate) fn view_over(&self, rect: egui::Rect) -> CanvasView {
-        CanvasView::over(rect, self.ppp()).with_scale(self.scale)
+        CanvasView::over(rect.translate(self.content_offset), self.ppp()).with_scale(self.scale)
     }
 
     /// Bind the per-frame [`egui::Painter`]. Called by the shell from

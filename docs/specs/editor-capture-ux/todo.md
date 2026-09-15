@@ -3,7 +3,7 @@
 - [x] 001-plus-popup-home-parity
 - [x] 002-portal-first-determinism
 - [x] 003-fit-to-view-canvas
-- [ ] 004-stable-editor-viewport
+- [x] 004-stable-editor-viewport
 - [ ] 005-router-skeleton
 - [ ] 006-editor-joins-router
 - [ ] 007-grab-outcome-split
