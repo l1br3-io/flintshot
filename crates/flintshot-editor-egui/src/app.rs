@@ -26,6 +26,7 @@ use flintshot_core::{
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
+use crate::home::HomeDirective;
 use crate::magnifier::Magnifier;
 use crate::overlay::{mask_color, mask_rects, usable_selection};
 use crate::toolbar::{self, ToolbarAction};
@@ -160,6 +161,11 @@ pub(crate) struct EditorApp {
     /// every other editor entry point leaves it off. See
     /// [`SelectionPhase`] for the lifecycle.
     phase: SelectionPhase,
+    /// Single-window page mode: the bridge to the app crate's router
+    /// plus the divergent outcome lifecycle (side effects report and
+    /// the page stays; see [`EditorPageBridge`]). `None` = the worker
+    /// window lifecycle of every pre-single-window path.
+    page: Option<crate::shell::PageBridgeSlot>,
 }
 
 impl EditorApp {
@@ -173,10 +179,36 @@ impl EditorApp {
     /// Core stays untouched — the phase is shell-owned state, the
     /// state only seeded with a value the core API already exposes.
     pub(crate) fn new(
+        state: EditorState,
+        ctx: &Context,
+        outcome: OutcomeSlot,
+        selection_first: bool,
+    ) -> Self {
+        Self::new_lifecycle(state, ctx, outcome, selection_first, None)
+    }
+
+    /// Page-mode constructor (single-window): the same editor over a
+    /// [`crate::shell::EditorPageBridge`] — side-effect outcomes
+    /// report through the bridge and the page stays open; directives
+    /// (external captures) poll each frame. See [`Self::new`].
+    pub(crate) fn new_page(
+        state: EditorState,
+        ctx: &Context,
+        outcome: OutcomeSlot,
+        selection_first: bool,
+        page: crate::shell::PageBridgeSlot,
+    ) -> Self {
+        Self::new_lifecycle(state, ctx, outcome, selection_first, Some(page))
+    }
+
+    /// The one real constructor behind [`Self::new`] /
+    /// [`Self::new_page`].
+    fn new_lifecycle(
         mut state: EditorState,
         ctx: &Context,
         outcome: OutcomeSlot,
         selection_first: bool,
+        page: Option<crate::shell::PageBridgeSlot>,
     ) -> Self {
         if selection_first {
             state.tool = Tool::Select;
@@ -210,6 +242,7 @@ impl EditorApp {
             } else {
                 SelectionPhase::Off
             },
+            page,
         }
     }
 
@@ -495,6 +528,11 @@ impl EditorApp {
     /// `OverlayApp`'s) lets the shell-side event translation be
     /// unit-tested with a synthetic `egui::Context`.
     fn logic_impl(&mut self, ctx: &Context) {
+        // Page mode first: directives (external captures) must land
+        // even mid-text-draft, and idle pages keep a slow heartbeat so
+        // they do.
+        self.poll_page_directives(ctx);
+
         // Translate egui's input events to the toolkit-agnostic
         // `InputEvent` and feed them through `state.dispatch_input`.
         // Per the Task 10 close-out's plan, this is the pure-dispatcher
@@ -914,6 +952,64 @@ impl EditorApp {
 }
 
 impl EditorApp {
+    /// Poll the page bridge's directives (single-window page mode
+    /// only). `Hide` closes the window — the external-capture seam
+    /// (the daemon's pre-grab handshake; the page must never be in a
+    /// shot); `Show` is the focus ping; `SetStatus` drains quietly
+    /// (the editor page shows no status line — the home page owns
+    /// one when the window routes back).
+    fn poll_page_directives(&mut self, ctx: &Context) {
+        let Some(bridge) = self.page.clone() else {
+            return;
+        };
+        // Idle repaint heartbeat so directives arrive without input
+        // (mirrors `HomeApp`'s pump).
+        ctx.request_repaint_after(crate::home::REPOLL_INTERVAL);
+        while let Some(directive) = bridge.borrow_mut().poll_directive() {
+            match directive {
+                HomeDirective::Hide => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                HomeDirective::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                HomeDirective::SetStatus(_) => {}
+            }
+        }
+    }
+
+    /// Whether the current page is a single-window page epoch.
+    fn is_page(&self) -> bool {
+        self.page.is_some()
+    }
+
+    /// Publish a side-effect outcome (Save / Copy / Upload success)
+    /// through the owning lifecycle: the worker window publishes to
+    /// the slot and closes; the single-window page reports through
+    /// the bridge and stays open (spec: outcomes keep the page).
+    fn publish_side_effect_outcome(&self, outcome: EditorOutcome) {
+        match &self.page {
+            Some(bridge) => bridge.borrow_mut().report_outcome(&outcome),
+            None => self.publish_outcome(Ok(outcome)),
+        }
+    }
+
+    /// Whether a side-effect arm should follow its publish with a
+    /// close: worker windows close (today's lifecycle); the page
+    /// never does.
+    fn closes_after_side_effect(&self) -> bool {
+        self.page.is_none()
+    }
+
+    /// The copy arm's close decision: page mode never closes (the
+    /// clipboard handle lives on in `self.clipboard` — the X11 owner
+    /// rule satisfied by the long-lived window instead of a lingering
+    /// process); worker mode keeps the platform rule.
+    fn close_after_copy_window(&self) -> bool {
+        !self.is_page() && close_after_copy(std::env::var_os("WAYLAND_DISPLAY").is_some())
+    }
+
     /// `+` chip / Ctrl+N handler: publish `NewCapture` and close —
     /// the closing window is the not-in-the-shot guarantee for the
     /// next grab. Uses `publish_outcome` (not `if_unset`): a prior
@@ -950,8 +1046,14 @@ impl EditorApp {
         match save_to_disk(&self.state, self.phase_active()) {
             Ok(Some(path)) => {
                 tracing::info!(path = %path.display(), "editor saved");
-                self.publish_outcome(Ok(EditorOutcome::Saved(path)));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                // GOTCHA (single-window): the page epoch stays open
+                // after a save — the side effect already happened and
+                // the bridge carries the report. Only the worker
+                // window closes here.
+                self.publish_side_effect_outcome(EditorOutcome::Saved(path));
+                if self.closes_after_side_effect() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
             Ok(None) => {
                 tracing::debug!("save dialog cancelled; staying in editor");
@@ -990,8 +1092,12 @@ impl EditorApp {
             Ok(()) => {
                 tracing::info!("editor copied to clipboard");
                 self.copied = true;
-                self.publish_outcome(Ok(EditorOutcome::CopiedToClipboard));
-                if close_after_copy(std::env::var_os("WAYLAND_DISPLAY").is_some()) {
+                // Page mode keeps the window open on every platform —
+                // the single window is long-lived, so the X11
+                // owner-clipboard hold is satisfied by the window
+                // itself (`self.clipboard`), not a lingering process.
+                self.publish_side_effect_outcome(EditorOutcome::CopiedToClipboard);
+                if self.close_after_copy_window() {
                     tracing::debug!("compositor-owned clipboard; closing after copy");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -1030,8 +1136,13 @@ impl EditorApp {
                         path = %path.display(),
                         "upload initiated; spawned upload worker"
                     );
-                    self.publish_outcome(Ok(EditorOutcome::Uploaded(String::new())));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    // Same page/worker split as Save (see the GOTCHA
+                    // there): the worker closes; the page reports and
+                    // stays.
+                    self.publish_side_effect_outcome(EditorOutcome::Uploaded(String::new()));
+                    if self.closes_after_side_effect() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
                 Err(err) => {
                     tracing::error!(
@@ -2067,6 +2178,257 @@ mod tests {
         // env var is set) closes immediately.
         assert!(close_after_copy(true), "Wayland: close after copy");
         assert!(!close_after_copy(false), "X11: keep serving the selection");
+    }
+
+    // --- Single-window page mode (single-window Task 003) ---
+
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    use crate::home::HomeDirective;
+    use crate::shell::{EditorPageBridge, PageBridgeSlot};
+
+    #[derive(Default)]
+    struct PageRecorder {
+        reported: Vec<EditorOutcome>,
+        statuses: Vec<String>,
+    }
+
+    /// Bridge double: records reports/statuses, replays directives.
+    #[derive(Default, Clone)]
+    struct RecordingPageBridge {
+        rec: Arc<Mutex<PageRecorder>>,
+        pending: Arc<Mutex<VecDeque<HomeDirective>>>,
+    }
+
+    impl EditorPageBridge for RecordingPageBridge {
+        fn report_outcome(&mut self, outcome: &EditorOutcome) {
+            self.rec
+                .lock()
+                .expect("recorder mutex")
+                .reported
+                .push(outcome.clone());
+        }
+
+        fn set_status(&mut self, status: &str) {
+            self.rec
+                .lock()
+                .expect("recorder mutex")
+                .statuses
+                .push(status.into());
+        }
+
+        fn poll_directive(&mut self) -> Option<HomeDirective> {
+            self.pending.lock().expect("pending mutex").pop_front()
+        }
+    }
+
+    /// A page-mode `EditorApp` over a recording bridge.
+    fn page_app(bridge: RecordingPageBridge) -> EditorApp {
+        let slot: PageBridgeSlot = Rc::new(RefCell::new(Box::new(bridge)));
+        EditorApp::new_page(
+            blank_state(64, 64),
+            &egui::Context::default(),
+            Rc::new(RefCell::new(None)),
+            false,
+            slot,
+        )
+    }
+
+    /// Whether the frame's full output asked the viewport to close.
+    fn close_command_issued(full: &egui::FullOutput) -> bool {
+        full.viewport_output
+            .values()
+            .flat_map(|v| v.commands.iter())
+            .any(|c| matches!(c, egui::ViewportCommand::Close))
+    }
+
+    #[test]
+    fn page_save_side_effect_reports_through_bridge_and_stays() {
+        // Page semantics (spec): Save applies its side effect, reports
+        // through the bridge, and the page stays — no slot publish
+        // (the slot carries exit signals only), no close.
+        let bridge = RecordingPageBridge::default();
+        let rec = bridge.rec.clone();
+        let app = page_app(bridge);
+        app.publish_side_effect_outcome(EditorOutcome::Saved(PathBuf::from("/tmp/shot.png")));
+        let guard = rec.lock().expect("recorder mutex");
+        assert!(
+            matches!(&guard.reported[..], [EditorOutcome::Saved(p)] if *p == std::path::Path::new("/tmp/shot.png")),
+            "the bridge must receive the save outcome"
+        );
+        drop(guard);
+        assert!(
+            app.outcome.borrow().is_none(),
+            "page mode must not publish side effects to the exit slot"
+        );
+        assert!(
+            !app.closes_after_side_effect(),
+            "the page never closes after a side effect"
+        );
+    }
+
+    #[test]
+    fn worker_side_effect_publishes_to_slot_and_closes() {
+        // Worker windows keep today's lifecycle: publish + close.
+        let app = phase_app(false);
+        app.publish_side_effect_outcome(EditorOutcome::Saved(PathBuf::from("/tmp/shot.png")));
+        assert!(
+            matches!(
+                &*app.outcome.borrow(),
+                Some(Ok(EditorOutcome::Saved(p))) if *p == std::path::Path::new("/tmp/shot.png")
+            ),
+            "worker mode must keep publishing to the slot"
+        );
+        assert!(
+            app.closes_after_side_effect(),
+            "worker windows close after a side effect"
+        );
+    }
+
+    #[test]
+    fn page_upload_reports_like_save() {
+        let bridge = RecordingPageBridge::default();
+        let rec = bridge.rec.clone();
+        let app = page_app(bridge);
+        app.publish_side_effect_outcome(EditorOutcome::Uploaded(String::new()));
+        assert!(
+            matches!(
+                &rec.lock().expect("recorder mutex").reported[..],
+                [EditorOutcome::Uploaded(_)]
+            ),
+            "upload rides the same page seam as save"
+        );
+    }
+
+    #[test]
+    fn page_copy_never_closes_on_any_platform() {
+        // The single window is long-lived: a copy keeps it open even
+        // on Wayland (where the worker closes) — the clipboard handle
+        // lives on in `self.clipboard`, same as the X11 worker path.
+        let app = page_app(RecordingPageBridge::default());
+        assert!(
+            !app.close_after_copy_window(),
+            "page mode suppresses the post-copy close everywhere"
+        );
+    }
+
+    #[test]
+    fn worker_copy_still_closes_on_wayland() {
+        let app = phase_app(false);
+        assert_eq!(
+            app.close_after_copy_window(),
+            close_after_copy(std::env::var_os("WAYLAND_DISPLAY").is_some()),
+            "worker mode keeps the platform-conditional close"
+        );
+    }
+
+    #[test]
+    fn page_esc_publishes_cancelled_and_issues_close() {
+        // Esc is the exit-to-home intent: publish Cancelled (the
+        // shell maps it to EditorPageExit::Home) + close the epoch.
+        let mut app = page_app(RecordingPageBridge::default());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| app.logic_impl(ui.ctx()),
+        );
+        assert!(
+            matches!(&*app.outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "Esc must publish the exit signal"
+        );
+        assert!(
+            close_command_issued(&full),
+            "Esc must issue the viewport close"
+        );
+    }
+
+    #[test]
+    fn page_new_capture_publishes_and_issues_close() {
+        // Ctrl+N in page mode: publish NewCapture + close — the shell
+        // maps it to EditorPageExit::Capture(mode).
+        let mut app = page_app(RecordingPageBridge::default());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::N,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: ctrl_as_winit_reports_it(),
+                }],
+                modifiers: ctrl_as_winit_reports_it(),
+                ..Default::default()
+            },
+            |ui| app.logic_impl(ui.ctx()),
+        );
+        assert!(
+            matches!(
+                &*app.outcome.borrow(),
+                Some(Ok(EditorOutcome::NewCapture {
+                    mode: NewCaptureMode::Region
+                }))
+            ),
+            "Ctrl+N must publish the recapture intent with its mode label"
+        );
+        assert!(
+            close_command_issued(&full),
+            "Ctrl+N must issue the viewport close"
+        );
+    }
+
+    #[test]
+    fn page_hide_directive_issues_close_command() {
+        // The external-capture seam: the daemon's HideForCapture
+        // handshake arrives as a Hide directive; the page closes so
+        // it is never in the shot.
+        let bridge = RecordingPageBridge::default();
+        bridge
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .push_back(HomeDirective::Hide);
+        let mut app = page_app(bridge.clone());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| app.logic_impl(ui.ctx()));
+        assert!(
+            close_command_issued(&full),
+            "a Hide directive must close the page window"
+        );
+        assert!(
+            bridge.pending.lock().expect("pending mutex").is_empty(),
+            "the directive was consumed"
+        );
+    }
+
+    #[test]
+    fn page_set_status_directive_is_consumed_quietly() {
+        // The editor page shows no status line; SetStatus directives
+        // (pump → window) must drain, not pile up or panic.
+        let bridge = RecordingPageBridge::default();
+        bridge
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .push_back(HomeDirective::SetStatus("daemon went away".into()));
+        let mut app = page_app(bridge.clone());
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.logic_impl(ui.ctx()));
+        assert!(
+            bridge.pending.lock().expect("pending mutex").is_empty(),
+            "SetStatus drains in page mode"
+        );
     }
 
     #[test]
