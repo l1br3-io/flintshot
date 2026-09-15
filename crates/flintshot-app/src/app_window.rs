@@ -140,6 +140,13 @@ struct SharedInner {
     /// The Open control decoded an image (or a grab delivered one):
     /// the next epoch is the editor page over it.
     pending_editor: Option<PendingEditor>,
+    /// A grab confirmed but its image has not landed (the portal's
+    /// clipboard write): the next generation opens on the Loading
+    /// route (editor-capture-ux Task 008).
+    pending_loading: bool,
+    /// A failed or quiet grab while the window was open on the
+    /// Loading route: route home — nothing is coming to show.
+    route_home: bool,
     /// The window closed for a hide directive (not a user quit): the
     /// outer loop must wait for the reopen instead of exiting.
     hide_requested: bool,
@@ -214,6 +221,40 @@ impl Shared {
     /// epoch.
     fn take_pending_editor(&self) -> Option<PendingEditor> {
         self.lock().pending_editor.take()
+    }
+
+    /// Arm the loading start (a confirmed grab whose image is still
+    /// landing).
+    fn set_pending_loading(&self) {
+        self.lock().pending_loading = true;
+        self.changed.notify_all();
+    }
+
+    /// Take the pending-loading start, if one waits.
+    fn take_pending_loading(&self) -> bool {
+        std::mem::take(&mut self.lock().pending_loading)
+    }
+
+    /// Drop any stale pending-loading mark (the reopen race
+    /// resolved through another start).
+    fn clear_pending_loading(&self) {
+        self.lock().pending_loading = false;
+    }
+
+    /// Arm the route-home intent (see [`SharedInner::route_home`]).
+    fn set_route_home(&self) {
+        self.lock().route_home = true;
+        self.changed.notify_all();
+    }
+
+    /// Take the route-home intent, if one waits.
+    fn take_route_home(&self) -> bool {
+        std::mem::take(&mut self.lock().route_home)
+    }
+
+    /// Whether a window generation is currently running.
+    fn window_is_open(&self) -> bool {
+        self.lock().window_open
     }
 
     /// Arm the home route (the editor page's `Esc` exit).
@@ -523,8 +564,18 @@ impl GrabRouter {
                 if self.flow.current(generation) {
                     tracing::debug!(
                         generation,
-                        "grab confirmed; the portal's clipboard write is landing"
+                        "grab confirmed; opening the loading route while the write lands"
                     );
+                    // The Show wakes the outer loop's wait-for-reopen;
+                    // the armed loading mark makes the fresh
+                    // generation open on the progress route. A fast
+                    // read-back may yet race this with a landed image
+                    // (the pending editor wins in
+                    // `next_start_after_reopen`).
+                    shared.set_pending_loading();
+                    if let Some(directive) = core.force_show() {
+                        shared.push_directive(directive);
+                    }
                 } else {
                     tracing::info!(generation, "discarding a superseded grab's confirmation");
                 }
@@ -568,7 +619,11 @@ fn route_grab(shared: &Shared, core: &mut HomeCore, grab: AppGrab) {
         }
         AppGrab::Quiet => {
             tracing::info!("capture dismissed or superseded; reopening the prior page");
-            if let Some(directive) = core.force_show() {
+            if shared.window_is_open() {
+                // The window is up (the loading route, typically):
+                // nothing is coming to show — route it home in-place.
+                shared.set_route_home();
+            } else if let Some(directive) = core.force_show() {
                 shared.push_directive(directive);
             }
         }
@@ -577,7 +632,11 @@ fn route_grab(shared: &Shared, core: &mut HomeCore, grab: AppGrab) {
             shared.push_directive(HomeDirective::SetStatus(format!(
                 "capture failed: {message}"
             )));
-            if let Some(directive) = core.force_show() {
+            if shared.window_is_open() {
+                // The open page shows the status line via the home
+                // route's bridge and leaves the spinner behind.
+                shared.set_route_home();
+            } else if let Some(directive) = core.force_show() {
                 shared.push_directive(directive);
             }
         }
@@ -765,13 +824,22 @@ fn handle_open_requested(shared: &Arc<Shared>, path: std::path::PathBuf) {
 /// wins; else the route that was open (the same-page restore); else
 /// home.
 fn next_start_after_reopen(shared: &Shared) -> GenerationStart {
-    if let Some(pending) = shared.take_pending_editor() {
-        return GenerationStart::Editor(Box::new(pending));
-    }
-    match shared.take_restore_page().unwrap_or(Page::Home) {
-        Page::Home => GenerationStart::Home,
-        Page::Editor(pending) => GenerationStart::Editor(pending),
-    }
+    let start = match shared.take_pending_editor() {
+        // A landed image (the fast read-back raced the open) opens
+        // the editor directly — no spinner flash.
+        Some(pending) => GenerationStart::Editor(Box::new(pending)),
+        // The confirmed grab's write is still landing: open on the
+        // progress route.
+        None if shared.take_pending_loading() => GenerationStart::Loading,
+        None => match shared.take_restore_page().unwrap_or(Page::Home) {
+            Page::Home => GenerationStart::Home,
+            Page::Editor(pending) => GenerationStart::Editor(pending),
+        },
+    };
+    // Whichever won, drain the other flag — a stale loading mark
+    // would flip a later reopen into a stranded spinner.
+    shared.clear_pending_loading();
+    start
 }
 
 /// What a window generation opens on — the outer loop's routing
@@ -783,6 +851,9 @@ enum GenerationStart {
     /// The editor over a routed image (a delivered grab reopening a
     /// closed window).
     Editor(Box<PendingEditor>),
+    /// The capture-progress route while a delivery is pending (a
+    /// confirmed grab whose clipboard write is landing).
+    Loading,
 }
 
 /// Run one window generation to its close through the window router:
@@ -811,6 +882,7 @@ fn run_generation(
         GenerationStart::Editor(pending) => {
             flintshot_editor_egui::WindowStart::Editor(Box::new(to_routed(&pending)))
         }
+        GenerationStart::Loading => flintshot_editor_egui::WindowStart::Loading,
     };
     shared.set_window_open();
     let ran = crate::ambient::with_ambient_runtime(|| {
@@ -1362,11 +1434,16 @@ impl flintshot_editor_egui::RouteHost for RouteHostBridge {
         // the editor lives (route entry inside the window counts).
         crate::cli::report_editor_window_opened_to_daemon();
     }
+
+    fn take_route_home(&mut self) -> bool {
+        self.shared.take_route_home()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flintshot_editor_egui::RouteHost as _;
 
     // ── Shared: the close/reopen rendezvous ─────────────────────
 
@@ -1495,7 +1572,9 @@ mod tests {
                 );
                 assert_eq!(pending.state.image.dimensions(), (5, 4));
             }
-            GenerationStart::Home => panic!("a routed image must win over the stash"),
+            GenerationStart::Home | GenerationStart::Loading => {
+                panic!("a routed image must win over the stash")
+            }
         }
     }
 
@@ -2029,6 +2108,122 @@ mod tests {
             watch1.superseded(),
             "a re-trigger flags the in-flight grab's watch"
         );
+    }
+
+    // --- Loading-route delivery (editor-capture-ux Task 008) ---
+
+    #[test]
+    fn confirmed_opens_the_loading_start() {
+        // The pump's Confirmed arms the loading start and wakes the
+        // outer loop: the fresh generation opens on the progress
+        // route while the portal's write lands.
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        let mut router = GrabRouter::default();
+        let gen = router.trigger();
+        router.arm(gen, Arc::new(SupersedeWatch::inert()));
+
+        router.deliver(&shared, &mut core, gen, AppGrabEvent::Confirmed);
+        assert!(shared.wait_for_reopen(), "the Show woke the reopen wait");
+        assert!(
+            matches!(next_start_after_reopen(&shared), GenerationStart::Loading),
+            "the confirmed grab opens on the loading route"
+        );
+    }
+
+    #[test]
+    fn fast_read_back_opens_the_editor_directly() {
+        // The read-back lands before the outer loop picks a start:
+        // the image wins over the loading mark — no spinner flash —
+        // and the stale mark drains.
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        let mut router = GrabRouter::default();
+        let gen = router.trigger();
+        router.arm(gen, Arc::new(SupersedeWatch::inert()));
+
+        router.deliver(&shared, &mut core, gen, AppGrabEvent::Confirmed);
+        router.deliver(
+            &shared,
+            &mut core,
+            gen,
+            AppGrabEvent::Finished(tiny_grab_image(false)),
+        );
+        match next_start_after_reopen(&shared) {
+            GenerationStart::Editor(pending) => {
+                assert_eq!(pending.state.image.dimensions(), (2, 2));
+            }
+            other => panic!("the landed image must win, got {other:?}"),
+        }
+        assert!(
+            !shared.take_pending_loading(),
+            "the stale loading mark drained with the race"
+        );
+    }
+
+    #[test]
+    fn delivered_image_reaches_the_open_window_through_the_host() {
+        // The in-window delivery contract: an armed pending editor
+        // (grab landed, window open) is consumed by the window's
+        // route-host poll — exactly what the pump's route_grab arms.
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        shared.set_window_open();
+        route_grab(&shared, &mut core, tiny_grab_image(false));
+
+        let mut host = RouteHostBridge {
+            shared: Arc::clone(&shared),
+        };
+        let routed = host
+            .take_routed_editor()
+            .expect("the open window consumes the delivery");
+        assert_eq!(routed.state.image.dimensions(), (2, 2));
+        assert!(host.take_routed_editor().is_none(), "consumed once");
+    }
+
+    #[test]
+    fn failure_while_open_routes_home_with_status() {
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        shared.set_window_open();
+        route_grab(
+            &shared,
+            &mut core,
+            AppGrab::Failed("the write never landed".into()),
+        );
+        assert!(
+            RouteHostBridge {
+                shared: Arc::clone(&shared)
+            }
+            .take_route_home(),
+            "the open page routes home instead of stranding the spinner"
+        );
+    }
+
+    #[test]
+    fn quiet_while_open_routes_home() {
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        shared.set_window_open();
+        route_grab(&shared, &mut core, AppGrab::Quiet);
+        assert!(shared.take_route_home(), "a quiet exit leaves the spinner");
+    }
+
+    #[test]
+    fn quiet_while_closed_reopens_the_prior_page() {
+        // The closed-window semantics are unchanged: the force-show
+        // reopens; no route-home intent arms (there is no window).
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        route_grab(&shared, &mut core, AppGrab::Quiet);
+        assert!(!shared.take_route_home(), "no window → no route intent");
+        assert!(shared.wait_for_reopen(), "the reopen directive landed");
     }
 
     #[test]

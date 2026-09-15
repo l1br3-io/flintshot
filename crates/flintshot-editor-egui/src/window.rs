@@ -46,6 +46,15 @@ use crate::home::{HomeApp, HomeBridge};
 use crate::shell::{PageBridgeSlot, EDITOR_PAGE_DEFAULT_SIZE, HOME_WINDOW_TITLE, WINDOW_TITLE};
 use flintshot_core::{EditorOutcome, EditorState};
 
+/// The loading route's status line (spec copy).
+const LOADING_STATUS: &str = "retrieving capture…";
+
+/// The loading route's repaint heartbeat: the spinner animates and
+/// the delivery polls (routed editor / route home) must run without
+/// input. Short enough that the post-delivery swap lands well inside
+/// the spec's perceivable window.
+const LOADING_REPAINT: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Which page the single window shows.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -81,6 +90,9 @@ pub enum WindowStart {
     /// closed window). Boxed: `RoutedEditor` carries the image
     /// buffer inline.
     Editor(Box<RoutedEditor>),
+    /// The capture-progress route while a portal delivery is pending
+    /// (the grab confirmed; the clipboard write landing).
+    Loading,
 }
 
 /// How one window generation ended — the post-close input the app
@@ -112,6 +124,11 @@ pub trait RouteHost {
     /// The editor route went live (the daemon report parity: one
     /// `EditorOpened` per editor session, wherever the editor lives).
     fn editor_route_opened(&mut self);
+
+    /// Take a pending "route home" intent, if one waits (a failed or
+    /// quiet grab while the window was open on the Loading route —
+    /// nothing is coming to show, and the spinner must not strand).
+    fn take_route_home(&mut self) -> bool;
 }
 
 /// Per-route viewport geometry — the one-time command batch a route
@@ -195,6 +212,7 @@ impl WindowApp {
     ) -> Self {
         let (route, editor) = match start {
             WindowStart::Home => (Route::Home, None),
+            WindowStart::Loading => (Route::Loading, None),
             WindowStart::Editor(routed) => {
                 let editor = Self::build_editor(&routed, ctx, &page_bridge, &editor_outcome);
                 (Route::Editor(routed), Some(editor))
@@ -274,6 +292,34 @@ impl WindowApp {
         }
     }
 
+    /// The Loading route's directive poll — no route app is live
+    /// there, so the router owns the queue: `Hide` still closes (the
+    /// not-in-the-shot guarantee holds mid-delivery) and `Show` is
+    /// the focus ping; the status line stays home's.
+    fn poll_loading_directives(&mut self, ctx: &Context) {
+        while let Some(directive) = self.home.poll_directive() {
+            match directive {
+                crate::home::HomeDirective::Hide => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                crate::home::HomeDirective::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                crate::home::HomeDirective::SetStatus(_) => {}
+            }
+        }
+    }
+
+    /// The route-home poll: a failed or quiet grab while the window
+    /// was open on the Loading route arms the intent — the spinner
+    /// must not strand. Never fires on Home (a no-swap there).
+    fn poll_route_home(&mut self, ctx: &Context) {
+        if self.host.take_route_home() && !matches!(self.route, Route::Home) {
+            self.request_route(ctx, Route::Home);
+        }
+    }
+
     /// The editor outcome poll: outcomes that route in-place are
     /// consumed here; a capture intent is left in the slot for the
     /// window's exit (its close is already landing).
@@ -318,28 +364,54 @@ impl WindowApp {
             Route::Home => self.home.logic_impl(ctx),
             // Editor: the editor app's own logic handles its input;
             // its directives (Hide → close) stay its own business.
-            Route::Editor(..) | Route::Loading => {}
+            Route::Editor(..) => {}
+            Route::Loading => {
+                // The spinner animates and the delivery polls run on
+                // the heartbeat, not input.
+                ctx.request_repaint_after(LOADING_REPAINT);
+                self.poll_loading_directives(ctx);
+            }
         }
         if let Some(editor) = self.editor.as_mut() {
             editor.logic_impl(ctx);
         }
         // Routing polls run after the active route's logic: an
-        // Open/Paste click arms the routed editor here, and the
-        // editor's outcome (Esc / error / capture) settles now too.
+        // Open/Paste click arms the routed editor here, the editor's
+        // outcome (Esc / error / capture) settles now, and a failed
+        // or quiet grab routes home from under the spinner.
         self.poll_routed_editor(ctx);
         self.poll_editor_outcome(ctx);
+        self.poll_route_home(ctx);
     }
 
     /// Headless-callable core of [`App::ui`].
     pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
         match &self.route {
             Route::Home => self.home.ui_impl(ui),
-            Route::Editor(..) | Route::Loading => {}
+            Route::Editor(..) => {}
+            Route::Loading => draw_loading(ui),
         }
         if let Some(editor) = self.editor.as_mut() {
             editor.ui_impl(ui);
         }
     }
+}
+
+/// The Loading route's body: a centered spinner over the status
+/// line — the editor's stable geometry, so the image swap into place
+/// moves nothing.
+fn draw_loading(ui: &mut egui::Ui) {
+    egui::CentralPanel::default().show(ui, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.4);
+            ui.add(egui::Spinner::new());
+            ui.label(
+                egui::RichText::new(LOADING_STATUS)
+                    .color(crate::theme::SLATE)
+                    .small(),
+            );
+        });
+    });
 }
 
 #[cfg(test)]
@@ -366,6 +438,76 @@ mod tests {
         fn poll_directive(&mut self) -> Option<HomeDirective> {
             None
         }
+    }
+
+    /// A home bridge replaying pre-loaded directives (the pump's
+    /// queue stand-in) — the Loading route's directive contract.
+    #[derive(Clone, Default)]
+    struct DirectiveBridge {
+        pending: Rc<RefCell<std::collections::VecDeque<HomeDirective>>>,
+    }
+
+    impl HomeBridge for DirectiveBridge {
+        fn request_capture(&mut self) {}
+        fn open_image(&mut self, _path: std::path::PathBuf) -> bool {
+            false
+        }
+        fn request_paste(&mut self) -> bool {
+            false
+        }
+        fn poll_directive(&mut self) -> Option<HomeDirective> {
+            self.pending.borrow_mut().pop_front()
+        }
+    }
+
+    fn loading_app_with_directives(directives: Vec<HomeDirective>) -> WindowApp {
+        let bridge = DirectiveBridge::default();
+        *bridge.pending.borrow_mut() = directives.into();
+        let slot: RouteSlot = Rc::new(RefCell::new(Route::Home));
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        WindowApp::new(
+            &egui::Context::default(),
+            WindowStart::Loading,
+            Box::new(bridge),
+            Rc::new(RefCell::new(Box::new(StubPageBridge::default()))),
+            Box::new(RecordingHost::default()),
+            "connected".into(),
+            outcome,
+            slot,
+        )
+    }
+
+    /// The external-capture seam holds mid-delivery: a Hide directive
+    /// on the Loading route still closes the window (not-in-the-shot).
+    #[test]
+    fn loading_hide_directive_closes_the_window() {
+        let mut app = loading_app_with_directives(vec![HomeDirective::Hide]);
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            transition_commands(&full)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "Hide closes even while the capture delivers"
+        );
+    }
+
+    /// A Show on the Loading route is the focus ping — no close.
+    #[test]
+    fn loading_show_directive_focuses_without_closing() {
+        let mut app = loading_app_with_directives(vec![HomeDirective::Show]);
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            !transition_commands(&full)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "Show focuses; it never closes"
+        );
     }
 
     /// A recording page bridge: statuses are the observable half of
@@ -408,6 +550,7 @@ mod tests {
     struct RecordingInner {
         queued: std::collections::VecDeque<RoutedEditor>,
         opened: usize,
+        route_home: Option<()>,
     }
 
     impl RouteHost for RecordingHost {
@@ -417,6 +560,10 @@ mod tests {
 
         fn editor_route_opened(&mut self) {
             self.inner.borrow_mut().opened += 1;
+        }
+
+        fn take_route_home(&mut self) -> bool {
+            self.inner.borrow_mut().route_home.take().is_some()
         }
     }
 
@@ -731,6 +878,83 @@ mod tests {
         assert!(
             app.editor_outcome.borrow().is_none(),
             "route entry clears the slot"
+        );
+    }
+
+    // --- The Loading route (editor-capture-ux Task 008) ---
+
+    #[test]
+    fn loading_start_opens_the_loading_route() {
+        let (app, _bridge, _host) = window_app_start(
+            WindowStart::Loading,
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        assert!(matches!(app.route, Route::Loading));
+        assert!(app.editor.is_none(), "no editor until the image lands");
+    }
+
+    /// The delivery contract: a grab's image armed while the window
+    /// shows Loading swaps the editor route in-place — no close, no
+    /// recreation.
+    #[test]
+    fn loading_delivers_the_routed_editor_in_place() {
+        let host = RecordingHost::default();
+        let (mut app, _bridge, host) =
+            window_app_start(WindowStart::Loading, StubPageBridge::default(), host);
+        host.inner.borrow_mut().queued.push_back(RoutedEditor {
+            state: editor_state(),
+            selection_first: false,
+        });
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Editor(..)),
+            "the delivered image swaps the editor in-place"
+        );
+        assert!(
+            !transition_commands(&full)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "the delivery never recreates the window"
+        );
+    }
+
+    /// A failed or quiet grab while Loading routes home — the
+    /// spinner must not strand.
+    #[test]
+    fn route_home_intent_ends_the_loading_route() {
+        let host = RecordingHost::default();
+        let (mut app, _bridge, host) =
+            window_app_start(WindowStart::Loading, StubPageBridge::default(), host);
+        host.inner.borrow_mut().route_home = Some(());
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Home),
+            "the route-home intent ends the spinner"
+        );
+    }
+
+    /// A home-route window ignores a stale route-home intent (the
+    /// no-swap guard).
+    #[test]
+    fn route_home_intent_is_ignored_on_home() {
+        let host = RecordingHost::default();
+        let (mut app, _bridge, host) =
+            window_app_start(WindowStart::Home, StubPageBridge::default(), host);
+        host.inner.borrow_mut().route_home = Some(());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Home) && transition_commands(&full).is_empty(),
+            "home stays home with no churn"
         );
     }
 
