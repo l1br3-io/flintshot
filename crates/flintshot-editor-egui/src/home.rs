@@ -217,10 +217,12 @@ impl App for HomeApp {
 }
 
 impl HomeApp {
-    /// Headless-callable core of `App::logic`: directive polling and
+    /// Headless-callable core of [`App::logic`]: directive polling and
     /// keyboard accelerators. Lives in `logic` (not `ui`) because
-    /// eframe calls it even without recent input.
-    fn logic_impl(&mut self, ctx: &Context) {
+    /// eframe calls it even without recent input. `pub(crate)`: the
+    /// window router (`crate::window`) delegates here on the Home
+    /// route.
+    pub(crate) fn logic_impl(&mut self, ctx: &Context) {
         // Directives (status changes, focus pings) arrive independent
         // of input; keep a slow repaint heartbeat so they land.
         ctx.request_repaint_after(REPOLL_INTERVAL);
@@ -278,9 +280,10 @@ impl HomeApp {
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
-    /// Headless-callable core of `App::ui` (mirrors `EditorApp`'s
-    /// `logic_impl` / `ui_impl` split).
-    fn ui_impl(&mut self, ui: &mut egui::Ui) {
+    /// Headless-callable core of [`App::ui`] (mirrors `EditorApp`'s
+    /// `logic_impl` / `ui_impl` split). `pub(crate)`: the window
+    /// router delegates here on the Home route.
+    pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.add_space(6.0);
             ui.heading("flintshot");

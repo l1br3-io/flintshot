@@ -10,18 +10,20 @@ use eframe::{AppCreator, NativeOptions};
 use flintshot_core::{EditorOutcome, EditorShell, EditorState, NewCaptureMode};
 
 use crate::app::{eframe_err_to_flintshot, EditorApp, OutcomeSlot};
-use crate::home::{HomeApp, HomeBridge, HomeDirective};
+use crate::home::{HomeBridge, HomeDirective};
 use crate::overlay::{OverlayApp, OVERLAY_TITLE};
+use crate::window::Route;
 
 /// Window title shown in the titlebar and used as the WM class hint.
 /// Matches the Phase 1 editor-window spec (`"flintshot — annotate"` with
-/// an em-dash).
-const WINDOW_TITLE: &str = "flintshot — annotate";
+/// an em-dash). Shared with the window router's geometry table.
+pub(crate) const WINDOW_TITLE: &str = "flintshot — annotate";
 
 /// Window title + WM class for the home (app) window — the
 /// capture-controls surface, distinct from the editor so WMs and
-/// `.desktop` `StartupWMClass` can route it separately.
-const HOME_WINDOW_TITLE: &str = "flintshot";
+/// `.desktop` `StartupWMClass` can route it separately. Shared with
+/// the window router's geometry table.
+pub(crate) const HOME_WINDOW_TITLE: &str = "flintshot";
 
 /// The editor page's default logical size (OQ-2's decision):
 /// roomy enough for the toolbar plus annotation chrome, small
@@ -296,24 +298,27 @@ impl EguiShell {
         run_overlay_blocking(state, self.close.as_ref())
     }
 
-    /// Open the home (app) window and block until the user closes
-    /// it. The window's outside world is entirely `bridge` — this
-    /// crate stays IPC-free (see [`HomeBridge`]).
-    ///
-    /// Concrete method, mirroring [`Self::run_overlay`]'s precedent.
+    /// Open the single window **router** on the Home route and block
+    /// until the window closes (one eframe lifetime per window
+    /// generation; page transitions swap routes in place — see
+    /// [`crate::window`]). Returns the route the window closed on —
+    /// the app crate's outer-loop restore input. The window's
+    /// outside world is entirely `bridge` — this crate stays
+    /// IPC-free (see [`HomeBridge`]).
     ///
     /// # Errors
     /// Surfaces [`crate::FlintshotError`] for window-system or
     /// render failures.
-    pub fn run_home(
+    pub fn run_window(
         &self,
         bridge: Box<dyn HomeBridge>,
         initial_status: String,
-    ) -> flintshot_core::Result<()> {
+    ) -> flintshot_core::Result<Route> {
+        let geometry = crate::window::route_geometry(&Route::Home);
         let viewport = egui::ViewportBuilder::default()
-            .with_title(HOME_WINDOW_TITLE)
-            .with_inner_size(egui::vec2(360.0, 240.0))
-            .with_resizable(false);
+            .with_title(geometry.title)
+            .with_inner_size(geometry.size)
+            .with_resizable(geometry.resizable);
 
         let options = NativeOptions {
             viewport,
@@ -321,12 +326,20 @@ impl EguiShell {
             ..Default::default()
         };
 
-        let app_creator: AppCreator<'_> =
-            Box::new(move |_cc| Ok(Box::new(HomeApp::new(bridge, initial_status))));
+        let route_slot: crate::window::RouteSlot = Rc::new(RefCell::new(Route::Home));
+        let slot_for_app = Rc::clone(&route_slot);
+        let app_creator: AppCreator<'_> = Box::new(move |_cc| {
+            Ok(Box::new(crate::window::WindowApp::new(
+                bridge,
+                initial_status,
+                slot_for_app,
+            )))
+        });
 
-        eframe::run_native(HOME_WINDOW_TITLE, options, app_creator)
+        eframe::run_native(geometry.title, options, app_creator)
             .map_err(|e| eframe_err_to_flintshot(&e))?;
-        Ok(())
+        let route = route_slot.borrow().clone();
+        Ok(route)
     }
 
     /// Open the editor as a **page** of the single window: a stable

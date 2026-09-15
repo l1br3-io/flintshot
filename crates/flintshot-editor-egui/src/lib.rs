@@ -41,8 +41,10 @@ mod overlay;
 mod shell;
 mod theme;
 mod toolbar;
+mod window;
 
 pub use canvas::{CanvasView, EguiCanvas, EguiTexture};
 pub use home::{HomeBridge, HomeDirective};
 pub use magnifier::{sample_zoomed_region, Magnifier};
 pub use shell::{CloseHandle, EditorPageBridge, EditorPageExit, EguiShell};
+pub use window::Route;

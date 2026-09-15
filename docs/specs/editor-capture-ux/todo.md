@@ -4,7 +4,7 @@
 - [x] 002-portal-first-determinism
 - [x] 003-fit-to-view-canvas
 - [x] 004-stable-editor-viewport
-- [ ] 005-router-skeleton
+- [x] 005-router-skeleton
 - [ ] 006-editor-joins-router
 - [ ] 007-grab-outcome-split
 - [ ] 008-loading-route-delivery
