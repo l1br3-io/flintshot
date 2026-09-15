@@ -118,14 +118,18 @@ leaf binaries. A future `flintshot-editor-iced` would slot in beside
 └────────────────────────┘
 ```
 
-The **single window** (ADR-0053) routes between a three-button home
-page and the editor page — one eframe lifetime per page, close +
-recreate per transition. The app's pump thread holds the daemon
-subscription, runs grabs in-process (shared `capture_flow` module),
-and receives forwarded triggers (`CaptureTriggered`,
-`OpenRequested`) whenever a window is present; without one, the
-daemon spawns the worker paths below, byte-identical to the
-pre-single-window behavior.
+The **single window** (ADR-0053/0054) routes between the
+three-button home page, the editor page, and the capture-progress
+loading page — one eframe lifetime per *window generation*, routes
+swapped in place per transition (a one-time viewport command batch);
+window destruction is reserved for captures (the not-in-the-shot
+guarantee) and user quit. The editor page opens at a stable default
+size with the image fitted (never upscaled) and centered. The app's
+pump thread holds the daemon subscription, runs grabs in-process
+(shared `capture_flow` module), and receives forwarded triggers
+(`CaptureTriggered`, `OpenRequested`) whenever a window is present;
+without one, the daemon spawns the worker paths below,
+byte-identical to the pre-single-window behavior.
 
 A single binary handles every role; behavior is selected by subcommand:
 

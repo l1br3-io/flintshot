@@ -63,3 +63,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0051 | [One Capture action — the OS's selection UI, post-grab routing, clean break](ADR-0051-single-capture-action-os-selection.md) |
 | ADR-0052 | [App-window presence by connection liveness](ADR-0052-app-window-presence-by-connection.md) |
 | ADR-0053 | [Single-window app — routed pages, in-process grabs, forwarded triggers](ADR-0053-single-window-app.md) |
+| ADR-0054 | [In-window routing — routes, not epochs; destruction reserved for captures](ADR-0054-in-window-routing.md) |

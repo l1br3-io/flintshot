@@ -9,4 +9,4 @@
 - [x] 007-grab-outcome-split
 - [x] 008-loading-route-delivery
 - [x] 009-chrome-strip-removal
-- [ ] 010-closeout-changelog-adr
+- [x] 010-closeout-changelog-adr
