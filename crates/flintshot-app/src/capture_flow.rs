@@ -42,6 +42,7 @@ pub(crate) fn resolve_capture_backend(
 pub(crate) fn native_grab_prepared(
     watch: &SupersedeWatch,
     backend: &dyn flintshot_core::capture::Capturer,
+    override_path: Option<&std::path::Path>,
 ) -> Result<Option<image::RgbaImage>> {
     // Snapshotted before the OS UI opens: after a `clipboard:///`
     // answer, the read-back wait must distinguish the portal's write
@@ -49,7 +50,7 @@ pub(crate) fn native_grab_prepared(
     // previous Copy — their workflow keeps one there).
     let pre_grab = clipboard_image_digest();
     let grab = {
-        let _prepared = CaptureGuard::request_at(None);
+        let _prepared = CaptureGuard::request_at(override_path);
         if watch.superseded() {
             tracing::info!("native capture superseded before the grab; exiting");
             return Ok(None);
@@ -270,6 +271,82 @@ fn read_image_from_clipboard() -> Result<image::RgbaImage> {
     })
 }
 
+/// One in-process grab's outcome for the app window's page router
+/// (single-window): what the pump should route when its grab thread
+/// finishes.
+#[derive(Debug)]
+pub(crate) enum AppGrab {
+    /// An image landed. `selection_first` picks the editor page's
+    /// landing phase: the fallback monitor grab pre-arms Select (the
+    /// worker's `"region"` labels); the native path (the OS UI
+    /// already selected) opens plain (`"capture"`).
+    Image {
+        /// The grabbed pixels.
+        img: image::RgbaImage,
+        /// Whether the editor page lands selection-first.
+        selection_first: bool,
+    },
+    /// Quiet exit — superseded before the grab, the OS selection UI
+    /// dismissed, or its Response timed out. Reopen the prior page;
+    /// no error surface.
+    Quiet,
+    /// Real failure: reopen with the message on the status line.
+    Failed(String),
+}
+
+/// Grab for the app window's pump (single-window): resolve the
+/// backend (config > auto — the app window carries no CLI pin), then
+/// the OS's own selection UI where the backend supports it, else the
+/// primary-monitor grab — both under the prepare handshake, both
+/// quiet-exit aware. Blocking (the OS UI blocks for human
+/// think-time); run on a dedicated thread so the pump keeps pumping.
+pub(crate) fn grab_for_app_window(watch: &SupersedeWatch) -> AppGrab {
+    match resolve_capture_backend(None) {
+        Ok(backend) => grab_with_backend(watch, backend.as_ref(), None),
+        Err(e) => AppGrab::Failed(format!("{e:#}")),
+    }
+}
+
+/// The testable seam under [`grab_for_app_window`]: the grab shape
+/// per already-resolved backend. A superseded watch short-circuits
+/// before any backend call — the newest intent owns the screen.
+pub(crate) fn grab_with_backend(
+    watch: &SupersedeWatch,
+    backend: &dyn flintshot_core::capture::Capturer,
+    override_path: Option<&std::path::Path>,
+) -> AppGrab {
+    if watch.superseded() {
+        tracing::info!("app-window capture superseded before the grab; exiting quietly");
+        return AppGrab::Quiet;
+    }
+    if backend.supports_selection() {
+        match native_grab_prepared(watch, backend, override_path) {
+            Ok(Some(img)) => AppGrab::Image {
+                img,
+                selection_first: false,
+            },
+            Ok(None) => AppGrab::Quiet,
+            Err(e) => AppGrab::Failed(format!("{e:#}")),
+        }
+    } else {
+        let cfg = match Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not load config; using built-in defaults");
+                Config::default()
+            }
+        };
+        match monitor_grab_prepared("region", watch, override_path, backend, &cfg) {
+            Ok(Some(img)) => AppGrab::Image {
+                img,
+                selection_first: true,
+            },
+            Ok(None) => AppGrab::Quiet,
+            Err(e) => AppGrab::Failed(format!("{e:#}")),
+        }
+    }
+}
+
 /// Classify a capture error as a **quiet exit**: the user dismissed
 /// the OS selection UI, or the interactive Response never arrived
 /// within its budget (spike C: the wedged-session hang). Both are
@@ -328,10 +405,6 @@ pub(crate) fn capture_prepared(
     override_path: Option<&std::path::Path>,
     backend_pin: Option<&str>,
 ) -> Result<Option<image::RgbaImage>> {
-    let _prepared = CaptureGuard::request_at(override_path);
-    if watch.superseded() {
-        return Ok(None);
-    }
     let cfg = match Config::load() {
         Ok(c) => c,
         Err(e) => {
@@ -342,6 +415,24 @@ pub(crate) fn capture_prepared(
     let preference = backend_pin.or(Some(cfg.capture.backend.as_str()));
     let backend = select_backend(preference).map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
     tracing::info!(backend = backend.id(), "{mode} capture backend resolved");
+    monitor_grab_prepared(mode, watch, override_path, backend.as_ref(), &cfg)
+}
+
+/// The backend-injected seam under [`capture_prepared`]: the prepare
+/// handshake + the primary-monitor grab over an already-resolved
+/// backend. The app window's pump grabs through this with its own
+/// backend instance (single-window); tests through this with fakes.
+pub(crate) fn monitor_grab_prepared(
+    mode: &str,
+    watch: &SupersedeWatch,
+    override_path: Option<&std::path::Path>,
+    backend: &dyn flintshot_core::capture::Capturer,
+    cfg: &Config,
+) -> Result<Option<image::RgbaImage>> {
+    let _prepared = CaptureGuard::request_at(override_path);
+    if watch.superseded() {
+        return Ok(None);
+    }
     // `CaptureOptions` is `#[non_exhaustive]`: mutate-from-default is
     // the cross-crate construction path.
     let mut opts = CaptureOptions::default();
@@ -578,5 +669,180 @@ mod tests {
         let other = vec![7_u8; 15];
         assert_ne!(rgba_digest(2, 2, &px), rgba_digest(2, 2, &other));
         assert_ne!(rgba_digest(2, 2, &px), rgba_digest(4, 1, &px));
+    }
+
+    // --- App-window grab classification (single-window Task 006) ---
+
+    use flintshot_core::capture::{CaptureOptions, Capturer};
+    use flintshot_core::{FlintshotError, Result};
+
+    /// What the fake backend hands back from either grab method.
+    enum FakeGrab {
+        Ok,
+        Cancelled,
+        Fail,
+    }
+
+    /// Inert backend double: no bus, no display — the grab result is
+    /// whatever the test arms.
+    struct FakeCapturer {
+        selection: bool,
+        outcome: FakeGrab,
+    }
+
+    fn tiny_img() -> image::RgbaImage {
+        image::RgbaImage::from_raw(2, 2, vec![255; 16]).expect("2×2×4 bytes")
+    }
+
+    fn fake_result(outcome: &FakeGrab) -> Result<image::RgbaImage> {
+        match outcome {
+            FakeGrab::Ok => Ok(tiny_img()),
+            FakeGrab::Cancelled => Err(FlintshotError::Capture {
+                detail: "portal screenshot cancelled (response code 1)".into(),
+            }),
+            FakeGrab::Fail => Err(FlintshotError::Capture {
+                detail: "shm screencopy failed".into(),
+            }),
+        }
+    }
+
+    impl Capturer for FakeCapturer {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn available(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn capture_monitor(
+            &self,
+            _monitor: Option<u32>,
+            _opts: &CaptureOptions,
+        ) -> Result<image::RgbaImage> {
+            fake_result(&self.outcome)
+        }
+
+        fn capture_selection(&self, _opts: &CaptureOptions) -> Result<image::RgbaImage> {
+            fake_result(&self.outcome)
+        }
+
+        fn supports_selection(&self) -> bool {
+            self.selection
+        }
+    }
+
+    /// A socket path that cannot exist — keeps the fake grabs'
+    /// `CaptureGuard` probes vacuous even when a real daemon runs on
+    /// the dev machine.
+    fn bogus_socket() -> &'static std::path::Path {
+        std::path::Path::new("/this/does/not/exist/flintshot-test-grab-flow.sock")
+    }
+
+    #[test]
+    fn app_grab_native_path_routes_a_plain_image() {
+        // The OS UI already selected: the editor page opens plain
+        // ("capture" landing, no selection-first phase).
+        let backend = FakeCapturer {
+            selection: true,
+            outcome: FakeGrab::Ok,
+        };
+        match grab_with_backend(&SupersedeWatch::inert(), &backend, Some(bogus_socket())) {
+            AppGrab::Image {
+                img,
+                selection_first,
+            } => {
+                assert_eq!(img.dimensions(), (2, 2));
+                assert!(!selection_first, "native path opens plain");
+            }
+            other => panic!("expected an image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn app_grab_fallback_routes_selection_first() {
+        // The fallback monitor grab lands selection-first — the
+        // worker's "region" labels, byte-identical.
+        let backend = FakeCapturer {
+            selection: false,
+            outcome: FakeGrab::Ok,
+        };
+        match grab_with_backend(&SupersedeWatch::inert(), &backend, Some(bogus_socket())) {
+            AppGrab::Image {
+                img,
+                selection_first,
+            } => {
+                assert_eq!(img.dimensions(), (2, 2));
+                assert!(selection_first, "fallback path pre-arms Select");
+            }
+            other => panic!("expected an image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn app_grab_dismissal_is_quiet() {
+        // A dismissed OS selection UI reopens the prior page; no
+        // error surface (spec Flow).
+        let backend = FakeCapturer {
+            selection: true,
+            outcome: FakeGrab::Cancelled,
+        };
+        assert!(matches!(
+            grab_with_backend(&SupersedeWatch::inert(), &backend, Some(bogus_socket())),
+            AppGrab::Quiet
+        ));
+    }
+
+    #[test]
+    fn app_grab_real_failure_carries_the_detail() {
+        let backend = FakeCapturer {
+            selection: false,
+            outcome: FakeGrab::Fail,
+        };
+        match grab_with_backend(&SupersedeWatch::inert(), &backend, Some(bogus_socket())) {
+            AppGrab::Failed(msg) => assert!(msg.contains("screencopy")),
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn app_grab_superseded_short_circuits_before_the_backend() {
+        // The newest intent owns the screen: a superseded watch never
+        // touches the backend (this fake would fail the test by
+        // panicking on grab).
+        struct TouchyBackend;
+        impl Capturer for TouchyBackend {
+            fn id(&self) -> &'static str {
+                "touchy"
+            }
+            fn name(&self) -> &'static str {
+                "touchy"
+            }
+            fn available(&self) -> Result<()> {
+                Ok(())
+            }
+            fn capture_monitor(
+                &self,
+                _monitor: Option<u32>,
+                _opts: &CaptureOptions,
+            ) -> Result<image::RgbaImage> {
+                panic!("a superseded grab must not reach the backend")
+            }
+            fn capture_selection(&self, _opts: &CaptureOptions) -> Result<image::RgbaImage> {
+                panic!("a superseded grab must not reach the backend")
+            }
+        }
+        let watch = SupersedeWatch::inert();
+        watch
+            .flag()
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            grab_with_backend(&watch, &TouchyBackend, Some(bogus_socket())),
+            AppGrab::Quiet
+        ));
     }
 }

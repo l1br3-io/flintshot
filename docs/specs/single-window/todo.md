@@ -5,7 +5,7 @@
 - [x] 003 editor-page-mode
 - [x] 004 router-open-in-process
 - [x] 005 paste-from-home
-- [ ] 006 in-process-capture
+- [x] 006 in-process-capture
 - [ ] 007 daemon-forwarding
 - [ ] 008 open-routing
 - [ ] 009 editor-chrome-actions

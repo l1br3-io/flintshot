@@ -55,10 +55,12 @@ use std::time::Duration;
 use color_eyre::eyre;
 use flintshot_core::ipc::Event as IpcEvent;
 use flintshot_core::ipc::Request;
-use flintshot_core::{EditorOutcome, EditorState};
+use flintshot_core::{Config, EditorOutcome, EditorState};
 use flintshot_editor_egui::{EditorPageBridge, EditorPageExit, HomeBridge, HomeDirective};
 use tokio::sync::mpsc as tokio_mpsc;
 
+use crate::capture_flow::AppGrab;
+use crate::cli::SupersedeWatch;
 use crate::ipc_server::{decode_event, read_frame};
 
 /// What the single window shows for its next lifetime — the router's
@@ -71,7 +73,18 @@ enum Page {
     /// Editor session over one image (boxed: `EditorState` carries
     /// its image buffer inline, and the unit variants need not pay
     /// for it).
-    Editor(Box<EditorState>),
+    Editor(Box<PendingEditor>),
+}
+
+/// An editor page waiting to run: the image's editor state plus the
+/// landing phase (the fallback monitor grab pre-arms Select — the
+/// worker's `"region"` labels; every other source opens plain).
+#[derive(Debug, Clone)]
+struct PendingEditor {
+    /// Source screenshot + annotation model.
+    state: EditorState,
+    /// Whether the epoch opens selection-first.
+    selection_first: bool,
 }
 
 /// Pause between the window closing and the capture delegating, so
@@ -99,20 +112,9 @@ const HIDE_ACK_WINDOW: Duration = Duration::from_millis(1500);
 /// A capture intent crossing UI → pump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PumpCommand {
-    /// Delegate [`Request::Capture`] — the single Capture action;
-    /// the OS UI (native) or the editor (fallback) owns selection.
+    /// Run the single Capture action in-process — the OS UI
+    /// (native) or the editor (fallback) owns selection.
     Capture,
-}
-
-impl PumpCommand {
-    /// The IPC request this intent delegates.
-    #[allow(
-        clippy::unused_self,
-        reason = "kept as a method so future variants can vary the request"
-    )]
-    fn request(self) -> Request {
-        Request::Capture { delay_ms: 0 }
-    }
 }
 
 /// State shared by the UI (in-window), the outer reopen loop, and
@@ -135,9 +137,9 @@ struct SharedInner {
     directives: std::collections::VecDeque<HomeDirective>,
     status: String,
     pending_capture: Option<PumpCommand>,
-    /// The Open control decoded an image: the next epoch is the
-    /// editor page over it (same window, new lifetime).
-    pending_editor: Option<EditorState>,
+    /// The Open control decoded an image (or a grab delivered one):
+    /// the next epoch is the editor page over it.
+    pending_editor: Option<PendingEditor>,
     /// The editor page exited to home (`Esc`): the next epoch is the
     /// home page, distinct from a user quit (X / Alt+F4).
     go_home: bool,
@@ -199,15 +201,16 @@ impl Shared {
     }
 
     /// Register the editor page the next epoch runs over (the Open
-    /// control's routed image).
-    fn set_pending_editor(&self, state: EditorState) {
-        self.lock().pending_editor = Some(state);
+    /// control's routed image, the Paste clipboard image, or a
+    /// delivered grab).
+    fn set_pending_editor(&self, pending: PendingEditor) {
+        self.lock().pending_editor = Some(pending);
         self.changed.notify_all();
     }
 
-    /// Take the pending editor state, if the window closed to open
-    /// one.
-    fn take_pending_editor(&self) -> Option<EditorState> {
+    /// Take the pending editor page, if one waits for the next
+    /// epoch.
+    fn take_pending_editor(&self) -> Option<PendingEditor> {
         self.lock().pending_editor.take()
     }
 
@@ -405,10 +408,183 @@ impl HomeCore {
     }
 }
 
+/// The pump's capture-flow state machine (single-window): which grab
+/// generation owns the route. Pure so the transitions are
+/// unit-testable without a display or a daemon.
+#[derive(Debug, Default, PartialEq)]
+struct CaptureFlow {
+    /// The newest grab generation; 0 = never triggered.
+    generation: u64,
+    /// A grab is in flight (its thread owns the route rights for
+    /// `generation`).
+    grabbing: bool,
+}
+
+impl CaptureFlow {
+    /// A new capture trigger. Supersedes any in-flight grab (the
+    /// newest intent owns the route — the Replace policy) and
+    /// returns the fresh generation the new grab runs under.
+    fn trigger(&mut self) -> u64 {
+        self.generation += 1;
+        self.grabbing = true;
+        self.generation
+    }
+
+    /// Whether `generation` still owns the route (a newer trigger
+    /// bumped past it).
+    fn current(&self, generation: u64) -> bool {
+        generation == self.generation
+    }
+
+    /// The grab ended (routed, quiet, or failed). Returns whether its
+    /// outcome may route; only the current generation clears the
+    /// in-flight mark (a superseded grab's end leaves the newer one
+    /// flying).
+    fn finished(&mut self, generation: u64) -> bool {
+        let routes = self.current(generation);
+        if routes {
+            self.grabbing = false;
+        }
+        routes
+    }
+}
+
+/// The in-flight grab's handle: what a re-trigger supersedes.
+struct ActiveGrab {
+    /// The generation this thread grabs under.
+    generation: u64,
+    /// The grab's watch — `supersede()`d by a newer trigger so its
+    /// next checkpoint abandons quietly. Shared with the grab
+    /// thread via `Arc`.
+    watch: Arc<SupersedeWatch>,
+}
+
+/// The pump's in-process capture machinery (single-window): the grab
+/// state machine, the active grab, and the sender its grab threads
+/// deliver through.
+#[derive(Default)]
+struct GrabRouter {
+    flow: CaptureFlow,
+    active: Option<ActiveGrab>,
+    /// Cloned per spawned grab thread; the router keeps the original
+    /// so the channel never closes under the pump.
+    grabs_tx: Option<tokio_mpsc::Sender<(u64, AppGrab)>>,
+}
+
+impl GrabRouter {
+    /// A capture trigger: supersede any in-flight grab and mint the
+    /// new generation. The caller arms [`Self::arm`] with the watch
+    /// it hands the grab thread.
+    fn trigger(&mut self) -> u64 {
+        let generation = self.flow.trigger();
+        if let Some(old) = self.active.take() {
+            tracing::info!(
+                generation = old.generation,
+                "superseding the in-flight grab; its outcome will be discarded"
+            );
+            old.watch.supersede();
+        }
+        generation
+    }
+
+    /// Track the freshly spawned grab as the active one.
+    fn arm(&mut self, generation: u64, watch: Arc<SupersedeWatch>) {
+        self.active = Some(ActiveGrab { generation, watch });
+    }
+
+    /// A grab thread delivered its outcome. Stale generations
+    /// (superseded mid-flight) are discarded; the current one routes.
+    fn deliver(&mut self, shared: &Shared, core: &mut HomeCore, generation: u64, grab: AppGrab) {
+        if !self.flow.finished(generation) {
+            tracing::info!(generation, "discarding a superseded grab's outcome");
+            return;
+        }
+        self.active = None;
+        route_grab(shared, core, grab);
+    }
+}
+
+/// Route one grab outcome to the outer loop: an image arms the
+/// editor page and wakes the router; quiet exits and failures reopen
+/// the prior page (home), failures with the message on the status
+/// line.
+fn route_grab(shared: &Shared, core: &mut HomeCore, grab: AppGrab) {
+    match grab {
+        AppGrab::Image {
+            img,
+            selection_first,
+        } => {
+            let cfg = match Config::load() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not load config; using built-in defaults");
+                    Config::default()
+                }
+            };
+            shared.set_pending_editor(PendingEditor {
+                state: crate::cli::state_from_config(img, &cfg),
+                selection_first,
+            });
+            if let Some(directive) = core.force_show() {
+                shared.push_directive(directive);
+            }
+        }
+        AppGrab::Quiet => {
+            tracing::info!("capture dismissed or superseded; reopening the prior page");
+            if let Some(directive) = core.force_show() {
+                shared.push_directive(directive);
+            }
+        }
+        AppGrab::Failed(message) => {
+            tracing::warn!(%message, "the app-window grab failed");
+            shared.push_directive(HomeDirective::SetStatus(format!(
+                "capture failed: {message}"
+            )));
+            if let Some(directive) = core.force_show() {
+                shared.push_directive(directive);
+            }
+        }
+    }
+}
+
+/// Spawn the grab thread for a fresh trigger (the pump stays
+/// responsive — the OS selection UI blocks for human think-time, and
+/// the handshake's waits must not starve the event loop).
+///
+/// GOTCHA (handshake): the window closed **before** this thread's
+/// `CaptureGuard` sends `PrepareCapture` (the outer loop slept the
+/// unmap grace first), so the daemon's `HideForCapture` broadcast
+/// finds `wait_window_closed` already true and the `ReportAppHidden`
+/// ack leaves immediately — the pump's select loop handles it while
+/// the grab thread blocks on `CaptureReady`.
+fn start_grab(router: &mut GrabRouter, shared: &Shared) {
+    let generation = router.trigger();
+    let watch = Arc::new(SupersedeWatch::subscribe_at(None));
+    let Some(tx) = router.grabs_tx.clone() else {
+        tracing::warn!("grab channel not wired; dropping the capture request");
+        return;
+    };
+    let grab_watch = Arc::clone(&watch);
+    if let Err(e) = std::thread::Builder::new()
+        .name("flintshot-app-grab".into())
+        .spawn(move || {
+            let grab = crate::capture_flow::grab_for_app_window(&grab_watch);
+            // A closed channel means the pump is gone (process on its
+            // way out) — dropping the outcome is correct then.
+            let _ = tx.blocking_send((generation, grab));
+        })
+    {
+        tracing::warn!(error = %e, "spawning the grab thread; reopening the prior page");
+        let _ = router.flow.finished(generation);
+        shared.push_directive(HomeDirective::Show);
+        return;
+    }
+    router.arm(generation, watch);
+}
+
 /// `flintshot app` entry point: acquire the app lock (focus-ping and
-/// exit if held), start the pump, then the close/reopen loop — one
-/// [`EguiShell::run_home`] iteration per window lifetime
-/// (ADR-0047).
+/// exit if held), start the pump, then the page-router loop — one
+/// eframe epoch per page lifetime (ADR-0047).
 pub(crate) fn run() -> eyre::Result<()> {
     let Some(_lock) = crate::single::acquire_app_lock()? else {
         return focus_existing();
@@ -437,50 +613,20 @@ pub(crate) fn run() -> eyre::Result<()> {
     // for the same reopen. Any other close is the user quitting.
     loop {
         let exit = match page {
-            Page::Home => {
-                let status = shared.status();
-                let initial_status = if status.is_empty() {
-                    "connecting…".to_string()
-                } else {
-                    status
-                };
-                let bridge = Bridge {
-                    shared: Arc::clone(&shared),
-                };
-                shared.set_window_open();
-                let ran = crate::ambient::with_ambient_runtime(|| {
-                    flintshot_editor_egui::EguiShell::new()
-                        .run_home(Box::new(bridge), initial_status)
-                });
-                let ran = ran
-                    .map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))
-                    .and_then(|ran| ran.map_err(|e| eyre::eyre!("running the app window: {e}")));
-                if let Err(e) = ran {
+            Page::Home => match run_home_epoch(&shared) {
+                Ok(()) => None,
+                Err(e) => {
                     result = Err(e);
                     break;
                 }
-                None
-            }
-            Page::Editor(state) => {
-                let bridge = PageBridge {
-                    shared: Arc::clone(&shared),
-                };
-                shared.set_window_open();
-                let ran = crate::ambient::with_ambient_runtime(|| {
-                    flintshot_editor_egui::EguiShell::new()
-                        .run_editor_page(*state, Box::new(bridge))
-                });
-                let ran = ran
-                    .map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))
-                    .and_then(|ran| ran.map_err(|e| eyre::eyre!("running the editor page: {e}")));
-                match ran {
-                    Ok(exit) => Some(exit),
-                    Err(e) => {
-                        result = Err(e);
-                        break;
-                    }
+            },
+            Page::Editor(pending) => match run_editor_epoch(&shared, *pending) {
+                Ok(exit) => Some(exit),
+                Err(e) => {
+                    result = Err(e);
+                    break;
                 }
-            }
+            },
         };
 
         // The window is destroyed — the pump's hide-ack waits on this
@@ -498,8 +644,8 @@ pub(crate) fn run() -> eyre::Result<()> {
             CloseReason::UserQuit => break,
             CloseReason::CaptureIntent(command) => {
                 // The window is destroyed; the grace covers the compositor
-                // finishing the teardown before the worker freezes the
-                // screen.
+                // finishing the teardown before the grab's handshake
+                // clears flintshot's remaining surfaces.
                 std::thread::sleep(Duration::from_millis(HIDE_GRACE_MS));
                 if let Err(e) = cmd_tx.blocking_send(command) {
                     tracing::warn!(error = %e, "app pump is gone; capture request dropped");
@@ -509,7 +655,12 @@ pub(crate) fn run() -> eyre::Result<()> {
                     tracing::warn!("app pump died before the capture session ended");
                     break;
                 }
-                page = Page::Home;
+                // The pump's grab may have routed an editor page (an
+                // image landed); a quiet exit or failure reopens home.
+                page = match shared.take_pending_editor() {
+                    Some(pending) => Page::Editor(Box::new(pending)),
+                    None => Page::Home,
+                };
             }
             CloseReason::HiddenByEvent => {
                 // An externally triggered capture hid us (HideForCapture
@@ -536,6 +687,48 @@ pub(crate) fn run() -> eyre::Result<()> {
     result
 }
 
+/// Run one home epoch (the three-button window) to its close.
+fn run_home_epoch(shared: &Arc<Shared>) -> eyre::Result<()> {
+    let status = shared.status();
+    let initial_status = if status.is_empty() {
+        "connecting…".to_string()
+    } else {
+        status
+    };
+    let bridge = Bridge {
+        shared: Arc::clone(shared),
+    };
+    shared.set_window_open();
+    let ran = crate::ambient::with_ambient_runtime(|| {
+        flintshot_editor_egui::EguiShell::new().run_home(Box::new(bridge), initial_status)
+    });
+    ran.map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))?
+        .map_err(|e| eyre::eyre!("running the app window: {e}"))
+}
+
+/// Run one editor epoch to its close, returning the page exit the
+/// router classifies next.
+fn run_editor_epoch(shared: &Arc<Shared>, pending: PendingEditor) -> eyre::Result<EditorPageExit> {
+    // One `EditorOpened` per actual window — the worker parity (the
+    // daemon broadcasts it; subscribers like the applet stay truthful
+    // wherever the editor lives).
+    crate::cli::report_editor_window_opened_to_daemon();
+    let shell = if pending.selection_first {
+        flintshot_editor_egui::EguiShell::new().with_selection_first()
+    } else {
+        flintshot_editor_egui::EguiShell::new()
+    };
+    let bridge = PageBridge {
+        shared: Arc::clone(shared),
+    };
+    shared.set_window_open();
+    let ran = crate::ambient::with_ambient_runtime(|| {
+        shell.run_editor_page(pending.state, Box::new(bridge))
+    });
+    ran.map_err(|e| eyre::eyre!("ambient runtime failure: {e}"))?
+        .map_err(|e| eyre::eyre!("running the editor page: {e}"))
+}
+
 /// Why the window closed — the outer loop's post-close decision,
 /// uniform across page epochs.
 #[derive(Debug, Clone)]
@@ -549,7 +742,7 @@ enum CloseReason {
     HiddenByEvent,
     /// The Open control routed an image: the next epoch is the
     /// editor page over it (boxed — see [`Page::Editor`]).
-    OpenImage(Box<EditorState>),
+    OpenImage(Box<PendingEditor>),
     /// The editor page exited to home (`Esc`): the next epoch is the
     /// home page — never a user quit.
     GoHome,
@@ -580,8 +773,8 @@ fn close_reason(shared: &Shared) -> CloseReason {
     if let Some(command) = shared.take_pending_capture() {
         return CloseReason::CaptureIntent(command);
     }
-    if let Some(state) = shared.take_pending_editor() {
-        return CloseReason::OpenImage(Box::new(state));
+    if let Some(pending) = shared.take_pending_editor() {
+        return CloseReason::OpenImage(Box::new(pending));
     }
     if shared.take_hide_requested() {
         return CloseReason::HiddenByEvent;
@@ -609,9 +802,9 @@ fn focus_existing() -> eyre::Result<()> {
 }
 
 /// The pump thread's whole life: connect (auto-starting the daemon),
-/// then pump commands → requests and events → directives. Marks the
-/// shared state dead on the way out so the outer loop can't wait
-/// forever.
+/// then pump commands → in-process grabs and events → directives.
+/// Marks the shared state dead on the way out so the outer loop
+/// can't wait forever.
 fn pump_main(mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>, shared: &Shared) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -623,6 +816,14 @@ fn pump_main(mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>, shared: &Shared) {
             shared.mark_pump_dead();
             return;
         }
+    };
+
+    // Grab threads deliver their outcomes through this channel
+    // (`blocking_send` from plain threads is the blessed direction).
+    let (grabs_tx, mut grabs_rx) = tokio_mpsc::channel::<(u64, AppGrab)>(8);
+    let mut router = GrabRouter {
+        grabs_tx: Some(grabs_tx),
+        ..GrabRouter::default()
     };
 
     // A borrowing (non-`move`) async block: the loops take `&Shared`,
@@ -648,13 +849,21 @@ fn pump_main(mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>, shared: &Shared) {
                 }
             });
             shared.push_directive(HomeDirective::SetStatus("connected".to_string()));
-            if connected_loop(stream, &mut cmd_rx, shared, &mut core).await
+            if connected_loop(
+                stream,
+                &mut cmd_rx,
+                &mut grabs_rx,
+                shared,
+                &mut core,
+                &mut router,
+            )
+            .await
                 == LoopExit::Disconnected
             {
-                degraded_loop(cmd_rx, shared, &mut core).await;
+                degraded_loop(cmd_rx, grabs_rx, shared, &mut core, &mut router).await;
             }
         } else {
-            degraded_loop(cmd_rx, shared, &mut core).await;
+            degraded_loop(cmd_rx, grabs_rx, shared, &mut core, &mut router).await;
         }
     });
     shared.mark_pump_dead();
@@ -721,14 +930,18 @@ enum LoopExit {
     Disconnected,
 }
 
-/// The subscribed loop: select over commands (delegate — the grace
-/// already elapsed in the outer loop before the command was sent)
-/// and events (drive [`HomeCore`]).
+/// The subscribed loop: select over commands (spawn the in-process
+/// grab — the grace already elapsed in the outer loop before the
+/// command was sent), grab deliveries (route to the outer loop), and
+/// events (drive [`HomeCore`]).
+#[allow(clippy::too_many_arguments)]
 async fn connected_loop(
     mut stream: crate::ipc_server::Stream,
     cmd_rx: &mut tokio_mpsc::Receiver<PumpCommand>,
+    grabs_rx: &mut tokio_mpsc::Receiver<(u64, AppGrab)>,
     shared: &Shared,
     core: &mut HomeCore,
+    router: &mut GrabRouter,
 ) -> LoopExit {
     loop {
         tokio::select! {
@@ -737,22 +950,17 @@ async fn connected_loop(
                     None => return LoopExit::WindowClosed,
                     Some(command) => {
                         core.capture_requested();
-                        match crate::ipc_client::delegate_async(None, &command.request()).await {
-                            Ok(crate::ipc_client::DelegateOutcome::Delegated) => {}
-                            Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {
-                                report_delegate_failure(
-                                    shared,
-                                    core,
-                                    "no daemon answered the capture request",
-                                );
-                            }
-                            Err(e) => report_delegate_failure(
-                                shared,
-                                core,
-                                &format!("capture request failed: {e}"),
-                            ),
-                        }
+                        // The single-window flow: the pump grabs
+                        // in-process (capture_flow), no worker spawn,
+                        // no daemon round-trip for the trigger.
+                        let _ = command;
+                        start_grab(router, shared);
                     }
+                }
+            }
+            delivered = grabs_rx.recv() => {
+                if let Some((generation, grab)) = delivered {
+                    router.deliver(shared, core, generation, grab);
                 }
             }
             frame = read_frame(&mut stream) => {
@@ -795,32 +1003,36 @@ async fn connected_loop(
 }
 
 /// No subscription (start failure or disconnect): keep answering
-/// commands with an error status + show, so a click can never
-/// strand the process windowless.
+/// commands — the in-process grab needs no daemon (the prepare
+/// handshake degrades to the vacuous `NoDaemon` guard, exactly like
+/// a standalone worker), so a click can never strand the process
+/// windowless.
 async fn degraded_loop(
     mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>,
+    mut grabs_rx: tokio_mpsc::Receiver<(u64, AppGrab)>,
     shared: &Shared,
     core: &mut HomeCore,
+    router: &mut GrabRouter,
 ) {
-    while let Some(command) = cmd_rx.recv().await {
-        core.capture_requested();
-        report_delegate_failure(
-            shared,
-            core,
-            "daemon unreachable — restart `flintshot app` after starting the daemon",
-        );
-        let _ = command; // the request itself is unservable here
+    loop {
+        tokio::select! {
+            command = cmd_rx.recv() => {
+                match command {
+                    None => return,
+                    Some(command) => {
+                        core.capture_requested();
+                        let _ = command;
+                        start_grab(router, shared);
+                    }
+                }
+            }
+            delivered = grabs_rx.recv() => {
+                if let Some((generation, grab)) = delivered {
+                    router.deliver(shared, core, generation, grab);
+                }
+            }
+        }
     }
-}
-
-/// Tell the outer loop a capture request went nowhere: reopen +
-/// status.
-fn report_delegate_failure(shared: &Shared, core: &mut HomeCore, message: &str) {
-    tracing::warn!("{message}");
-    if let Some(directive) = core.force_show() {
-        shared.push_directive(directive);
-    }
-    shared.push_directive(HomeDirective::SetStatus(message.to_string()));
 }
 
 /// [`HomeBridge`] impl joining the home page to the shared state:
@@ -840,7 +1052,10 @@ impl HomeBridge for Bridge {
         match decode_image_file(&path) {
             Ok(state) => {
                 tracing::info!(path = %path.display(), "image routed to the editor page");
-                self.shared.set_pending_editor(state);
+                self.shared.set_pending_editor(PendingEditor {
+                    state,
+                    selection_first: false,
+                });
                 true
             }
             Err(e) => {
@@ -857,7 +1072,10 @@ impl HomeBridge for Bridge {
     fn request_paste(&mut self) -> bool {
         if let Some(state) = paste_clipboard_image() {
             tracing::info!("clipboard image routed to the editor page");
-            self.shared.set_pending_editor(state);
+            self.shared.set_pending_editor(PendingEditor {
+                state,
+                selection_first: false,
+            });
             true
         } else {
             self.shared.push_directive(HomeDirective::SetStatus(
@@ -1299,14 +1517,6 @@ mod tests {
     }
 
     #[test]
-    fn commands_map_to_requests() {
-        assert_eq!(
-            PumpCommand::Capture.request(),
-            Request::Capture { delay_ms: 0 }
-        );
-    }
-
-    #[test]
     fn bridge_capture_request_registers_the_intent() {
         // The UI-thread seam: request_capture registers the pending
         // command the outer loop services once the window closes.
@@ -1334,7 +1544,8 @@ mod tests {
         let state = shared
             .take_pending_editor()
             .expect("the editor state is pending for the outer loop");
-        assert_eq!(state.image.dimensions(), png.dims);
+        assert_eq!(state.state.image.dimensions(), png.dims);
+        assert!(!state.selection_first, "Open opens plain");
     }
 
     #[test]
@@ -1398,11 +1609,10 @@ mod tests {
     #[test]
     fn close_reason_open_image_routes_the_editor_epoch() {
         let shared = Shared::default();
-        let state = fixture_png_state((3, 2));
-        shared.set_pending_editor(state);
+        shared.set_pending_editor(pending_over((3, 2), false));
         assert!(matches!(
             close_reason(&shared),
-            CloseReason::OpenImage(state) if state.image.dimensions() == (3, 2)
+            CloseReason::OpenImage(pending) if pending.state.image.dimensions() == (3, 2)
         ));
     }
 
@@ -1422,7 +1632,7 @@ mod tests {
         // A capture intent is the strongest close reason: the newest
         // capture owns the screen (Replace policy).
         let shared = Shared::default();
-        shared.set_pending_editor(fixture_png_state((2, 2)));
+        shared.set_pending_editor(pending_over((2, 2), false));
         shared.push_directive(HomeDirective::Hide);
         shared.set_pending_capture(PumpCommand::Capture);
         assert!(matches!(
@@ -1438,7 +1648,7 @@ mod tests {
         let shared = Shared::default();
         shared.push_directive(HomeDirective::Hide);
         shared.set_go_home();
-        shared.set_pending_editor(fixture_png_state((2, 2)));
+        shared.set_pending_editor(pending_over((2, 2), false));
         assert!(matches!(close_reason(&shared), CloseReason::OpenImage(_)));
     }
 
@@ -1460,6 +1670,136 @@ mod tests {
         ));
         arm_editor_exit(&shared, &EditorPageExit::Closed);
         assert!(matches!(close_reason(&shared), CloseReason::UserQuit));
+    }
+
+    // --- In-process capture (single-window Task 006) ---
+
+    use crate::capture_flow::AppGrab;
+
+    #[test]
+    fn capture_flow_trigger_bumps_and_marks_grabbing() {
+        let mut flow = CaptureFlow::default();
+        assert!(!flow.grabbing, "idle at start");
+        assert_eq!(flow.trigger(), 1);
+        assert!(flow.grabbing);
+        assert_eq!(flow.trigger(), 2, "a re-trigger mints a new generation");
+    }
+
+    #[test]
+    fn capture_flow_retrigger_discards_the_old_grabs_outcome() {
+        // The Replace policy in-process: a trigger while grabbing
+        // supersedes the in-flight grab; the old generation's outcome
+        // must not route, and its end must not clear the newer grab.
+        let mut flow = CaptureFlow::default();
+        let first = flow.trigger();
+        let second = flow.trigger();
+        assert!(flow.current(second));
+        assert!(!flow.current(first), "the first generation is stale");
+        assert!(
+            !flow.finished(first),
+            "a superseded grab's outcome is discarded"
+        );
+        assert!(flow.grabbing, "the newer grab is still flying");
+        assert!(flow.finished(second));
+        assert!(!flow.grabbing, "the current grab's end returns to idle");
+    }
+
+    #[test]
+    fn grab_router_retrigger_supersedes_the_active_watch() {
+        let mut router = GrabRouter::default();
+        let gen1 = router.trigger();
+        let watch1 = Arc::new(SupersedeWatch::inert());
+        router.arm(gen1, Arc::clone(&watch1));
+        assert!(!watch1.superseded());
+        router.trigger();
+        assert!(
+            watch1.superseded(),
+            "a re-trigger flags the in-flight grab's watch"
+        );
+    }
+
+    fn tiny_grab_image(selection_first: bool) -> AppGrab {
+        let img = image::RgbaImage::from_raw(2, 2, vec![255; 16]).expect("2×2×4 bytes");
+        AppGrab::Image {
+            img,
+            selection_first,
+        }
+    }
+
+    #[test]
+    fn grab_image_routes_a_pending_editor_and_wakes_the_router() {
+        let shared = Shared::default();
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        let mut router = GrabRouter::default();
+        let gen = router.trigger();
+        router.arm(gen, Arc::new(SupersedeWatch::inert()));
+        router.deliver(&shared, &mut core, gen, tiny_grab_image(true));
+        let pending = shared
+            .take_pending_editor()
+            .expect("the image routes an editor page");
+        assert!(pending.selection_first, "the landing phase rides the route");
+        assert!(
+            shared.wait_for_reopen(),
+            "the router wake (Show) fired with the route"
+        );
+    }
+
+    #[test]
+    fn grab_quiet_exit_reopens_home_without_a_route() {
+        let shared = Shared::default();
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        let mut router = GrabRouter::default();
+        let gen = router.trigger();
+        router.deliver(&shared, &mut core, gen, AppGrab::Quiet);
+        assert!(
+            shared.take_pending_editor().is_none(),
+            "a quiet exit routes nothing"
+        );
+        assert!(shared.wait_for_reopen(), "the prior page reopens");
+    }
+
+    #[test]
+    fn grab_failure_reopens_home_with_a_status() {
+        let shared = Shared::default();
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        let mut router = GrabRouter::default();
+        let gen = router.trigger();
+        router.deliver(
+            &shared,
+            &mut core,
+            gen,
+            AppGrab::Failed("shm screencopy failed".into()),
+        );
+        assert!(shared.take_pending_editor().is_none());
+        assert!(matches!(
+            shared.poll_directive(),
+            Some(HomeDirective::SetStatus(text)) if text.contains("screencopy")
+        ));
+        assert!(shared.wait_for_reopen());
+    }
+
+    #[test]
+    fn stale_grab_delivery_is_discarded_entirely() {
+        // A superseded grab delivering late must not route, reopen,
+        // or touch the status line.
+        let shared = Shared::default();
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        let mut router = GrabRouter::default();
+        let stale = router.trigger();
+        let current = router.trigger();
+        router.deliver(&shared, &mut core, stale, tiny_grab_image(false));
+        assert!(shared.take_pending_editor().is_none());
+        shared.mark_pump_dead(); // a wait would block otherwise
+        assert!(!shared.wait_for_reopen(), "no wake from a stale grab");
+        assert!(shared.poll_directive().is_none());
+        assert!(
+            router.flow.current(current),
+            "the newer grab still owns the route"
+        );
     }
 
     /// A tiny PNG written to a temp file (the decode path needs real
@@ -1492,6 +1832,15 @@ mod tests {
         )
         .expect("raw buffer");
         flintshot_core::EditorState::new(img)
+    }
+
+    /// A pending editor page over a `dims`-sized image, with the
+    /// landing phase under test.
+    fn pending_over(dims: (u32, u32), selection_first: bool) -> PendingEditor {
+        PendingEditor {
+            state: fixture_png_state(dims),
+            selection_first,
+        }
     }
 
     #[test]
