@@ -172,6 +172,13 @@ impl HomeApp {
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
+    /// Poll one directive from the home bridge — the window router
+    /// owns directive handling on the Loading route, where no route
+    /// app is live (see `crate::window`).
+    pub(crate) fn poll_directive(&mut self) -> Option<HomeDirective> {
+        self.bridge.poll_directive()
+    }
+
     /// The Open control: native file dialog, then hand the picked
     /// path to the bridge. Cancelling the dialog is a plain no-op —
     /// the window stays exactly as it was. A routed image also keeps

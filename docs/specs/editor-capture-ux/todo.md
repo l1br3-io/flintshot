@@ -7,6 +7,6 @@
 - [x] 005-router-skeleton
 - [x] 006-editor-joins-router
 - [x] 007-grab-outcome-split
-- [ ] 008-loading-route-delivery
+- [x] 008-loading-route-delivery
 - [ ] 009-chrome-strip-removal
 - [ ] 010-closeout-changelog-adr
