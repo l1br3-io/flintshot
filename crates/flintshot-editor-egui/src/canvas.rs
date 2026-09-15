@@ -16,6 +16,135 @@ use flintshot_core::{
 #[derive(Clone)]
 pub struct EguiTexture(pub egui::TextureHandle);
 
+/// The full image-physical ↔ screen-logical view transform: the
+/// canvas panel rect, the display's pixels-per-point, and the
+/// fit-to-view scale factor.
+///
+/// One shared mapping every coordinate translation goes through
+/// (editor-capture-ux Task 003; the GOTCHA it exists to prevent: a
+/// site hand-rolling its own `ppp` division drifts from the others
+/// and corrupts input hit-testing or chrome placement under scale).
+/// The mapping sites today:
+///
+/// - the canvas `draw_*` path (image px → screen-logical paint),
+/// - the editor shell's pointer translation
+///   (`logical_to_image`: screen → image px for the dispatcher),
+/// - the chrome paint sites — magnifier, move chrome, selected
+///   chrome, selection-phase mask — and the magnifier's cursor
+///   anchor (`image_to_logical`),
+/// - text measurement back into image px (`image_len`).
+///
+/// `scale` is 1.0 in today's image-sized windows (the transform
+/// lands byte-identical); Task 004 computes the fit and letterboxes
+/// by adjusting the origin.
+#[derive(Clone, Copy, Debug)]
+pub struct CanvasView {
+    /// Canvas panel rect in screen-logical px; `rect.min` is the
+    /// image origin's on-screen anchor. The magnifier also clamps
+    /// against this rect.
+    rect: egui::Rect,
+    /// Display pixels-per-point.
+    ppp: f32,
+    /// Fit-to-view scale (image px → on-screen physical px):
+    /// `x_logical = x_img * scale / ppp + origin`. 1.0 = 1:1.
+    scale: f32,
+}
+
+impl CanvasView {
+    /// A scale-1.0 view over a full panel rect (the editor shell's
+    /// pointer/chrome sites and the magnifier).
+    #[must_use]
+    pub(crate) fn over(rect: egui::Rect, ppp: f32) -> Self {
+        Self {
+            rect,
+            ppp,
+            scale: 1.0,
+        }
+    }
+
+    /// A scale-1.0 view anchored at an origin with no meaningful
+    /// bounds (the canvas's own draw path — it never clamps).
+    #[must_use]
+    pub(crate) fn at_origin(origin: egui::Pos2, ppp: f32) -> Self {
+        Self::over(
+            egui::Rect::from_min_size(origin, egui::vec2(f32::INFINITY, f32::INFINITY)),
+            ppp,
+        )
+    }
+
+    /// Set the fit scale (builder form — the shell computes the fit
+    /// then threads the view everywhere).
+    #[must_use]
+    pub(crate) fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// The canvas panel rect in screen-logical px (magnifier
+    /// clamping).
+    pub(crate) fn rect(&self) -> egui::Rect {
+        self.rect
+    }
+
+    /// The display pixels-per-point (screen-space widget sizing —
+    /// the magnifier's inset).
+    pub(crate) fn ppp(&self) -> f32 {
+        self.ppp
+    }
+
+    /// Image-physical px → screen-logical px (chrome placement).
+    pub(crate) fn image_to_logical(&self, p: Point) -> egui::Pos2 {
+        let k = self.scale / self.ppp;
+        egui::pos2(p.x * k + self.rect.min.x, p.y * k + self.rect.min.y)
+    }
+
+    /// Screen-logical px → image-physical px (pointer mapping).
+    pub(crate) fn logical_to_image(&self, p: egui::Pos2) -> Point {
+        let k = self.ppp / self.scale;
+        let local = p - self.rect.min;
+        Point::new(local.x * k, local.y * k)
+    }
+
+    /// Image-physical rect → screen-logical rect.
+    pub(crate) fn image_rect_to_logical(&self, r: Rect) -> egui::Rect {
+        let k = self.scale / self.ppp;
+        egui::Rect::from_min_size(
+            self.image_to_logical(r.min),
+            egui::vec2(r.width() * k, r.height() * k),
+        )
+    }
+
+    /// Image-px length → screen-logical length (stroke widths, font
+    /// sizes — WYSIWYG relative to the fitted image).
+    pub(crate) fn len(&self, image_px: f32) -> f32 {
+        image_px * self.scale / self.ppp
+    }
+
+    /// Screen-logical length → image-px length (the measure path's
+    /// inverse of [`len`](Self::len)).
+    pub(crate) fn image_len(&self, logical: f32) -> f32 {
+        logical * self.ppp / self.scale
+    }
+}
+
+/// Pure fit-to-view computation: the scale that fits an image
+/// `(w, h)` (physical px) inside a viewport `(w, h)` (logical px),
+/// capped at 1.0 — never upscales. Degenerate inputs (any zero
+/// dimension) yield no scale; callers keep the previous fit (or 1.0)
+/// rather than collapsing the canvas.
+// Wired into the viewport flip in editor-capture-ux Task 004; lands
+// tested ahead of it here (Task 003's byte-identical bar).
+#[cfg_attr(not(test), allow(dead_code))]
+#[must_use]
+pub(crate) fn fit_scale(img: (f32, f32), viewport: (f32, f32)) -> Option<f32> {
+    let (w, h) = img;
+    let (vw, vh) = viewport;
+    if w <= 0.0 || h <= 0.0 || vw <= 0.0 || vh <= 0.0 {
+        return None;
+    }
+    Some((vw / w).min(vh / h).min(1.0))
+}
+
 /// egui implementation of the [`Canvas`] trait.
 ///
 /// Holds the [`egui::Context`] (captured at construction time, stable
@@ -45,6 +174,12 @@ pub struct EguiCanvas {
     /// [`set_clip`](Self::set_clip). Constrains every draw except
     /// the background blit (Phase 5 overlay's region confinement).
     clip: Option<egui::Rect>,
+    /// Fit-to-view scale factor (image px → on-screen physical px).
+    /// 1.0 today (image-sized windows); Task 004 sets the fitted
+    /// value. Every image→logical mapping in this canvas and in the
+    /// shell's pointer/chrome sites goes through it via
+    /// [`CanvasView`].
+    scale: f32,
     /// Cached textures for [`draw_image_region`](Self::draw_image_region)
     /// (the blur path), keyed by pixel content. Phase 5 Task 008:
     /// this path used to re-upload a fresh GPU texture every frame
@@ -85,9 +220,37 @@ impl EguiCanvas {
             painter: None,
             origin: egui::Pos2::ZERO,
             clip: None,
+            scale: 1.0,
             region_textures: HashMap::new(),
             region_used: HashSet::new(),
         }
+    }
+
+    /// Set the fit-to-view scale factor (see [`Self::scale`]). The
+    /// shell computes the fit ([`fit_scale`]) and calls this whenever
+    /// the image or viewport changes; 1.0 restores the image-sized
+    /// mapping.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
+    }
+
+    /// The current fit-to-view scale factor.
+    #[must_use]
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// The view anchored at the canvas's bound origin (the draw
+    /// path's own mapping).
+    fn view(&self) -> CanvasView {
+        CanvasView::at_origin(self.origin, self.ppp()).with_scale(self.scale)
+    }
+
+    /// The view over the shell's cached canvas rect — the pointer /
+    /// chrome sites' mapping (one source of truth for the scale).
+    #[must_use]
+    pub(crate) fn view_over(&self, rect: egui::Rect) -> CanvasView {
+        CanvasView::over(rect, self.ppp()).with_scale(self.scale)
     }
 
     /// Bind the per-frame [`egui::Painter`]. Called by the shell from
@@ -117,7 +280,7 @@ impl EguiCanvas {
     /// under the overlay's dim mask. The editor window never sets a
     /// clip, so its rendering is byte-identical to pre-Phase 5.
     pub fn set_clip(&mut self, clip: Option<Rect>) {
-        self.clip = clip.map(|r| to_egui_rect(r.normalized(), self.ppp(), self.origin));
+        self.clip = clip.map(|r| self.view().image_rect_to_logical(r.normalized()));
     }
 
     /// Physical-to-logical pixel conversion factor for the bound context.
@@ -147,31 +310,11 @@ fn to_egui_color(c: Color) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
 }
 
-/// Convert a physical-px [`Rect`] to a screen-logical [`egui::Rect`]:
-/// divide by `pixels_per_point` and translate by the canvas `origin`
-/// (the panel's top-left in screen-logical px). Without the origin
-/// translation every draw call lands at the window's top-left,
-/// leaving the image and any annotation in the topmost rows hidden
-/// behind the editor toolbar.
-///
-/// Callers must pass an already-normalized rect (`min` top-left). The
-/// render path normalizes before invoking the canvas methods.
-fn to_egui_rect(rect: Rect, ppp: f32, origin: egui::Pos2) -> egui::Rect {
-    egui::Rect::from_min_size(
-        egui::pos2(rect.min.x / ppp + origin.x, rect.min.y / ppp + origin.y),
-        egui::vec2(rect.width() / ppp, rect.height() / ppp),
-    )
-}
-
-/// Convert a physical-px [`Point`] to a screen-logical [`egui::Pos2`].
-fn to_egui_pos(p: Point, ppp: f32, origin: egui::Pos2) -> egui::Pos2 {
-    egui::pos2(p.x / ppp + origin.x, p.y / ppp + origin.y)
-}
-
-/// Convert a [`Stroke`] to an [`egui::Stroke`], scaling the width from
-/// physical px to logical px.
-fn to_egui_stroke(stroke: Stroke, ppp: f32) -> egui::Stroke {
-    egui::Stroke::new(stroke.width / ppp, to_egui_color(stroke.color))
+/// Convert a [`Stroke`] to an [`egui::Stroke`] through the view:
+/// the width is an image-px length and scales with the fit (WYSIWYG
+/// relative to the fitted image).
+fn to_egui_stroke(stroke: Stroke, view: CanvasView) -> egui::Stroke {
+    egui::Stroke::new(view.len(stroke.width), to_egui_color(stroke.color))
 }
 
 impl Canvas for EguiCanvas {
@@ -208,8 +351,7 @@ impl Canvas for EguiCanvas {
         let Some(painter) = &self.painter else {
             return;
         };
-        let ppp = self.ctx.pixels_per_point();
-        let dest = to_egui_rect(rect, ppp, self.origin);
+        let dest = self.view().image_rect_to_logical(rect);
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         painter.image(img.0.id(), dest, uv, egui::Color32::WHITE);
     }
@@ -265,8 +407,7 @@ impl Canvas for EguiCanvas {
             self.region_textures.insert(key.clone(), handle.clone());
             handle
         };
-        let ppp = self.ppp();
-        let dest_rect = to_egui_rect(dest, ppp, self.origin);
+        let dest_rect = self.view().image_rect_to_logical(dest);
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         painter.image(texture.id(), dest_rect, uv, egui::Color32::WHITE);
     }
@@ -275,14 +416,14 @@ impl Canvas for EguiCanvas {
         let Some(painter) = self.clip_painter() else {
             return;
         };
-        let ppp = self.ppp();
+        let view = self.view();
         // StrokeKind::Inside keeps the stroke inside the dragged rect
         // bounds so "what you dragged is what you get" — the visible
         // outline's outer edge coincides with the rect.
         painter.rect_stroke(
-            to_egui_rect(rect, ppp, self.origin),
+            view.image_rect_to_logical(rect),
             egui::CornerRadius::ZERO,
-            to_egui_stroke(*stroke, ppp),
+            to_egui_stroke(*stroke, view),
             egui::StrokeKind::Inside,
         );
     }
@@ -292,7 +433,7 @@ impl Canvas for EguiCanvas {
             return;
         };
         painter.rect_filled(
-            to_egui_rect(rect, self.ppp(), self.origin),
+            self.view().image_rect_to_logical(rect),
             egui::CornerRadius::ZERO,
             to_egui_color(color),
         );
@@ -302,13 +443,13 @@ impl Canvas for EguiCanvas {
         let Some(painter) = self.clip_painter() else {
             return;
         };
-        let ppp = self.ppp();
-        let er = to_egui_rect(rect, ppp, self.origin);
+        let view = self.view();
+        let er = view.image_rect_to_logical(rect);
         painter.add(egui::epaint::EllipseShape {
             center: er.center(),
             radius: er.size() / 2.0,
             fill: fill.map_or(egui::Color32::TRANSPARENT, to_egui_color),
-            stroke: to_egui_stroke(*stroke, ppp),
+            stroke: to_egui_stroke(*stroke, view),
             angle: 0.0,
         });
     }
@@ -317,13 +458,10 @@ impl Canvas for EguiCanvas {
         let Some(painter) = self.clip_painter() else {
             return;
         };
-        let ppp = self.ppp();
+        let view = self.view();
         painter.line_segment(
-            [
-                to_egui_pos(a, ppp, self.origin),
-                to_egui_pos(b, ppp, self.origin),
-            ],
-            to_egui_stroke(*stroke, ppp),
+            [view.image_to_logical(a), view.image_to_logical(b)],
+            to_egui_stroke(*stroke, view),
         );
     }
 
@@ -331,7 +469,6 @@ impl Canvas for EguiCanvas {
         let Some(painter) = self.clip_painter() else {
             return;
         };
-        let ppp = self.ppp();
         // One `PathShape::line` (a single tessellated strip) renders the
         // whole freehand stroke with per-pixel coverage computed once,
         // so a translucent marker doesn't compound at the segment joints
@@ -339,13 +476,11 @@ impl Canvas for EguiCanvas {
         if points.len() < 2 {
             return;
         }
-        let path: Vec<egui::Pos2> = points
-            .iter()
-            .map(|&p| to_egui_pos(p, ppp, self.origin))
-            .collect();
+        let view = self.view();
+        let path: Vec<egui::Pos2> = points.iter().map(|&p| view.image_to_logical(p)).collect();
         painter.add(egui::epaint::PathShape::line(
             path,
-            to_egui_stroke(*stroke, ppp),
+            to_egui_stroke(*stroke, view),
         ));
     }
 
@@ -353,28 +488,29 @@ impl Canvas for EguiCanvas {
         let Some(painter) = self.clip_painter() else {
             return;
         };
-        let ppp = self.ppp();
-        let a_l = to_egui_pos(a, ppp, self.origin);
-        let b_l = to_egui_pos(b, ppp, self.origin);
-        let egui_stroke = to_egui_stroke(*stroke, ppp);
+        let view = self.view();
+        let a_l = view.image_to_logical(a);
+        let b_l = view.image_to_logical(b);
+        let egui_stroke = to_egui_stroke(*stroke, view);
         painter.line_segment([a_l, b_l], egui_stroke);
-        // `arrow_barbs` returns physical-px endpoints (head_size is
-        // defined in physical px); converting them to logical via
-        // `to_egui_pos` yields the right on-screen length at any
-        // `pixels_per_point`, matching what `ImageCanvas` bakes into
-        // the saved PNG (ADR-0015 WYSIWYG).
+        // `arrow_barbs` returns image-px endpoints (head_size is
+        // defined in image px); mapping them through the view yields
+        // the right on-screen length at any `pixels_per_point` and fit
+        // scale, matching what `ImageCanvas` bakes into the saved PNG
+        // (ADR-0015 WYSIWYG).
         let [left, right] = arrow_barbs(a, b, head_size);
-        painter.line_segment([b_l, to_egui_pos(left, ppp, self.origin)], egui_stroke);
-        painter.line_segment([b_l, to_egui_pos(right, ppp, self.origin)], egui_stroke);
+        painter.line_segment([b_l, view.image_to_logical(left)], egui_stroke);
+        painter.line_segment([b_l, view.image_to_logical(right)], egui_stroke);
     }
 
     fn draw_text(&mut self, pos: Point, text: &str, style: &TextStyle) {
         let Some(painter) = self.clip_painter() else {
             return;
         };
-        let ppp = self.ppp();
-        // `style.size` is physical px; egui wants logical px for FontId.
-        let size = style.size / ppp;
+        let view = self.view();
+        // `style.size` is image px; egui wants logical px for FontId,
+        // and the fit scale keeps text WYSIWYG with the fitted image.
+        let size = view.len(style.size);
         // egui ships two built-in families; Serif falls back to
         // Proportional (Sans) until a serif face is bundled — see ADR.
         let family = match style.family {
@@ -405,7 +541,7 @@ impl Canvas for EguiCanvas {
         };
         job.append(text, 0.0, format);
         let galley = self.ctx.fonts_mut(|f| f.layout_job(job));
-        let anchor = to_egui_pos(pos, ppp, self.origin);
+        let anchor = view.image_to_logical(pos);
         let galley_size = galley.size();
         // Solid background rect behind the laid-out block.
         if let Some(bg) = style.background {
@@ -419,7 +555,7 @@ impl Canvas for EguiCanvas {
         // in any colour without re-laying-out.
         if let Some(outline) = style.outline {
             let oc = to_egui_color(outline.color);
-            let w = outline.width / ppp;
+            let w = view.len(outline.width);
             for (dx, dy) in [(w, 0.0), (-w, 0.0), (0.0, w), (0.0, -w)] {
                 painter.galley_with_override_text_color(
                     anchor + egui::vec2(dx, dy),
@@ -435,7 +571,7 @@ impl Canvas for EguiCanvas {
         // WYSIWYG difference, documented in the ADR.
         if matches!(style.weight, FontWeight::Bold) {
             painter.galley_with_override_text_color(
-                anchor + egui::vec2(0.5 / ppp, 0.0),
+                anchor + egui::vec2(view.len(0.5), 0.0),
                 galley,
                 color,
             );
@@ -443,9 +579,9 @@ impl Canvas for EguiCanvas {
     }
 
     fn measure_text(&self, text: &str, style: &TextStyle) -> flintshot_core::text::TextMetrics {
-        let ppp = self.ppp();
-        // `style.size` is physical px; egui wants logical px for FontId.
-        let font_id = egui::FontId::proportional(style.size / ppp);
+        let view = self.view();
+        // `style.size` is image px; egui wants logical px for FontId.
+        let font_id = egui::FontId::proportional(view.len(style.size));
         // Laying out the text is the authoritative measurement path —
         // it consults the same font + shaping that `draw_text` uses, so
         // the caret lands exactly at the visible end of the run. egui's
@@ -459,20 +595,21 @@ impl Canvas for EguiCanvas {
                 f32::INFINITY,
             )
         });
-        // Galley size is logical px; convert back to physical to match
-        // the canvas-physical coordinate space the render path uses.
+        // Galley size is logical px; convert back to image px — the
+        // canvas-physical coordinate space the render path uses —
+        // inverting the fit scale so metrics track the drawn glyphs.
         let size = galley.size();
-        let width = size.x * ppp;
+        let width = view.image_len(size.x);
         // The caret sits at the end of the last line; `galley.rows`'s
         // final entry holds that line's width (empty after a trailing
         // `\n`, which is correct — the caret drops to a fresh line).
         let last_line_width = galley
             .rows
             .last()
-            .map_or(0.0, |row| row.rect().width() * ppp);
+            .map_or(0.0, |row| view.image_len(row.rect().width()));
         flintshot_core::text::TextMetrics {
             width,
-            height: size.y * ppp,
+            height: view.image_len(size.y),
             last_line_width,
         }
     }
@@ -482,6 +619,123 @@ impl Canvas for EguiCanvas {
 mod tests {
     use super::*;
     use flintshot_core::{Color, Rect, Stroke};
+
+    // --- Fit-to-view (editor-capture-ux Task 003) ---
+
+    #[test]
+    fn fit_scale_scales_large_images_down_on_the_binding_axis() {
+        // Wide image, viewport exactly half: x binds.
+        assert_eq!(fit_scale((2000.0, 1000.0), (1000.0, 500.0)), Some(0.5));
+        // Tall image, viewport exactly half: y binds.
+        assert_eq!(fit_scale((1000.0, 2000.0), (500.0, 1000.0)), Some(0.5));
+        // Both axes shrink: the smaller ratio wins.
+        assert_eq!(fit_scale((2000.0, 2000.0), (500.0, 1000.0)), Some(0.25));
+    }
+
+    #[test]
+    fn fit_scale_never_upscales() {
+        // A tiny image in a roomy viewport renders 1:1, not stretched.
+        assert_eq!(fit_scale((100.0, 50.0), (1000.0, 1000.0)), Some(1.0));
+        // Exactly viewport-sized: 1.0, not 1.0-epsilon games.
+        assert_eq!(fit_scale((500.0, 300.0), (500.0, 300.0)), Some(1.0));
+    }
+
+    #[test]
+    fn fit_scale_degenerate_inputs_yield_no_scale() {
+        assert_eq!(fit_scale((0.0, 100.0), (100.0, 100.0)), None);
+        assert_eq!(fit_scale((100.0, 0.0), (100.0, 100.0)), None);
+        assert_eq!(fit_scale((100.0, 100.0), (0.0, 100.0)), None);
+        assert_eq!(fit_scale((100.0, 100.0), (100.0, 0.0)), None);
+    }
+
+    #[test]
+    fn fit_scale_aspect_extreme_fits_the_binding_axis() {
+        // 10000×10 into 100×100: x binds hard, y is nearly empty.
+        assert_eq!(fit_scale((10_000.0, 10.0), (100.0, 100.0)), Some(0.01));
+        // 10×10000 into 100×100: y binds.
+        assert_eq!(fit_scale((10.0, 10_000.0), (100.0, 100.0)), Some(0.01));
+    }
+
+    /// A view over a panel at logical (10, 20) sized 400×300, ppp 2,
+    /// fit-scale 0.5 — the arbitrary-transform fixture.
+    fn scaled_view() -> CanvasView {
+        CanvasView::over(
+            egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 300.0)),
+            2.0,
+        )
+        .with_scale(0.5)
+    }
+
+    #[test]
+    fn view_maps_by_the_fit_formula() {
+        let view = scaled_view();
+        // x_logical = x_img * scale / ppp + origin.x
+        assert_eq!(
+            view.image_to_logical(Point::new(100.0, 200.0)),
+            egui::pos2(35.0, 70.0)
+        );
+        assert_eq!(
+            view.image_rect_to_logical(Rect::from_xywh(100.0, 200.0, 40.0, 20.0)),
+            egui::Rect::from_min_size(egui::pos2(35.0, 70.0), egui::vec2(10.0, 5.0))
+        );
+    }
+
+    #[test]
+    fn pointer_mapping_round_trips_under_scale() {
+        // logical → image px → logical: the pointer translation and
+        // its inverse must agree at an arbitrary scale.
+        let view = scaled_view();
+        for l in [
+            egui::pos2(10.0, 20.0),
+            egui::pos2(210.0, 170.0),
+            egui::pos2(409.5, 319.5),
+        ] {
+            let round = view.image_to_logical(view.logical_to_image(l));
+            assert!((round - l).length() < 1e-3, "{l} round-trips, got {round}");
+        }
+    }
+
+    #[test]
+    fn chrome_mapping_round_trips_under_scale() {
+        // image px → logical → image: the chrome placement path.
+        let view = scaled_view();
+        for p in [
+            Point::new(0.0, 0.0),
+            Point::new(512.0, 384.0),
+            Point::new(1599.0, 1199.0),
+        ] {
+            let round = view.logical_to_image(view.image_to_logical(p));
+            assert!(
+                (round.x - p.x).abs() < 1e-3 && (round.y - p.y).abs() < 1e-3,
+                "{p:?} round-trips, got {round:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_lengths_scale_and_invert() {
+        let view = scaled_view();
+        // 10 image px → 10 * 0.5 / 2.0 logical px on screen.
+        assert!((view.len(10.0) - 2.5).abs() < 1e-6);
+        // And back: a measured 2.5 logical px is 10 image px.
+        assert!((view.image_len(2.5) - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn identity_view_matches_the_legacy_formula() {
+        // At scale 1.0 the mapping is exactly the old
+        // `p / ppp + origin` math (this task's byte-identical bar).
+        let view = CanvasView::over(
+            egui::Rect::from_min_size(egui::pos2(30.0, 40.0), egui::vec2(800.0, 600.0)),
+            1.25,
+        );
+        let p = Point::new(250.0, 125.0);
+        assert_eq!(
+            view.image_to_logical(p),
+            egui::pos2(30.0 + 250.0 / 1.25, 40.0 + 125.0 / 1.25)
+        );
+        assert!((view.len(9.0) - 9.0 / 1.25).abs() < 1e-6);
+    }
 
     /// `draw_ellipse` emits at least one `egui::Painter` shape — guards
     /// against the Phase 1 regression where the method body was empty.
