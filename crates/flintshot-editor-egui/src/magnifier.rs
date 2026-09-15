@@ -15,6 +15,7 @@
 //! window. The egui widget (`Magnifier::show`) is a thin layer over it:
 //! sample → crop sub-image → upload as a one-frame texture → paint.
 
+use crate::canvas::CanvasView;
 use flintshot_core::{Point, Rect};
 
 /// On-screen inset edge length in logical px. The magnifier paints a
@@ -144,9 +145,12 @@ impl Magnifier {
     /// Sample `image` around `cursor_phys`, upload the zoomed pixels,
     /// and paint the inset at a fixed offset from the cursor.
     ///
-    /// `canvas_rect` is the screen-logical rect of the canvas panel
-    /// (used to keep the inset on-screen). `ppp` is `pixels_per_point`.
-    /// `cursor_phys` is in the same physical-px space as `image`.
+    /// `view` is the canvas view (editor-capture-ux Task 003): the
+    /// cursor anchor maps through the fit scale, and the inset clamps
+    /// against `view.rect()`. The inset itself is a screen-space
+    /// widget — its size rides `pixels_per_point` alone, unaffected
+    /// by the fit. `cursor_phys` is in the same image-px space as
+    /// `image`.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -158,9 +162,10 @@ impl Magnifier {
         ctx: &egui::Context,
         image: &image::RgbaImage,
         cursor_phys: Point,
-        canvas_rect: egui::Rect,
-        ppp: f32,
+        view: CanvasView,
     ) {
+        let canvas_rect = view.rect();
+        let ppp = view.ppp();
         let src = sample_zoomed_region(image.dimensions(), cursor_phys, ZOOM, INSET_PX);
         let sub = crop_subimage(image, src);
 
@@ -197,10 +202,7 @@ impl Magnifier {
         let inset_logical = INSET_PX / ppp;
         // Offset the inset down-and-right of the cursor so the cursor
         // itself stays visible; clamp to keep it inside the canvas.
-        let cursor_logical = egui::pos2(
-            cursor_phys.x / ppp + canvas_rect.min.x,
-            cursor_phys.y / ppp + canvas_rect.min.y,
-        );
+        let cursor_logical = view.image_to_logical(cursor_phys);
         let offset = 16.0;
         let mut dest_min = cursor_logical + egui::vec2(offset, offset);
         // If the inset would run off the right/bottom edge, flip it to

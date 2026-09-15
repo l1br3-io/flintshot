@@ -1233,13 +1233,14 @@ impl OverlayApp {
         }
         let ppp = ctx.pixels_per_point();
         let cursor_phys = to_canvas_physical(pos, panel_rect, ppp);
+        // The overlay is always fullscreen-fit: the view is the plain
+        // 1:1 mapping (no fit scale — the image *is* the viewport).
         self.magnifier.show(
             painter,
             ctx,
             &self.state.image,
             cursor_phys,
-            panel_rect,
-            ppp,
+            crate::canvas::CanvasView::over(panel_rect, ppp),
         );
     }
 }

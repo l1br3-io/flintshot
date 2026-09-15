@@ -21,8 +21,8 @@ use eframe::App;
 use egui::Context;
 use flintshot_core::{
     compose_final, compose_final_region, render::render, BlurCache, Config, DispatchOutcome,
-    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode, Point,
-    Rect, Tool,
+    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode, Rect,
+    Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -292,14 +292,14 @@ impl EditorApp {
     /// selection — the overlay's mask math verbatim — and the hint
     /// line in a badge-style pill at the canvas's top centre. No-op
     /// outside the phase; see [`Self::phase_active`].
-    fn paint_selection_phase(&self, ctx: &Context, painter: &egui::Painter) {
+    fn paint_selection_phase(&self, _ctx: &Context, painter: &egui::Painter) {
         let Some(panel) = self.canvas_rect else {
             return;
         };
-        let ppp = ctx.pixels_per_point();
-        let to_logical = |p: Point| egui::pos2(panel.min.x + p.x / ppp, panel.min.y + p.y / ppp);
-        let sel_logical = usable_selection(self.state.selection)
-            .map(|s| egui::Rect::from_two_pos(to_logical(s.min), to_logical(s.max)));
+        let view = self.canvas.view_over(panel);
+        let sel_logical = usable_selection(self.state.selection).map(|s| {
+            egui::Rect::from_two_pos(view.image_to_logical(s.min), view.image_to_logical(s.max))
+        });
         for band in mask_rects(panel, sel_logical) {
             painter.rect_filled(band, egui::CornerRadius::ZERO, mask_color());
         }
@@ -437,7 +437,7 @@ impl EditorApp {
         let Some(canvas_rect) = self.canvas_rect else {
             return;
         };
-        let ppp = ctx.pixels_per_point();
+        let view = self.canvas.view_over(canvas_rect);
         let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else {
             return;
         };
@@ -447,18 +447,11 @@ impl EditorApp {
         if !canvas_rect.contains(pos) {
             return;
         }
-        // Screen-logical → canvas-physical, matching the pointer
-        // translation in `logic()`.
-        let local = pos - canvas_rect.min;
-        let cursor_phys = Point::new(local.x * ppp, local.y * ppp);
-        self.magnifier.show(
-            painter,
-            ctx,
-            &self.state.image,
-            cursor_phys,
-            canvas_rect,
-            ppp,
-        );
+        // Screen-logical → image-physical through the shared view,
+        // matching the pointer translation in `logic()`.
+        let cursor_phys = view.logical_to_image(pos);
+        self.magnifier
+            .show(painter, ctx, &self.state.image, cursor_phys, view);
     }
 
     /// Paint the Move-tool hover / grab outline (see
@@ -473,23 +466,21 @@ impl EditorApp {
         let Some(canvas_rect) = self.canvas_rect else {
             return;
         };
-        let ppp = ctx.pixels_per_point();
+        let view = self.canvas.view_over(canvas_rect);
         let pos = ctx.input(|i| i.pointer.latest_pos());
         let hover_at = pos
             .filter(|p| canvas_rect.contains(*p) && !self.canvas_drag_active)
-            .map(|p| {
-                // Screen-logical → canvas-physical, matching `logic_impl`.
-                let local = p - canvas_rect.min;
-                Point::new(local.x * ppp, local.y * ppp)
-            });
+            // Screen-logical → image-physical, matching `logic_impl`.
+            .map(|p| view.logical_to_image(p));
         let Some((rect, kind)) = crate::chrome::move_chrome(&self.state, hover_at) else {
             return;
         };
-        let to_logical =
-            |p: Point| egui::pos2(canvas_rect.min.x + p.x / ppp, canvas_rect.min.y + p.y / ppp);
         crate::chrome::paint_move_chrome(
             painter,
-            egui::Rect::from_two_pos(to_logical(rect.min), to_logical(rect.max)),
+            egui::Rect::from_two_pos(
+                view.image_to_logical(rect.min),
+                view.image_to_logical(rect.max),
+            ),
             kind,
         );
     }
@@ -502,7 +493,7 @@ impl EditorApp {
     /// yields no chrome while Move is active (degenerate bbox /
     /// stale index) deselects instead of rendering — the selection
     /// must never point at something unoutlinable.
-    fn paint_selected_chrome_if_any(&mut self, ctx: &Context, painter: &egui::Painter) {
+    fn paint_selected_chrome_if_any(&mut self, _ctx: &Context, painter: &egui::Painter) {
         let Some(rect) = crate::chrome::selected_chrome(&self.state) else {
             if self.state.tool == Tool::Move && self.state.selected_index.is_some() {
                 self.state.selected_index = None;
@@ -512,12 +503,13 @@ impl EditorApp {
         let Some(canvas_rect) = self.canvas_rect else {
             return;
         };
-        let ppp = ctx.pixels_per_point();
-        let to_logical =
-            |p: Point| egui::pos2(canvas_rect.min.x + p.x / ppp, canvas_rect.min.y + p.y / ppp);
+        let view = self.canvas.view_over(canvas_rect);
         crate::chrome::paint_selected_chrome(
             painter,
-            egui::Rect::from_two_pos(to_logical(rect.min), to_logical(rect.max)),
+            egui::Rect::from_two_pos(
+                view.image_to_logical(rect.min),
+                view.image_to_logical(rect.max),
+            ),
         );
     }
 }
@@ -633,7 +625,7 @@ impl EditorApp {
         let Some(canvas_rect) = self.canvas_rect else {
             return;
         };
-        let ppp = ctx.pixels_per_point();
+        let view = self.canvas.view_over(canvas_rect);
 
         let (pointer, primary_pressed, primary_down, primary_released) = ctx.input(|i| {
             (
@@ -648,12 +640,12 @@ impl EditorApp {
             return;
         };
 
-        // Screen-logical → canvas-physical: subtract the canvas origin
-        // (so pointer (0,0) means canvas top-left, not screen top-left)
-        // then scale by `pixels_per_point` to land in the physical-px
-        // space `EditorState` operates on.
-        let local = pos - canvas_rect.min;
-        let at = Point::new(local.x * ppp, local.y * ppp);
+        // Screen-logical → image-physical through the shared view:
+        // subtract the canvas origin (so pointer (0,0) means canvas
+        // top-left, not screen top-left), then scale by
+        // `pixels_per_point` (and the fit scale once Task 004 wires
+        // it) to land in the image-px space `EditorState` operates on.
+        let at = view.logical_to_image(pos);
 
         // Begin only when the press lands inside the canvas — clicks on
         // the toolbar (or outside the window) shouldn't start a drag.
@@ -1676,6 +1668,7 @@ pub(crate) fn tool_for_key(key: egui::Key) -> Option<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flintshot_core::Point;
     use flintshot_core::{Annotation, EditorState};
 
     /// Construct an all-white `EditorState` of the given pixel size.
