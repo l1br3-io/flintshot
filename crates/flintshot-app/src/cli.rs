@@ -488,7 +488,7 @@ fn native_capture_and_dispatch(
     // icon hostage — annotation takes minutes, and a hidden tray
     // removes the user's only cancel affordance while a capture is
     // not even in flight.
-    let Some(img) = native_grab_prepared(watch, backend)? else {
+    let Some(img) = native_grab_prepared(watch, backend, None)? else {
         return Ok(());
     };
 
@@ -802,7 +802,7 @@ impl SupersedeWatch {
     /// socket). Failure to connect degrades to [`Self::inert`] —
     /// graceful close is an optimization the hard kill backstops.
     /// One socket probe is the whole standalone cost.
-    fn subscribe_at(override_path: Option<&std::path::Path>) -> Self {
+    pub(crate) fn subscribe_at(override_path: Option<&std::path::Path>) -> Self {
         let watch = Self::inert();
         let flag = Arc::clone(&watch.flag);
         let close_hook = Arc::clone(&watch.close_hook);
@@ -822,6 +822,15 @@ impl SupersedeWatch {
     /// Whether a newer capture superseded this session.
     pub(crate) fn superseded(&self) -> bool {
         self.flag.load(Ordering::Acquire)
+    }
+
+    /// Flag this watch superseded **locally** — a newer in-process
+    /// trigger replaces this grab (the app window's pump restart
+    /// seam, single-window). Unlike the daemon broadcast, there is
+    /// no window to close here; only the flag fires, so the grab's
+    /// next checkpoint abandons quietly.
+    pub(crate) fn supersede(&self) {
+        self.flag.store(true, Ordering::Release);
     }
 
     /// The flag cell itself (test seam).
@@ -1237,7 +1246,10 @@ fn run_overlay_with_config(
 /// editor-window and overlay shell paths so both sessions start
 /// from the same persisted tool settings.
 #[cfg(feature = "egui")]
-fn state_from_config(img: image::RgbaImage, cfg: &Config) -> flintshot_core::EditorState {
+pub(crate) fn state_from_config(
+    img: image::RgbaImage,
+    cfg: &Config,
+) -> flintshot_core::EditorState {
     let mut state = flintshot_core::EditorState::new(img);
     state.color = cfg.ui.default_color;
     state.text_color = cfg.ui.default_text_color;
@@ -1378,7 +1390,7 @@ fn report_uploaded_to_daemon(url: &str, delete_handle: Option<&str>) {
 /// never for `--out`). Best-effort: a missing daemon is a silent
 /// no-op (the worker may be standalone). Mirrors
 /// [`report_saved_to_daemon`].
-fn report_editor_window_opened_to_daemon() {
+pub(crate) fn report_editor_window_opened_to_daemon() {
     report_editor_window_opened_to_daemon_at(None);
 }
 
