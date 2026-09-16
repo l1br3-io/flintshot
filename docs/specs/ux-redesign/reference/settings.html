@@ -1,0 +1,263 @@
+<!--
+Reference of record for the ux-redesign effort — Settings route.
+Saved verbatim from the user's mockup snippet.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Flintshot — Settings (static design)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ============ TOKENS (theme/palette.rs equivalents) ============ */
+:root {
+  --forest-deep:#1F5233; --forest-mid:#2C6B45; --forest-ink:#16381F;
+  --gold:#E4B54A; --gold-deep:#C99A2E;
+  --paper:#F6EFDE; --paper-cream:#FBF6EA; --paper-dim:#EDE4CE;
+  --ink:#2A2620; --ink-soft:#6E6754;
+  --cream-text:#F3EDDD; --cream-dim:#C9C2AC; --lock-grey:#9A947F;
+  --fs-xs:10.5px; --fs-sm:12px; --fs-md:13.5px; --fs-lg:16px; --fs-xl:21px;
+  --r-cutout:10px; --r-pod:12px; --r-pill:999px;
+  --sh-resting:0 1px 0 rgba(22,56,31,.35), 0 3px 8px rgba(22,56,31,.28);
+  --sh-paper:0 6px 0 rgba(22,56,31,.16), 0 22px 44px rgba(22,56,31,.28);
+  --grain:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0.1 0 0 0 0 0.2 0 0 0 0 0.12 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family:'Plus Jakarta Sans',sans-serif; background:#12100C;
+  display:flex; justify-content:center; padding:28px 16px 60px;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ============ WINDOW + TOPBAR ============ */
+.window {
+  width:min(900px,100%); height:760px;
+  border-radius:var(--r-cutout); overflow:hidden;
+  box-shadow:var(--sh-paper);
+  display:flex; flex-direction:column;
+}
+.topbar {
+  height:44px; flex:0 0 44px;
+  background:var(--forest-deep);
+  border-bottom:2px solid rgba(243,237,221,.14);
+  box-shadow:0 2px 10px rgba(22,56,31,.45);
+  display:flex; align-items:center; gap:14px;
+  padding:0 14px; color:var(--cream-text);
+}
+.brand { display:flex; align-items:center; gap:9px; }
+.brand .flame {
+  width:24px; height:24px; border-radius:8px; background:var(--gold);
+  display:grid; place-items:center; font-size:13px;
+  box-shadow:inset 0 -3px 0 rgba(22,56,31,.28), 0 2px 6px rgba(0,0,0,.3);
+}
+.brand .name { font-weight:800; font-size:var(--fs-md); }
+.crumb { display:flex; align-items:center; gap:7px; font-size:var(--fs-sm); font-weight:500; }
+.crumb .stage { color:var(--cream-dim); }
+.crumb .stage.cur { color:var(--gold); font-weight:800; }
+.crumb .sep { color:var(--cream-dim); opacity:.5; font-size:11px; }
+.tb-spacer { flex:1; }
+.ghost {
+  display:flex; align-items:center; gap:7px;
+  font:inherit; font-size:var(--fs-sm); font-weight:700; color:var(--cream-text);
+  background:rgba(243,237,221,.06); border:1.5px solid rgba(243,237,221,.28);
+  border-radius:var(--r-pod); padding:5px 13px 5px 10px;
+}
+.ghost .ico { font-size:13px; }
+.ghost.hero-key { border-color:rgba(228,181,74,.55); }
+.ghost:disabled { color:var(--cream-dim); border-color:rgba(243,237,221,.12); background:rgba(243,237,221,.02); }
+.overflow {
+  width:30px; height:30px; border-radius:var(--r-pod);
+  display:grid; place-items:center; font-size:15px; font-weight:800;
+  color:var(--cream-text); background:rgba(243,237,221,.06);
+  border:1.5px solid rgba(243,237,221,.28);
+}
+
+/* ============ SETTINGS CONTENT ============ */
+.settings {
+  flex:1; overflow-y:auto; padding:30px 0 48px;
+  background-image:var(--grain), var(--paper);
+}
+.set-wrap { width:min(640px,92%); margin:0 auto; }
+.set-head { font-size:var(--fs-xl); font-weight:800; color:var(--ink); }
+.set-sub { font-size:var(--fs-sm); color:var(--ink-soft); font-weight:500; margin:2px 0 18px; }
+
+.section {
+  background:var(--paper-cream);
+  border:1.5px solid rgba(22,56,31,.3);
+  outline:2px solid #fff; outline-offset:-4px;
+  border-radius:var(--r-cutout);
+  margin-bottom:12px; box-shadow:var(--sh-resting);
+}
+.sec-head {
+  display:flex; align-items:center; padding:11px 12px;
+  font-size:var(--fs-sm); font-weight:700; color:var(--ink);
+}
+.sec-head .chev { margin-left:auto; font-size:11px; color:var(--ink-soft); }
+.sec-body { padding:0 12px 12px; }
+
+.set-row { display:flex; align-items:center; gap:14px; padding:10px 0; }
+.set-row + .set-row { border-top:1px dashed rgba(22,56,31,.15); }
+.set-info { flex:1; min-width:0; }
+.set-info b { display:block; font-size:var(--fs-sm); font-weight:700; color:var(--ink); }
+.set-info span { font-size:var(--fs-xs); color:var(--ink-soft); font-weight:500; }
+
+/* controls (static states only) */
+.wells { display:flex; gap:6px; }
+.well {
+  text-align:center; padding:5px 14px; border-radius:8px;
+  background:var(--paper-dim); border:1.5px solid rgba(22,56,31,.2);
+  font-size:var(--fs-sm); font-weight:600; color:var(--ink);
+}
+.well.on { background:var(--forest-mid); color:var(--cream-text); border-color:var(--forest-deep); }
+.switch { width:34px; height:19px; border-radius:var(--r-pill); flex:0 0 34px;
+  background:var(--paper-dim); border:1.5px solid rgba(22,56,31,.3); position:relative; }
+.switch::after { content:''; position:absolute; top:1px; left:1px; width:13px; height:13px;
+  border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); }
+.switch.on { background:var(--gold); }
+.switch.on::after { transform:translateX(15px); }
+.switch.locked { opacity:.55; }
+.text-input {
+  font:inherit; font-size:var(--fs-sm); font-weight:600; padding:6px 10px; width:190px;
+  border-radius:8px; border:1.5px solid rgba(22,56,31,.3);
+  background:var(--paper-dim); color:var(--ink);
+}
+.btn {
+  font:inherit; font-size:var(--fs-sm); font-weight:700; padding:6px 14px;
+  border-radius:9px; background:var(--forest-mid); color:var(--cream-text);
+  border:1.5px solid var(--forest-deep);
+}
+kbd.paper-kbd {
+  font:inherit; font-size:var(--fs-xs); font-weight:700;
+  background:var(--paper-dim); color:var(--ink);
+  border:1.5px solid rgba(22,56,31,.28); border-radius:5px; padding:1px 7px;
+}
+.readonly-well {
+  font-size:var(--fs-sm); font-weight:700; color:var(--ink-soft);
+  background:var(--paper-dim); border:1.5px dashed rgba(22,56,31,.25);
+  border-radius:8px; padding:5px 12px;
+}
+</style>
+</head>
+<body>
+
+<div class="window">
+
+  <!-- ZONE 1 · TOPBAR -->
+  <div class="topbar">
+    <div class="brand"><div class="flame">🔥</div><span class="name">Flintshot</span></div>
+    <div class="crumb"><span class="stage">Home</span><span class="sep">▸</span><span class="stage cur">Settings</span></div>
+    <div class="tb-spacer"></div>
+    <div class="ghost hero-key"><span class="ico">✚</span>Capture</div>
+    <div class="ghost" disabled><span class="ico">⧉</span>Copy</div>
+    <div class="ghost" disabled><span class="ico">🗀</span>Open</div>
+    <div class="overflow">⋯</div>
+  </div>
+
+  <!-- SETTINGS CONTENT -->
+  <div class="settings">
+    <div class="set-wrap">
+      <div class="set-head">Settings</div>
+      <div class="set-sub">Preferences for capture, editing, and output.</div>
+
+      <div class="section">
+        <div class="sec-head">📷 Capture <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="set-row">
+            <div class="set-info"><b>Default mode</b><span>Used when a capture starts without a modifier</span></div>
+            <div class="wells"><div class="well on">Region</div><div class="well">Full screen</div><div class="well">Window</div></div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Delay</b><span>Wait before the shutter fires — lets menus settle</span></div>
+            <div class="wells"><div class="well on">0s</div><div class="well">3s</div><div class="well">5s</div></div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Include mouse cursor</b><span>Composite the cursor into the capture</span></div>
+            <div class="switch"></div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Hide Flintshot from the shot 🔒</b><span>Always on — a product guarantee, not a preference</span></div>
+            <div class="switch on locked"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="sec-head">✏️ Editor <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="set-row">
+            <div class="set-info"><b>Tool when an editor opens</b><span>Defaults to Pencil</span></div>
+            <div class="readonly-well">Pencil ▾</div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Show statusbar</b><span>Dims, byte estimate, hints, shortcuts</span></div>
+            <div class="switch on"></div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Byte-size estimate</b><span>Heuristic is instant (dims × 4); Exact runs a real PNG encode</span></div>
+            <div class="wells"><div class="well on">Heuristic</div><div class="well">Exact (PNG)</div></div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Spring animations</b><span>Pop hovers, tool bounce, section collapse</span></div>
+            <div class="switch on"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="sec-head">⤓ Output &amp; saving <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="set-row">
+            <div class="set-info"><b>Format</b><span>Quality applies to JPEG only</span></div>
+            <div class="wells"><div class="well on">PNG</div><div class="well">JPEG</div></div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>JPEG quality</b></div>
+            <div class="wells"><div class="well">80</div><div class="well on">90</div><div class="well">100</div></div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Filename template</b><span>{app} {date} {time} are substituted on save</span></div>
+            <div class="text-input">{app}-{date}-{time}</div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Copy to clipboard after capture</b><span>Skips the editor hand-off for quick pastes</span></div>
+            <div class="switch"></div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Save location</b><span>~/Pictures/Flintshot</span></div>
+            <div class="btn">Choose…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="sec-head">⌨ Shortcuts <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="set-row"><div class="set-info"><b>Undo</b></div><kbd class="paper-kbd">Ctrl+Z</kbd></div>
+          <div class="set-row"><div class="set-info"><b>Redo</b></div><kbd class="paper-kbd">Ctrl+Y</kbd></div>
+          <div class="set-row"><div class="set-info"><b>Save</b></div><kbd class="paper-kbd">Ctrl+S</kbd></div>
+          <div class="set-row"><div class="set-info"><b>Delete selection</b></div><kbd class="paper-kbd">Del</kbd></div>
+          <div class="set-row"><div class="set-info"><b>Capture region</b></div><kbd class="paper-kbd">PrtSc</kbd></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="sec-head">🖥 System <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="set-row">
+            <div class="set-info"><b>Display server</b><span>Detected at startup — not switchable at runtime</span></div>
+            <div class="readonly-well">X11</div>
+          </div>
+          <div class="set-row">
+            <div class="set-info"><b>Version</b></div>
+            <div class="readonly-well">Flintshot 1.4.0</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
