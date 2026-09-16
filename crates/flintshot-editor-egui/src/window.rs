@@ -210,6 +210,12 @@ impl WindowApp {
         editor_outcome: OutcomeSlot,
         route_slot: RouteSlot,
     ) -> Self {
+        // One-time theme application for the routed window: the
+        // home route has no editor app to do it, so the router owns
+        // the window's skin from its first frame (the editor
+        // constructor's apply is idempotent for editor-started
+        // windows).
+        crate::theme::apply(ctx);
         let (route, editor) = match start {
             WindowStart::Home => (Route::Home, None),
             WindowStart::Loading => (Route::Loading, None),

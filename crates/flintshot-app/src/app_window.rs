@@ -1299,6 +1299,14 @@ impl HomeBridge for Bridge {
     fn poll_directive(&mut self) -> Option<HomeDirective> {
         self.shared.poll_directive()
     }
+
+    fn recent_images(&mut self) -> Vec<std::path::PathBuf> {
+        flintshot_core::recents::Recents::load()
+            .paths()
+            .into_iter()
+            .map(std::path::Path::to_path_buf)
+            .collect()
+    }
 }
 
 /// Read the system clipboard's image into the editor state the
