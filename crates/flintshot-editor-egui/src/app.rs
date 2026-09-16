@@ -441,10 +441,14 @@ impl EditorApp {
         // until the panel reports the right size. GOTCHA: the old
         // top-rail layout added the toolbar's height below
         // `canvas_rect.min.y` here; the docked side panel instead
-        // reserves width to the *right* of the canvas, so the
-        // window is image + [`panel::PANEL_WIDTH`] wide and exactly
-        // image tall.
-        let new_size = egui::vec2(target_w + panel::PANEL_WIDTH, target_h);
+        // reserves width to the *right* of the canvas, and the
+        // header reserves a strip above — the window is image +
+        // [`panel::PANEL_WIDTH`] wide and image +
+        // [`header::HEADER_HEIGHT`] tall.
+        let new_size = egui::vec2(
+            target_w + panel::PANEL_WIDTH,
+            target_h + crate::header::HEADER_HEIGHT,
+        );
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
         ctx.request_repaint();
     }
@@ -929,6 +933,12 @@ impl EditorApp {
     /// `pub(crate)`: the window router delegates here on the Editor
     /// route.
     pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
+        // Worker editor windows (no router above them) draw their
+        // own header; routed pages inherit the router's — drawing
+        // it here too would double it.
+        if self.page.is_none() {
+            crate::header::show(ui, crate::header::Doc::Editor, None);
+        }
         // Side panel. Must come before CentralPanel so egui reserves
         // the right-hand strip (the retired top rail's reservation,
         // rotated). Pods, chips, and the `+` popup live in

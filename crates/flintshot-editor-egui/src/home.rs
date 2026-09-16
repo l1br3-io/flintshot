@@ -172,6 +172,12 @@ impl HomeApp {
         ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
+    /// The status line's current text (the header's overflow menu
+    /// surfaces it on the Home route).
+    pub(crate) fn status_line(&self) -> String {
+        self.ui.status.clone()
+    }
+
     /// Poll one directive from the home bridge — the window router
     /// owns directive handling on the Loading route, where no route
     /// app is live (see `crate::window`).

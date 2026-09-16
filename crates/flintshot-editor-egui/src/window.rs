@@ -386,6 +386,18 @@ impl WindowApp {
 
     /// Headless-callable core of [`App::ui`].
     pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
+        // The header spans every route (home, editor, loading) —
+        // one identity line across the window's whole life.
+        let doc = match &self.route {
+            Route::Home => crate::header::Doc::Home,
+            Route::Editor(..) | Route::Loading => crate::header::Doc::Editor,
+        };
+        let status = if matches!(self.route, Route::Home) {
+            Some(self.home.status_line())
+        } else {
+            None
+        };
+        crate::header::show(ui, doc, status.as_deref());
         match &self.route {
             Route::Home => self.home.ui_impl(ui),
             Route::Editor(..) => {}
