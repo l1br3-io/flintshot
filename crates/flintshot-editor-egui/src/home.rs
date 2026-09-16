@@ -291,10 +291,14 @@ impl HomeApp {
     pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.add_space(6.0);
-            ui.heading("flintshot");
+            ui.heading(
+                egui::RichText::new("flintshot")
+                    .size(theme::TYPE_TITLE)
+                    .strong(),
+            );
             ui.label(
                 egui::RichText::new("captures hide this window and return when done")
-                    .color(theme::SLATE)
+                    .color(theme::palette::INK_SOFT)
                     .small(),
             );
             ui.add_space(10.0);
@@ -302,10 +306,10 @@ impl HomeApp {
             let tall = egui::vec2(ui.available_width(), 42.0);
             let capture = egui::Button::new(
                 egui::RichText::new("Capture  [C]")
-                    .color(theme::INK)
+                    .color(theme::palette::CUTOUT_WHITE)
                     .strong(),
             )
-            .fill(theme::EMBER)
+            .fill(theme::palette::FOREST_DEEP)
             .min_size(tall);
             if ui.add(capture).clicked() {
                 self.start_capture(ui.ctx());
@@ -315,7 +319,7 @@ impl HomeApp {
 
             let open = egui::Button::new(
                 egui::RichText::new("Open…  [O]")
-                    .color(theme::CHALK)
+                    .color(theme::palette::INK)
                     .strong(),
             )
             .min_size(egui::vec2(ui.available_width(), 34.0));
@@ -328,7 +332,7 @@ impl HomeApp {
                 ui.add_space(4.0);
                 let paste = egui::Button::new(
                     egui::RichText::new("Paste  [P]")
-                        .color(theme::CHALK)
+                        .color(theme::palette::INK)
                         .strong(),
                 )
                 .min_size(egui::vec2(ui.available_width(), 34.0));
@@ -344,7 +348,7 @@ impl HomeApp {
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(&self.ui.status)
-                        .color(theme::SLATE)
+                        .color(theme::palette::INK_SOFT)
                         .small(),
                 );
             });

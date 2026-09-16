@@ -23,7 +23,7 @@ pub(crate) enum MoveChromeKind {
     /// Pointer rests on an annotation: dashed 1 px outline, the
     /// "grab me" invitation.
     Hover,
-    /// A dispatcher move drag is live: solid ember outline tracking
+    /// A dispatcher move drag is live: solid forest outline tracking
     /// the grabbed annotation — the active-object emphasis.
     Grab,
 }
@@ -56,7 +56,7 @@ pub(crate) fn move_chrome(
 }
 
 /// Paint a chrome rect (screen-logical, shell-transformed) in its
-/// kind's visual: the theme's dashed hover stroke or the solid ember
+/// kind's visual: the theme's dashed hover stroke or the solid forest
 /// grab stroke, padded off the annotation's own ink so the outline
 /// never overlaps what it outlines.
 pub(crate) fn paint_move_chrome(painter: &egui::Painter, rect: egui::Rect, kind: MoveChromeKind) {
@@ -96,7 +96,7 @@ pub(crate) fn selected_chrome(state: &EditorState) -> Option<Rect> {
 }
 
 /// Paint the persistent-selection outline (screen-logical,
-/// shell-transformed): 1 px dashed ember on the move chrome's dash /
+/// shell-transformed): 1 px dashed forest on the move chrome's dash /
 /// pad rhythm, over the shared render output with the other chrome —
 /// editor-only by construction, never in composed output.
 pub(crate) fn paint_selected_chrome(painter: &egui::Painter, rect: egui::Rect) {

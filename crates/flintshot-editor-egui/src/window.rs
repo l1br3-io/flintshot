@@ -407,7 +407,7 @@ fn draw_loading(ui: &mut egui::Ui) {
             ui.add(egui::Spinner::new());
             ui.label(
                 egui::RichText::new(LOADING_STATUS)
-                    .color(crate::theme::SLATE)
+                    .color(crate::theme::palette::INK_SOFT)
                     .small(),
             );
         });

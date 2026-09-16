@@ -83,7 +83,7 @@
 //! freehand · labels · redact, no capture `+`) plus a history pod
 //! (undo / redo / delete), each its own island; row 2 reads as two
 //! islands: the ✓ / ✕ pair and the outputs (Save / Upload,
-//! and the ember Copy primary — Copy is Enter-equivalent: the spec
+//! and the forest Copy primary — Copy is Enter-equivalent: the spec
 //! pins Enter = Copy). The toolbar shows only while a usable
 //! selection exists and no fresh region drag runs, and swallows
 //! pointer presses before chrome interception so chip clicks never
@@ -646,7 +646,7 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
 
 /// The floating toolbar's accept row, read as two islands: the ✓
 /// accept (Enter semantics) / ✕ cancel (Esc semantics) pair, then
-/// the outputs (Save / Upload and the ember Copy primary).
+/// the outputs (Save / Upload and the forest Copy primary).
 /// Copy is Enter-equivalent (spec: Enter = Copy); the output
 /// chips' pipelines are the Task 006 flows described in the module
 /// docs.
@@ -1109,7 +1109,7 @@ impl OverlayApp {
     /// editor rail's pod islands): row 1 walks the shared tool pods
     /// plus a history pod; row 2 reads as two islands — ✓ accept
     /// (Enter semantics) / ✕ cancel (Esc semantics), then the
-    /// outputs Save / Upload and the ember Copy primary. Copy
+    /// outputs Save / Upload and the forest Copy primary. Copy
     /// is Enter-equivalent (spec: Enter = Copy).
     fn show_toolbar(
         &mut self,
@@ -1130,10 +1130,10 @@ impl OverlayApp {
             .fixed_pos(anchor)
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(crate::theme::GRAPHITE_900)
+                    .fill(crate::theme::palette::PAPER_CREAM)
                     .inner_margin(egui::Margin::symmetric(8, 5))
-                    .corner_radius(egui::CornerRadius::same(8))
-                    .stroke(egui::Stroke::new(1.0, crate::theme::GRAPHITE_500))
+                    .corner_radius(egui::CornerRadius::same(crate::theme::POD_RADIUS))
+                    .stroke(crate::theme::HAIRLINE_STROKE)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             action = overlay_rail_row(ui, &mut self.state);
@@ -1456,7 +1456,7 @@ impl OverlayApp {
         }
 
         // Move-tool object chrome (prominent-move spec): dashed hover
-        // outline / solid ember grab outline, painted under the
+        // outline / solid forest grab outline, painted under the
         // selection handles and badge so the region chrome stays
         // legible over it. Computed in `pointer_and_chrome` this
         // frame; `None` paints nothing.
@@ -1466,7 +1466,7 @@ impl OverlayApp {
         }
 
         // Persistent-selection outline (annotation-delete spec): the
-        // selected annotation's bbox as a dashed ember rect, right
+        // selected annotation's bbox as a dashed forest rect, right
         // after the move chrome in the overlay's chrome order — the
         // editor window's ordering. Chrome-only by construction (the
         // shell's paint pass, never the clipped render / composed
@@ -2454,23 +2454,30 @@ mod tests {
         (a.center().y - b.center().y).abs() < 0.01
     }
 
-    /// Count the pod-island fills a frame painted: rounded
-    /// `GRAPHITE_800` rects at the theme's pod corner radius — the
-    /// visual signature of [`toolbar::pod_island`].
+    /// Count the pod-island fills a frame painted: rounded white
+    /// cutout rects at the theme's pod corner radius — the visual
+    /// signature of [`toolbar::pod_island`]. Frames with shadows
+    /// wrap their shapes in `Shape::Vec`, so the collect recurses.
     fn island_count(output: &egui::FullOutput) -> usize {
-        output
-            .shapes
-            .iter()
-            .filter(|cs| match &cs.shape {
-                egui::Shape::Rect(egui::epaint::RectShape {
-                    fill,
-                    corner_radius,
-                    ..
-                }) => {
-                    *fill == crate::theme::GRAPHITE_800
-                        && *corner_radius == egui::CornerRadius::same(crate::theme::POD_CORNER)
+        fn collect<'a>(
+            shapes: impl Iterator<Item = &'a egui::Shape>,
+            out: &mut Vec<&'a egui::epaint::RectShape>,
+        ) {
+            for shape in shapes {
+                match shape {
+                    egui::Shape::Rect(r) => out.push(r),
+                    egui::Shape::Vec(v) => collect(v.iter(), out),
+                    _ => {}
                 }
-                _ => false,
+            }
+        }
+        let mut rects = Vec::new();
+        collect(output.shapes.iter().map(|cs| &cs.shape), &mut rects);
+        rects
+            .iter()
+            .filter(|r| {
+                r.fill == crate::theme::palette::CUTOUT_WHITE
+                    && r.corner_radius == egui::CornerRadius::same(crate::theme::POD_RADIUS)
             })
             .count()
     }
@@ -2511,7 +2518,7 @@ mod tests {
         assert_eq!(
             islands,
             toolbar::TOOL_PODS.len() + 1,
-            "every pod renders as its own GRAPHITE_800 island"
+            "every pod renders as its own white cutout island"
         );
         // One row: shared centre line, strictly left to right.
         for w in rects.windows(2) {
@@ -2597,7 +2604,7 @@ mod tests {
         let upload = rect("overlay_upload");
         let copy = ctx
             .read_response(egui::Id::new("copy_action"))
-            .expect("the ember Copy primary stays in the outputs island")
+            .expect("the forest Copy primary stays in the outputs island")
             .rect;
         // One row, Copy trailing the outputs.
         for w in [accept, cancel, save, upload, copy].windows(2) {

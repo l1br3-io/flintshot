@@ -1,10 +1,10 @@
 //! The editor toolbar: a two-row instrument panel.
 //!
 //! **Rail** (top, stable across tools): semantically grouped pods,
-//! each a rounded graphite island separated by gaps — capture `+` ·
+//! each a white cutout island separated by gaps — capture `+` ·
 //! selection (Move, Select) · shapes · freehand · labels · redact ·
 //! history (undo / redo / delete) · outputs (Save, Upload, and
-//! the ember Copy primary, right-aligned). **Bay** (bottom,
+//! the forest Copy primary, right-aligned). **Bay** (bottom,
 //! per-tool): only the controls the active tool can use, plus a
 //! contextual hint on the right.
 //!
@@ -250,7 +250,7 @@ pub(crate) fn show(
     page_actions: bool,
 ) -> (ToolbarAction, Option<PageChromeAction>) {
     let frame = egui::Frame::new()
-        .fill(theme::GRAPHITE_900)
+        .fill(theme::palette::PAPER_CREAM)
         .inner_margin(egui::Margin::symmetric(8, 5));
     egui::Panel::top("editor_toolbar")
         .frame(frame)
@@ -287,16 +287,18 @@ const REPLACE_HINT: &str = "new content replaces the image — unsaved edits are
 // Rail
 // ------------------------------------------------------------------
 
-/// Wrap a pod's chips in a rounded graphite island — the grouping
-/// container shared by the editor rail and the overlay's floating
-/// tool row. The inner layout is pinned left-to-right so the helper
-/// works inside the outputs island's right-to-left anchor layout
-/// too.
+/// Wrap a pod's chips in a rounded white cutout island — the
+/// grouping container shared by the editor rail and the overlay's
+/// floating tool row. The inner layout is pinned left-to-right so
+/// the helper works inside the outputs island's right-to-left
+/// anchor layout too.
 pub(crate) fn pod_island<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::new()
-        .fill(theme::GRAPHITE_800)
-        .corner_radius(CornerRadius::same(theme::POD_CORNER))
+        .fill(theme::palette::CUTOUT_WHITE)
+        .corner_radius(CornerRadius::same(theme::POD_RADIUS))
         .inner_margin(egui::Margin::same(theme::POD_PAD))
+        .stroke(theme::HAIRLINE_STROKE)
+        .shadow(theme::SHADOW_RESTING)
         .show(ui, |ui| {
             ui.with_layout(
                 egui::Layout::left_to_right(egui::Align::Center),
@@ -494,10 +496,10 @@ fn new_capture_chip(
 
 /// One text row in the `+` popup: an explicit-id button (the
 /// two-pass click-test pattern reads these ids back), quiet at rest
-/// and graphite on hover — a menu row, not a chip. Fixed-width rows
-/// keep the popup at its `set_min_width` (an `available_width` row
-/// would stretch it toward the screen edge). `hint` rides the hover
-/// tooltip.
+/// and cream-tinted on hover — a menu row, not a chip. Fixed-width
+/// rows keep the popup at its `set_min_width` (an `available_width`
+/// row would stretch it toward the screen edge). `hint` rides the
+/// hover tooltip.
 fn popup_button(ui: &mut egui::Ui, id: egui::Id, label: &str, hint: Option<&str>) -> bool {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 20.0), Sense::hover());
     let mut resp = ui.interact(rect, id, Sense::click());
@@ -505,7 +507,7 @@ fn popup_button(ui: &mut egui::Ui, id: egui::Id, label: &str, hint: Option<&str>
         resp = resp.on_hover_text(hint);
     }
     let fill = if resp.hovered() {
-        theme::GRAPHITE_500
+        theme::palette::HOLIDAY_FAINT
     } else {
         Color32::TRANSPARENT
     };
@@ -520,14 +522,14 @@ fn popup_button(ui: &mut egui::Ui, id: egui::Id, label: &str, hint: Option<&str>
         rect.left_center() + egui::vec2(6.0, 0.0),
         Align2::LEFT_CENTER,
         label,
-        FontId::proportional(12.5),
-        theme::CHALK,
+        FontId::proportional(theme::TYPE_BODY),
+        theme::palette::INK,
     );
     resp.clicked()
 }
 
 /// Output actions as the right-aligned outputs island: Save /
-/// Upload as quiet icon chips, Copy as the ember primary (the
+/// Upload as quiet icon chips, Copy as the forest primary (the
 /// dominant terminal action for screenshot flows). The right-to-
 /// left anchor layout only places the island; inside it the chips
 /// run left-to-right in visual order. On a successful copy the
@@ -589,7 +591,7 @@ fn hairline(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), Sense::hover());
     ui.painter().line_segment(
         [rect.left_center(), rect.right_center()],
-        Stroke::new(1.0, theme::GRAPHITE_500),
+        theme::HAIRLINE_STROKE,
     );
 }
 
@@ -600,8 +602,8 @@ fn select_bay(ui: &mut egui::Ui, state: &mut EditorState) {
     if let Some(n) = sel.filter(|n| n.width().abs() >= 1.0 && n.height().abs() >= 1.0) {
         ui.label(
             egui::RichText::new(dims_label(n))
-                .color(theme::CHALK)
-                .size(12.0),
+                .color(theme::palette::INK)
+                .size(theme::TYPE_CAPTION),
         );
         if ui.button("Crop · Enter").clicked() {
             state.confirm_selection();
@@ -646,7 +648,7 @@ fn text_bay(ui: &mut egui::Ui, state: &mut EditorState) {
 }
 
 /// Blur kind segmented control; the selected segment inherits the
-/// ember selection visuals from the theme.
+/// forest selection visuals from the theme.
 fn blur_bay(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.selectable_value(&mut state.blur_kind, BlurKind::Gaussian, "Gaussian");
     ui.selectable_value(&mut state.blur_kind, BlurKind::Pixelate, "Pixelate");
@@ -661,7 +663,11 @@ fn text_style_popup(ui: &mut egui::Ui, state: &mut EditorState) {
         .spacing([10.0, 5.0])
         .show(ui, |ui| {
             let head = |ui: &mut egui::Ui, text: &str| {
-                ui.label(egui::RichText::new(text).size(12.0).color(theme::SLATE));
+                ui.label(
+                    egui::RichText::new(text)
+                        .size(theme::TYPE_CAPTION)
+                        .color(theme::palette::INK_SOFT),
+                );
             };
             head(ui, "Family");
             ui.horizontal(|ui| {
@@ -724,12 +730,16 @@ fn text_style_popup(ui: &mut egui::Ui, state: &mut EditorState) {
     });
 }
 
-/// Contextual hint, right-aligned in slate. Replaces the old static
+/// Contextual hint, right-aligned in soft ink. Replaces the old static
 /// "Drag to draw · Ctrl+Z undo · Esc cancel" row with guidance that
 /// is true for the selected tool.
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.label(egui::RichText::new(text).color(theme::SLATE).size(12.0));
+        ui.label(
+            egui::RichText::new(text)
+                .color(theme::palette::INK_SOFT)
+                .size(theme::TYPE_CAPTION),
+        );
     });
 }
 
@@ -756,12 +766,13 @@ fn dims_label(rect: flintshot_core::Rect) -> String {
 // Chips
 // ------------------------------------------------------------------
 
-/// A 28×28 icon chip: graphite at rest, lighter on hover, ember
-/// when selected. The selected glyph flips to ink, reading as a
-/// spark cut out of the panel — the toolbar's only color besides
-/// the Copy primary. A disabled chip (`enabled == false`) drops
-/// its border, dims its glyph, and downgrades to hover-only so the
-/// tooltip (lock clause included) still explains itself.
+/// A 28×28 icon chip: white cutout at rest, cream with a gold ring
+/// on hover, forest when selected. The selected glyph flips to
+/// white, reading as cut out of the panel — the pop-up-book active
+/// state. A disabled chip (`enabled == false`) keeps its hairline
+/// (a borderless white chip would vanish into its white pod), dims
+/// its glyph, and downgrades to hover-only so the tooltip (lock
+/// clause included) still explains itself.
 pub(crate) fn chip(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -783,32 +794,34 @@ pub(crate) fn chip(
         )
         .on_hover_text(tooltip);
     let fill = if selected {
-        theme::EMBER
+        theme::palette::FOREST_DEEP
     } else if enabled && resp.hovered() {
-        theme::GRAPHITE_500
+        theme::palette::HOLIDAY_FAINT
     } else {
-        theme::GRAPHITE_700
+        theme::palette::CUTOUT_WHITE
     };
-    let border = if selected || !enabled {
+    let border = if selected {
         Stroke::NONE
+    } else if enabled && resp.hovered() {
+        Stroke::new(1.25, theme::palette::AUTUMN_GOLD)
     } else {
-        Stroke::new(1.0, theme::GRAPHITE_500)
+        theme::HAIRLINE_STROKE
     };
     ui.painter().rect(
         rect,
-        CornerRadius::same(6),
+        CornerRadius::same(theme::CHIP_RADIUS),
         fill,
         border,
         StrokeKind::Middle,
     );
     let color = if !enabled {
-        theme::SLATE.gamma_multiply(0.5)
+        theme::palette::INK_SOFT.gamma_multiply(0.5)
     } else if selected {
-        theme::INK
+        theme::palette::CUTOUT_WHITE
     } else if resp.hovered() {
-        theme::CHALK
+        theme::palette::INK
     } else {
-        theme::SLATE
+        theme::palette::INK_SOFT
     };
     glyph(ui.painter(), rect, color);
     resp
@@ -834,9 +847,10 @@ fn labeled_chip_width(label_width: f32) -> f32 {
 /// A labeled tool chip — [`chip`]'s glyph plus text, following the
 /// Copy-primary's glyph+label pattern (`copy_chip`): 28 px tall,
 /// galley-measured width, same rest / hover / selected visuals as
-/// `chip` (ember selected, graphite otherwise). The label is the
+/// `chip` (forest selected, white otherwise). The label is the
 /// emphasis, not new color. Renders the Move chip in both rails.
-/// Disabled state mirrors [`chip`]'s (no border, dimmed, hover-only).
+/// Disabled state mirrors [`chip`]'s (hairline border, dimmed,
+/// hover-only).
 pub(crate) fn labeled_chip(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -846,9 +860,11 @@ pub(crate) fn labeled_chip(
     glyph: Glyph,
     enabled: bool,
 ) -> egui::Response {
-    let galley =
-        ui.painter()
-            .layout_no_wrap(label.to_owned(), FontId::proportional(13.0), theme::CHALK);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        FontId::proportional(theme::TYPE_BODY),
+        theme::palette::INK,
+    );
     let galley_size = galley.size();
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(labeled_chip_width(galley_size.x), 28.0),
@@ -866,32 +882,34 @@ pub(crate) fn labeled_chip(
         )
         .on_hover_text(tooltip);
     let fill = if selected {
-        theme::EMBER
+        theme::palette::FOREST_DEEP
     } else if enabled && resp.hovered() {
-        theme::GRAPHITE_500
+        theme::palette::HOLIDAY_FAINT
     } else {
-        theme::GRAPHITE_700
+        theme::palette::CUTOUT_WHITE
     };
-    let border = if selected || !enabled {
+    let border = if selected {
         Stroke::NONE
+    } else if enabled && resp.hovered() {
+        Stroke::new(1.25, theme::palette::AUTUMN_GOLD)
     } else {
-        Stroke::new(1.0, theme::GRAPHITE_500)
+        theme::HAIRLINE_STROKE
     };
     ui.painter().rect(
         rect,
-        CornerRadius::same(6),
+        CornerRadius::same(theme::CHIP_RADIUS),
         fill,
         border,
         StrokeKind::Middle,
     );
     let color = if !enabled {
-        theme::SLATE.gamma_multiply(0.5)
+        theme::palette::INK_SOFT.gamma_multiply(0.5)
     } else if selected {
-        theme::INK
+        theme::palette::CUTOUT_WHITE
     } else if resp.hovered() {
-        theme::CHALK
+        theme::palette::INK
     } else {
-        theme::SLATE
+        theme::palette::INK_SOFT
     };
     let glyph_rect = egui::Rect::from_min_size(rect.min, egui::vec2(LABEL_GLYPH_EDGE, 28.0));
     glyph(ui.painter(), glyph_rect, color);
@@ -903,15 +921,17 @@ pub(crate) fn labeled_chip(
     resp
 }
 
-/// The ember Copy primary: wider chip with a glyph + label. The
+/// The forest Copy primary: wider chip with a glyph + label. The
 /// glyph morphs to a checkmark once a copy has succeeded this
 /// session, pairing with the "Copied" label. Shared with the
 /// overlay's accept row.
 pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
     let label = if copied { "Copied" } else { "Copy" };
-    let galley =
-        ui.painter()
-            .layout_no_wrap(label.to_owned(), FontId::proportional(13.0), theme::INK);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        FontId::proportional(theme::TYPE_BODY),
+        theme::palette::CUTOUT_WHITE,
+    );
     let galley_size = galley.size();
     let width = 10.0 + 18.0 + 5.0 + galley_size.x + 10.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), Sense::hover());
@@ -920,8 +940,8 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
         .on_hover_text("Copy · Ctrl+C");
     ui.painter().rect(
         rect,
-        CornerRadius::same(6),
-        theme::EMBER,
+        CornerRadius::same(theme::CHIP_RADIUS),
+        theme::palette::FOREST_DEEP,
         Stroke::NONE,
         StrokeKind::Middle,
     );
@@ -930,19 +950,20 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
         egui::vec2(18.0, 28.0),
     );
     let glyph = if copied { g_check } else { g_copy };
-    glyph(ui.painter(), glyph_rect, theme::INK);
+    glyph(ui.painter(), glyph_rect, theme::palette::CUTOUT_WHITE);
     let pos = egui::pos2(
         glyph_rect.right() + 5.0,
         rect.center().y - galley_size.y / 2.0,
     );
-    ui.painter().galley(pos, galley, theme::INK);
+    ui.painter()
+        .galley(pos, galley, theme::palette::CUTOUT_WHITE);
     resp
 }
 
 /// The seven color presets plus a custom-color chip whose popup
 /// hosts egui's full sRGB editor.
 fn swatch_row(ui: &mut egui::Ui, color: &mut Color) {
-    for sw in theme::SWATCHES {
+    for sw in theme::palette::SWATCHES {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
         let selected = to_color32(*color) == sw;
         let resp = ui.interact(
@@ -951,9 +972,9 @@ fn swatch_row(ui: &mut egui::Ui, color: &mut Color) {
             Sense::click(),
         );
         let ring = if selected {
-            Stroke::new(2.0, theme::EMBER)
+            Stroke::new(2.0, theme::palette::FOREST_DEEP)
         } else {
-            Stroke::new(1.0, theme::GRAPHITE_500)
+            theme::HAIRLINE_STROKE
         };
         ui.painter()
             .rect(rect, CornerRadius::same(4), sw, ring, StrokeKind::Middle);
@@ -973,11 +994,11 @@ fn custom_color_chip(ui: &mut egui::Ui, color: &mut Color) {
     ui.painter().rect(
         rect,
         CornerRadius::same(4),
-        theme::GRAPHITE_700,
-        Stroke::new(1.0, theme::GRAPHITE_500),
+        theme::palette::CUTOUT_WHITE,
+        theme::HAIRLINE_STROKE,
         StrokeKind::Middle,
     );
-    g_plus(ui.painter(), rect, theme::CHALK);
+    g_plus(ui.painter(), rect, theme::palette::INK);
     let mut rgb = [color.r, color.g, color.b];
     egui::Popup::from_toggle_button_response(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -997,18 +1018,22 @@ fn stroke_chips(ui: &mut egui::Ui, state: &mut EditorState) {
         let selected = (state.stroke_width - preset).abs() < 0.001;
         let resp = ui.interact(rect, egui::Id::new(("stroke", i)), Sense::click());
         let fill = if selected || resp.hovered() {
-            theme::GRAPHITE_500
+            theme::palette::HOLIDAY_FAINT
         } else {
-            theme::GRAPHITE_700
+            theme::palette::CUTOUT_WHITE
         };
         ui.painter().rect(
             rect,
-            CornerRadius::same(5),
+            CornerRadius::same(theme::CHIP_RADIUS),
             fill,
-            Stroke::new(1.0, theme::GRAPHITE_500),
+            theme::HAIRLINE_STROKE,
             StrokeKind::Middle,
         );
-        let dot = if selected { theme::EMBER } else { theme::CHALK };
+        let dot = if selected {
+            theme::palette::FOREST_DEEP
+        } else {
+            theme::palette::INK
+        };
         ui.painter()
             .circle(rect.center(), preset / 2.0 + 1.2, dot, Stroke::NONE);
         if resp.clicked() {
@@ -1747,23 +1772,30 @@ mod tests {
         b.min.x - a.max.x
     }
 
-    /// The pod-island fills a frame painted: rounded `GRAPHITE_800`
-    /// rects at the theme's pod corner radius — the visual signature
-    /// of [`pod_island`].
+    /// The pod-island fills a frame painted: rounded white cutout
+    /// rects at the theme's pod corner radius — the visual
+    /// signature of [`pod_island`]. Frames with shadows wrap their
+    /// shapes in `Shape::Vec`, so the collect recurses.
     fn island_count(output: &egui::FullOutput) -> usize {
-        output
-            .shapes
-            .iter()
-            .filter(|cs| match &cs.shape {
-                egui::Shape::Rect(egui::epaint::RectShape {
-                    fill,
-                    corner_radius,
-                    ..
-                }) => {
-                    *fill == theme::GRAPHITE_800
-                        && *corner_radius == egui::CornerRadius::same(theme::POD_CORNER)
+        fn collect<'a>(
+            shapes: impl Iterator<Item = &'a egui::Shape>,
+            out: &mut Vec<&'a egui::epaint::RectShape>,
+        ) {
+            for shape in shapes {
+                match shape {
+                    egui::Shape::Rect(r) => out.push(r),
+                    egui::Shape::Vec(v) => collect(v.iter(), out),
+                    _ => {}
                 }
-                _ => false,
+            }
+        }
+        let mut rects = Vec::new();
+        collect(output.shapes.iter().map(|cs| &cs.shape), &mut rects);
+        rects
+            .iter()
+            .filter(|r| {
+                r.fill == theme::palette::CUTOUT_WHITE
+                    && r.corner_radius == egui::CornerRadius::same(theme::POD_RADIUS)
             })
             .count()
     }
@@ -1804,7 +1836,7 @@ mod tests {
         assert_eq!(
             islands,
             TOOL_PODS.len() + 3,
-            "every rail pod renders as its own GRAPHITE_800 island"
+            "every rail pod renders as its own white cutout island"
         );
         // One row, strictly left to right across the whole rail.
         for w in rects.windows(2) {
