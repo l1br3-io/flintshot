@@ -8,6 +8,6 @@
 - [x] 006 floating-controls
 - [x] 007 contextual-options-popover
 - [x] 008 export-cluster
-- [ ] 009 header-bar
+- [x] 009 header-bar
 - [ ] 010 welcome-screen
 - [ ] 011 final-sweep
