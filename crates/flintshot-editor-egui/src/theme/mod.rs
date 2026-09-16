@@ -9,6 +9,14 @@
 //! the light theme — the dark "deep forest" variant is a planned
 //! follow-up effort, not a runtime choice.
 
+// The motion + texture primitives ship ahead of their first
+// consumers (hover-lift and pop-in land with the side panel /
+// floating controls; grain with the welcome surfaces). Drop these
+// allows when those land.
+#[allow(dead_code)]
+pub(crate) mod ease;
+#[allow(dead_code)]
+pub(crate) mod grain;
 pub(crate) mod palette;
 
 use egui::{Context, CornerRadius, Stroke};
