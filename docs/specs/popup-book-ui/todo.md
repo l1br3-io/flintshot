@@ -1,6 +1,6 @@
 # todo
 
-- [ ] 001 theme-token-module
+- [x] 001 theme-token-module
 - [ ] 002 jakarta-fonts
 - [ ] 003 motion-texture-primitives
 - [ ] 004 core-recents
