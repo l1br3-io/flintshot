@@ -20,6 +20,12 @@ Categories used below:
 
 ### Added
 
+- **Collapsible editor side panel**: a `«`/`»` toggle in the
+  panel's action row collapses the docked panel to a 44 px glyph
+  rail (every tool, `+`, and the export/copy actions stay live;
+  tooltips and ids unchanged) and back. The worker window's
+  image-fit resize follows the live panel width, so a collapsed
+  rail never keeps re-issuing the expanded size.
 - **Pop-up book UI — design-token system + editor/home redesign**
   (spec `docs/specs/popup-book-ui/`): one centralized theme
   (`theme/` — cream paper, white cutout cards with 8px borders,
@@ -42,6 +48,11 @@ Categories used below:
 
 ### Changed
 
+- **Editor side panel reads as one docked sidebar** (revises
+  `popup-book-ui` task 005's per-pod cards): the five tool pods
+  are now rows of a **single** white cutout card separated by
+  hairlines, replacing the seven disjointed shadowed islands; the
+  per-pod hover-lift microinteraction is gone with them.
 - **One window for everything — `flintshot app` routes instead of
   spawning** (ADR-0053/0054, specs `docs/specs/single-window/`,
   `docs/specs/editor-capture-ux/`): the app window is a page router
@@ -212,6 +223,14 @@ Categories used below:
 
 ### Fixed
 
+- **Bottom cluster layout bug in the editor side panel**: the
+  export pod island inside the panel's bottom-up layout stretched
+  to fill all remaining height (up to a third of the window,
+  overlapping the history island) — an `egui::Frame` in a
+  `bottom_up` layout grabs the whole remaining column. Delete /
+  Save / Upload now share one exact-height island row with the
+  Copy hero pinned below, pinned by a regression test at multiple
+  window heights.
 - **Confirming the OS screenshot UI with Copy no longer kills the
   capture** (spec `docs/specs/portal-clipboard-uri/`): COSMIC's
   portal answers a Copy-confirmed grab with `clipboard:///` — the
