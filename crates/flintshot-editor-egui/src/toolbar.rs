@@ -1163,7 +1163,7 @@ fn g_text(p: &egui::Painter, r: egui::Rect, c: Color32) {
         r.center(),
         Align2::CENTER_CENTER,
         "T",
-        FontId::proportional(15.0),
+        FontId::proportional(theme::TYPE_TITLE),
         c,
     );
 }
@@ -1186,7 +1186,7 @@ fn g_number(p: &egui::Painter, r: egui::Rect, c: Color32) {
         pt(r, 0.0, 0.5),
         Align2::CENTER_CENTER,
         "1",
-        FontId::proportional(10.0),
+        FontId::proportional(theme::TYPE_CAPTION),
         c,
     );
 }
