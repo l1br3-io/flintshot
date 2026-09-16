@@ -16,8 +16,8 @@
 //!   entered via [`EguiShell::run_overlay`].
 //! - [`shell`] — the public `EguiShell` (`impl EditorShell`) that
 //!   owns the eframe lifecycle and the outcome slot.
-//! - `theme` (private) — the graphite + ember token set and `Visuals`
-//!   applied to every editor window.
+//! - `theme` (private) — the pop-up book design-token system (cream
+//!   paper, white cutouts, forest accents) applied to every window.
 //! - `toolbar` (private) — the rail + bay toolbar drawn by `app`.
 //!
 //! Phase 1 Task 4 filled in the background-blit path (canvas module);
