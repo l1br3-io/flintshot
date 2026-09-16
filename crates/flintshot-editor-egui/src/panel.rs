@@ -313,12 +313,19 @@ fn fill_toggle(ui: &mut egui::Ui, state: &mut EditorState) {
     }
 }
 
-/// The bottom cluster: history (undo / redo / delete) above the
-/// outputs (Save / Upload / the forest Copy primary). Restyled as
-/// the export cluster with its own task; chips relocated as-is.
+/// The bottom cluster: the export group (Copy hero below, Save /
+/// Upload secondaries above it) with the Delete history pod
+/// topmost. Existing handlers are reused untouched — this is
+/// arrangement + emphasis, not behavior. Pin stays out (the
+/// pin-to-desktop feature was removed before this effort; the
+/// spec's Gradia-derived mention is a stale carryover).
 fn bottom_actions(ui: &mut egui::Ui, copied: bool, delete_enabled: bool) -> ToolbarAction {
     let mut action = ToolbarAction::None;
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+        if copy_hero(ui, copied).clicked() {
+            action = ToolbarAction::Copy;
+        }
+        ui.add_space(theme::POD_GAP);
         pod_island(ui, |ui| {
             if chip(
                 ui,
@@ -334,9 +341,6 @@ fn bottom_actions(ui: &mut egui::Ui, copied: bool, delete_enabled: bool) -> Tool
             }
             if chip(ui, egui::Id::new("upload"), "Upload", false, g_upload, true).clicked() {
                 action = ToolbarAction::Upload;
-            }
-            if copy_chip(ui, copied).clicked() {
-                action = ToolbarAction::Copy;
             }
         });
         ui.add_space(theme::POD_GAP);
@@ -361,6 +365,48 @@ fn bottom_actions(ui: &mut egui::Ui, copied: bool, delete_enabled: bool) -> Tool
         });
     });
     action
+}
+
+/// The Copy hero: a full-width forest card with the 8 px cutout
+/// border and a resting shadow — the instant annotate-and-copy
+/// anchor, visually the loudest control in the panel. The glyph
+/// morphs to a check and the label reads "Copied" once a copy has
+/// succeeded this session (the copied-state feedback contract).
+fn copy_hero(ui: &mut egui::Ui, copied: bool) -> egui::Response {
+    let width = ui.available_width().max(120.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 40.0), egui::Sense::hover());
+    let resp = ui
+        .interact(rect, egui::Id::new("copy_action"), egui::Sense::click())
+        .on_hover_text("Copy · Ctrl+C");
+    let radius = egui::CornerRadius::same(theme::POD_RADIUS);
+    ui.painter()
+        .add(theme::SHADOW_RESTING.as_shape(rect, radius));
+    ui.painter().rect(
+        rect,
+        radius,
+        theme::palette::FOREST_DEEP,
+        theme::CUTOUT_STROKE,
+        egui::StrokeKind::Inside,
+    );
+    let glyph_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 12.0, rect.top()),
+        egui::vec2(20.0, 40.0),
+    );
+    let glyph = if copied { g_check } else { g_copy };
+    glyph(ui.painter(), glyph_rect, theme::palette::CUTOUT_WHITE);
+    let label = if copied { "Copied" } else { "Copy" };
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(theme::TYPE_BODY),
+        theme::palette::CUTOUT_WHITE,
+    );
+    let pos = egui::pos2(
+        glyph_rect.right() + 6.0,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    ui.painter()
+        .galley(pos, galley, theme::palette::CUTOUT_WHITE);
+    resp
 }
 
 /// The Win11-style "new snip" affordance leading the panel. A
@@ -1773,6 +1819,81 @@ mod tests {
         assert!(
             ctx.read_response(egui::Id::new("pin")).is_none(),
             "the pin chip must not register a response"
+        );
+    }
+
+    /// Collect rect shapes a frame painted, recursing into
+    /// `Shape::Vec` (frames with shadows wrap).
+    fn collect_rect_shapes<'a>(
+        shapes: impl Iterator<Item = &'a egui::Shape>,
+        out: &mut Vec<&'a egui::epaint::RectShape>,
+    ) {
+        for shape in shapes {
+            match shape {
+                egui::Shape::Rect(r) => out.push(r),
+                egui::Shape::Vec(v) => collect_rect_shapes(v.iter(), out),
+                _ => {}
+            }
+        }
+    }
+
+    // --- Export cluster (Copy hero) ---
+
+    /// Copy renders visually primary: wider and taller than the
+    /// Save / Upload secondaries, painted forest with the 8 px
+    /// cutout border.
+    #[test]
+    fn copy_hero_renders_primary_over_secondaries() {
+        let mut state = panel_state();
+        let ctx = egui::Context::default();
+        let mut panel = PanelState::default();
+        let output = {
+            let raw = screen(1024.0, 768.0);
+            ctx.run_ui(raw, |ui| {
+                let _ = show(ui, &mut state, false, ToolGate::All, false, &mut panel);
+            })
+        };
+        let hero = ctx
+            .read_response(egui::Id::new("copy_action"))
+            .expect("the hero registers");
+        let save = ctx
+            .read_response(egui::Id::new("save"))
+            .expect("Save registers");
+        assert!(
+            hero.rect.width() > save.rect.width() * 2.0,
+            "the hero dominates: {:?} vs {:?}",
+            hero.rect,
+            save.rect
+        );
+        assert!(
+            hero.rect.height() > save.rect.height(),
+            "the hero is the tallest control"
+        );
+        // The hero card paints forest-filled with the cutout border.
+        let mut rects = Vec::new();
+        collect_rect_shapes(output.shapes.iter().map(|cs| &cs.shape), &mut rects);
+        assert!(
+            rects.iter().any(|r| {
+                r.fill == theme::palette::FOREST_DEEP
+                    && r.corner_radius == egui::CornerRadius::same(theme::POD_RADIUS)
+                    && r.stroke.color == theme::palette::CUTOUT_WHITE
+            }),
+            "the hero paints forest with a white cutout border"
+        );
+    }
+
+    /// The copied-state feedback still hangs off the same response:
+    /// a copied session renders without changing the wiring.
+    #[test]
+    fn copy_hero_renders_the_copied_state() {
+        let mut state = panel_state();
+        let ctx = egui::Context::default();
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, ToolGate::All, false, vec![]);
+        let _ = draw(&ctx, &mut state, &mut panel, ToolGate::All, true, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("copy_action")).is_some(),
+            "the hero registers under the copied flag too"
         );
     }
 
