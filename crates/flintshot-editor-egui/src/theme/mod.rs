@@ -107,6 +107,72 @@ pub(crate) const MOVE_CHROME_PAD: f32 = 3.0;
 /// Stroke-width presets behind the S / M / L dots.
 pub(crate) const STROKE_PRESETS: [f32; 3] = [2.0, 4.0, 8.0];
 
+/// Named font family for display text: Plus Jakarta Sans
+/// `ExtraBold`. egui's `FontId` has no weight axis, so the display
+/// weight lives in the family — see `font_definitions`.
+pub(crate) const FAMILY_DISPLAY: &str = "jakarta-display";
+
+/// Named font family for text annotations: the pre-Jakarta
+/// Ubuntu-led chain, pinned so the text tool's on-canvas output is
+/// unchanged by the UI re-skin (the annotation font is not the UI
+/// font).
+pub(crate) const FAMILY_ANNOTATION: &str = "annotation-sans";
+
+/// Build the app's [`egui::FontDefinitions`]: Plus Jakarta Sans
+/// (Regular / Medium / `ExtraBold`, OFL — see `assets/fonts/`)
+/// embedded via `include_bytes!`, with Jakarta Regular as the
+/// primary proportional face and the egui emoji fallbacks retained
+/// behind it. GOTCHA: the monospace family (Hack) is left at the
+/// egui default — dims readouts and Mono annotations rely on it.
+fn font_definitions() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+
+    for (name, bytes) in [
+        (
+            "PlusJakartaSans-Regular",
+            include_bytes!("../../assets/fonts/PlusJakartaSans-Regular.ttf") as &[u8],
+        ),
+        (
+            "PlusJakartaSans-Medium",
+            include_bytes!("../../assets/fonts/PlusJakartaSans-Medium.ttf"),
+        ),
+        (
+            "PlusJakartaSans-ExtraBold",
+            include_bytes!("../../assets/fonts/PlusJakartaSans-ExtraBold.ttf"),
+        ),
+    ] {
+        fonts.font_data.insert(
+            name.to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(bytes)),
+        );
+    }
+
+    // UI text: Jakarta leads the chain; the default emoji fallbacks
+    // trail for glyph coverage.
+    if let Some(chain) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        chain.insert(0, "PlusJakartaSans-Regular".to_owned());
+    }
+
+    // The old pre-Jakarta proportional chain, re-homed under a
+    // dedicated name so annotations render exactly as before.
+    fonts.families.insert(
+        egui::FontFamily::Name(FAMILY_ANNOTATION.into()),
+        vec![
+            "Ubuntu-Light".to_owned(),
+            "NotoEmoji-Regular".to_owned(),
+            "emoji-icon-font".to_owned(),
+        ],
+    );
+
+    // Display weight: ExtraBold as its own family.
+    fonts.families.insert(
+        egui::FontFamily::Name(FAMILY_DISPLAY.into()),
+        vec!["PlusJakartaSans-ExtraBold".to_owned()],
+    );
+
+    fonts
+}
+
 /// Apply the pop-up book theme to a [`Context`]. Called once per
 /// window at app construction; light-only (dark is a follow-up
 /// effort). Selected widgets and selected text inherit the forest
@@ -114,6 +180,7 @@ pub(crate) const STROKE_PRESETS: [f32; 3] = [2.0, 4.0, 8.0];
 pub(crate) fn apply(ctx: &Context) {
     ctx.set_theme(egui::ThemePreference::Light);
     ctx.set_visuals(visuals());
+    ctx.set_fonts(font_definitions());
     ctx.style_mut_of(egui::Theme::Light, |style| {
         style.spacing.button_padding = BUTTON_PADDING;
         style.spacing.item_spacing = egui::vec2(SPACE_SCALE[1], SPACE_SCALE[1]);
@@ -289,5 +356,79 @@ mod tests {
     #[test]
     fn pod_pad_grew_past_the_old_island() {
         assert!(POD_PAD > 3);
+    }
+
+    /// Jakarta Regular leads the proportional chain with the egui
+    /// emoji fallbacks intact behind it (no tofu on emoji).
+    #[test]
+    fn jakarta_leads_proportional_with_emoji_fallback() {
+        let fonts = font_definitions();
+        let chain = &fonts.families[&egui::FontFamily::Proportional];
+        assert_eq!(
+            chain.first().map(String::as_str),
+            Some("PlusJakartaSans-Regular"),
+            "Jakarta must be the primary UI face"
+        );
+        assert!(
+            chain.iter().any(|f| f.contains("emoji")),
+            "the default emoji fallbacks must survive behind Jakarta"
+        );
+    }
+
+    /// All three Jakarta weights are embedded — the spec's one
+    /// family, three weights.
+    #[test]
+    fn all_three_jakarta_weights_are_embedded() {
+        let fonts = font_definitions();
+        for name in [
+            "PlusJakartaSans-Regular",
+            "PlusJakartaSans-Medium",
+            "PlusJakartaSans-ExtraBold",
+        ] {
+            assert!(fonts.font_data.contains_key(name), "{name} missing");
+        }
+    }
+
+    /// Display text maps to its own `ExtraBold` family — egui has no
+    /// weight axis on `FontId`, so the weight lives in the family.
+    #[test]
+    fn display_family_maps_to_extra_bold() {
+        let fonts = font_definitions();
+        assert_eq!(
+            fonts.families[&egui::FontFamily::Name(FAMILY_DISPLAY.into())],
+            ["PlusJakartaSans-ExtraBold".to_owned()]
+        );
+    }
+
+    /// Annotations keep the pre-Jakarta face: their named family
+    /// pins the old Ubuntu-led chain so the text tool's output is
+    /// unchanged by the UI re-skin (the annotation font is not the
+    /// UI font).
+    #[test]
+    fn annotation_family_pins_the_pre_jakarta_face() {
+        let fonts = font_definitions();
+        let chain = &fonts.families[&egui::FontFamily::Name(FAMILY_ANNOTATION.into())];
+        assert_eq!(chain.first().map(String::as_str), Some("Ubuntu-Light"));
+        assert!(
+            chain.iter().any(|f| f.contains("emoji")),
+            "annotations keep emoji coverage"
+        );
+        assert!(
+            !chain.iter().any(|f| f.starts_with("PlusJakartaSans")),
+            "annotations must not silently become Jakarta"
+        );
+    }
+
+    /// The monospace family (Hack) stays untouched — dims readouts,
+    /// code-ish text, and Mono annotations keep their face.
+    #[test]
+    fn monospace_family_is_untouched() {
+        let fonts = font_definitions();
+        assert_eq!(
+            fonts.families[&egui::FontFamily::Monospace]
+                .first()
+                .map(String::as_str),
+            Some("Hack")
+        );
     }
 }

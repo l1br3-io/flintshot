@@ -530,11 +530,13 @@ impl Canvas for EguiCanvas {
         // `style.size` is image px; egui wants logical px for FontId,
         // and the fit scale keeps text WYSIWYG with the fitted image.
         let size = view.len(style.size);
-        // egui ships two built-in families; Serif falls back to
-        // Proportional (Sans) until a serif face is bundled — see ADR.
+        // Annotations keep the pre-Jakarta face: the theme pins the
+        // old Ubuntu-led chain under a dedicated family so the text
+        // tool's output is unchanged by the UI re-skin. Serif (and
+        // any future family) falls back to the sans annotation face.
         let family = match style.family {
             FontFamily::Monospace => egui::FontFamily::Monospace,
-            _ => egui::FontFamily::Proportional,
+            _ => egui::FontFamily::Name(crate::theme::FAMILY_ANNOTATION.into()),
         };
         let format = egui::text::TextFormat {
             font_id: egui::FontId { size, family },
@@ -600,7 +602,13 @@ impl Canvas for EguiCanvas {
     fn measure_text(&self, text: &str, style: &TextStyle) -> flintshot_core::text::TextMetrics {
         let view = self.view();
         // `style.size` is image px; egui wants logical px for FontId.
-        let font_id = egui::FontId::proportional(view.len(style.size));
+        // The family must mirror `draw_text`'s (the annotation
+        // family), or the caret measurement diverges from the drawn
+        // glyphs.
+        let font_id = egui::FontId::new(
+            view.len(style.size),
+            egui::FontFamily::Name(crate::theme::FAMILY_ANNOTATION.into()),
+        );
         // Laying out the text is the authoritative measurement path —
         // it consults the same font + shaping that `draw_text` uses, so
         // the caret lands exactly at the visible end of the run. egui's
