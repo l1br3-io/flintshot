@@ -22,8 +22,8 @@
 //!   paper, white cutouts, forest accents) applied to every window.
 //! - `panel` (private) — the docked right side panel (tools,
 //!   contextual bay, bottom actions) drawn by `app`.
-//! - `toolbar` (private) — the chip/pod/glyph primitives + bay
-//!   rows shared by the panel and the overlay's floating rows.
+//! - `popover` (private) — the color / stroke picker bay that
+//!   opens as a popover from a single pod button.
 //!
 //! Phase 1 Task 4 filled in the background-blit path (canvas module);
 //! Task 5 added the eframe shell (app + shell modules) with the
@@ -45,9 +45,9 @@ mod home;
 mod magnifier;
 mod overlay;
 mod panel;
+mod popover;
 mod shell;
 mod theme;
-mod toolbar;
 mod window;
 
 pub use canvas::{CanvasView, EguiCanvas, EguiTexture};

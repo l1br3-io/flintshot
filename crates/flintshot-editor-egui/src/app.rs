@@ -30,8 +30,7 @@ use crate::floating;
 use crate::home::HomeDirective;
 use crate::magnifier::Magnifier;
 use crate::overlay::{mask_color, mask_rects, usable_selection};
-use crate::panel;
-use crate::toolbar::{self, ToolbarAction};
+use crate::panel::{self, ToolbarAction};
 
 /// The selection-first phase's hint line (spec copy). Visible while
 /// the phase is live; every clause stays truthful for the whole
@@ -279,7 +278,7 @@ impl EditorApp {
     /// The rail's tool gate for the current frame: the live
     /// selection-first phase locks every non-Select chip (selection
     /// is the only job), and the first crop restores the full set.
-    fn rail_gate(&self) -> toolbar::ToolGate {
+    fn rail_gate(&self) -> panel::ToolGate {
         rail_gate(self.phase_active())
     }
 
@@ -1103,11 +1102,11 @@ impl EditorApp {
         // double-click).
         if let Some(page_action) = page_action {
             match page_action {
-                toolbar::PageChromeAction::Capture => {
+                panel::PageChromeAction::Capture => {
                     self.handle_new_capture(NewCaptureMode::Region, ui.ctx());
                 }
-                toolbar::PageChromeAction::Open => self.handle_page_open(ui.ctx()),
-                toolbar::PageChromeAction::Paste => self.handle_page_paste(ui.ctx()),
+                panel::PageChromeAction::Open => self.handle_page_open(ui.ctx()),
+                panel::PageChromeAction::Paste => self.handle_page_paste(ui.ctx()),
             }
         }
     }
@@ -1806,11 +1805,11 @@ fn parse_magnifier_key(name: &str) -> egui::Key {
 /// live phase locks the rail to `Select`; an ended (or never
 /// requested) phase renders the full set. Pure so the phase→gate
 /// contract is testable without a live `Ui`.
-fn rail_gate(phase_active: bool) -> toolbar::ToolGate {
+fn rail_gate(phase_active: bool) -> panel::ToolGate {
     if phase_active {
-        toolbar::ToolGate::SelectOnly
+        panel::ToolGate::SelectOnly
     } else {
-        toolbar::ToolGate::All
+        panel::ToolGate::All
     }
 }
 
@@ -1983,8 +1982,8 @@ mod tests {
     /// rail; ended / never-requested phase → full rail.
     #[test]
     fn rail_gate_tracks_phase() {
-        assert_eq!(rail_gate(true), toolbar::ToolGate::SelectOnly);
-        assert_eq!(rail_gate(false), toolbar::ToolGate::All);
+        assert_eq!(rail_gate(true), panel::ToolGate::SelectOnly);
+        assert_eq!(rail_gate(false), panel::ToolGate::All);
     }
 
     #[test]
@@ -2226,15 +2225,12 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_crop_button_path_ends_phase() {
+    fn panel_crop_button_path_ends_phase() {
         let mut app = phase_app(true);
         app.state.selection = Some(Rect::from_xywh(8.0, 8.0, 32.0, 16.0));
         app.state.confirm_selection(); // the "Crop · Enter" button's call
         app.end_phase_on_crop();
-        assert!(
-            !app.phase_active(),
-            "the toolbar crop must end the phase too"
-        );
+        assert!(!app.phase_active(), "the panel crop must end the phase too");
     }
 
     #[test]
