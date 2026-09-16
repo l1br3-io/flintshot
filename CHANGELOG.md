@@ -18,6 +18,28 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- **Pop-up book UI — design-token system + editor/home redesign**
+  (spec `docs/specs/popup-book-ui/`): one centralized theme
+  (`theme/` — cream paper, white cutout cards with 8px borders,
+  two-level painted shadows, forest accents, Plus Jakarta Sans
+  embedded under OFL, spring easing, procedural paper grain,
+  light-only). The editor's top toolbar dissolves into a docked
+  right side panel (hover-lift tool pods, contextual per-tool
+  options, color/stroke picker popover, Copy-hero export cluster)
+  plus floating on-canvas chips (undo/redo, magnifier toggle,
+  loupe zoom). The home window becomes a welcome screen: forest
+  hero capture card, persistent recents grid
+  (`flintshot-core::recents` — paths+mtimes in
+  `<config_dir>/flintshot/recents.toml`, capped at 20, dead paths
+  pruned, thumbnails never persisted), Open/Paste cards, and
+  drag-and-drop. A quiet header bar spans every surface with an
+  inert one-tab strip, a hidden AI slot, and an overflow menu.
+  Shape tools gain a fill toggle (`EditorState::fill_shapes`,
+  default outlined-only). All shortcuts, the ToolGate phase flow,
+  and the ADR-0047 capture choreography are preserved unchanged.
+
 ### Changed
 
 - **One window for everything — `flintshot app` routes instead of

@@ -46,6 +46,33 @@ pub(crate) const SHADOW_RESTING: Color32 =
 pub(crate) const SHADOW_LIFTED: Color32 =
     Color32::from_rgba_unmultiplied_const(0x22, 0x30, 0x1F, 102);
 
+/// Convert a core [`flintshot_core::geom::Color`] (unpremultiplied)
+/// into egui's premultiplied space. The converter lives here so
+/// `Color32` construction has exactly one home (the token-only
+/// scan's contract); values are runtime, not tokens.
+pub(crate) fn egui_color(c: flintshot_core::geom::Color) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
+}
+
+/// A core color forced opaque (swatch rings compare by rgb).
+pub(crate) fn opaque(c: flintshot_core::geom::Color) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r, c.g, c.b, 255)
+}
+
+/// Premultiplied egui color from raw components (thumbnail pixels,
+/// popover swatches) — runtime values, not tokens.
+pub(crate) fn premultiplied(r: u8, g: u8, b: u8, a: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+/// Functional black at `alpha` — readability chrome that must sit
+/// legibly over arbitrary screenshots (the overlay freeze mask,
+/// badge backgrounds, the loupe's border). Not a skin color; the
+/// only non-token color constructors the crate allows.
+pub(crate) fn readability_black(alpha: u8) -> Color32 {
+    Color32::from_black_alpha(alpha)
+}
+
 /// Annotation color presets shown as swatches in the picker bay:
 /// berry leads (the classic annotation default), then fox, gold,
 /// forest, sky; white and ink earn their slots for dark / light

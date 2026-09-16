@@ -234,7 +234,7 @@ const MASK_ALPHA: u8 = 128;
 /// window's selection-first phase cannot drift apart in shade.
 #[must_use]
 pub(crate) fn mask_color() -> egui::Color32 {
-    egui::Color32::from_black_alpha(MASK_ALPHA)
+    crate::theme::palette::readability_black(MASK_ALPHA)
 }
 
 /// The dim-mask coverage of `panel` minus `hole`: the four bands
@@ -1495,7 +1495,7 @@ impl OverlayApp {
                     painter.rect_stroke(
                         rect,
                         egui::CornerRadius::same(2),
-                        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(200)),
+                        egui::Stroke::new(1.0, crate::theme::palette::readability_black(200)),
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -1524,7 +1524,7 @@ impl OverlayApp {
             painter.rect_filled(
                 rect.expand(4.0),
                 egui::CornerRadius::same(3),
-                egui::Color32::from_black_alpha(200),
+                crate::theme::palette::readability_black(200),
             );
             painter.galley(rect.min, galley, egui::Color32::WHITE);
         }

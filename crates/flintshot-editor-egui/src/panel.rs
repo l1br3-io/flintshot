@@ -24,6 +24,13 @@ use crate::theme;
 /// canvas at the 1024×640 editor page default.
 pub(crate) const PANEL_WIDTH: f32 = 260.0;
 
+/// The Objects panel section (spec §forward-compat 2): reserved
+/// for multi-select grouping, hidden today — the selection model
+/// stays single-select and this section renders nothing until its
+/// spec lands. Flipping the constant is the seam's whole
+/// integration point.
+const OBJECTS_SECTION_LIVE: bool = false;
+
 /// How far a lifted card translates up, logical px.
 const LIFT_PX: f32 = 4.0;
 
@@ -76,6 +83,10 @@ pub(crate) fn show(
             let (mut action, page_action) = new_capture_chip(ui, page_actions);
             ui.add_space(theme::POD_GAP);
             tool_pods(ui, state, gate, panel, dt);
+            if OBJECTS_SECTION_LIVE {
+                // Unreachable while the seam is inert.
+                unreachable!("OBJECTS_SECTION_LIVE is false until its spec lands");
+            }
             bay(ui, state);
             let bottom = bottom_actions(ui, copied, state.selected_index.is_some());
             if action == ToolbarAction::None {
@@ -1286,7 +1297,7 @@ fn stroke_chips(ui: &mut egui::Ui, state: &mut EditorState) {
 }
 
 fn to_color32(c: Color) -> Color32 {
-    Color32::from_rgb(c.r, c.g, c.b)
+    crate::theme::palette::opaque(c)
 }
 
 fn from_color32(c: Color32) -> Color {

@@ -352,6 +352,48 @@ mod tests {
         );
     }
 
+    /// Spec success criterion 1, machine-checked: `Color32`
+    /// construction (`from_*`) appears only in `theme/palette.rs`
+    /// — the token-only contract, enforced forever.
+    #[test]
+    fn color32_construction_lives_only_in_the_palette() {
+        fn scan(dir: &std::path::Path, hits: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    scan(&path, hits);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let Ok(body) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    // The pattern is assembled at runtime so this
+                    // test's own source doesn't trip the scan.
+                    let needle = concat!("Color32", "::from_");
+                    if body.contains(needle) {
+                        hits.push(path);
+                    }
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits = Vec::new();
+        scan(&src, &mut hits);
+        let palette = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("theme")
+            .join("palette.rs");
+        for hit in &hits {
+            assert_eq!(
+                hit.canonicalize().ok(),
+                palette.canonicalize().ok(),
+                "Color32 construction outside theme/palette.rs: {hit:?}"
+            );
+        }
+    }
+
     /// Button padding is measurably larger than the retired compact
     /// 7×3 instrument-panel density (spec: ~30–50% growth).
     #[test]
