@@ -340,7 +340,7 @@ impl EditorApp {
         painter.rect_filled(
             rect.expand(4.0),
             egui::CornerRadius::same(3),
-            egui::Color32::from_black_alpha(200),
+            crate::theme::palette::readability_black(200),
         );
         painter.galley(rect.min, galley, egui::Color32::WHITE);
     }

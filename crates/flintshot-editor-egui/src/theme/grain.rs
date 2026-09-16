@@ -37,12 +37,7 @@ pub(crate) fn tile(seed: u64, size: u32) -> Vec<Color32> {
         } else {
             palette::INK
         };
-        out.push(Color32::from_rgba_unmultiplied(
-            base.r(),
-            base.g(),
-            base.b(),
-            alpha,
-        ));
+        out.push(palette::premultiplied(base.r(), base.g(), base.b(), alpha));
     }
     out
 }

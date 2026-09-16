@@ -258,7 +258,7 @@ impl Magnifier {
         painter.rect_stroke(
             dest_rect,
             egui::CornerRadius::ZERO,
-            egui::Stroke::new(1.0, egui::Color32::from_black_alpha(180)),
+            egui::Stroke::new(1.0, crate::theme::palette::readability_black(180)),
             egui::StrokeKind::Outside,
         );
     }

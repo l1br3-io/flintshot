@@ -604,7 +604,7 @@ impl HomeApp {
             };
             let pixels = small
                 .pixels()
-                .map(|p| egui::Color32::from_rgba_unmultiplied(p.0[0], p.0[1], p.0[2], p.0[3]))
+                .map(|p| crate::theme::palette::premultiplied(p.0[0], p.0[1], p.0[2], p.0[3]))
                 .collect::<Vec<_>>();
             let image = egui::ColorImage::new([tw as usize, th as usize], pixels);
             let handle = ctx.load_texture(

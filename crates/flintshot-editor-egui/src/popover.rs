@@ -96,7 +96,7 @@ fn labeled_color_chip(ui: &mut egui::Ui, color: Color, target: ColorTarget) -> e
     ui.painter().rect_filled(
         swatch_rect,
         egui::CornerRadius::same(3),
-        egui::Color32::from_rgba_unmultiplied(r, g, b, a),
+        crate::theme::palette::premultiplied(r, g, b, a),
     );
     let pos = egui::pos2(
         swatch_rect.right() + 8.0,

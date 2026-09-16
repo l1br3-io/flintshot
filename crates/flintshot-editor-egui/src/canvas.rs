@@ -326,7 +326,7 @@ impl EguiCanvas {
 /// source data stays straight (egui's `Color32` stores premultiplied
 /// internally but the helper handles the conversion).
 fn to_egui_color(c: Color) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
+    crate::theme::palette::egui_color(c)
 }
 
 /// Convert a [`Stroke`] to an [`egui::Stroke`] through the view:
