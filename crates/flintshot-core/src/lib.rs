@@ -25,6 +25,7 @@ pub mod geom;
 pub mod image_ops;
 pub mod input;
 pub mod ipc;
+pub mod recents;
 pub mod render;
 pub mod serde_util;
 pub mod shell;
