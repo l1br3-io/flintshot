@@ -443,10 +443,11 @@ impl EditorApp {
         // `canvas_rect.min.y` here; the docked side panel instead
         // reserves width to the *right* of the canvas, and the
         // header reserves a strip above — the window is image +
-        // [`panel::PANEL_WIDTH`] wide and image +
+        // the live panel width (a collapsed rail must not keep
+        // re-issuing the expanded width) and image +
         // [`header::HEADER_HEIGHT`] tall.
         let new_size = egui::vec2(
-            target_w + panel::PANEL_WIDTH,
+            target_w + self.panel.width(),
             target_h + crate::header::HEADER_HEIGHT,
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));

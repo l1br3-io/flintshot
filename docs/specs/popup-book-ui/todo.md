@@ -10,4 +10,4 @@
 - [x] 008 export-cluster
 - [x] 009 header-bar
 - [x] 010 welcome-screen
-- [ ] 011 final-sweep
+- [x] 011 final-sweep

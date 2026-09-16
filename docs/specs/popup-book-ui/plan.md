@@ -38,30 +38,30 @@ choreography are preserved unchanged.
 ## Task Index
 
 ### Phase 1: Foundation (skin + primitives)
-- [ ] Task 1: Design-token module (`theme/`) with light visuals → `tasks/001-theme-token-module.md`
-- [ ] Task 2: Embed Plus Jakarta Sans + type ramp → `tasks/002-jakarta-fonts.md`
-- [ ] Task 3: Spring easing + paper-grain primitives → `tasks/003-motion-texture-primitives.md`
+- [x] Task 1: Design-token module (`theme/`) with light visuals → `tasks/001-theme-token-module.md`
+- [x] Task 2: Embed Plus Jakarta Sans + type ramp → `tasks/002-jakarta-fonts.md`
+- [x] Task 3: Spring easing + paper-grain primitives → `tasks/003-motion-texture-primitives.md`
 
 ### Checkpoint: Foundation
-- [ ] Build + full test suite green; app runs re-skinned (light cream)
+- [x] Build + full test suite green; app runs re-skinned (light cream)
 
 ### Phase 2: Editor structure
-- [ ] Task 4: `flintshot-core::recents` + recording wiring → `tasks/004-core-recents.md`
-- [ ] Task 5: Docked side panel replaces the toolbar rail → `tasks/005-side-panel.md`
-- [ ] Task 6: Floating on-canvas controls → `tasks/006-floating-controls.md`
-- [ ] Task 7: Contextual tool options + picker popover → `tasks/007-contextual-options-popover.md`
-- [ ] Task 8: Export cluster with Copy hero → `tasks/008-export-cluster.md`
+- [x] Task 4: `flintshot-core::recents` + recording wiring → `tasks/004-core-recents.md`
+- [x] Task 5: Docked side panel replaces the toolbar rail → `tasks/005-side-panel.md`
+- [x] Task 6: Floating on-canvas controls → `tasks/006-floating-controls.md`
+- [x] Task 7: Contextual tool options + picker popover → `tasks/007-contextual-options-popover.md`
+- [x] Task 8: Export cluster with Copy hero → `tasks/008-export-cluster.md`
 
 ### Checkpoint: Editor complete
-- [ ] Capture → annotate → copy works end-to-end from the panel; shortcuts unregressed
+- [x] Capture → annotate → copy works end-to-end from the panel; shortcuts unregressed
 
 ### Phase 3: Welcome + header + polish
-- [ ] Task 9: Header bar with tab-strip and AI seams → `tasks/009-header-bar.md`
-- [ ] Task 10: Welcome screen (hero + recents grid + drop) → `tasks/010-welcome-screen.md`
-- [ ] Task 11: Token-only sweep + regression + CHANGELOG → `tasks/011-final-sweep.md`
+- [x] Task 9: Header bar with tab-strip and AI seams → `tasks/009-header-bar.md`
+- [x] Task 10: Welcome screen (hero + recents grid + drop) → `tasks/010-welcome-screen.md`
+- [x] Task 11: Token-only sweep + regression + CHANGELOG → `tasks/011-final-sweep.md`
 
 ### Checkpoint: Complete
-- [ ] All spec success criteria verified; ready for review
+- [x] All spec success criteria verified; ready for review
 
 ## Risks and Mitigations
 
