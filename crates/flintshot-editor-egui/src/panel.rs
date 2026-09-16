@@ -276,31 +276,9 @@ fn bottom_actions(ui: &mut egui::Ui, copied: bool, delete_enabled: bool) -> Tool
             }
         });
         ui.add_space(theme::POD_GAP);
+        // History pod: Delete alone — Undo / Redo live on the
+        // floating on-canvas cluster now (`crate::floating`).
         toolbar::pod_island(ui, |ui| {
-            if toolbar::chip(
-                ui,
-                egui::Id::new("undo"),
-                "Undo · Ctrl+Z",
-                false,
-                toolbar::g_undo,
-                true,
-            )
-            .clicked()
-            {
-                action = ToolbarAction::Undo;
-            }
-            if toolbar::chip(
-                ui,
-                egui::Id::new("redo"),
-                "Redo · Ctrl+Y",
-                false,
-                toolbar::g_redo,
-                true,
-            )
-            .clicked()
-            {
-                action = ToolbarAction::Redo;
-            }
             // Enabled iff an annotation is selected (persistent
             // selection); disabled reads greyed / hover-only via the
             // same `enabled` path the locked tool chips use.
@@ -540,13 +518,14 @@ mod tests {
         let del = ctx
             .read_response(egui::Id::new("delete"))
             .expect("pass 1 registered the Delete chip");
+        let at = del.rect.center();
         draw(
             &ctx,
             state,
             &mut panel,
             ToolGate::All,
             false,
-            click_events(del.rect.center()),
+            click_events(at),
         )
         .0
     }

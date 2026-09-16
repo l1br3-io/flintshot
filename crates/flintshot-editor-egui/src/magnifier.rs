@@ -22,10 +22,19 @@ use flintshot_core::{Point, Rect};
 /// square of this size; higher = larger loupe but more GPU fill.
 const INSET_PX: f32 = 96.0;
 
-/// Zoom factor applied to the sampled source region. At `4.0`, each
-/// source pixel covers a 4×4 block of inset pixels, so the user sees
-/// chunky, individually-addressable pixels — the point of the tool.
+/// Default zoom factor applied to the sampled source region. At
+/// `4.0`, each source pixel covers a 4×4 block of inset pixels, so
+/// the user sees chunky, individually-addressable pixels — the
+/// point of the tool. The floating cluster's zoom chips step this
+/// per session.
 const ZOOM: f32 = 4.0;
+
+/// One loupe zoom step (the floating chips' ±).
+const ZOOM_STEP: f32 = 1.0;
+
+/// The loupe's usable zoom range: magnify between 2× and 8× (a
+/// magnifier should magnify; `sample_zoomed_region` enforces ≥ 1).
+const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 2.0..=8.0;
 
 /// Compute the source-physical [`Rect`] to sample from the image so
 /// that, stretched to `inset_px`, it appears `zoom`× magnified.
@@ -133,9 +142,31 @@ fn crop_subimage(src: &image::RgbaImage, region: Rect) -> image::RgbaImage {
 #[derive(Default)]
 pub struct Magnifier {
     texture: Option<egui::TextureHandle>,
+    /// The session's loupe zoom factor; `None` = the [`ZOOM`]
+    /// default (kept `Option` so `Default` stays const and the
+    /// default stays the single source of truth).
+    zoom: Option<f32>,
 }
 
 impl Magnifier {
+    /// The current loupe zoom factor.
+    #[must_use]
+    pub fn zoom(&self) -> f32 {
+        self.zoom.unwrap_or(ZOOM)
+    }
+
+    /// Step the loupe's zoom factor up one stop (clamped).
+    pub fn zoom_in(&mut self) {
+        let z = (self.zoom() + ZOOM_STEP).min(*ZOOM_RANGE.end());
+        self.zoom = Some(z);
+    }
+
+    /// Step the loupe's zoom factor down one stop (clamped).
+    pub fn zoom_out(&mut self) {
+        let z = (self.zoom() - ZOOM_STEP).max(*ZOOM_RANGE.start());
+        self.zoom = Some(z);
+    }
+
     /// Construct a magnifier with no cached texture yet.
     #[must_use]
     pub fn new() -> Self {
@@ -166,7 +197,7 @@ impl Magnifier {
     ) {
         let canvas_rect = view.rect();
         let ppp = view.ppp();
-        let src = sample_zoomed_region(image.dimensions(), cursor_phys, ZOOM, INSET_PX);
+        let src = sample_zoomed_region(image.dimensions(), cursor_phys, self.zoom(), INSET_PX);
         let sub = crop_subimage(image, src);
 
         // GOTCHA: `load_texture` allocates a fresh GPU buffer + entry
