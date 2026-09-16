@@ -9,5 +9,5 @@
 - [x] 007 contextual-options-popover
 - [x] 008 export-cluster
 - [x] 009 header-bar
-- [ ] 010 welcome-screen
+- [x] 010 welcome-screen
 - [ ] 011 final-sweep
