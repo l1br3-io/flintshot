@@ -1,16 +1,15 @@
-//! The editor toolbar: a two-row instrument panel.
+//! The chip / pod / glyph primitives and the contextual bay rows.
 //!
-//! **Rail** (top, stable across tools): semantically grouped pods,
-//! each a white cutout island separated by gaps — capture `+` ·
-//! selection (Move, Select) · shapes · freehand · labels · redact ·
-//! history (undo / redo / delete) · outputs (Save, Upload, and
-//! the forest Copy primary, right-aligned). **Bay** (bottom,
-//! per-tool): only the controls the active tool can use, plus a
-//! contextual hint on the right.
+//! The retired top-rail toolbar dissolved into the docked side
+//! panel (`crate::panel`); what remains here is the shared
+//! vocabulary both surfaces speak: the `ToolPod` table (all tools
+//! in pod order), the chip / labeled-chip / copy-chip widgets with
+//! their cutout styling, the pod island container, the per-tool bay
+//! rows, and the painter-drawn vector glyphs.
 //!
-//! The chips, glyphs, and `ToolPod` table are shared with the Phase
-//! 5 overlay's floating toolbar (plan decision 4: reuse the chips,
-//! new layout only) — hence `pub(crate)` on the primitives below.
+//! The Phase 5 overlay's floating rows reuse the same primitives
+//! (plan decision 4: shared chips, per-surface layout) — hence
+//! `pub(crate)` on everything below.
 //!
 //! All icons are painter-drawn vector glyphs (see
 //! `docs/adrs/ADR-0027-painter-drawn-toolbar-glyphs.md`): they share
@@ -19,7 +18,6 @@
 //! No emoji in labels — tofu boxes on font-constrained systems are a
 //! known failure mode of the previous toolbar.
 
-use egui::containers::scroll_area::ScrollBarVisibility;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Sense, Stroke, StrokeKind, Vec2};
 use flintshot_core::{
     BlurKind, Color, EditorState, FontFamily, FontStyle, FontWeight, NewCaptureMode, TextAlign,
@@ -228,7 +226,7 @@ impl ToolGate {
 
 /// Lock clause appended to a gated-off chip's tooltip. Phrased for
 /// the editor's selection-first phase, the only gate user today.
-const LOCK_CLAUSE: &str = "locked — Enter crops to unlock";
+pub(crate) const LOCK_CLAUSE: &str = "locked — Enter crops to unlock";
 
 /// Draw the whole toolbar (rail + bay) as the window's top panel.
 ///
@@ -242,26 +240,6 @@ const LOCK_CLAUSE: &str = "locked — Enter crops to unlock";
 /// windows offer Capture alone, matching the chrome strip's
 /// worker-draws-none rule). Returns the rail's fired action plus the
 /// popup's fired page action, if any.
-pub(crate) fn show(
-    ui: &mut egui::Ui,
-    state: &mut EditorState,
-    copied: bool,
-    gate: ToolGate,
-    page_actions: bool,
-) -> (ToolbarAction, Option<PageChromeAction>) {
-    let frame = egui::Frame::new()
-        .fill(theme::palette::PAPER_CREAM)
-        .inner_margin(egui::Margin::symmetric(8, 5));
-    egui::Panel::top("editor_toolbar")
-        .frame(frame)
-        .show(ui, |ui| {
-            let action = draw_rail(ui, state, copied, gate, page_actions);
-            draw_bay(ui, state);
-            action
-        })
-        .inner
-}
-
 /// A fired `+` popup action (single-window pages): the home's three
 /// intents, reachable while annotating. The popup is the sole
 /// visible home-parity surface on the editor (the chrome strip it
@@ -281,7 +259,7 @@ pub(crate) enum PageChromeAction {
 /// The replace-semantics note every page action carries: swapping
 /// the image drops unsaved annotations (consistent with supersede —
 /// the newest intent wins).
-const REPLACE_HINT: &str = "new content replaces the image — unsaved edits are lost";
+pub(crate) const REPLACE_HINT: &str = "new content replaces the image — unsaved edits are lost";
 
 // ------------------------------------------------------------------
 // Rail
@@ -317,287 +295,13 @@ pub(crate) fn pod_gap(ui: &mut egui::Ui) {
     ui.add_space(theme::POD_GAP);
 }
 
-fn draw_rail(
-    ui: &mut egui::Ui,
-    state: &mut EditorState,
-    copied: bool,
-    gate: ToolGate,
-    page_actions: bool,
-) -> (ToolbarAction, Option<PageChromeAction>) {
-    egui::ScrollArea::horizontal()
-        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (mut action, page_action) =
-                    pod_island(ui, |ui| new_capture_chip(ui, page_actions));
-                pod_gap(ui);
-                for pod in TOOL_PODS {
-                    pod_island(ui, |ui| {
-                        for spec in pod.tools {
-                            let enabled = gate.contains(spec.tool);
-                            let selected = state.tool == spec.tool;
-                            let tooltip = if enabled {
-                                format!("{} · {}", spec.name, spec.key)
-                            } else {
-                                format!("{} · {} · {LOCK_CLAUSE}", spec.name, spec.key)
-                            };
-                            // Move renders labeled (rail emphasis); ids stay
-                            // key-derived so tooltips and clicks are unchanged.
-                            let resp = if spec.tool == Tool::Move {
-                                labeled_chip(
-                                    ui,
-                                    egui::Id::new(("tool", spec.key)),
-                                    &tooltip,
-                                    selected,
-                                    spec.name,
-                                    spec.glyph,
-                                    enabled,
-                                )
-                            } else {
-                                chip(
-                                    ui,
-                                    egui::Id::new(("tool", spec.key)),
-                                    &tooltip,
-                                    selected,
-                                    spec.glyph,
-                                    enabled,
-                                )
-                            };
-                            if resp.clicked() {
-                                // Core `set_tool` owns the "the selection is
-                                // Move-tool chrome" invariant: leaving Move
-                                // drops the persistent selection.
-                                state.set_tool(spec.tool);
-                            }
-                        }
-                    });
-                    pod_gap(ui);
-                }
-                let history = pod_island(ui, |ui| {
-                    let mut action = ToolbarAction::None;
-                    if chip(
-                        ui,
-                        egui::Id::new("undo"),
-                        "Undo · Ctrl+Z",
-                        false,
-                        g_undo,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        action = ToolbarAction::Undo;
-                    }
-                    if chip(
-                        ui,
-                        egui::Id::new("redo"),
-                        "Redo · Ctrl+Y",
-                        false,
-                        g_redo,
-                        true,
-                    )
-                    .clicked()
-                    {
-                        action = ToolbarAction::Redo;
-                    }
-                    // Enabled iff an annotation is selected (persistent
-                    // selection, task 001); disabled reads greyed /
-                    // hover-only via the same `enabled` path the locked
-                    // tool chips use.
-                    if chip(
-                        ui,
-                        egui::Id::new("delete"),
-                        "Delete · Del",
-                        false,
-                        g_trash,
-                        state.selected_index.is_some(),
-                    )
-                    .clicked()
-                    {
-                        action = ToolbarAction::Delete;
-                    }
-                    action
-                });
-                if action == ToolbarAction::None {
-                    action = history;
-                }
-                let output = rail_actions(ui, copied);
-                if action == ToolbarAction::None {
-                    action = output;
-                }
-                (action, page_action)
-            })
-            .inner
-        })
-        .inner
-}
-
-/// The Win11-style "new snip" affordance leading the rail. A popup
-/// (not an immediate action) so the home window's three actions —
-/// Capture / Open… / Paste — hang off one chip (home parity);
-/// Ctrl+N is the keyboard fast path. In a page epoch the popup
-/// entries fire [`PageChromeAction`]s;
-/// the worker window, with no bridge to route Open/Paste, offers
-/// Capture alone through the classic `NewCapture` exit.
-fn new_capture_chip(
-    ui: &mut egui::Ui,
-    page_actions: bool,
-) -> (ToolbarAction, Option<PageChromeAction>) {
-    let mut action = ToolbarAction::None;
-    let mut page_action = None;
-    let new_chip = chip(
-        ui,
-        egui::Id::new("new-capture"),
-        "New capture · Ctrl+N",
-        false,
-        g_plus,
-        true,
-    );
-    let popup_id = new_chip.id.with("popup");
-    egui::Popup::from_toggle_button_response(&new_chip)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
-            ui.set_min_width(160.0);
-            ui.vertical(|ui| {
-                let mut fired = false;
-                if page_actions {
-                    if popup_button(ui, egui::Id::new("plus-capture"), "Capture  [C]", None) {
-                        page_action = Some(PageChromeAction::Capture);
-                        fired = true;
-                    }
-                    if popup_button(
-                        ui,
-                        egui::Id::new("plus-open"),
-                        "Open…  [O]",
-                        Some(REPLACE_HINT),
-                    ) {
-                        page_action = Some(PageChromeAction::Open);
-                        fired = true;
-                    }
-                    if popup_button(ui, egui::Id::new("plus-paste"), "Paste", Some(REPLACE_HINT)) {
-                        page_action = Some(PageChromeAction::Paste);
-                        fired = true;
-                    }
-                } else if popup_button(ui, egui::Id::new("plus-capture"), "Capture · Ctrl+N", None)
-                {
-                    action = ToolbarAction::NewCapture(NewCaptureMode::Region);
-                    fired = true;
-                }
-                if fired {
-                    // A capture closes the editor (the popup dies with
-                    // it), but page-mode Open/Paste keep the window —
-                    // the popup must not linger open over them.
-                    egui::Popup::close_id(ui.ctx(), popup_id);
-                }
-            });
-        });
-    (action, page_action)
-}
-
-/// One text row in the `+` popup: an explicit-id button (the
-/// two-pass click-test pattern reads these ids back), quiet at rest
-/// and cream-tinted on hover — a menu row, not a chip. Fixed-width
-/// rows keep the popup at its `set_min_width` (an `available_width`
-/// row would stretch it toward the screen edge). `hint` rides the
-/// hover tooltip.
-fn popup_button(ui: &mut egui::Ui, id: egui::Id, label: &str, hint: Option<&str>) -> bool {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(160.0, 20.0), Sense::hover());
-    let mut resp = ui.interact(rect, id, Sense::click());
-    if let Some(hint) = hint {
-        resp = resp.on_hover_text(hint);
-    }
-    let fill = if resp.hovered() {
-        theme::palette::HOLIDAY_FAINT
-    } else {
-        Color32::TRANSPARENT
-    };
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(4),
-        fill,
-        Stroke::NONE,
-        StrokeKind::Middle,
-    );
-    ui.painter().text(
-        rect.left_center() + egui::vec2(6.0, 0.0),
-        Align2::LEFT_CENTER,
-        label,
-        FontId::proportional(theme::TYPE_BODY),
-        theme::palette::INK,
-    );
-    resp.clicked()
-}
-
-/// Output actions as the right-aligned outputs island: Save /
-/// Upload as quiet icon chips, Copy as the forest primary (the
-/// dominant terminal action for screenshot flows). The right-to-
-/// left anchor layout only places the island; inside it the chips
-/// run left-to-right in visual order. On a successful copy the
-/// glyph morphs sheet→check and the label reads "Copied".
-fn rail_actions(ui: &mut egui::Ui, copied: bool) -> ToolbarAction {
-    let mut action = ToolbarAction::None;
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        pod_island(ui, |ui| {
-            if chip(
-                ui,
-                egui::Id::new("save"),
-                "Save · Ctrl+S",
-                false,
-                g_save,
-                true,
-            )
-            .clicked()
-            {
-                action = ToolbarAction::Save;
-            }
-            if chip(ui, egui::Id::new("upload"), "Upload", false, g_upload, true).clicked() {
-                action = ToolbarAction::Upload;
-            }
-            if copy_chip(ui, copied).clicked() {
-                action = ToolbarAction::Copy;
-            }
-        });
-    });
-    action
-}
-
 // ------------------------------------------------------------------
 // Bay
 // ------------------------------------------------------------------
 
-fn draw_bay(ui: &mut egui::Ui, state: &mut EditorState) {
-    hairline(ui);
-    ui.add_space(3.0);
-    ui.horizontal(|ui| {
-        match state.tool {
-            Tool::Select => select_bay(ui, state),
-            // Move has no adjustable properties — nothing to grab,
-            // nothing to drag — so its bay is just the hint.
-            Tool::Move => {}
-            Tool::Text => text_bay(ui, state),
-            Tool::Blur => blur_bay(ui, state),
-            Tool::Number => swatch_row(ui, &mut state.color),
-            // Future `Tool` variants (the enum is `#[non_exhaustive]`)
-            // and the six drawing tools share the generic controls.
-            _ => draw_controls(ui, state),
-        }
-        hint(ui, tool_hint(state.tool));
-    });
-}
-
-/// Full-width 1px rule between rail and bay.
-fn hairline(ui: &mut egui::Ui) {
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), Sense::hover());
-    ui.painter().line_segment(
-        [rect.left_center(), rect.right_center()],
-        theme::HAIRLINE_STROKE,
-    );
-}
-
 /// Select: live selection dims + crop. Without a selection the bay
 /// shows only the hint — no dead controls.
-fn select_bay(ui: &mut egui::Ui, state: &mut EditorState) {
+pub(crate) fn select_bay(ui: &mut egui::Ui, state: &mut EditorState) {
     let sel = state.selection.map(flintshot_core::Rect::normalized);
     if let Some(n) = sel.filter(|n| n.width().abs() >= 1.0 && n.height().abs() >= 1.0) {
         ui.label(
@@ -611,10 +315,9 @@ fn select_bay(ui: &mut egui::Ui, state: &mut EditorState) {
     }
 }
 
-/// Draw tools: color swatches, stroke presets, width slider.
-fn draw_controls(ui: &mut egui::Ui, state: &mut EditorState) {
-    swatch_row(ui, &mut state.color);
-    ui.separator();
+/// Draw tools, stroke row: S / M / L presets plus the width
+/// slider (the swatch row renders above it).
+pub(crate) fn stroke_row(ui: &mut egui::Ui, state: &mut EditorState) {
     stroke_chips(ui, state);
     ui.add_sized(
         [92.0, 20.0],
@@ -622,12 +325,9 @@ fn draw_controls(ui: &mut egui::Ui, state: &mut EditorState) {
     );
 }
 
-/// Text: its own swatches (decoupled from the drawing color, so red
-/// arrows and white labels coexist), font-size stepper, and the
-/// `Aa` typography popover.
-fn text_bay(ui: &mut egui::Ui, state: &mut EditorState) {
-    swatch_row(ui, &mut state.text_color);
-    ui.separator();
+/// Text: typography row — font-size stepper and the `Aa`
+/// typography popover (the swatch row renders above it).
+pub(crate) fn text_style_row(ui: &mut egui::Ui, state: &mut EditorState) {
     if ui.small_button("-").clicked() {
         state.font_size = (state.font_size - 1.0).max(8.0);
     }
@@ -640,7 +340,6 @@ fn text_bay(ui: &mut egui::Ui, state: &mut EditorState) {
     if ui.small_button("+").clicked() {
         state.font_size = (state.font_size + 1.0).min(72.0);
     }
-    ui.separator();
     let btn = ui.add(egui::Button::new(egui::RichText::new("Aa").strong()));
     egui::Popup::from_toggle_button_response(&btn)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -649,7 +348,7 @@ fn text_bay(ui: &mut egui::Ui, state: &mut EditorState) {
 
 /// Blur kind segmented control; the selected segment inherits the
 /// forest selection visuals from the theme.
-fn blur_bay(ui: &mut egui::Ui, state: &mut EditorState) {
+pub(crate) fn blur_bay(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.selectable_value(&mut state.blur_kind, BlurKind::Gaussian, "Gaussian");
     ui.selectable_value(&mut state.blur_kind, BlurKind::Pixelate, "Pixelate");
 }
@@ -733,7 +432,7 @@ fn text_style_popup(ui: &mut egui::Ui, state: &mut EditorState) {
 /// Contextual hint, right-aligned in soft ink. Replaces the old static
 /// "Drag to draw · Ctrl+Z undo · Esc cancel" row with guidance that
 /// is true for the selected tool.
-fn hint(ui: &mut egui::Ui, text: &str) {
+pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.label(
             egui::RichText::new(text)
@@ -744,7 +443,7 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 }
 
 /// Per-tool hint copy. Kept pure for testing.
-fn tool_hint(tool: Tool) -> &'static str {
+pub(crate) fn tool_hint(tool: Tool) -> &'static str {
     match tool {
         Tool::Select => "drag a region · Copy uses it · Enter crops",
         Tool::Move => "press an annotation and drag to reposition · Del removes",
@@ -962,7 +661,7 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
 
 /// The seven color presets plus a custom-color chip whose popup
 /// hosts egui's full sRGB editor.
-fn swatch_row(ui: &mut egui::Ui, color: &mut Color) {
+pub(crate) fn swatch_row(ui: &mut egui::Ui, color: &mut Color) {
     for sw in theme::palette::SWATCHES {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
         let selected = to_color32(*color) == sw;
@@ -1280,7 +979,7 @@ pub(crate) fn g_x(p: &egui::Painter, r: egui::Rect, c: Color32) {
     seg(p, r, (5.0, -5.0), (-5.0, 5.0), c, 2.5);
 }
 
-fn g_plus(p: &egui::Painter, r: egui::Rect, c: Color32) {
+pub(crate) fn g_plus(p: &egui::Painter, r: egui::Rect, c: Color32) {
     seg(p, r, (-4.0, 0.0), (4.0, 0.0), c, 2.0);
     seg(p, r, (0.0, -4.0), (0.0, 4.0), c, 2.0);
 }
@@ -1417,51 +1116,6 @@ mod tests {
         assert_eq!(from_color32(to_color32(c)), c);
     }
 
-    /// A minimal state whose tool the rail can switch.
-    fn rail_state() -> EditorState {
-        let img = image::RgbaImage::from_raw(64, 48, vec![255; 64 * 48 * 4])
-            .expect("raw buffer matches 64*48*4");
-        EditorState::new(img)
-    }
-
-    /// Drive the rail through a synthetic context: pass 1 lays out
-    /// (registering chip rects by id), pass 2 injects a primary
-    /// click at the Pencil chip's centre. Returns the tool after.
-    fn tool_after_pen_click(gate: ToolGate) -> Tool {
-        let mut state = rail_state();
-        state.tool = Tool::Select;
-        let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = show(ui, &mut state, false, gate, false);
-        });
-        let pen = ctx
-            .read_response(egui::Id::new(("tool", "P")))
-            .expect("pass 1 registered the Pencil chip");
-        let at = pen.rect.center();
-        let click = egui::RawInput {
-            events: vec![
-                egui::Event::PointerMoved(at),
-                egui::Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-                egui::Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-            ..egui::RawInput::default()
-        };
-        let _ = ctx.run_ui(click, |ui| {
-            let _ = show(ui, &mut state, false, gate, false);
-        });
-        state.tool
-    }
-
     #[test]
     fn toolgate_select_only_admits_exactly_select() {
         assert!(ToolGate::All.contains(Tool::Select));
@@ -1486,256 +1140,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn select_only_click_cannot_switch_tool() {
-        assert_eq!(
-            tool_after_pen_click(ToolGate::SelectOnly),
-            Tool::Select,
-            "a gated-off chip must render hover-only and stay inert"
-        );
-    }
-
-    #[test]
-    fn all_gate_click_switches_tool() {
-        assert_eq!(
-            tool_after_pen_click(ToolGate::All),
-            Tool::Pencil,
-            "control: the same click switches under All"
-        );
-    }
-
     // --- Delete chip (annotation-delete Task 002) ---
 
-    /// State with one committed rect annotation kept selected (the
-    /// persistent-selection contract task 001 added: a Move-tool
-    /// click leaves `selected_index` set past release).
-    fn selected_state() -> EditorState {
-        let mut state = rail_state();
-        state.pending = Some(flintshot_core::Annotation::Rect {
-            rect: flintshot_core::Rect::from_xywh(10.0, 10.0, 40.0, 30.0),
-            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
-            fill: None,
-        });
-        state.commit_annotation();
-        state.selected_index = Some(0);
-        state
-    }
-
-    /// Drive the rail through a synthetic context and click the
-    /// Delete chip's centre — the `tool_after_pen_click` pattern
-    /// pointed at the new chip. Returns the collected action.
-    fn action_after_delete_click(state: &mut EditorState) -> ToolbarAction {
-        let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = show(ui, state, false, ToolGate::All, false);
-        });
-        let del = ctx
-            .read_response(egui::Id::new("delete"))
-            .expect("pass 1 registered the Delete chip");
-        let at = del.rect.center();
-        let click = egui::RawInput {
-            events: vec![
-                egui::Event::PointerMoved(at),
-                egui::Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-                egui::Event::PointerButton {
-                    pos: at,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-            ..egui::RawInput::default()
-        };
-        let mut action = ToolbarAction::None;
-        let _ = ctx.run_ui(click, |ui| {
-            action = show(ui, state, false, ToolGate::All, false).0;
-        });
-        action
-    }
-
-    #[test]
-    fn delete_chip_click_emits_delete_with_selection() {
-        let mut state = selected_state();
-        assert_eq!(
-            action_after_delete_click(&mut state),
-            ToolbarAction::Delete,
-            "a selected annotation makes the chip live and clicking it emits Delete"
-        );
-    }
-
-    #[test]
-    fn delete_chip_click_inert_without_selection() {
-        let mut state = rail_state();
-        assert_eq!(
-            action_after_delete_click(&mut state),
-            ToolbarAction::None,
-            "no selection: the chip must render greyed / hover-only and stay inert"
-        );
-    }
-
     // --- `+` popup home parity (editor-capture-ux Task 001) ---
-
-    /// A primary click's raw-input event triple (move + press +
-    /// release) at `at`.
-    fn click_events(at: egui::Pos2) -> Vec<egui::Event> {
-        vec![
-            egui::Event::PointerMoved(at),
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::PointerButton {
-                pos: at,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ]
-    }
-
-    /// Lay the toolbar out once, then click the `+` chip open — the
-    /// popup's entries register in the same pass the chip clicks
-    /// (egui toggles + renders the popup immediately). The roomy
-    /// screen rect keeps the popup's below-the-chip align stable
-    /// once its size is known (a flip between passes would stale the
-    /// entry rects the click pass targets).
-    fn open_plus_popup(page_actions: bool) -> egui::Context {
-        let mut state = rail_state();
-        let ctx = egui::Context::default();
-        let screen = || egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1600.0, 900.0),
-            )),
-            ..egui::RawInput::default()
-        };
-        let _ = ctx.run_ui(screen(), |ui| {
-            let _ = show(ui, &mut state, false, ToolGate::All, page_actions);
-        });
-        let chip = ctx
-            .read_response(egui::Id::new("new-capture"))
-            .expect("pass 1 registered the + chip");
-        let click = egui::RawInput {
-            events: click_events(chip.rect.center()),
-            ..screen()
-        };
-        let _ = ctx.run_ui(click, |ui| {
-            let _ = show(ui, &mut state, false, ToolGate::All, page_actions);
-        });
-        ctx
-    }
-
-    /// The two-pass click-test pattern aimed at a `+` popup entry:
-    /// open the popup, let it settle for a pass (egui gates popup
-    /// contents' interactions off the open pass), then click the
-    /// entry with the given id. Returns the toolbar's fired action
-    /// pair from the click pass.
-    fn plus_popup_action_after_click_on(
-        id: &str,
-        page_actions: bool,
-    ) -> (ToolbarAction, Option<PageChromeAction>) {
-        let ctx = open_plus_popup(page_actions);
-        let screen = || egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1600.0, 900.0),
-            )),
-            ..egui::RawInput::default()
-        };
-        let mut state = rail_state();
-        let _ = ctx.run_ui(screen(), |ui| {
-            let _ = show(ui, &mut state, false, ToolGate::All, page_actions);
-        });
-        let entry = ctx
-            .read_response(egui::Id::new(id))
-            .unwrap_or_else(|| panic!("the open popup registers {id}"));
-        let click = egui::RawInput {
-            events: click_events(entry.rect.center()),
-            ..screen()
-        };
-        let mut state = rail_state();
-        let mut fired = (ToolbarAction::None, None);
-        let _ = ctx.run_ui(click, |ui| {
-            fired = show(ui, &mut state, false, ToolGate::All, page_actions);
-        });
-        fired
-    }
-
-    #[test]
-    fn plus_popup_page_mode_maps_capture_to_the_capture_exit() {
-        assert_eq!(
-            plus_popup_action_after_click_on("plus-capture", true),
-            (ToolbarAction::None, Some(PageChromeAction::Capture)),
-            "the popup's Capture routes the same action the chrome strip's twin does"
-        );
-    }
-
-    #[test]
-    fn plus_popup_page_mode_maps_open_to_the_page_bridge() {
-        assert_eq!(
-            plus_popup_action_after_click_on("plus-open", true),
-            (ToolbarAction::None, Some(PageChromeAction::Open)),
-            "the popup's Open routes the page bridge's open_image contract"
-        );
-    }
-
-    #[test]
-    fn plus_popup_page_mode_maps_paste_to_the_page_bridge() {
-        assert_eq!(
-            plus_popup_action_after_click_on("plus-paste", true),
-            (ToolbarAction::None, Some(PageChromeAction::Paste)),
-            "the popup's Paste routes the page bridge's request_paste contract"
-        );
-    }
-
-    #[test]
-    fn plus_popup_page_mode_offers_exactly_the_home_actions() {
-        let ctx = open_plus_popup(true);
-        for id in ["plus-capture", "plus-open", "plus-paste"] {
-            assert!(
-                ctx.read_response(egui::Id::new(id)).is_some(),
-                "the popup must offer {id}"
-            );
-        }
-        // No capture-kind variants: the popup's only capture entry is
-        // `plus-capture` — a Fullscreen twin must not appear.
-        assert!(
-            ctx.read_response(egui::Id::new("plus-fullscreen"))
-                .is_none(),
-            "the popup must not offer capture-kind variants"
-        );
-    }
-
-    #[test]
-    fn plus_popup_worker_mode_offers_capture_only() {
-        let ctx = open_plus_popup(false);
-        assert!(
-            ctx.read_response(egui::Id::new("plus-capture")).is_some(),
-            "the worker popup keeps its Capture entry"
-        );
-        for id in ["plus-open", "plus-paste"] {
-            assert!(
-                ctx.read_response(egui::Id::new(id)).is_none(),
-                "worker windows have no bridge — {id} must not render"
-            );
-        }
-    }
-
-    #[test]
-    fn plus_popup_worker_mode_capture_is_the_new_capture_exit() {
-        assert_eq!(
-            plus_popup_action_after_click_on("plus-capture", false),
-            (ToolbarAction::NewCapture(NewCaptureMode::Region), None),
-            "worker capture keeps the NewCapture exit (Region is the internal default)"
-        );
-    }
 
     // --- Move hint delete affordance (annotation-delete Task 003) ---
 
@@ -1749,206 +1156,5 @@ mod tests {
         );
     }
 
-    /// The Pin affordance is gone from the outputs island
-    /// (remove-pin-to-desktop): no chip may register under the
-    /// retired id.
-    #[test]
-    fn rail_has_no_pin_chip() {
-        let mut state = rail_state();
-        let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = show(ui, &mut state, false, ToolGate::All, false);
-        });
-        assert!(
-            ctx.read_response(egui::Id::new("pin")).is_none(),
-            "the pin chip must not register a response"
-        );
-    }
-
     // --- Pod island geometry, closeout (toolbar-groups Task 003) ---
-
-    /// Horizontal gap between two chip rects laid out left to right.
-    fn chip_gap(a: egui::Rect, b: egui::Rect) -> f32 {
-        b.min.x - a.max.x
-    }
-
-    /// The pod-island fills a frame painted: rounded white cutout
-    /// rects at the theme's pod corner radius — the visual
-    /// signature of [`pod_island`]. Frames with shadows wrap their
-    /// shapes in `Shape::Vec`, so the collect recurses.
-    fn island_count(output: &egui::FullOutput) -> usize {
-        fn collect<'a>(
-            shapes: impl Iterator<Item = &'a egui::Shape>,
-            out: &mut Vec<&'a egui::epaint::RectShape>,
-        ) {
-            for shape in shapes {
-                match shape {
-                    egui::Shape::Rect(r) => out.push(r),
-                    egui::Shape::Vec(v) => collect(v.iter(), out),
-                    _ => {}
-                }
-            }
-        }
-        let mut rects = Vec::new();
-        collect(output.shapes.iter().map(|cs| &cs.shape), &mut rects);
-        rects
-            .iter()
-            .filter(|r| {
-                r.fill == theme::palette::CUTOUT_WHITE
-                    && r.corner_radius == egui::CornerRadius::same(theme::POD_RADIUS)
-            })
-            .count()
-    }
-
-    /// Lay the full toolbar out once at a wide viewport and return
-    /// every rail chip rect in visual order (capture `+`, the pod
-    /// walk, history, then the right-aligned outputs island).
-    fn editor_rail_chip_rects(state: &mut EditorState) -> (Vec<egui::Rect>, usize) {
-        let ctx = egui::Context::default();
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let _ = show(ui, state, false, ToolGate::All, false);
-        });
-        let rect = |id: egui::Id| {
-            ctx.read_response(id)
-                .unwrap_or_else(|| panic!("rail layout registers {id:?}"))
-                .rect
-        };
-        let mut rects = vec![rect(egui::Id::new("new-capture"))];
-        for spec in flat() {
-            rects.push(rect(egui::Id::new(("tool", spec.key))));
-        }
-        for id in ["undo", "redo", "delete"] {
-            rects.push(rect(egui::Id::new(id)));
-        }
-        for id in ["save", "upload", "copy_action"] {
-            rects.push(rect(egui::Id::new(id)));
-        }
-        (rects, island_count(&output))
-    }
-
-    /// The "perceivable without tooltips" contract pinned
-    /// geometrically: every pod renders as its own island, and pod
-    /// boundaries dominate the intra-pod chip spacing at a glance.
-    #[test]
-    fn editor_rail_groups_pods_as_islands() {
-        let (rects, islands) = editor_rail_chip_rects(&mut rail_state());
-        // capture `+` + five tool pods + history + outputs.
-        assert_eq!(
-            islands,
-            TOOL_PODS.len() + 3,
-            "every rail pod renders as its own white cutout island"
-        );
-        // One row, strictly left to right across the whole rail.
-        for w in rects.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            assert!(
-                (a.center().y - b.center().y).abs() < 0.01,
-                "rail chips share a row"
-            );
-            assert!(a.max.x <= b.min.x, "rail chips run left to right");
-        }
-        // Pod boundaries: after the capture chip, after each tool
-        // pod's last chip, and after history. Under the synthetic
-        // run's unbounded scroll width the outputs island trails
-        // history at the same pod rhythm (in a real window with
-        // spare width it stretches right — never the reverse).
-        let mut sizes: Vec<usize> = TOOL_PODS.iter().map(|p| p.tools.len()).collect();
-        sizes.push(3);
-        let mut boundary = vec![false; rects.len() - 1];
-        boundary[0] = true;
-        let mut i = 1;
-        for &n in &sizes {
-            i += n;
-            boundary[i - 1] = true;
-        }
-        let mut intra = Vec::new();
-        let mut inter = Vec::new();
-        for (i, b) in boundary.iter().enumerate() {
-            let gap = chip_gap(rects[i], rects[i + 1]);
-            if *b {
-                inter.push(gap);
-            } else {
-                intra.push(gap);
-            }
-        }
-        // capture→selection, four between the tool pods, redact→
-        // history, history→outputs.
-        assert!(!intra.is_empty() && inter.len() == sizes.len() + 1);
-        let max_intra = intra.iter().copied().fold(f32::MIN, f32::max);
-        // The outputs boundary is alignment-dependent (trails history
-        // under unbounded synthetic width, stretches right in a real
-        // window) — rhythm is pinned on the six true pod gaps only.
-        let (outputs_gap, pod_gaps) = inter.split_last().expect("seven inter-pod boundaries");
-        let min_inter = pod_gaps.iter().copied().fold(f32::MAX, f32::min);
-        let max_inter = pod_gaps.iter().copied().fold(f32::MIN, f32::max);
-        assert!(
-            min_inter > max_intra + 4.0,
-            "island gaps ({min_inter}..{max_inter}, outputs {outputs_gap}) must dominate intra-pod gaps (≤{max_intra})"
-        );
-        assert!(
-            *outputs_gap > max_intra + 4.0,
-            "the outputs boundary reads as an inter-pod gap too ({outputs_gap} vs intra ≤{max_intra})"
-        );
-        assert!(
-            max_inter - min_inter <= 2.0,
-            "uniform island gaps, got {pod_gaps:?}"
-        );
-    }
-
-    /// The ~500 px stress from the spec's manual matrix, pinned
-    /// headlessly: at a viewport narrower than the rail, the
-    /// scroll fallback keeps every control laid out (nothing
-    /// vanishes or overlaps — all reachable by scrolling).
-    #[test]
-    fn editor_rail_narrow_viewport_lays_out_every_control() {
-        let mut state = rail_state();
-        let ctx = egui::Context::default();
-        let _ = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::pos2(0.0, 0.0),
-                    egui::vec2(500.0, 400.0),
-                )),
-                ..egui::RawInput::default()
-            },
-            |ui| {
-                let _ = show(ui, &mut state, false, ToolGate::All, false);
-            },
-        );
-        let rects = {
-            let mut rects = Vec::new();
-            let rect = |id: egui::Id| {
-                ctx.read_response(id)
-                    .unwrap_or_else(|| panic!("narrow rail still registers {id:?}"))
-                    .rect
-            };
-            rects.push(rect(egui::Id::new("new-capture")));
-            for spec in flat() {
-                rects.push(rect(egui::Id::new(("tool", spec.key))));
-            }
-            for id in ["undo", "redo", "delete", "save", "upload", "copy_action"] {
-                rects.push(rect(egui::Id::new(id)));
-            }
-            rects
-        };
-        for (i, r) in rects.iter().enumerate() {
-            assert!(
-                r.width() > 0.0 && r.height() > 0.0,
-                "chip {i} keeps a non-degenerate rect at 500 px"
-            );
-        }
-        for w in rects.windows(2) {
-            assert!(
-                w[0].max.x <= w[1].min.x,
-                "no chip overlap at 500 px: {:?} vs {:?}",
-                w[0],
-                w[1]
-            );
-        }
-        let rightmost = rects.iter().map(|r| r.max.x).fold(f32::MIN, f32::max);
-        assert!(
-            rightmost > 500.0,
-            "the rail must overflow a 500 px viewport (scroll fallback engaged); rightmost {rightmost}"
-        );
-    }
 }

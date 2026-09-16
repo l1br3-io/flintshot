@@ -18,7 +18,10 @@
 //!   owns the eframe lifecycle and the outcome slot.
 //! - `theme` (private) — the pop-up book design-token system (cream
 //!   paper, white cutouts, forest accents) applied to every window.
-//! - `toolbar` (private) — the rail + bay toolbar drawn by `app`.
+//! - `panel` (private) — the docked right side panel (tools,
+//!   contextual bay, bottom actions) drawn by `app`.
+//! - `toolbar` (private) — the chip/pod/glyph primitives + bay
+//!   rows shared by the panel and the overlay's floating rows.
 //!
 //! Phase 1 Task 4 filled in the background-blit path (canvas module);
 //! Task 5 added the eframe shell (app + shell modules) with the
@@ -38,6 +41,7 @@ mod chrome;
 mod home;
 mod magnifier;
 mod overlay;
+mod panel;
 mod shell;
 mod theme;
 mod toolbar;

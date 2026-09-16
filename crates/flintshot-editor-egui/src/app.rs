@@ -29,6 +29,7 @@ use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::home::HomeDirective;
 use crate::magnifier::Magnifier;
 use crate::overlay::{mask_color, mask_rects, usable_selection};
+use crate::panel;
 use crate::toolbar::{self, ToolbarAction};
 
 /// The selection-first phase's hint line (spec copy). Visible while
@@ -121,11 +122,15 @@ pub(crate) struct EditorApp {
     /// canvas hits), cleared on `PointerUp`. Without this guard,
     /// `primary_down` alone would emit `PointerDrag` for every frame
     /// the button is held — including presses that began on the
-    /// toolbar. A toolbar press would then feed `PointerDrag`s
+    /// side panel. A panel press would then feed `PointerDrag`s
     /// straight into the dispatcher, corrupting in-flight state:
     /// e.g. an active `Tool::Select` selection would be extended to
-    /// the toolbar's (negative canvas-y) position while the user is
-    /// clicking Copy, and Copy would then read the mangled rect.
+    /// a panel-side position while the user is clicking Copy, and
+    /// Copy would then read the mangled rect. GOTCHA: the retired
+    /// top-rail era described this as "negative canvas-y" — with
+    /// the right-docked panel the poisoned coords are positive-x
+    /// past `canvas_rect.max.x`, but the `contains` gate needs no
+    /// axis-specific logic either way.
     canvas_drag_active: bool,
     /// Outcome slot shared with the shell. Set on `Esc` or any future
     /// exit path (Save / Copy / …). Defaults to `Ok(Cancelled)` if
@@ -174,6 +179,9 @@ pub(crate) struct EditorApp {
     /// open-time clamp to the monitor (page epochs only; see
     /// [`Self::update_fit`]).
     open_clamp_pending: bool,
+    /// The docked side panel's cross-frame state (hover-lift
+    /// progress, grain texture).
+    panel: panel::PanelState,
 }
 
 impl EditorApp {
@@ -252,6 +260,7 @@ impl EditorApp {
             },
             open_clamp_pending: page.is_some(),
             page,
+            panel: panel::PanelState::default(),
         }
     }
 
@@ -424,9 +433,13 @@ impl EditorApp {
             return;
         }
         // The prior resize hasn't landed yet: keep issuing InnerSize
-        // until the panel reports the right size.
-        let toolbar_h = self.canvas_rect.map_or(0.0, |r| r.min.y);
-        let new_size = egui::vec2(target_w, target_h + toolbar_h);
+        // until the panel reports the right size. GOTCHA: the old
+        // top-rail layout added the toolbar's height below
+        // `canvas_rect.min.y` here; the docked side panel instead
+        // reserves width to the *right* of the canvas, so the
+        // window is image + [`panel::PANEL_WIDTH`] wide and exactly
+        // image tall.
+        let new_size = egui::vec2(target_w + panel::PANEL_WIDTH, target_h);
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
         ctx.request_repaint();
     }
@@ -905,16 +918,23 @@ impl EditorApp {
     /// `pub(crate)`: the window router delegates here on the Editor
     /// route.
     pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
-        // Toolbar. Must come before CentralPanel so egui reserves the
-        // horizontal strip at the top. The rail + bay layout, chips,
-        // and popups live in `crate::toolbar`; the plain call (no
-        // closure) keeps the borrow of `&mut self.state` disjoint
-        // from `self.copied`. The `+` popup offers the page actions
-        // only when a bridge exists to route them (worker windows
-        // get the Capture-only popup).
+        // Side panel. Must come before CentralPanel so egui reserves
+        // the right-hand strip (the retired top rail's reservation,
+        // rotated). Pods, chips, and the `+` popup live in
+        // `crate::panel`; the plain call (no closure) keeps the
+        // borrow of `&mut self.state` disjoint from `self.copied`
+        // and `&mut self.panel`. The `+` popup offers the page
+        // actions only when a bridge exists to route them (worker
+        // windows get the Capture-only popup).
         let gate = self.rail_gate();
-        let (action, popup_page) =
-            toolbar::show(ui, &mut self.state, self.copied, gate, self.page.is_some());
+        let (action, popup_page) = panel::show(
+            ui,
+            &mut self.state,
+            self.copied,
+            gate,
+            self.page.is_some(),
+            &mut self.panel,
+        );
 
         // The `+` popup's page actions (single-window): the sole
         // visible home-parity surface on the editor (the chrome strip
@@ -1943,10 +1963,12 @@ mod tests {
         app: &mut EditorApp,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
+        // Roomy enough for the docked side panel (260 px) plus a
+        // real canvas; the retired top-rail era fit in 200×200.
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
-                egui::vec2(200.0, 200.0),
+                egui::vec2(640.0, 480.0),
             )),
             events,
             ..egui::RawInput::default()
@@ -2461,7 +2483,7 @@ mod tests {
             .any(|c| matches!(c, egui::ViewportCommand::InnerSize(_)))
     }
 
-    /// A big image in the 200×200 synthetic screen must render
+    /// A big image in the 640×480 synthetic screen must render
     /// scaled down (fit < 1) and centered in the canvas panel.
     #[test]
     fn page_large_image_fits_scaled_and_centered() {
@@ -2473,7 +2495,7 @@ mod tests {
         let scale = app.canvas.scale();
         assert!(
             scale > 0.0 && scale < 1.0,
-            "a 400×300 image in a ~200-wide panel must scale down, got {scale}"
+            "a 400×300 image in a ~380-wide canvas must scale down, got {scale}"
         );
         let rect = app.canvas_rect.expect("frames cached the canvas rect");
         let view = app.canvas.view_over(rect);
@@ -3156,6 +3178,68 @@ mod tests {
         );
     }
 
+    // --- Side-panel input gating (pop-up book Task 005) ---
+
+    /// A press that begins on the docked panel must never start a
+    /// canvas gesture: the press-and-release stays inert even when
+    /// the pointer drags across the canvas, and a follow-up drag
+    /// with the button never held emits nothing (the
+    /// `canvas_drag_active` gate holds for the right-edge panel the
+    /// same way it held for the retired top rail).
+    #[test]
+    fn press_beginning_on_the_panel_never_starts_a_gesture() {
+        let ctx = egui::Context::default();
+        let mut state = move_state_with_ann();
+        state.tool = Tool::Rect;
+        state.selected_index = None;
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+        // A point inside the side panel: right of the canvas rect.
+        let panel_point = egui::pos2(
+            f32::midpoint(canvas.max.x, 1024.0).min(canvas.max.x + 100.0),
+            canvas.min.y + 40.0,
+        );
+        assert!(
+            panel_point.x > canvas.max.x,
+            "fixture: the press point must sit on the panel"
+        );
+        let into_canvas = egui::pos2(canvas.min.x + 30.0, canvas.min.y + 30.0);
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(panel_point),
+                egui::Event::PointerButton {
+                    pos: panel_point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(into_canvas),
+                egui::Event::PointerButton {
+                    pos: into_canvas,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(
+            app.state.pending.is_none() && app.state.anns.len() == 1,
+            "a panel press must not begin a rect annotation (anns: {:?}, pending: {:?})",
+            app.state.anns.len(),
+            app.state.pending.is_some()
+        );
+        assert!(!app.canvas_drag_active, "no drag may survive the release");
+    }
+
     // --- Delete chip (annotation-delete Task 002) ---
 
     #[test]
@@ -3164,12 +3248,12 @@ mod tests {
         let mut state = move_state_with_ann();
         state.selected_index = Some(0);
         let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
-        // The rail is ~470 px of chips inside a horizontal ScrollArea
-        // that only exists for narrow captures — a 200 px screen (the
-        // usual editor_frame size) scrolls the Delete chip out of the
-        // viewport, where no pointer can reach it. Wide screen so the
-        // whole rail is visible; positions are still canvas-derived.
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 200.0));
+        // The panel stacks ~450 px of pods + bay above the bottom
+        // cluster; a short screen would clip the Delete chip out of
+        // the viewport, where no pointer can reach it. Roomy screen
+        // so the whole panel is visible; positions are still
+        // response-derived.
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
         let frame = |ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>| {
             let raw = egui::RawInput {
                 screen_rect: Some(screen),
