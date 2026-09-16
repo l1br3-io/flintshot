@@ -26,6 +26,7 @@ use flintshot_core::{
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
+use crate::floating;
 use crate::home::HomeDirective;
 use crate::magnifier::Magnifier;
 use crate::overlay::{mask_color, mask_rects, usable_selection};
@@ -182,6 +183,10 @@ pub(crate) struct EditorApp {
     /// The docked side panel's cross-frame state (hover-lift
     /// progress, grain texture).
     panel: panel::PanelState,
+    /// The floating cluster's chip rects from the last frame —
+    /// presses that begin there are chrome, never canvas gestures
+    /// (misses between chips pass through to the canvas).
+    floating_rects: Vec<egui::Rect>,
 }
 
 impl EditorApp {
@@ -261,6 +266,7 @@ impl EditorApp {
             open_clamp_pending: page.is_some(),
             page,
             panel: panel::PanelState::default(),
+            floating_rects: Vec::new(),
         }
     }
 
@@ -752,7 +758,13 @@ impl EditorApp {
         // canvas-y) position, so by the time the toolbar's click
         // handler runs `handle_copy` / `confirm_selection`, the rect
         // no longer matches what the user dragged.
-        let pointer_event = if primary_pressed && canvas_rect.contains(pos) {
+        // The floating quick cluster floats over the canvas: its
+        // chips sit inside `canvas_rect`, so the press gate must
+        // exclude them explicitly or a chip press would also start
+        // an annotation drag. Misses between chips pass through
+        // (the pointer-miss passthrough contract).
+        let on_floating = self.floating_rects.iter().any(|r| r.contains(pos));
+        let pointer_event = if primary_pressed && canvas_rect.contains(pos) && !on_floating {
             self.canvas_drag_active = true;
             Some(InputEvent::PointerDown { pos: at })
         } else if primary_released && self.canvas_drag_active {
@@ -1024,10 +1036,25 @@ impl EditorApp {
         self.paint_move_chrome_if_any(ui.ctx(), ui.painter());
 
         // Persistent-selection outline (annotation-delete spec):
-        // dashed ember bbox of the selected annotation, last among
+        // dashed forest bbox of the selected annotation, last among
         // the chrome. Chrome-only by construction — it lives in the
         // shell's paint pass, never in `render()` / composed output.
         self.paint_selected_chrome_if_any(ui.ctx(), ui.painter());
+
+        // Floating quick cluster (undo / redo / magnifier / loupe
+        // zoom) over the canvas's top-left corner. The chip rects
+        // feed the next frame's press gate.
+        let canvas_rect = self.canvas_rect;
+        let (floating_action, chip_rects) = canvas_rect.map_or((None, Vec::new()), |rect| {
+            floating::show(
+                ui.ctx(),
+                rect,
+                self.magnifier_always_on,
+                &mut self.magnifier,
+            )
+        });
+        self.floating_rects = chip_rects;
+        self.handle_floating_action(floating_action);
 
         // Handle toolbar actions outside the toolbar drawing code so
         // we can borrow `&self.outcome` cleanly. Each handler runs the
@@ -1087,6 +1114,42 @@ impl EditorApp {
 }
 
 impl EditorApp {
+    /// Apply a floating-cluster action: Undo / Redo replay the same
+    /// dispatches their keyboard twins produce, the magnifier chip
+    /// flips the always-on flag, and the zoom chips' factor step
+    /// already happened inside the cluster.
+    fn handle_floating_action(&mut self, action: Option<floating::FloatingAction>) {
+        match action {
+            Some(floating::FloatingAction::Undo) => {
+                let _ = self.state.dispatch_input(&InputEvent::Key {
+                    key: Key::Char('z'),
+                    modifiers: Modifiers {
+                        ctrl: true,
+                        ..Modifiers::default()
+                    },
+                });
+            }
+            Some(floating::FloatingAction::Redo) => {
+                let _ = self.state.dispatch_input(&InputEvent::Key {
+                    key: Key::Char('y'),
+                    modifiers: Modifiers {
+                        ctrl: true,
+                        ..Modifiers::default()
+                    },
+                });
+            }
+            Some(floating::FloatingAction::ToggleMagnifier) => {
+                self.magnifier_always_on = !self.magnifier_always_on;
+            }
+            // Zoom chips: the cluster already stepped the loupe's
+            // factor; nothing further to apply.
+            Some(
+                floating::FloatingAction::LoupeZoomIn | floating::FloatingAction::LoupeZoomOut,
+            )
+            | None => {}
+        }
+    }
+
     /// Poll the page bridge's directives (single-window page mode
     /// only). `Hide` closes the window — the external-capture seam
     /// (the daemon's pre-grab handshake; the page must never be in a
@@ -1982,9 +2045,11 @@ mod tests {
     /// An editor state on the default Move tool with one committed
     /// rect annotation at (10,10)-(50,40) — something to hover.
     fn move_state_with_ann() -> EditorState {
+        // The annotation sits below the floating cluster's band (the
+        // canvas's top-left ~40 px are chrome now).
         let mut state = blank_state(64, 64);
         state.pending = Some(Annotation::Rect {
-            rect: Rect::from_xywh(10.0, 10.0, 40.0, 30.0),
+            rect: Rect::from_xywh(10.0, 50.0, 40.0, 30.0),
             stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
             fill: None,
         });
@@ -2036,7 +2101,7 @@ mod tests {
             "fixture: first frame caches the canvas rect"
         );
         assert_eq!(
-            cursor_after_hover(&ctx, &mut app, (30.0, 25.0)),
+            cursor_after_hover(&ctx, &mut app, (30.0, 65.0)),
             egui::CursorIcon::Move,
             "hovering the annotation under Move must show the grab cursor"
         );
@@ -2071,7 +2136,7 @@ mod tests {
         editor_frame(&ctx, &mut app, vec![]);
         let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
         // Press on the annotation, drag a little, release not yet.
-        let press = egui::pos2(canvas.min.x + 30.0, canvas.min.y + 25.0);
+        let press = egui::pos2(canvas.min.x + 30.0, canvas.min.y + 65.0);
         editor_frame(
             &ctx,
             &mut app,
@@ -2094,7 +2159,7 @@ mod tests {
             )),
             events: vec![egui::Event::PointerMoved(egui::pos2(
                 canvas.min.x + 36.0,
-                canvas.min.y + 29.0,
+                canvas.min.y + 69.0,
             ))],
             ..egui::RawInput::default()
         };
@@ -3238,6 +3303,60 @@ mod tests {
             app.state.pending.is_some()
         );
         assert!(!app.canvas_drag_active, "no drag may survive the release");
+    }
+
+    /// A press that begins on the floating quick cluster (which
+    /// floats INSIDE the canvas rect) must not start an annotation
+    /// drag either — the floating rect gate holds exactly like the
+    /// panel gate.
+    #[test]
+    fn press_beginning_on_the_floating_cluster_never_starts_a_gesture() {
+        let ctx = egui::Context::default();
+        let mut state = move_state_with_ann();
+        state.tool = Tool::Rect;
+        state.selected_index = None;
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        let chips = app.floating_rects.clone();
+        assert!(!chips.is_empty(), "frames cached the floating chip rects");
+        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+        assert!(
+            chips.iter().all(|r| canvas.contains_rect(*r)),
+            "fixture: the cluster floats over the canvas"
+        );
+        // Press on the magnifier-toggle chip (the cluster's middle).
+        let at = chips[2].center();
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(canvas.min.x + 200.0, canvas.min.y + 100.0)),
+                egui::Event::PointerButton {
+                    pos: egui::pos2(canvas.min.x + 200.0, canvas.min.y + 100.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(
+            app.state.pending.is_none() && app.state.anns.len() == 1,
+            "a cluster press must not begin a rect annotation"
+        );
+        assert!(!app.canvas_drag_active);
     }
 
     // --- Delete chip (annotation-delete Task 002) ---

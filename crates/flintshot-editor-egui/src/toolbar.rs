@@ -58,7 +58,7 @@ pub(crate) enum ToolbarAction {
 /// `(0, 0)` is the rect centre, `±7` the edges, +Y is down — matching
 /// egui's screen space so glyphs can be reasoned about like the
 /// strokes they represent.
-type Glyph = fn(&egui::Painter, egui::Rect, Color32);
+pub(crate) type Glyph = fn(&egui::Painter, egui::Rect, Color32);
 
 /// One rail tool chip: variant, display name, hotkey hint, glyph.
 /// Shared with the overlay's floating rail (plan decision 4).
@@ -429,17 +429,16 @@ fn text_style_popup(ui: &mut egui::Ui, state: &mut EditorState) {
     });
 }
 
-/// Contextual hint, right-aligned in soft ink. Replaces the old static
-/// "Drag to draw · Ctrl+Z undo · Esc cancel" row with guidance that
-/// is true for the selected tool.
+/// Contextual hint, soft ink at caption size. A plain wrapping
+/// label — the retired rail's right-aligned variant explodes the
+/// vertical layout of the narrow panel (horizontal layouts wrap
+/// downwards once the row overflows).
 pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        ui.label(
-            egui::RichText::new(text)
-                .color(theme::palette::INK_SOFT)
-                .size(theme::TYPE_CAPTION),
-        );
-    });
+    ui.label(
+        egui::RichText::new(text)
+            .color(theme::palette::INK_SOFT)
+            .size(theme::TYPE_CAPTION),
+    );
 }
 
 /// Per-tool hint copy. Kept pure for testing.
