@@ -23,13 +23,12 @@
 //! `request_repaint_after` keeps directives (status, focus pings)
 //! flowing even when idle.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use eframe::App;
 use egui::{Context, Key, KeyboardShortcut, Modifiers, ViewportCommand};
-
-use crate::theme;
 
 /// How often an idle home window re-polls directives (status
 /// changes, focus pings arrive independent of input). Shared by the
@@ -50,6 +49,15 @@ const CLOSE_WATCHDOG_DELAY: Duration = Duration::from_millis(500);
 /// routes to the editor page in-process (see
 /// [`HomeBridge::request_paste`]).
 const SHOW_PASTE: bool = true;
+
+/// The hero's pop-in ramp, seconds.
+const HERO_POP_IN_SECONDS: f32 = 0.25;
+
+/// Thumbnail card edge, logical px (decoded at 2× for crispness).
+const THUMB_EDGE: f32 = 96.0;
+
+/// Welcome grain seed — any fixed value.
+const WELCOME_GRAIN_SEED: u64 = 0xFEED;
 
 /// A directive from the app crate into the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +106,13 @@ pub trait HomeBridge {
     /// Take one pending directive, oldest first. Called every
     /// frame (see [`REPOLL_INTERVAL`]).
     fn poll_directive(&mut self) -> Option<HomeDirective>;
+
+    /// Recent image paths for the welcome grid, most recent first
+    /// (the app's bridge answers from `flintshot_core::recents`).
+    /// Default: none — test doubles and minimal bridges.
+    fn recent_images(&mut self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// The eframe app for the home window. Owns no IPC state — see
@@ -105,6 +120,20 @@ pub trait HomeBridge {
 pub(crate) struct HomeApp {
     /// Implementation-supplied world (pump, delegation).
     bridge: Box<dyn HomeBridge>,
+    /// Recent image paths for the welcome grid (refreshed at
+    /// construction, on `Show`, and after a routed image).
+    recent: Vec<PathBuf>,
+    /// Decoded thumbnails keyed by path — in-memory only, never
+    /// persisted (the recents index stores paths alone).
+    thumbs: HashMap<PathBuf, egui::TextureHandle>,
+    /// The welcome's age, seconds — drives the hero's spring
+    /// pop-in and stops once past the ramp.
+    age: f32,
+    /// The grain tile for the welcome background.
+    grain: Option<egui::TextureHandle>,
+    /// The last drop already routed (egui holds dropped files
+    /// across frames; each file must route exactly once).
+    last_drop: Option<PathBuf>,
     /// Pure UI state, kept separate so directive application is
     /// headless-testable.
     ui: HomeUiState,
@@ -147,11 +176,17 @@ impl HomeUiState {
 impl HomeApp {
     /// Construct the app over a bridge. Pure: no egui context is
     /// touched until the first `update`.
-    pub(crate) fn new(bridge: Box<dyn HomeBridge>, initial_status: String) -> Self {
+    pub(crate) fn new(mut bridge: Box<dyn HomeBridge>, initial_status: String) -> Self {
+        let recent = bridge.recent_images();
         Self {
             ui: HomeUiState {
                 status: initial_status,
             },
+            recent,
+            thumbs: HashMap::new(),
+            age: 0.0,
+            grain: None,
+            last_drop: None,
             bridge,
             capture_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::C),
             open_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::O),
@@ -241,6 +276,11 @@ impl HomeApp {
         while let Some(directive) = self.bridge.poll_directive() {
             let focus = matches!(directive, HomeDirective::Show);
             let hide = matches!(directive, HomeDirective::Hide);
+            if focus {
+                // Re-focus is the cheap refresh point: captures the
+                // saves that happened while the editor page was up.
+                self.recent = self.bridge.recent_images();
+            }
             self.ui.apply(&directive);
             if hide {
                 // Not-in-the-shot for externally triggered captures:
@@ -294,71 +334,318 @@ impl HomeApp {
     /// Headless-callable core of [`App::ui`] (mirrors `EditorApp`'s
     /// `logic_impl` / `ui_impl` split). `pub(crate)`: the window
     /// router delegates here on the Home route.
+    ///
+    /// The welcome (Gradia pattern #1 on the pop-up-book skin):
+    /// grain-tiled cream, a forest hero card with the spring
+    /// pop-in, Open / Paste secondary cards, and the recents grid
+    /// — every state renders content, never blank.
     pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.heading(
-                egui::RichText::new("flintshot")
-                    .size(theme::TYPE_TITLE)
-                    .strong(),
-            );
+        // Whole-page drop target: any dropped image file routes
+        // through the existing open path (best-effort — winit's
+        // Wayland DND varies; open/paste/recents keep the page
+        // complete regardless).
+        self.handle_dropped_files(ui.ctx());
+        let dt = ui.ctx().input(|i| i.unstable_dt);
+        self.age = (self.age + dt).min(HERO_POP_IN_SECONDS);
+
+        let panel = egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(crate::theme::palette::PAPER_CREAM)
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(ui, |ui| {
+                self.paint_grain(ui);
+                self.welcome_body(ui);
+            });
+        let _ = panel;
+    }
+
+    /// The welcome body: hero, secondaries, recents grid / empty
+    /// card, and the bottom status line (ADR-0047's watchdog
+    /// contract lives above this in `logic_impl`).
+    fn welcome_body(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(crate::theme::SPACE_SCALE[2]);
+        self.hero_card(ui);
+        ui.add_space(crate::theme::SPACE_SCALE[2]);
+        self.secondary_cards(ui);
+        ui.add_space(crate::theme::SPACE_SCALE[3]);
+        self.recents_section(ui);
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
             ui.label(
-                egui::RichText::new("captures hide this window and return when done")
-                    .color(theme::palette::INK_SOFT)
-                    .small(),
+                egui::RichText::new(&self.ui.status)
+                    .color(crate::theme::palette::INK_SOFT)
+                    .size(crate::theme::TYPE_CAPTION),
             );
-            ui.add_space(10.0);
+        });
+    }
 
-            let tall = egui::vec2(ui.available_width(), 42.0);
-            let capture = egui::Button::new(
-                egui::RichText::new("Capture  [C]")
-                    .color(theme::palette::CUTOUT_WHITE)
-                    .strong(),
-            )
-            .fill(theme::palette::FOREST_DEEP)
-            .min_size(tall);
-            if ui.add(capture).clicked() {
-                self.start_capture(ui.ctx());
-                return;
-            }
-            ui.add_space(4.0);
+    /// The hero: a forest-filled cutout card with the 8 px white
+    /// border, spring pop-in on first open, "Take a screenshot" in
+    /// the display weight. Click (or the C accelerator, handled in
+    /// `logic_impl`) fires the existing capture flow.
+    fn hero_card(&mut self, ui: &mut egui::Ui) {
+        let eased = crate::theme::ease::spring(self.age / HERO_POP_IN_SECONDS);
+        let eased = if self.age >= HERO_POP_IN_SECONDS {
+            1.0
+        } else {
+            eased.clamp(0.0, 1.08)
+        };
+        // Pop-in: the card grows from an inset; overshoot lets it
+        // breathe slightly past the resting size.
+        let inset = ((1.0 - eased) * 40.0).max(0.0);
+        let label = "Take a screenshot";
+        let galley = ui.painter().layout_no_wrap(
+            label.to_owned(),
+            egui::FontId::new(
+                crate::theme::TYPE_DISPLAY,
+                egui::FontFamily::Name(crate::theme::FAMILY_DISPLAY.into()),
+            ),
+            crate::theme::palette::CUTOUT_WHITE,
+        );
+        let hint = ui.painter().layout_no_wrap(
+            " [C]".to_owned(),
+            egui::FontId::proportional(crate::theme::TYPE_CAPTION),
+            crate::theme::palette::CUTOUT_WHITE,
+        );
+        let width = 26.0 + galley.size().x + hint.size().x + 26.0;
+        let full = egui::vec2(width, 72.0);
+        let (rect, _) = ui.allocate_exact_size(full, egui::Sense::hover());
+        let card = rect.shrink(inset);
+        let resp = ui
+            .interact(rect, egui::Id::new("hero-capture"), egui::Sense::click())
+            .on_hover_text("Capture · C");
+        let radius = egui::CornerRadius::same(crate::theme::POD_RADIUS);
+        ui.painter()
+            .add(crate::theme::SHADOW_LIFTED.as_shape(card, radius));
+        ui.painter().rect(
+            card,
+            radius,
+            crate::theme::palette::FOREST_DEEP,
+            crate::theme::CUTOUT_STROKE,
+            egui::StrokeKind::Inside,
+        );
+        let ink = crate::theme::palette::CUTOUT_WHITE;
+        let pos = egui::pos2(
+            card.left() + 26.0,
+            card.center().y - f32::midpoint(galley.size().y, hint.size().y),
+        );
+        ui.painter().galley(pos, galley.clone(), ink);
+        ui.painter()
+            .galley(pos + egui::vec2(0.0, galley.size().y), hint.clone(), ink);
+        if resp.clicked() {
+            let ctx = ui.ctx().clone();
+            self.start_capture(&ctx);
+        }
+    }
 
-            let open = egui::Button::new(
-                egui::RichText::new("Open…  [O]")
-                    .color(theme::palette::INK)
-                    .strong(),
-            )
-            .min_size(egui::vec2(ui.available_width(), 34.0));
-            if ui.add(open).clicked() {
-                self.handle_open(ui.ctx());
-                return;
-            }
-
-            if SHOW_PASTE {
-                ui.add_space(4.0);
-                let paste = egui::Button::new(
-                    egui::RichText::new("Paste  [P]")
-                        .color(theme::palette::INK)
-                        .strong(),
-                )
-                .min_size(egui::vec2(ui.available_width(), 34.0));
-                if ui.add(paste).clicked() {
-                    // A routed paste keeps the window: the router
-                    // swaps the editor route in-place (same no-close
-                    // contract as the Open control).
-                    let _ = self.bridge.request_paste();
+    /// Open / Paste as secondary white cutout cards.
+    fn secondary_cards(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for (id, label, hint) in [
+                ("home-open", "Open…", " · O"),
+                ("home-paste", "Paste", " · P"),
+            ] {
+                let galley = ui.painter().layout_no_wrap(
+                    format!("{label}{hint}"),
+                    egui::FontId::proportional(crate::theme::TYPE_BODY),
+                    crate::theme::palette::INK,
+                );
+                let w = 16.0 + galley.size().x + 16.0;
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 34.0), egui::Sense::hover());
+                let resp = ui
+                    .interact(rect, egui::Id::new(id), egui::Sense::click())
+                    .on_hover_text(label);
+                ui.painter().rect(
+                    rect,
+                    egui::CornerRadius::same(crate::theme::POD_RADIUS),
+                    crate::theme::palette::CUTOUT_WHITE,
+                    crate::theme::HAIRLINE_STROKE,
+                    egui::StrokeKind::Middle,
+                );
+                let pos = egui::pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0);
+                ui.painter().galley(pos, galley, crate::theme::palette::INK);
+                if resp.clicked() {
+                    let ctx = ui.ctx().clone();
+                    match id {
+                        "home-open" => self.handle_open(&ctx),
+                        _ => {
+                            let _ = self.bridge.request_paste();
+                        }
+                    }
                 }
             }
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(&self.ui.status)
-                        .color(theme::palette::INK_SOFT)
-                        .small(),
-                );
-            });
         });
+    }
+
+    /// The recents grid (with thumbnails decoded + downscaled on
+    /// demand) or, when empty, the friendly empty card — never
+    /// blank space. Dead paths render nothing (pruned at load;
+    /// undecodable files skip their card silently).
+    fn recents_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("Recent")
+                .size(crate::theme::TYPE_CAPTION)
+                .color(crate::theme::palette::INK_SOFT),
+        );
+        if self.recent.is_empty() {
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width().min(420.0), 64.0),
+                egui::Sense::hover(),
+            );
+            let _ = ui.interact(rect, egui::Id::new("recents-empty"), egui::Sense::hover());
+            ui.painter().rect(
+                rect,
+                egui::CornerRadius::same(crate::theme::POD_RADIUS),
+                crate::theme::palette::CUTOUT_WHITE,
+                crate::theme::HAIRLINE_STROKE,
+                egui::StrokeKind::Middle,
+            );
+            let galley = ui.painter().layout_no_wrap(
+                "No captures yet — your recent shots will land here".to_owned(),
+                egui::FontId::proportional(crate::theme::TYPE_CAPTION),
+                crate::theme::palette::INK_SOFT,
+            );
+            let pos = egui::pos2(
+                rect.center().x - galley.size().x / 2.0,
+                rect.center().y - galley.size().y / 2.0,
+            );
+            ui.painter()
+                .galley(pos, galley, crate::theme::palette::INK_SOFT);
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing =
+                egui::vec2(crate::theme::SPACE_SCALE[2], crate::theme::SPACE_SCALE[2]);
+            let recent = self.recent.clone();
+            for path in &recent {
+                self.recent_card(ui, path);
+            }
+        });
+    }
+
+    /// One recent's thumb card: letterboxed thumbnail on white,
+    /// click routes through the existing `open_image` path.
+    fn recent_card(&mut self, ui: &mut egui::Ui, path: &PathBuf) {
+        let Some(texture) = self.thumbnail(ui.ctx(), path) else {
+            return;
+        };
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(112.0, 112.0), egui::Sense::hover());
+        let resp = ui
+            .interact(
+                rect,
+                egui::Id::new(("recent", path.to_string_lossy().to_string())),
+                egui::Sense::click(),
+            )
+            .on_hover_text(path.to_string_lossy().to_string());
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(crate::theme::POD_RADIUS),
+            crate::theme::palette::CUTOUT_WHITE,
+            if resp.hovered() {
+                egui::Stroke::new(1.25, crate::theme::palette::AUTUMN_GOLD)
+            } else {
+                crate::theme::HAIRLINE_STROKE
+            },
+            egui::StrokeKind::Middle,
+        );
+        // Letterbox: the fitted image centers in the card.
+        let thumb = texture.size_vec2();
+        let (tw, th) = (thumb.x, thumb.y);
+        let scale = 96.0 / tw.max(th);
+        let size = egui::vec2(tw * scale, th * scale);
+        let img_rect = egui::Rect::from_center_size(rect.center(), size);
+        ui.painter().image(
+            texture.id(),
+            img_rect,
+            egui::Rect {
+                min: egui::pos2(0.0, 0.0),
+                max: egui::pos2(1.0, 1.0),
+            },
+            crate::theme::palette::CUTOUT_WHITE,
+        );
+        if resp.clicked() {
+            let _ = self.bridge.open_image(path.clone());
+            self.recent = self.bridge.recent_images();
+        }
+    }
+
+    /// Decode + downscale a recent's thumbnail on demand, cached
+    /// in memory for the session. `None` when the file is gone or
+    /// undecodable — the card silently skips.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "thumbnail dims are ≤ 2× the card edge by construction; u32 dims ≤ 2^24 are exact in f32"
+    )]
+    fn thumbnail(&mut self, ctx: &egui::Context, path: &PathBuf) -> Option<&egui::TextureHandle> {
+        if !self.thumbs.contains_key(path) {
+            let img = image::open(path).ok()?;
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            // Downscale to 2× the card edge (crispness), preserving
+            // aspect; smaller images stay 1:1.
+            let fit = THUMB_EDGE * 2.0;
+            let s = fit / (w.max(h) as f32);
+            let (tw, th) = if s < 1.0 {
+                (
+                    (((w as f32) * s).round() as u32).max(1),
+                    (((h as f32) * s).round() as u32).max(1),
+                )
+            } else {
+                (w, h)
+            };
+            let same_size = tw == w && th == h;
+            let small = if same_size {
+                rgba
+            } else {
+                image::imageops::resize(&rgba, tw, th, image::imageops::FilterType::Triangle)
+            };
+            let pixels = small
+                .pixels()
+                .map(|p| egui::Color32::from_rgba_unmultiplied(p.0[0], p.0[1], p.0[2], p.0[3]))
+                .collect::<Vec<_>>();
+            let image = egui::ColorImage::new([tw as usize, th as usize], pixels);
+            let handle = ctx.load_texture(
+                format!("recent-{}", path.to_string_lossy()),
+                image,
+                egui::TextureOptions::default(),
+            );
+            self.thumbs.insert(path.clone(), handle);
+        }
+        self.thumbs.get(path)
+    }
+
+    /// Tile the grain over the welcome background — the first
+    /// paint call inside the panel so every card sits above it.
+    fn paint_grain(&mut self, ui: &mut egui::Ui) {
+        if self.grain.is_none() {
+            let image =
+                egui::ColorImage::new([64, 64], crate::theme::grain::tile(WELCOME_GRAIN_SEED, 64));
+            let options = egui::TextureOptions {
+                wrap_mode: egui::TextureWrapMode::Repeat,
+                ..Default::default()
+            };
+            self.grain = Some(ui.ctx().load_texture("welcome-grain", image, options));
+        }
+        if let Some(texture) = self.grain.as_ref() {
+            crate::theme::grain::paint_grain(ui.painter(), ui.max_rect(), texture);
+        }
+    }
+
+    /// Route a dropped image file through the existing open path —
+    /// once per file (egui holds drops across frames).
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone()));
+        if dropped == self.last_drop {
+            return;
+        }
+        if let Some(path) = dropped {
+            self.last_drop = Some(path.clone());
+            let _ = self.bridge.open_image(path);
+            self.recent = self.bridge.recent_images();
+        }
     }
 }
 
@@ -411,6 +698,7 @@ mod tests {
             .push_back(HomeDirective::Hide);
         let mut app = HomeApp::new(Box::new(bridge), "connected".into());
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         app.logic_impl(&ctx);
         // The directive was consumed (not skipped as unknown).
         assert!(
@@ -493,6 +781,7 @@ mod tests {
     struct RecordingBridge {
         rec: Recording,
         pending: Arc<Mutex<VecDeque<HomeDirective>>>,
+        recents: Vec<PathBuf>,
     }
 
     impl HomeBridge for RecordingBridge {
@@ -518,6 +807,10 @@ mod tests {
 
         fn poll_directive(&mut self) -> Option<HomeDirective> {
             self.pending.lock().expect("pending mutex").pop_front()
+        }
+
+        fn recent_images(&mut self) -> Vec<PathBuf> {
+            self.recents.clone()
         }
     }
 
@@ -553,6 +846,7 @@ mod tests {
         let rec = bridge.rec.clone();
         let mut app = HomeApp::new(Box::new(bridge), "connected".into());
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         ctx.begin_pass(egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::C,
@@ -582,6 +876,7 @@ mod tests {
         let rec = bridge.rec.clone();
         let mut app = HomeApp::new(Box::new(bridge), "connected".into());
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let full = ctx.run_ui(
             egui::RawInput {
                 events: vec![egui::Event::Key {
@@ -623,6 +918,7 @@ mod tests {
             .clipboard_has_image = true;
         let mut app = HomeApp::new(Box::new(bridge), "connected".into());
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let full = ctx.run_ui(
             egui::RawInput {
                 events: vec![egui::Event::Key {
@@ -642,6 +938,162 @@ mod tests {
                 .flat_map(|v| v.commands.iter())
                 .all(|c| !matches!(c, egui::ViewportCommand::Close)),
             "a routed paste keeps the window — the router swaps the route"
+        );
+    }
+
+    // --- Welcome screen (pop-up book Task 010) ---
+
+    fn welcome_frame(
+        app: &mut HomeApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        // The hero speaks the display family — installed by
+        // `theme::apply` in every real window (the router owns it).
+        let raw = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1024.0, 768.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        ctx.run_ui(raw, |ui| app.ui_impl(ui))
+    }
+
+    /// Every welcome state renders the hero — never blank.
+    #[test]
+    fn welcome_renders_hero_and_secondaries_in_every_state() {
+        let bridge = RecordingBridge::default();
+        let rec = bridge.rec.clone();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("hero-capture")).is_some(),
+            "the hero card renders"
+        );
+        assert!(ctx.read_response(egui::Id::new("home-open")).is_some());
+        assert!(ctx.read_response(egui::Id::new("home-paste")).is_some());
+        assert_eq!(rec.0.lock().expect("recorder mutex").capture_requests, 0);
+    }
+
+    /// An empty recents list shows the friendly empty card.
+    #[test]
+    fn welcome_without_recents_shows_the_empty_card() {
+        let mut app = HomeApp::new(Box::new(RecordingBridge::default()), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("recents-empty")).is_some(),
+            "the empty state renders a card, not blank space"
+        );
+    }
+
+    /// A real recent renders a thumb card; clicking it routes
+    /// through the existing open path.
+    #[test]
+    fn recents_grid_renders_a_real_thumbnail_and_reopens_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        let img = image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 40, 40, 255]));
+        img.save(&png).unwrap();
+
+        let bridge = RecordingBridge {
+            recents: vec![png.clone()],
+            ..RecordingBridge::default()
+        };
+        let rec = bridge.rec.clone();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let card = ctx
+            .read_response(egui::Id::new(("recent", png.to_string_lossy().to_string())))
+            .expect("the thumb card registers for a decodable recent");
+        assert!(
+            ctx.read_response(egui::Id::new("recents-empty")).is_none(),
+            "a non-empty grid renders no empty card"
+        );
+        let at = card.rect.center();
+        let _ = welcome_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(
+            rec.0.lock().expect("recorder mutex").opened,
+            vec![png],
+            "clicking a recent routes the existing open_image path"
+        );
+    }
+
+    /// A dead recent path renders nothing and breaks nothing.
+    #[test]
+    fn dead_recent_path_is_silently_absent() {
+        let bridge = RecordingBridge {
+            recents: vec![PathBuf::from("/nonexistent/shot.png")],
+            ..RecordingBridge::default()
+        };
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new(("recent", "/nonexistent/shot.png")))
+                .is_none(),
+            "an undecodable recent renders no card"
+        );
+    }
+
+    /// A dropped image file routes through the existing open path —
+    /// exactly once per file.
+    #[test]
+    fn dropped_image_file_routes_through_open() {
+        let bridge = RecordingBridge::default();
+        let rec = bridge.rec.clone();
+        let drop = PathBuf::from("/tmp/dropped.png");
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let raw = |dropped: bool| egui::RawInput {
+            dropped_files: if dropped {
+                vec![egui::DroppedFile {
+                    path: Some(drop.clone()),
+                    ..Default::default()
+                }]
+            } else {
+                Vec::new()
+            },
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1024.0, 768.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw(true), |ui| app.ui_impl(ui));
+        let _ = ctx.run_ui(raw(true), |ui| app.ui_impl(ui));
+        assert_eq!(
+            rec.0.lock().expect("recorder mutex").opened,
+            vec![drop],
+            "the drop routes exactly once while egui holds the file"
         );
     }
 }
