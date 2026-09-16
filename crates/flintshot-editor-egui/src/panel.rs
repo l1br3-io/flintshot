@@ -1,13 +1,25 @@
 //! The docked side panel — the editor's control home.
 //!
-//! Right-docked, grain-textured cream paper. Top → bottom: the
-//! `+` capture chip (new capture / open / paste popup), the five
-//! tool pods as white cutout cards with the spring hover-lift
-//! (shadow grows, card translates up), the contextual options
-//! section (exactly the selected tool's options; the color/stroke
-//! picker bay collapses behind one popover pod button — see
-//! `crate::popover`), and the history + output actions pinned at
-//! the bottom. The canvas beside it is never grained or shadowed.
+//! Right-docked, grain-textured cream paper, and **collapsible** to
+//! a glyph rail (the `«` toggle in the action row; the rail's `»`
+//! restores it). Top → bottom: the action row (`+` capture chip,
+//! collapse toggle), **one** white cutout card holding the five
+//! semantic tool groups separated by hairlines (one card, not five
+//! floating islands — the disjointed shadowed cards read as clutter,
+//! and the per-pod hover-lift went with them), the contextual
+//! options section (exactly the selected tool's options; the
+//! color/stroke picker bay collapses behind one popover pod button —
+//! see `crate::popover`), and the bottom cluster: history + export
+//! chips in one quiet island with the Copy hero pinned below. The
+//! canvas beside it is never grained or shadowed.
+//!
+//! Layout note (the stretched-island bug this file must not
+//! reintroduce): `egui::Frame` inside a `bottom_up` layout grabs the
+//! full remaining main-direction space — the old bottom actions
+//! stretched their export island to a third of the window. The
+//! bottom cluster therefore allocates **exact** sizes
+//! (`allocate_exact_size` / `allocate_ui_with_layout` with an
+//! explicit desired size), which shrink-wrap by contract.
 //!
 //! Input gating lives in `crate::app`: a press only starts a
 //! canvas gesture when it lands inside the cached `CentralPanel`
@@ -24,18 +36,16 @@ use crate::theme;
 /// canvas at the 1024×640 editor page default.
 pub(crate) const PANEL_WIDTH: f32 = 260.0;
 
+/// Collapsed rail width, logical px: exactly one 28 px chip column
+/// plus the panel's inner margin.
+pub(crate) const RAIL_WIDTH: f32 = 44.0;
+
 /// The Objects panel section (spec §forward-compat 2): reserved
 /// for multi-select grouping, hidden today — the selection model
 /// stays single-select and this section renders nothing until its
 /// spec lands. Flipping the constant is the seam's whole
 /// integration point.
 const OBJECTS_SECTION_LIVE: bool = false;
-
-/// How far a lifted card translates up, logical px.
-const LIFT_PX: f32 = 4.0;
-
-/// Hover-lift ramp duration, seconds.
-const HOVER_LIFT_DURATION: f32 = 0.18;
 
 /// Grain seed — any fixed value; determinism is the contract.
 const GRAIN_SEED: u64 = 0x5EED_C0DE;
@@ -44,15 +54,33 @@ const GRAIN_SEED: u64 = 0x5EED_C0DE;
 /// scale.
 const GRAIN_TILE: u32 = 64;
 
-/// Panel state that persists across frames: per-pod hover-lift
-/// progress and the (lazily created) grain texture handle.
+/// Height of the bottom cluster's export island: one chip row (28)
+/// plus the pod padding (6) either side. Written as a literal —
+/// `f32::from` is not const-callable.
+const EXPORT_ROW_HEIGHT: f32 = 40.0;
+
+/// Panel state that persists across frames: the collapse flag and
+/// the (lazily created) grain texture handle.
 #[derive(Default)]
 pub(crate) struct PanelState {
-    /// Hover-lift progress per tool pod (index into
-    /// [`TOOL_PODS`]), 0 = resting.
-    pod_lift: Vec<f32>,
+    /// Whether the panel is collapsed to the glyph rail.
+    pub(crate) collapsed: bool,
     /// The grain tile, created on first use.
     grain: Option<egui::TextureHandle>,
+}
+
+impl PanelState {
+    /// The panel's current width, logical px — the worker window's
+    /// resize target must follow the live panel (a collapsed panel
+    /// must not keep issuing the expanded width).
+    #[must_use]
+    pub(crate) fn width(&self) -> f32 {
+        if self.collapsed {
+            RAIL_WIDTH
+        } else {
+            PANEL_WIDTH
+        }
+    }
 }
 
 /// Draw the whole side panel. Returns the fired action plus the
@@ -66,35 +94,209 @@ pub(crate) fn show(
     page_actions: bool,
     panel: &mut PanelState,
 ) -> (ToolbarAction, Option<PageChromeAction>) {
-    let dt = ui.ctx().input(|i| i.unstable_dt);
-    if panel.pod_lift.len() != TOOL_PODS.len() {
-        panel.pod_lift = vec![0.0; TOOL_PODS.len()];
-    }
-
     let frame = egui::Frame::new()
         .fill(theme::palette::PAPER_CREAM)
         .inner_margin(egui::Margin::same(8));
+    let width = panel.width();
+    let collapsed = panel.collapsed;
     egui::Panel::right("editor_panel")
         .resizable(false)
-        .exact_size(PANEL_WIDTH)
+        .exact_size(width)
         .frame(frame)
         .show(ui, |ui| {
             paint_grain(ui, panel);
-            let (mut action, page_action) = new_capture_chip(ui, page_actions);
-            ui.add_space(theme::POD_GAP);
-            tool_pods(ui, state, gate, panel, dt);
-            if OBJECTS_SECTION_LIVE {
-                // Unreachable while the seam is inert.
-                unreachable!("OBJECTS_SECTION_LIVE is false until its spec lands");
+            if collapsed {
+                rail_body(ui, state, copied, gate, page_actions, panel)
+            } else {
+                docked_body(ui, state, copied, gate, page_actions, panel)
             }
-            bay(ui, state);
-            let bottom = bottom_actions(ui, copied, state.selected_index.is_some());
-            if action == ToolbarAction::None {
-                action = bottom;
-            }
-            (action, page_action)
         })
         .inner
+}
+
+/// The expanded panel body: action row, tools card, contextual
+/// bay, bottom cluster.
+fn docked_body(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    copied: bool,
+    gate: ToolGate,
+    page_actions: bool,
+    panel: &mut PanelState,
+) -> (ToolbarAction, Option<PageChromeAction>) {
+    let (mut action, page_action) = ui
+        .horizontal(|ui| {
+            let pair = new_capture_chip(ui, page_actions);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if collapse_toggle(ui, false).clicked() {
+                    panel.collapsed = true;
+                }
+            });
+            pair
+        })
+        .inner;
+    ui.add_space(theme::POD_GAP);
+    tools_card(ui, state, gate);
+    if OBJECTS_SECTION_LIVE {
+        // Unreachable while the seam is inert.
+        unreachable!("OBJECTS_SECTION_LIVE is false until its spec lands");
+    }
+    bay(ui, state);
+    let bottom = bottom_actions(ui, copied, state.selected_index.is_some());
+    if action == ToolbarAction::None {
+        action = bottom;
+    }
+    (action, page_action)
+}
+
+/// The collapsed rail body: the same vocabulary, glyph-only, in
+/// one 28 px column — tools top, outputs pinned bottom.
+fn rail_body(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    copied: bool,
+    gate: ToolGate,
+    page_actions: bool,
+    panel: &mut PanelState,
+) -> (ToolbarAction, Option<PageChromeAction>) {
+    let mut action = ToolbarAction::None;
+    if collapse_toggle(ui, true).clicked() {
+        panel.collapsed = false;
+    }
+    ui.add_space(theme::POD_GAP);
+    let (plus, page_action) = new_capture_chip(ui, page_actions);
+    if action == ToolbarAction::None {
+        action = plus;
+    }
+    ui.add_space(theme::POD_GAP);
+    ui.separator();
+    for spec in TOOL_PODS.iter().flat_map(|pod| pod.tools.iter()) {
+        let enabled = gate.contains(spec.tool);
+        let tooltip = if enabled {
+            format!("{} · {}", spec.name, spec.key)
+        } else {
+            format!("{} · {} · {}", spec.name, spec.key, LOCK_CLAUSE)
+        };
+        let resp = chip(
+            ui,
+            egui::Id::new(("tool", spec.key)),
+            &tooltip,
+            state.tool == spec.tool,
+            spec.glyph,
+            enabled,
+        );
+        if resp.clicked() {
+            state.set_tool(spec.tool);
+        }
+    }
+    ui.separator();
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+        if copy_square(ui, copied).clicked() {
+            action = ToolbarAction::Copy;
+        }
+        ui.add_space(theme::SPACE_SCALE[1]);
+        for (id, tooltip, glyph) in [
+            ("upload", "Upload", g_upload as Glyph),
+            ("save", "Save · Ctrl+S", g_save),
+            ("delete", "Delete · Del", g_trash),
+        ] {
+            if chip(
+                ui,
+                egui::Id::new(id),
+                tooltip,
+                false,
+                glyph,
+                id != "delete" || state.selected_index.is_some(),
+            )
+            .clicked()
+            {
+                action = match id {
+                    "save" => ToolbarAction::Save,
+                    "upload" => ToolbarAction::Upload,
+                    _ => ToolbarAction::Delete,
+                };
+            }
+            ui.add_space(theme::SPACE_SCALE[1]);
+        }
+    });
+    (action, page_action)
+}
+
+/// The `«` / `»` collapse toggle — the panel's one affordance that
+/// is about the panel itself. Expanded shows `»` (hide, toward the
+/// right edge); the rail shows `«` (restore).
+fn collapse_toggle(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
+    let (tooltip, glyph): (&str, Glyph) = if collapsed {
+        ("Show tools", g_show_panel)
+    } else {
+        ("Hide tools", g_hide_panel)
+    };
+    chip(
+        ui,
+        egui::Id::new("panel-collapse"),
+        tooltip,
+        false,
+        glyph,
+        true,
+    )
+}
+
+/// The five semantic tool groups as rows of **one** white cutout
+/// card, hairline-separated — grouping by proximity and rules, not
+/// by seven floating islands. Clicks switch tools through core
+/// `set_tool` (leaving Move drops the persistent selection); the
+/// gate greys locked chips without hiding them.
+fn tools_card(ui: &mut egui::Ui, state: &mut EditorState, gate: ToolGate) {
+    egui::Frame::new()
+        .fill(theme::palette::CUTOUT_WHITE)
+        .corner_radius(egui::CornerRadius::same(theme::POD_RADIUS))
+        .inner_margin(egui::Margin::same(theme::POD_PAD))
+        .stroke(theme::HAIRLINE_STROKE)
+        .shadow(theme::SHADOW_RESTING)
+        .show(ui, |ui| {
+            for (i, pod) in TOOL_PODS.iter().enumerate() {
+                if i > 0 {
+                    ui.separator();
+                }
+                ui.horizontal(|ui| {
+                    for spec in pod.tools {
+                        let enabled = gate.contains(spec.tool);
+                        let selected = state.tool == spec.tool;
+                        let tooltip = if enabled {
+                            format!("{} · {}", spec.name, spec.key)
+                        } else {
+                            format!("{} · {} · {}", spec.name, spec.key, LOCK_CLAUSE)
+                        };
+                        // Move renders labeled (pod emphasis); ids stay
+                        // key-derived so tooltips and clicks are
+                        // unchanged from the rail era.
+                        let resp = if spec.tool == Tool::Move {
+                            labeled_chip(
+                                ui,
+                                egui::Id::new(("tool", spec.key)),
+                                &tooltip,
+                                selected,
+                                spec.name,
+                                spec.glyph,
+                                enabled,
+                            )
+                        } else {
+                            chip(
+                                ui,
+                                egui::Id::new(("tool", spec.key)),
+                                &tooltip,
+                                selected,
+                                spec.glyph,
+                                enabled,
+                            )
+                        };
+                        if resp.clicked() {
+                            state.set_tool(spec.tool);
+                        }
+                    }
+                });
+            }
+        });
 }
 
 /// Stamp the grain tile over the panel body — first widget call so
@@ -114,112 +316,6 @@ fn paint_grain(ui: &mut egui::Ui, panel: &mut PanelState) {
     }
     if let Some(texture) = panel.grain.as_ref() {
         theme::grain::paint_grain(ui.painter(), ui.max_rect(), texture);
-    }
-}
-
-/// The five tool pods as lift cards. Clicks switch tools through
-/// core `set_tool` (leaving Move drops the persistent selection);
-/// the gate greys locked chips without hiding them.
-fn tool_pods(
-    ui: &mut egui::Ui,
-    state: &mut EditorState,
-    gate: ToolGate,
-    panel: &mut PanelState,
-    dt: f32,
-) {
-    for (i, pod) in TOOL_PODS.iter().enumerate() {
-        let resp = lift_frame(panel.pod_lift[i]).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for spec in pod.tools {
-                    let enabled = gate.contains(spec.tool);
-                    let selected = state.tool == spec.tool;
-                    let tooltip = if enabled {
-                        format!("{} · {}", spec.name, spec.key)
-                    } else {
-                        format!("{} · {} · {}", spec.name, spec.key, LOCK_CLAUSE)
-                    };
-                    // Move renders labeled (pod emphasis); ids stay
-                    // key-derived so tooltips and clicks are
-                    // unchanged from the rail era.
-                    let resp = if spec.tool == Tool::Move {
-                        labeled_chip(
-                            ui,
-                            egui::Id::new(("tool", spec.key)),
-                            &tooltip,
-                            selected,
-                            spec.name,
-                            spec.glyph,
-                            enabled,
-                        )
-                    } else {
-                        chip(
-                            ui,
-                            egui::Id::new(("tool", spec.key)),
-                            &tooltip,
-                            selected,
-                            spec.glyph,
-                            enabled,
-                        )
-                    };
-                    if resp.clicked() {
-                        state.set_tool(spec.tool);
-                    }
-                }
-            })
-        });
-        let target = f32::from(u8::from(resp.response.hovered()));
-        panel.pod_lift[i] =
-            theme::ease::approach(panel.pod_lift[i], target, dt, HOVER_LIFT_DURATION);
-        ui.add_space(theme::POD_GAP);
-    }
-}
-
-/// A cutout card at hover-lift progress `t`: the spring eases both
-/// the shadow growth (resting → lifted) and an up-translation —
-/// the outer margin shifts from "top padding" to "bottom padding"
-/// so the card rises [`LIFT_PX`] inside its reserved space without
-/// moving the layout below.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the margin is LIFT_PX-e by construction, 0..=4"
-)]
-fn lift_frame(t: f32) -> egui::Frame {
-    let eased = theme::ease::spring(t).clamp(0.0, 1.0);
-    let lift = eased * LIFT_PX;
-    egui::Frame::new()
-        .fill(theme::palette::CUTOUT_WHITE)
-        .corner_radius(egui::CornerRadius::same(theme::POD_RADIUS))
-        .inner_margin(egui::Margin::same(theme::POD_PAD))
-        .stroke(theme::HAIRLINE_STROKE)
-        .shadow(shadow_lerp(
-            theme::SHADOW_RESTING,
-            theme::SHADOW_LIFTED,
-            eased,
-        ))
-        .outer_margin(egui::Margin {
-            left: 0,
-            right: 0,
-            top: (LIFT_PX - lift) as i8,
-            bottom: lift as i8,
-        })
-}
-
-/// Linear shadow blend between the two token levels.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "shadow offsets/spreads blend between token values well inside i8 range"
-)]
-fn shadow_lerp(a: egui::Shadow, b: egui::Shadow, t: f32) -> egui::Shadow {
-    let mix = |x: f32, y: f32| x + (y - x) * t;
-    egui::Shadow {
-        offset: [
-            mix(f32::from(a.offset[0]), f32::from(b.offset[0])) as i8,
-            mix(f32::from(a.offset[1]), f32::from(b.offset[1])) as i8,
-        ],
-        blur: mix(f32::from(a.blur), f32::from(b.blur)) as u8,
-        spread: mix(f32::from(a.spread), f32::from(b.spread)) as u8,
-        color: a.color.lerp_to_gamma(b.color, t),
     }
 }
 
@@ -324,20 +420,66 @@ fn fill_toggle(ui: &mut egui::Ui, state: &mut EditorState) {
     }
 }
 
-/// The bottom cluster: the export group (Copy hero below, Save /
-/// Upload secondaries above it) with the Delete history pod
-/// topmost. Existing handlers are reused untouched — this is
-/// arrangement + emphasis, not behavior. Pin stays out (the
-/// pin-to-desktop feature was removed before this effort; the
-/// spec's Gradia-derived mention is a stale carryover).
+/// The bottom cluster: the export group (Delete / Save / Upload in
+/// one quiet island) with the Copy hero pinned below it. Existing
+/// handlers are reused untouched — this is arrangement, not
+/// behavior.
+///
+/// Everything here allocates **exact** sizes: an `egui::Frame`
+/// inside the `bottom_up` layout grabs the whole remaining column
+/// (the stretched-island bug — see the module docs), so the island
+/// is painted by hand over an exact allocation and the chips laid
+/// out inside it.
 fn bottom_actions(ui: &mut egui::Ui, copied: bool, delete_enabled: bool) -> ToolbarAction {
     let mut action = ToolbarAction::None;
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
         if copy_hero(ui, copied).clicked() {
             action = ToolbarAction::Copy;
         }
-        ui.add_space(theme::POD_GAP);
-        pod_island(ui, |ui| {
+        ui.add_space(theme::SPACE_SCALE[2]);
+        let bottom = export_island(ui, delete_enabled);
+        if action == ToolbarAction::None {
+            action = bottom;
+        }
+    });
+    action
+}
+
+/// The export island: Delete (history) beside Save / Upload on one
+/// white cutout row, exactly [`EXPORT_ROW_HEIGHT`] tall — the
+/// pinned-height allocation is the stretch fix.
+fn export_island(ui: &mut egui::Ui, delete_enabled: bool) -> ToolbarAction {
+    let mut action = ToolbarAction::None;
+    let width = ui.available_width().max(120.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, EXPORT_ROW_HEIGHT),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            let rect = ui.max_rect();
+            let radius = egui::CornerRadius::same(theme::POD_RADIUS);
+            ui.painter()
+                .add(theme::SHADOW_RESTING.as_shape(rect, radius));
+            ui.painter().rect(
+                rect,
+                radius,
+                theme::palette::CUTOUT_WHITE,
+                theme::HAIRLINE_STROKE,
+                egui::StrokeKind::Middle,
+            );
+            ui.add_space(f32::from(theme::POD_PAD));
+            ui.spacing_mut().item_spacing = egui::vec2(theme::SPACE_SCALE[1], 0.0);
+            if chip(
+                ui,
+                egui::Id::new("delete"),
+                "Delete · Del",
+                false,
+                g_trash,
+                delete_enabled,
+            )
+            .clicked()
+            {
+                action = ToolbarAction::Delete;
+            }
             if chip(
                 ui,
                 egui::Id::new("save"),
@@ -353,29 +495,30 @@ fn bottom_actions(ui: &mut egui::Ui, copied: bool, delete_enabled: bool) -> Tool
             if chip(ui, egui::Id::new("upload"), "Upload", false, g_upload, true).clicked() {
                 action = ToolbarAction::Upload;
             }
-        });
-        ui.add_space(theme::POD_GAP);
-        // History pod: Delete alone — Undo / Redo live on the
-        // floating on-canvas cluster now (`crate::floating`).
-        pod_island(ui, |ui| {
-            // Enabled iff an annotation is selected (persistent
-            // selection); disabled reads greyed / hover-only via the
-            // same `enabled` path the locked tool chips use.
-            if chip(
-                ui,
-                egui::Id::new("delete"),
-                "Delete · Del",
-                false,
-                g_trash,
-                delete_enabled,
-            )
-            .clicked()
-            {
-                action = ToolbarAction::Delete;
-            }
-        });
-    });
+        },
+    );
     action
+}
+
+/// The collapsed rail's Copy: a 28 px forest square (the
+/// selected-chip visual language — the 8 px cutout border would
+/// eat a square this small), morphing to a check on the copied
+/// feedback like the hero.
+fn copy_square(ui: &mut egui::Ui, copied: bool) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+    let resp = ui
+        .interact(rect, egui::Id::new("copy_action"), egui::Sense::click())
+        .on_hover_text("Copy · Ctrl+C");
+    ui.painter().rect(
+        rect,
+        egui::CornerRadius::same(theme::CHIP_RADIUS),
+        theme::palette::FOREST_DEEP,
+        egui::Stroke::NONE,
+        egui::StrokeKind::Middle,
+    );
+    let glyph = if copied { g_check } else { g_copy };
+    glyph(ui.painter(), rect, theme::palette::CUTOUT_WHITE);
+    resp
 }
 
 /// The Copy hero: a full-width forest card with the 8 px cutout
@@ -1539,6 +1682,26 @@ pub(crate) fn g_plus(p: &egui::Painter, r: egui::Rect, c: Color32) {
     seg(p, r, (0.0, -4.0), (0.0, 4.0), c, 2.0);
 }
 
+/// Two chevrons pointing `dir` (±1) — the panel collapse toggle's
+/// »/« idiom.
+fn g_chevrons(p: &egui::Painter, r: egui::Rect, c: Color32, dir: f32) {
+    for cx in [-2.5_f32, 2.5] {
+        let tip = pt(r, cx + 2.0 * dir, 0.0);
+        p.line_segment([pt(r, cx - 2.0 * dir, -4.0), tip], Stroke::new(2.0, c));
+        p.line_segment([tip, pt(r, cx - 2.0 * dir, 4.0)], Stroke::new(2.0, c));
+    }
+}
+
+/// » — hide the panel (it folds toward the right edge).
+fn g_hide_panel(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    g_chevrons(p, r, c, 1.0);
+}
+
+/// « — restore the panel from the rail.
+fn g_show_panel(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    g_chevrons(p, r, c, -1.0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2025,11 +2188,12 @@ mod tests {
         rects
     }
 
-    /// Every pod renders as its own white cutout island, chips
-    /// within a pod share a row, and the pods stack strictly
-    /// top-to-bottom — the vertical rhythm that replaced the rail.
+    /// The tools render as **one** white cutout card (plus the
+    /// export island below) — not five floating pods; the groups
+    /// separate by hairlines, chips within a group share a row,
+    /// and the groups stack strictly top-to-bottom.
     #[test]
-    fn panel_pods_stack_as_separate_islands() {
+    fn panel_renders_one_tools_card_plus_the_export_island() {
         let mut state = panel_state();
         let ctx = egui::Context::default();
         let mut panel = PanelState::default();
@@ -2039,20 +2203,19 @@ mod tests {
                 let _ = show(ui, &mut state, false, ToolGate::All, false, &mut panel);
             })
         };
-        // five tool pods + history + outputs.
+        let islands = island_rects(&output);
         assert_eq!(
-            island_rects(&output).len(),
-            TOOL_PODS.len() + 2,
-            "every pod renders as its own white cutout island"
+            islands.len(),
+            2,
+            "exactly two white cutout cards: the tools card + the export island"
         );
-        // Tool chips inside one pod share a row; the first chips of
-        // consecutive pods stack strictly downward.
-        let first_chip = |pod: usize| {
-            let spec = TOOL_PODS[pod].tools.first().expect("non-empty pod");
-            ctx.read_response(egui::Id::new(("tool", spec.key)))
-                .unwrap_or_else(|| panic!("pod {pod} registered its first chip"))
-                .rect
-        };
+        // The two cards never overlap.
+        assert!(
+            !islands[0].intersects(islands[1]),
+            "cards overlap: {islands:?}"
+        );
+        // Tool chips inside one group share a row; the first chips
+        // of consecutive groups stack strictly downward.
         for pod in TOOL_PODS.windows(2) {
             let a = ctx
                 .read_response(egui::Id::new((
@@ -2070,10 +2233,9 @@ mod tests {
                 .rect;
             assert!(
                 a.max.y <= b.min.y,
-                "pods must stack top-to-bottom: {a:?} vs {b:?}"
+                "groups must stack top-to-bottom: {a:?} vs {b:?}"
             );
         }
-        let _ = first_chip(0);
         // Chips within the shapes pod share a row.
         let shapes = TOOL_PODS[1].tools;
         let a = ctx
@@ -2086,8 +2248,165 @@ mod tests {
             .rect;
         assert!(
             (a.center().y - b.center().y).abs() < 0.01,
-            "intra-pod chips share a row"
+            "intra-group chips share a row"
         );
+    }
+
+    /// The export island never stretches (the bottom-up `Frame`
+    /// bug this layout must not reintroduce): Delete / Save /
+    /// Upload share one exact-height row, the hero sits below it,
+    /// and nothing overlaps — at any window height.
+    #[test]
+    fn bottom_cluster_never_stretches_or_overlaps() {
+        for height in [640.0, 2000.0] {
+            let mut state = panel_state();
+            let ctx = egui::Context::default();
+            let mut panel = PanelState::default();
+            let output = {
+                let raw = screen(1024.0, height);
+                ctx.run_ui(raw, |ui| {
+                    let _ = show(ui, &mut state, false, ToolGate::All, false, &mut panel);
+                })
+            };
+            let del = ctx
+                .read_response(egui::Id::new("delete"))
+                .expect("delete")
+                .rect;
+            let save = ctx.read_response(egui::Id::new("save")).expect("save").rect;
+            let upload = ctx
+                .read_response(egui::Id::new("upload"))
+                .expect("upload")
+                .rect;
+            let hero = ctx
+                .read_response(egui::Id::new("copy_action"))
+                .expect("hero")
+                .rect;
+            assert!(
+                (del.height() - 28.0).abs() < 0.01,
+                "h={height}: chips stay chip-sized, got {del:?}"
+            );
+            assert!(
+                (del.top() - save.top()).abs() < 0.01 && (save.top() - upload.top()).abs() < 0.01,
+                "h={height}: the export chips share one row"
+            );
+            assert!(
+                hero.top() >= save.bottom(),
+                "h={height}: the hero sits below the export row"
+            );
+            for island in island_rects(&output) {
+                if island.contains(save.center()) {
+                    assert!(
+                        island.height() <= EXPORT_ROW_HEIGHT + 1.0,
+                        "h={height}: the export island stretched to {}",
+                        island.height()
+                    );
+                }
+            }
+        }
+    }
+
+    // --- Collapse (the rail) ---
+
+    /// Clicking `«` collapses the panel to the 44 px rail; the
+    /// tool vocabulary stays reachable and live from the rail.
+    #[test]
+    fn collapse_toggle_swaps_to_the_rail_and_back() {
+        let mut state = panel_state();
+        let ctx = egui::Context::default();
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, ToolGate::All, false, vec![]);
+        let toggle = ctx
+            .read_response(egui::Id::new("panel-collapse"))
+            .expect("the toggle registered");
+        let _ = draw(
+            &ctx,
+            &mut state,
+            &mut panel,
+            ToolGate::All,
+            false,
+            click_events(toggle.rect.center()),
+        );
+        assert!(panel.collapsed, "one click collapses the panel");
+        assert!((panel.width() - RAIL_WIDTH).abs() < f32::EPSILON);
+        // The rail keeps every tool + output registered.
+        for spec in TOOL_PODS.iter().flat_map(|pod| pod.tools.iter()) {
+            assert!(
+                ctx.read_response(egui::Id::new(("tool", spec.key)))
+                    .is_some(),
+                "the rail keeps {}",
+                spec.name
+            );
+        }
+        for id in ["new-capture", "save", "upload", "delete", "copy_action"] {
+            assert!(
+                ctx.read_response(egui::Id::new(id)).is_some(),
+                "the rail keeps {id}"
+            );
+        }
+        // And the rail's toggle restores the docked panel.
+        let toggle = ctx
+            .read_response(egui::Id::new("panel-collapse"))
+            .expect("the rail toggle registered");
+        let _ = draw(
+            &ctx,
+            &mut state,
+            &mut panel,
+            ToolGate::All,
+            false,
+            click_events(toggle.rect.center()),
+        );
+        assert!(!panel.collapsed, "the rail toggle restores the panel");
+        assert!((panel.width() - PANEL_WIDTH).abs() < f32::EPSILON);
+    }
+
+    /// A collapsed rail frees the canvas: at the 1024 default the
+    /// central panel reclaims the docked width.
+    #[test]
+    fn collapsed_rail_frees_the_canvas() {
+        let mut state = panel_state();
+        let ctx = egui::Context::default();
+        let mut panel = PanelState {
+            collapsed: true,
+            ..PanelState::default()
+        };
+        let raw = screen(1024.0, 640.0);
+        let _ = ctx.run_ui(raw, |ui| {
+            let _ = show(ui, &mut state, false, ToolGate::All, false, &mut panel);
+            let central = egui::CentralPanel::default().show(ui, |ui| {
+                ui.allocate_space(egui::vec2(1.0, 1.0));
+            });
+            assert!(
+                central.response.rect.width() >= 1024.0 - RAIL_WIDTH,
+                "a collapsed panel must leave ~the full window to the canvas, got {:?}",
+                central.response.rect.width()
+            );
+        });
+    }
+
+    /// Rail chips stay live: a click on the rail's Pencil chip
+    /// switches tools exactly like the docked card.
+    #[test]
+    fn rail_chip_click_switches_tool() {
+        let mut state = panel_state();
+        state.tool = Tool::Select;
+        let ctx = egui::Context::default();
+        let mut panel = PanelState {
+            collapsed: true,
+            ..PanelState::default()
+        };
+        let _ = draw(&ctx, &mut state, &mut panel, ToolGate::All, false, vec![]);
+        let pen = ctx
+            .read_response(egui::Id::new(("tool", "P")))
+            .expect("the rail registered the Pencil chip");
+        let _ = draw(
+            &ctx,
+            &mut state,
+            &mut panel,
+            ToolGate::All,
+            false,
+            click_events(pen.rect.center()),
+        );
+        assert_eq!(state.tool, Tool::Pencil, "rail clicks switch tools");
     }
 
     /// The 1024×640 editor page default must leave ≥ ~700 px of
@@ -2110,51 +2429,6 @@ mod tests {
                 central.response.rect.width()
             );
         });
-    }
-
-    /// Hovering a pod drives its lift progress toward 1; leaving it
-    /// decays back toward 0 — the spring microinteraction is wired.
-    #[test]
-    fn hover_lift_progress_rises_and_falls() {
-        let mut state = panel_state();
-        let ctx = egui::Context::default();
-        let mut panel = PanelState::default();
-        let _ = draw(&ctx, &mut state, &mut panel, ToolGate::All, false, vec![]);
-        let move_chip = ctx
-            .read_response(egui::Id::new(("tool", "V")))
-            .expect("the selection pod's leading chip");
-        let at = move_chip.rect.center();
-        let hover = egui::Event::PointerMoved(at);
-        for _ in 0..30 {
-            let _ = draw(
-                &ctx,
-                &mut state,
-                &mut panel,
-                ToolGate::All,
-                false,
-                vec![hover.clone()],
-            );
-        }
-        assert!(
-            panel.pod_lift[0] > 0.9,
-            "a held hover must ramp the lift to ~1, got {}",
-            panel.pod_lift[0]
-        );
-        for _ in 0..30 {
-            let _ = draw(
-                &ctx,
-                &mut state,
-                &mut panel,
-                ToolGate::All,
-                false,
-                vec![egui::Event::PointerMoved(egui::pos2(5.0, 700.0))],
-            );
-        }
-        assert!(
-            panel.pod_lift[0] < 0.1,
-            "leaving the pod must decay the lift toward 0, got {}",
-            panel.pod_lift[0]
-        );
     }
     // --- Migrated from the retired toolbar.rs ---
 
