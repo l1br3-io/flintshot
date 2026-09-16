@@ -3,7 +3,7 @@
 - [x] 001 theme-token-module
 - [x] 002 jakarta-fonts
 - [x] 003 motion-texture-primitives
-- [ ] 004 core-recents
+- [x] 004 core-recents
 - [ ] 005 side-panel
 - [ ] 006 floating-controls
 - [ ] 007 contextual-options-popover
