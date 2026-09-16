@@ -6,7 +6,7 @@
 - [x] 004 core-recents
 - [x] 005 side-panel
 - [x] 006 floating-controls
-- [ ] 007 contextual-options-popover
+- [x] 007 contextual-options-popover
 - [ ] 008 export-cluster
 - [ ] 009 header-bar
 - [ ] 010 welcome-screen
