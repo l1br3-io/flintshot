@@ -9,7 +9,7 @@
 //! Everything here is a read-only query over [`EditorState`] — no
 //! dispatcher events, no history entries, no `selected_index` /
 //! `moving` mutation. The shells gate *when* to ask (pointer on
-//! canvas, not over the toolbar, no gesture in flight) and own the
+//! canvas, not over the side panel, no gesture in flight) and own the
 //! physical → logical transform; this module decides *what* the
 //! answer is and how it paints.
 

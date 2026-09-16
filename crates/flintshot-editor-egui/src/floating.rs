@@ -10,8 +10,8 @@
 //! untouched.
 
 use crate::magnifier::Magnifier;
+use crate::panel;
 use crate::theme;
-use crate::toolbar;
 
 /// Margin between the canvas's corner and the cluster, logical px
 /// (two spacing-scale steps off the image edge).
@@ -49,13 +49,13 @@ pub(crate) fn show(
         .order(egui::Order::Middle)
         .fixed_pos(anchor)
         .show(ctx, |ui| {
-            toolbar::pod_island(ui, |ui| {
+            panel::pod_island(ui, |ui| {
                 let mut chip = |id: &'static str,
                                 tooltip: &str,
                                 selected: bool,
-                                glyph: toolbar::Glyph,
+                                glyph: panel::Glyph,
                                 on_click: Option<FloatingAction>| {
-                    let resp = toolbar::chip(ui, egui::Id::new(id), tooltip, selected, glyph, true);
+                    let resp = panel::chip(ui, egui::Id::new(id), tooltip, selected, glyph, true);
                     chip_rects.push(resp.rect);
                     if resp.clicked() {
                         if let Some(a) = on_click {
@@ -67,14 +67,14 @@ pub(crate) fn show(
                     "undo",
                     "Undo · Ctrl+Z",
                     false,
-                    toolbar::g_undo,
+                    panel::g_undo,
                     Some(FloatingAction::Undo),
                 );
                 chip(
                     "redo",
                     "Redo · Ctrl+Y",
                     false,
-                    toolbar::g_redo,
+                    panel::g_redo,
                     Some(FloatingAction::Redo),
                 );
                 chip(
@@ -95,7 +95,7 @@ pub(crate) fn show(
                     "zoom-in",
                     "Loupe zoom in",
                     false,
-                    toolbar::g_plus,
+                    panel::g_plus,
                     Some(FloatingAction::LoupeZoomIn),
                 );
                 // The zoom clicks step the factor right after the

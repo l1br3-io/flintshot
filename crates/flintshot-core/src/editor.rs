@@ -290,6 +290,11 @@ pub struct EditorState {
     /// the toolbar's `BlurKind` toggle; read at `begin_annotation` time
     /// so the dragged annotation uses the currently-selected variant.
     pub blur_kind: BlurKind,
+    /// When `true`, `Tool::Rect` / `Tool::Ellipse` drafts are created
+    /// filled with the annotation color (in addition to the stroke);
+    /// `false` (default) keeps them outlined-only, matching the
+    /// pre-toggle behavior. Read at `begin_annotation` time.
+    pub fill_shapes: bool,
     /// Active font size for `Tool::Text`.
     pub font_size: f32,
     /// Active font family for `Tool::Text`.
@@ -347,6 +352,7 @@ impl EditorState {
             selection: None,
             tool: Tool::default(),
             flip_to_move: true,
+            fill_shapes: false,
             color: Color::RED,
             stroke_width: 3.0,
             blur_kind: BlurKind::default(),
@@ -404,16 +410,19 @@ impl EditorState {
     /// first if it wants to preserve the in-flight one.
     pub fn begin_annotation(&mut self, at: Point) {
         let stroke = Stroke::new(self.color, self.stroke_width);
+        // The fill toggle applies to the closed shapes alone; every
+        // other tool has no interior to fill.
+        let fill = self.fill_shapes.then_some(self.color);
         let ann = match self.tool {
             Tool::Rect => Annotation::Rect {
                 rect: Rect::new(at, at),
                 stroke,
-                fill: None,
+                fill,
             },
             Tool::Ellipse => Annotation::Ellipse {
                 rect: Rect::new(at, at),
                 stroke,
-                fill: None,
+                fill,
             },
             Tool::Line => Annotation::Line {
                 a: at,
@@ -2096,6 +2105,37 @@ mod tests {
             s.begin_annotation(Point::new(1.0, 1.0));
             assert!(s.pending.is_none(), "{tool:?} should be a no-op");
         }
+    }
+
+    /// The fill toggle seeds closed-shape drafts with the
+    /// annotation color; the default stays outlined-only.
+    #[test]
+    fn fill_toggle_controls_closed_shape_drafts() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Rect;
+        s.begin_annotation(Point::new(1.0, 1.0));
+        assert!(
+            matches!(&s.pending, Some(Annotation::Rect { fill: None, .. })),
+            "default stays outlined-only"
+        );
+
+        s.fill_shapes = true;
+        s.begin_annotation(Point::new(1.0, 1.0));
+        match &s.pending {
+            Some(Annotation::Rect {
+                fill: Some(f),
+                stroke,
+                ..
+            }) => {
+                assert_eq!(*f, stroke.color, "fill uses the annotation color");
+            }
+            other => panic!("expected a filled rect, got {other:?}"),
+        }
+
+        // Line never gains a fill regardless of the toggle.
+        s.tool = Tool::Line;
+        s.begin_annotation(Point::new(1.0, 1.0));
+        assert!(matches!(&s.pending, Some(Annotation::Line { .. })));
     }
 
     // --- Task 10: dispatch_input tests ---

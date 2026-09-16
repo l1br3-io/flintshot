@@ -149,7 +149,7 @@ use crate::app::{
 };
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
-use crate::toolbar::{self, ToolbarAction};
+use crate::panel::{self, ToolbarAction};
 
 /// Window title + WM class for the overlay viewport. Distinct from
 /// the editor window so WMs / compositors can route it.
@@ -550,7 +550,7 @@ pub(crate) fn toolbar_anchor(sel: egui::Rect, panel: egui::Rect, size: egui::Vec
 }
 
 /// The floating toolbar's compact rail row: the shared
-/// [`toolbar::TOOL_PODS`] walk plus a history pod, each rendered as
+/// [`panel::TOOL_PODS`] walk plus a history pod, each rendered as
 /// its own rounded island (plan decision 4 — the editor rail's
 /// chips, glyphs, and pod grouping; the overlay has no capture
 /// `+`). Tool clicks switch `state.tool` directly, the same
@@ -558,8 +558,8 @@ pub(crate) fn toolbar_anchor(sel: egui::Rect, panel: egui::Rect, size: egui::Vec
 /// actions for the caller to replay.
 fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction {
     let mut action = ToolbarAction::None;
-    for pod in toolbar::TOOL_PODS {
-        toolbar::pod_island(ui, |ui| {
+    for pod in panel::TOOL_PODS {
+        panel::pod_island(ui, |ui| {
             for spec in pod.tools {
                 let selected = state.tool == spec.tool;
                 let tooltip = format!("{} · {}", spec.name, spec.key);
@@ -567,7 +567,7 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
                 // rail; the wider chip simply widens the measured toolbar
                 // size that drives `toolbar_anchor`.
                 let resp = if spec.tool == Tool::Move {
-                    toolbar::labeled_chip(
+                    panel::labeled_chip(
                         ui,
                         egui::Id::new(("overlay_tool", spec.key)),
                         tooltip.as_str(),
@@ -577,7 +577,7 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
                         true,
                     )
                 } else {
-                    toolbar::chip(
+                    panel::chip(
                         ui,
                         egui::Id::new(("overlay_tool", spec.key)),
                         tooltip.as_str(),
@@ -594,28 +594,28 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
                 }
             }
         });
-        toolbar::pod_gap(ui);
+        panel::pod_gap(ui);
     }
-    let history = toolbar::pod_island(ui, |ui| {
+    let history = panel::pod_island(ui, |ui| {
         let mut action = ToolbarAction::None;
-        if toolbar::chip(
+        if panel::chip(
             ui,
             egui::Id::new("overlay_undo"),
             "Undo · Ctrl+Z",
             false,
-            toolbar::g_undo,
+            panel::g_undo,
             true,
         )
         .clicked()
         {
             action = ToolbarAction::Undo;
         }
-        if toolbar::chip(
+        if panel::chip(
             ui,
             egui::Id::new("overlay_redo"),
             "Redo · Ctrl+Y",
             false,
-            toolbar::g_redo,
+            panel::g_redo,
             true,
         )
         .clicked()
@@ -624,12 +624,12 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
         }
         // Enabled iff an annotation is selected (persistent
         // selection, task 001); disabled reads greyed / hover-only.
-        if toolbar::chip(
+        if panel::chip(
             ui,
             egui::Id::new("overlay_delete"),
             "Delete · Del",
             false,
-            toolbar::g_trash,
+            panel::g_trash,
             state.selected_index.is_some(),
         )
         .clicked()
@@ -653,25 +653,25 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
 fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>) {
     let mut action = ToolbarAction::None;
     let mut close = None;
-    toolbar::pod_island(ui, |ui| {
-        if toolbar::chip(
+    panel::pod_island(ui, |ui| {
+        if panel::chip(
             ui,
             egui::Id::new("overlay_accept"),
             "Accept · Enter",
             false,
-            toolbar::g_check,
+            panel::g_check,
             true,
         )
         .clicked()
         {
             close = Some(OverlayClose::Accept);
         }
-        if toolbar::chip(
+        if panel::chip(
             ui,
             egui::Id::new("overlay_cancel"),
             "Cancel · Esc",
             false,
-            toolbar::g_x,
+            panel::g_x,
             true,
         )
         .clicked()
@@ -679,33 +679,33 @@ fn overlay_accept_row(ui: &mut egui::Ui) -> (ToolbarAction, Option<OverlayClose>
             close = Some(OverlayClose::Cancel);
         }
     });
-    toolbar::pod_gap(ui);
-    toolbar::pod_island(ui, |ui| {
-        if toolbar::chip(
+    panel::pod_gap(ui);
+    panel::pod_island(ui, |ui| {
+        if panel::chip(
             ui,
             egui::Id::new("overlay_save"),
             "Save · Ctrl+S",
             false,
-            toolbar::g_save,
+            panel::g_save,
             true,
         )
         .clicked()
         {
             action = ToolbarAction::Save;
         }
-        if toolbar::chip(
+        if panel::chip(
             ui,
             egui::Id::new("overlay_upload"),
             "Upload",
             false,
-            toolbar::g_upload,
+            panel::g_upload,
             true,
         )
         .clicked()
         {
             action = ToolbarAction::Upload;
         }
-        if toolbar::copy_chip(ui, false).clicked() {
+        if panel::copy_chip(ui, false).clicked() {
             action = ToolbarAction::Copy;
         }
     });
@@ -2456,7 +2456,7 @@ mod tests {
 
     /// Count the pod-island fills a frame painted: rounded white
     /// cutout rects at the theme's pod corner radius — the visual
-    /// signature of [`toolbar::pod_island`]. Frames with shadows
+    /// signature of [`panel::pod_island`]. Frames with shadows
     /// wrap their shapes in `Shape::Vec`, so the collect recurses.
     fn island_count(output: &egui::FullOutput) -> usize {
         fn collect<'a>(
@@ -2492,7 +2492,7 @@ mod tests {
                 let _ = overlay_rail_row(ui, state);
             });
         });
-        let rects = toolbar::TOOL_PODS
+        let rects = panel::TOOL_PODS
             .iter()
             .flat_map(|p| p.tools.iter())
             .map(|spec| {
@@ -2517,7 +2517,7 @@ mod tests {
         // Five tool pods + the history pod, each one painted island.
         assert_eq!(
             islands,
-            toolbar::TOOL_PODS.len() + 1,
+            panel::TOOL_PODS.len() + 1,
             "every pod renders as its own white cutout island"
         );
         // One row: shared centre line, strictly left to right.
@@ -2527,7 +2527,7 @@ mod tests {
         }
         // Pod boundaries sit after each pod's last chip (the history
         // pod trails the tool pods).
-        let mut sizes: Vec<usize> = toolbar::TOOL_PODS.iter().map(|p| p.tools.len()).collect();
+        let mut sizes: Vec<usize> = panel::TOOL_PODS.iter().map(|p| p.tools.len()).collect();
         sizes.push(3);
         let mut boundary = vec![false; rects.len() - 1];
         let mut i = 0;
