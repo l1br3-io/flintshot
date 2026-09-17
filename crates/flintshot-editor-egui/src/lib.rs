@@ -25,8 +25,10 @@
 //!   paper, white cutouts, forest accents) applied to every window.
 //! - `statusbar` (private) — the 30 px forest footer (dims readout,
 //!   gold per-tool hint, kbd chips) under the editor zones.
-//! - `panel` (private) — the docked right side panel (tools,
-//!   contextual bay, bottom actions) drawn by `app`.
+//! - `rail` (private) — the left tool rail (48 px forest strip, the
+//!   tool vocabulary + glyphs, `ToolGate`) drawn by `app`.
+//! - `panel` (private) — the docked right side panel (contextual
+//!   bay, bottom actions) drawn by `app`.
 //! - `popover` (private) — the color / stroke picker bay that
 //!   opens as a popover from a single pod button.
 //!
@@ -52,6 +54,7 @@ mod magnifier;
 mod overlay;
 mod panel;
 mod popover;
+mod rail;
 mod shell;
 mod statusbar;
 mod theme;

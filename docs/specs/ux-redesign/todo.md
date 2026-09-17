@@ -3,7 +3,7 @@
 - [x] 001 palette-tokens
 - [x] 002 widgets
 - [x] 003 statusbar
-- [ ] 004 tool-rail
+- [x] 004 tool-rail
 - [ ] 005 topbar-editor
 - [ ] 006 panel-sections
 - [ ] 007 topbar-home

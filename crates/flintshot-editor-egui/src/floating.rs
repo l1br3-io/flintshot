@@ -11,6 +11,7 @@
 
 use crate::magnifier::Magnifier;
 use crate::panel;
+use crate::rail;
 use crate::theme;
 
 /// Margin between the canvas's corner and the cluster, logical px
@@ -53,7 +54,7 @@ pub(crate) fn show(
                 let mut chip = |id: &'static str,
                                 tooltip: &str,
                                 selected: bool,
-                                glyph: panel::Glyph,
+                                glyph: rail::Glyph,
                                 on_click: Option<FloatingAction>| {
                     let resp = panel::chip(ui, egui::Id::new(id), tooltip, selected, glyph, true);
                     chip_rects.push(resp.rect);
