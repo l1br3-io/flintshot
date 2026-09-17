@@ -1,7 +1,7 @@
 # todo
 
 - [x] 001 palette-tokens
-- [ ] 002 widgets
+- [x] 002 widgets
 - [ ] 003 statusbar
 - [ ] 004 tool-rail
 - [ ] 005 topbar-editor
