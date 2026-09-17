@@ -25,53 +25,87 @@ use egui::{Context, CornerRadius, Stroke};
 /// may use between pods, sections, and controls.
 pub(crate) const SPACE_SCALE: [f32; 5] = [4.0, 8.0, 12.0, 16.0, 24.0];
 
-/// Corner radius of a pod / card / popover, logical px.
-pub(crate) const POD_RADIUS: u8 = 10;
-/// Corner radius of an inner chip, logical px.
-pub(crate) const CHIP_RADIUS: u8 = 7;
+/// Corner radius of a cutout — cards, bars, sections, popovers —
+/// logical px (spec: cutout 10).
+pub(crate) const CUTOUT_RADIUS: u8 = 10;
+/// Corner radius of a pod — chips and buttons — logical px
+/// (spec: pod 12, rounding wider than its container's cutout).
+pub(crate) const POD_RADIUS: u8 = 12;
+/// Corner radius of a pill — switches — logical px. Painter-side
+/// clamping keeps any oversized value a true pill, so this is
+/// effectively "as round as it gets".
+// Consumed with the switch widget (task 002).
+#[allow(dead_code)]
+pub(crate) const PILL_RADIUS: u8 = 100;
 
-/// The cutout border: 8 px of white around every card and pod.
+/// The cutout border: 8 px of cream around every card and pod.
 // Consumed by the docked side panel and welcome cards (tasks 005+);
 // the toolbar pods sit on cream and use the hairline instead.
 #[allow(dead_code)]
 pub(crate) const CUTOUT_STROKE: Stroke = Stroke {
     width: 8.0,
-    color: palette::CUTOUT_WHITE,
+    color: palette::PAPER_CREAM,
 };
 
-/// The 1 px cream-tinted hairline for inner chips and separators.
+/// The 1 px paper-dim hairline for inner chips and separators.
 pub(crate) const HAIRLINE_STROKE: Stroke = Stroke {
     width: 1.0,
-    color: palette::HOLIDAY_HAIRLINE,
+    color: palette::PAPER_DIM,
 };
 
-/// Resting painted shadow: 10 px blur at α ≈ 0.30.
+/// Resting painted shadow (chips / sections): the soft layer of the
+/// mockup's `--sh-resting`.
 pub(crate) const SHADOW_RESTING: egui::Shadow = egui::Shadow {
-    offset: [0, 2],
-    blur: 10,
+    offset: [0, 3],
+    blur: 8,
     spread: 0,
     color: palette::SHADOW_RESTING,
 };
 
-/// Lifted painted shadow (hover / pop-in): 30 px blur at α = 0.40.
-pub(crate) const SHADOW_LIFTED: egui::Shadow = egui::Shadow {
-    offset: [0, 4],
-    blur: 30,
+/// Lift painted shadow (hover): the soft layer of `--sh-lift`.
+pub(crate) const SHADOW_LIFT: egui::Shadow = egui::Shadow {
+    offset: [0, 8],
+    blur: 18,
     spread: 0,
-    color: palette::SHADOW_LIFTED,
+    color: palette::SHADOW_LIFT,
 };
 
-/// Type ramp, logical px. Plus Jakarta Sans (Regular / Medium /
-/// `ExtraBold`) lands with the fonts task; the sizes are the contract.
-// Display size: consumed by the welcome hero card (task 010).
+/// Pop painted shadow (active tool, menus): the soft layer of
+/// `--sh-pop`.
+pub(crate) const SHADOW_POP: egui::Shadow = egui::Shadow {
+    offset: [0, 12],
+    blur: 26,
+    spread: 0,
+    color: palette::SHADOW_POP,
+};
+
+/// Paper painted shadow (window / canvas paper, hero card): the
+/// soft layer of `--sh-paper`.
+pub(crate) const SHADOW_PAPER: egui::Shadow = egui::Shadow {
+    offset: [0, 22],
+    blur: 44,
+    spread: 0,
+    color: palette::SHADOW_PAPER,
+};
+
+/// The six-step type ramp, logical px (spec: xs 10.5 · sm 12 ·
+/// md 13.5 · lg 16 · xl 21 · hero 30). Plus Jakarta Sans; the
+/// display weight for hero / title lives in [`FAMILY_DISPLAY`].
+// TYPE_XS: settings kbd chips + overflow notes (tasks 005/009).
+// TYPE_HERO: welcome hero card (task 010).
 #[allow(dead_code)]
-pub(crate) const TYPE_DISPLAY: f32 = 26.0;
-/// Title / heading size, logical px.
-pub(crate) const TYPE_TITLE: f32 = 16.0;
-/// Body and control-label size, logical px.
-pub(crate) const TYPE_BODY: f32 = 13.0;
-/// Caption / hint size, logical px.
-pub(crate) const TYPE_CAPTION: f32 = 11.0;
+pub(crate) const TYPE_XS: f32 = 10.5;
+/// Small text: captions, hints, kbd chips.
+pub(crate) const TYPE_SM: f32 = 12.0;
+/// Body and control-label size.
+pub(crate) const TYPE_MD: f32 = 13.5;
+/// Title / heading size.
+pub(crate) const TYPE_LG: f32 = 16.0;
+/// Extra-large display text.
+pub(crate) const TYPE_XL: f32 = 21.0;
+/// Hero display text.
+#[allow(dead_code)]
+pub(crate) const TYPE_HERO: f32 = 30.0;
 
 /// Inner padding between a pod island's edge and its chips, logical
 /// px (i8 to match egui's `Margin`).
@@ -198,57 +232,57 @@ pub(crate) fn apply(ctx: &Context) {
     });
 }
 
-/// Build the cream-paper `Visuals`: white chips with hairline
-/// borders on cream, a gold ring on hover, forest fills on
-/// active/selected with white glyphs.
+/// Build the paper `Visuals`: cream chips with hairline borders on
+/// the paper desk, a forest border on hover, forest fills on
+/// active/selected with cream glyphs.
 fn visuals() -> egui::Visuals {
     let mut v = egui::Visuals::light();
-    v.panel_fill = palette::PAPER_CREAM;
-    v.window_fill = palette::CUTOUT_WHITE;
-    v.faint_bg_color = palette::HOLIDAY_FAINT;
-    v.extreme_bg_color = palette::HOLIDAY_FAINT;
+    v.panel_fill = palette::PAPER;
+    v.window_fill = palette::PAPER_CREAM;
+    v.faint_bg_color = palette::PAPER_DIM;
+    v.extreme_bg_color = palette::PAPER_DIM;
     v.hyperlink_color = palette::FOREST_DEEP;
-    v.window_shadow = SHADOW_RESTING;
-    v.popup_shadow = SHADOW_LIFTED;
+    v.window_shadow = SHADOW_PAPER;
+    v.popup_shadow = SHADOW_POP;
 
     // Non-interactive: labels, separators, window outline.
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, palette::INK);
     v.widgets.noninteractive.bg_stroke = HAIRLINE_STROKE;
     v.widgets.noninteractive.bg_fill = palette::PAPER_CREAM;
-    v.widgets.noninteractive.corner_radius = CornerRadius::same(CHIP_RADIUS);
+    v.widgets.noninteractive.corner_radius = CornerRadius::same(POD_RADIUS);
 
-    // Resting widgets: white cutout chips with hairline borders.
-    v.widgets.inactive.weak_bg_fill = palette::CUTOUT_WHITE;
-    v.widgets.inactive.bg_fill = palette::CUTOUT_WHITE;
+    // Resting widgets: cream cutout chips with hairline borders.
+    v.widgets.inactive.weak_bg_fill = palette::PAPER_CREAM;
+    v.widgets.inactive.bg_fill = palette::PAPER_CREAM;
     v.widgets.inactive.bg_stroke = HAIRLINE_STROKE;
     v.widgets.inactive.fg_stroke = Stroke::new(1.0, palette::INK);
-    v.widgets.inactive.corner_radius = CornerRadius::same(CHIP_RADIUS);
+    v.widgets.inactive.corner_radius = CornerRadius::same(POD_RADIUS);
 
-    // Hover: the gold lift ring on a faint-cream fill.
-    v.widgets.hovered.weak_bg_fill = palette::HOLIDAY_FAINT;
-    v.widgets.hovered.bg_fill = palette::HOLIDAY_FAINT;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.25, palette::AUTUMN_GOLD);
+    // Hover: the forest border on a dim-well fill.
+    v.widgets.hovered.weak_bg_fill = palette::PAPER_DIM;
+    v.widgets.hovered.bg_fill = palette::PAPER_DIM;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.25, palette::FOREST);
     v.widgets.hovered.fg_stroke = Stroke::new(1.2, palette::INK);
-    v.widgets.hovered.corner_radius = CornerRadius::same(CHIP_RADIUS);
+    v.widgets.hovered.corner_radius = CornerRadius::same(POD_RADIUS);
 
-    // Pressed / open / selected: forest-filled with white glyphs —
+    // Pressed / open / selected: forest-filled with cream glyphs —
     // the chip reads as cut out of the panel.
     v.widgets.active.weak_bg_fill = palette::FOREST_DEEP;
     v.widgets.active.bg_fill = palette::FOREST_DEEP;
     v.widgets.active.bg_stroke = Stroke::new(1.0, palette::FOREST_DEEP);
-    v.widgets.active.fg_stroke = Stroke::new(1.2, palette::CUTOUT_WHITE);
-    v.widgets.active.corner_radius = CornerRadius::same(CHIP_RADIUS);
+    v.widgets.active.fg_stroke = Stroke::new(1.2, palette::CREAM_TEXT);
+    v.widgets.active.corner_radius = CornerRadius::same(POD_RADIUS);
     v.widgets.open = v.widgets.hovered;
 
     // Selection (text spans + selected segmented options): forest
-    // background with white foreground.
+    // background with cream foreground.
     v.selection.bg_fill = palette::FOREST_MID;
-    v.selection.stroke = Stroke::new(1.2, palette::CUTOUT_WHITE);
+    v.selection.stroke = Stroke::new(1.2, palette::CREAM_TEXT);
 
     // Popup / window dressing.
     v.window_stroke = HAIRLINE_STROKE;
-    v.window_corner_radius = CornerRadius::same(POD_RADIUS);
-    v.menu_corner_radius = CornerRadius::same(POD_RADIUS);
+    v.window_corner_radius = CornerRadius::same(CUTOUT_RADIUS);
+    v.menu_corner_radius = CornerRadius::same(CUTOUT_RADIUS);
     v
 }
 
@@ -277,44 +311,55 @@ mod tests {
         );
     }
 
-    /// A pod must round wider than its chips so the container /
-    /// chip hierarchy stays readable.
+    /// A pod (chip / button) rounds wider than its cutout container,
+    /// per the mockup's radius pair.
     #[test]
-    fn pod_radius_rounds_wider_than_chips() {
-        assert!(POD_RADIUS > CHIP_RADIUS);
+    fn pod_radius_rounds_wider_than_cutout() {
+        assert_eq!(POD_RADIUS, 12);
+        assert_eq!(CUTOUT_RADIUS, 10);
+        assert!(POD_RADIUS > CUTOUT_RADIUS);
     }
 
-    /// The two-level shadow spec: resting at 10 px, lifted at up to
-    /// 30 px, lifted strictly softer and denser.
+    /// The four-level shadow spec: resting / lift / pop / paper,
+    /// strictly softer by blur across resting → lift → pop → paper,
+    /// and all distinct.
     #[test]
-    fn shadows_pin_the_two_levels() {
-        assert_eq!(SHADOW_RESTING.blur, 10);
-        assert_eq!(SHADOW_LIFTED.blur, 30);
-        assert!(SHADOW_RESTING.blur < SHADOW_LIFTED.blur);
-        assert_ne!(SHADOW_RESTING, SHADOW_LIFTED);
+    fn shadows_pin_the_four_levels() {
+        assert_eq!(SHADOW_RESTING.blur, 8);
+        assert_eq!(SHADOW_LIFT.blur, 18);
+        assert_eq!(SHADOW_POP.blur, 26);
+        assert_eq!(SHADOW_PAPER.blur, 44);
+        assert!(SHADOW_RESTING.blur < SHADOW_LIFT.blur);
+        assert!(SHADOW_LIFT.blur < SHADOW_POP.blur);
+        assert!(SHADOW_POP.blur < SHADOW_PAPER.blur);
+        assert_ne!(SHADOW_RESTING, SHADOW_LIFT);
+        assert_ne!(SHADOW_POP, SHADOW_PAPER);
     }
 
-    /// The cutout stroke is the spec's 8 px white border.
+    /// The cutout stroke is the spec's 8 px cream border.
     #[test]
-    fn cutout_stroke_is_eight_px_white() {
+    fn cutout_stroke_is_eight_px_cream() {
         assert_eq!(CUTOUT_STROKE.width.to_bits(), 8.0_f32.to_bits());
-        assert_eq!(CUTOUT_STROKE.color, palette::CUTOUT_WHITE);
+        assert_eq!(CUTOUT_STROKE.color, palette::PAPER_CREAM);
     }
 
-    /// The hairline is 1 px of cream-tinted neutral.
+    /// The hairline is 1 px of the paper-dim neutral.
     #[test]
     fn hairline_is_one_px_neutral() {
         assert_eq!(HAIRLINE_STROKE.width.to_bits(), 1.0_f32.to_bits());
-        assert_eq!(HAIRLINE_STROKE.color, palette::HOLIDAY_HAIRLINE);
+        assert_eq!(HAIRLINE_STROKE.color, palette::PAPER_DIM);
     }
 
-    /// The type ramp orders strictly downward from display to
-    /// caption.
+    /// The type ramp is exactly the six spec sizes, strictly
+    /// increasing.
     #[test]
-    fn type_ramp_orders_strictly() {
-        assert!(TYPE_DISPLAY > TYPE_TITLE);
-        assert!(TYPE_TITLE > TYPE_BODY);
-        assert!(TYPE_BODY > TYPE_CAPTION);
+    fn type_ramp_is_exactly_the_six_spec_sizes() {
+        let ramp = [TYPE_XS, TYPE_SM, TYPE_MD, TYPE_LG, TYPE_XL, TYPE_HERO];
+        let want = [10.5_f32, 12.0, 13.5, 16.0, 21.0, 30.0];
+        for (got, want) in ramp.iter().zip(want) {
+            assert_eq!(got.to_bits(), want.to_bits(), "ramp step must be exact");
+        }
+        assert!(ramp.windows(2).all(|w| w[0] < w[1]));
     }
 
     /// Stroke presets stay strictly increasing and in slider range.
@@ -337,19 +382,32 @@ mod tests {
         assert_eq!(ctx.theme(), egui::Theme::Light);
     }
 
-    /// `apply` installs the cream paper as the panel fill and the
-    /// forest accent as the selection fill.
+    /// `apply` installs the paper desk as the panel fill, cream as
+    /// the resting chip fill, and the forest accent as the selection
+    /// fill with cream glyphs.
     #[test]
     fn apply_installs_paper_and_forest() {
         let ctx = Context::default();
         apply(&ctx);
         let style = ctx.style_of(egui::Theme::Light);
-        assert_eq!(style.visuals.panel_fill, palette::PAPER_CREAM);
-        assert_eq!(style.visuals.selection.bg_fill, palette::FOREST_MID);
-        assert_eq!(
-            style.visuals.widgets.inactive.bg_fill,
-            palette::CUTOUT_WHITE
-        );
+        let v = &style.visuals;
+        assert_eq!(v.panel_fill, palette::PAPER);
+        assert_eq!(v.window_fill, palette::PAPER_CREAM);
+        assert_eq!(v.selection.bg_fill, palette::FOREST_MID);
+        assert_eq!(v.widgets.inactive.bg_fill, palette::PAPER_CREAM);
+        assert_eq!(v.widgets.hovered.bg_stroke.color, palette::FOREST);
+        assert_eq!(v.widgets.active.fg_stroke.color, palette::CREAM_TEXT);
+    }
+
+    /// The window / popup shadows sit at the paper and pop levels —
+    /// windows are paper, menus pop.
+    #[test]
+    fn window_and_popup_shadows_use_paper_and_pop() {
+        let ctx = Context::default();
+        apply(&ctx);
+        let v = &ctx.style_of(egui::Theme::Light).visuals;
+        assert_eq!(v.window_shadow, SHADOW_PAPER);
+        assert_eq!(v.popup_shadow, SHADOW_POP);
     }
 
     /// Spec success criterion 1, machine-checked: `Color32`

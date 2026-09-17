@@ -1,6 +1,6 @@
 # todo
 
-- [ ] 001 palette-tokens
+- [x] 001 palette-tokens
 - [ ] 002 widgets
 - [ ] 003 statusbar
 - [ ] 004 tool-rail

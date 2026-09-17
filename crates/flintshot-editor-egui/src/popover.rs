@@ -39,8 +39,8 @@ pub(crate) fn pod_button(ui: &mut egui::Ui, state: &mut EditorState, target: Col
         .show(|ui| {
             ui.set_min_width(200.0);
             egui::Frame::new()
-                .fill(theme::palette::CUTOUT_WHITE)
-                .corner_radius(egui::CornerRadius::same(theme::POD_RADIUS))
+                .fill(theme::palette::PAPER_CREAM)
+                .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
                 .inner_margin(egui::Margin::same(theme::POD_PAD))
                 .stroke(theme::HAIRLINE_STROKE)
                 .show(ui, |ui| {
@@ -67,7 +67,7 @@ fn labeled_color_chip(ui: &mut egui::Ui, color: Color, target: ColorTarget) -> e
     };
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        egui::FontId::proportional(theme::TYPE_BODY),
+        egui::FontId::proportional(theme::TYPE_MD),
         theme::palette::INK,
     );
     let galley_size = galley.size();
@@ -80,8 +80,8 @@ fn labeled_color_chip(ui: &mut egui::Ui, color: Color, target: ColorTarget) -> e
         .on_hover_text("Color and stroke width");
     ui.painter().rect(
         rect,
-        egui::CornerRadius::same(theme::CHIP_RADIUS),
-        theme::palette::CUTOUT_WHITE,
+        egui::CornerRadius::same(theme::POD_RADIUS),
+        theme::palette::PAPER_CREAM,
         theme::HAIRLINE_STROKE,
         egui::StrokeKind::Middle,
     );
