@@ -1204,14 +1204,6 @@ impl OverlayApp {
                 });
             }
             ToolbarAction::Save => self.handle_save(ctx),
-            // The editor window's NewCapture twin: publish and close
-            // — the closing overlay is the not-in-the-shot guarantee
-            // for the next grab (the shell's caller re-runs the
-            // cycle, same as `run_editor`'s loop).
-            ToolbarAction::NewCapture(mode) => {
-                *self.outcome.borrow_mut() = Some(Ok(EditorOutcome::NewCapture { mode }));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
             ToolbarAction::Upload => self.handle_upload(ctx),
             ToolbarAction::None => {}
         }
