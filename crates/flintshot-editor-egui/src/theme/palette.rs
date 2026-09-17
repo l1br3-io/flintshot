@@ -86,6 +86,13 @@ pub(crate) fn opaque(c: flintshot_core::geom::Color) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r, c.g, c.b, 255)
 }
 
+/// An opaque token color at a new alpha — the cream-tinted hovers
+/// over forest fills, the dimmed borders. Opaque sources only: the
+/// premultiplied round-trip is lossless at α 255 and lossy below.
+pub(crate) fn with_alpha(c: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
+
 /// Premultiplied egui color from raw components (thumbnail pixels,
 /// popover swatches) — runtime values, not tokens.
 pub(crate) fn premultiplied(r: u8, g: u8, b: u8, a: u8) -> Color32 {

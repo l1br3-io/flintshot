@@ -52,6 +52,10 @@ mod panel;
 mod popover;
 mod shell;
 mod theme;
+// The shared cutout widgets ship ahead of their first consumers
+// (statusbar / rail / topbar / panel / settings land in tasks 003+).
+#[allow(dead_code)]
+mod widgets;
 mod window;
 
 pub use canvas::{CanvasView, EguiCanvas, EguiTexture};
