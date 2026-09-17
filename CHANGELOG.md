@@ -20,6 +20,60 @@ Categories used below:
 
 ### Added
 
+- **Five-zone UI + settings route** (spec `docs/specs/ux-redesign/`):
+  the single window re-laid out around the mockup's five zones —
+  44 px topbar (flame brand, breadcrumb, Capture / Copy / Open hero
+  buttons, `⋯` overflow with Save / Upload / Paste + Settings), a
+  48 px left tool rail (forest-mid, gold active chip with a spring
+  pop, lock-grey gated tools), a 236 px properties panel
+  (`{Tool} · Properties` with per-tool collapsible sections —
+  Stroke / Fill / Text / Number / Effects / Crop / Selection —
+  binding real editor fields), a 30 px statusbar (dims + byte
+  estimate, gold per-tool hint, real kbd chips), and the canvas as a
+  paper cutout (shadow + cream ring + corner handles, chrome-only).
+- **Settings route**: reachable from every route's `⋯` overflow;
+  cutout cards for Capture / Editor / Output & saving / Shortcuts /
+  System; wells, switches, and dashed readonly rows (hide-from-shot,
+  default tool, shortcuts, display server, version). Edits apply live
+  and persist through the existing config save + watcher round-trip
+  (debounced).
+- **Settings config schema** (additive, serde-defaulted):
+  `capture.default-mode`, `ui.show-statusbar`,
+  `ui.statusbar-size-mode`, `ui.animations`, and `output.*` (format,
+  jpeg-quality, filename-template, save-dir). Filename templates
+  substitute `{app}` / `{date}` / `{time}` and sanitize to one path
+  component; unknown enum values warn and resolve to defaults.
+- **Direct save**: when `output.filename-template` is set,
+  Save writes `save-dir/template.ext` in the configured format
+  (JPEG at the configured quality) with `-2`-style collision
+  suffixes; an empty template keeps the file dialog.
+- **Shared cutout widgets**: ghost button (hero-key variant), well
+  rows, the gold pill switch (locked variant at 55% opacity),
+  collapsible sections with spring unfold, kbd chips — all behind a
+  single animation gate (`ui.animations`).
+
+### Changed
+
+- The editor's byte-size readout follows `ui.statusbar-size-mode`
+  (`heuristic` `w × h × 4` by default, `exact-png` for a real PNG
+  encode, cached per image dims).
+- The palette of record moved to the mockup's token table (forest /
+  gold / paper families, ink + cream text) with cutout 10 / pod 12 /
+  pill radii and four shadow levels (resting / lift / pop / paper);
+  the v1 gold and graphite-era neutrals are retired and a source scan
+  keeps them out.
+- `capture.default-mode` seeds the topbar Capture exit (fullscreen
+  skips the selection; window falls back to region).
+
+### Removed
+
+- The quiet header bar (tab-strip + AI seams), the side panel's tools
+  card, export island, copy hero/square, `+` capture popup, and the
+  collapse-to-rail mode — every action they hosted moved to the
+  topbar, overflow, rail, or Selection section.
+
+### Added
+
 - **Collapsible editor side panel**: a `«`/`»` toggle in the
   panel's action row collapses the docked panel to a 44 px glyph
   rail (every tool, `+`, and the export/copy actions stay live;
