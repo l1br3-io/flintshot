@@ -962,27 +962,12 @@ impl EditorApp {
         // the gate reflects the selection-first phase.
         let gate = self.rail_gate();
         rail::show(ui, &mut self.state, gate, &mut self.rail);
-        // Side panel. Must come before CentralPanel so egui reserves
-        // the right-hand strip (the retired top rail's reservation,
-        // rotated). Pods, chips, and the `+` popup live in
-        // `crate::panel`; the plain call (no closure) keeps the
-        // borrow of `&mut self.state` disjoint from `self.copied`
-        // and `&mut self.panel`. The `+` popup offers the page
-        // actions only when a bridge exists to route them (worker
-        // windows get the Capture-only popup).
-        let (action, popup_page) = panel::show(
-            ui,
-            &mut self.state,
-            self.copied,
-            self.page.is_some(),
-            &mut self.panel,
-        );
-
-        // The `+` popup's page actions (single-window): the sole
-        // visible home-parity surface on the editor (the chrome strip
-        // it duplicated is gone — editor-capture-ux OQ-1). Worker
-        // windows draw no popup entries beyond Capture.
-        let page_action = popup_page;
+        // Properties panel. Must come before CentralPanel so egui
+        // reserves the right-hand strip. The plain call (no closure)
+        // keeps the borrow of `&mut self.state` disjoint from the
+        // panel's own state. Returns the Selection section's fired
+        // Delete, if any.
+        let panel_action = panel::show(ui, &mut self.state, &mut self.panel);
 
         // Selection-first phase: the toolbar's "Crop · Enter" button
         // crops through `confirm_selection`, bypassing `logic` — so
@@ -1092,11 +1077,11 @@ impl EditorApp {
         // publishes the matching `EditorOutcome` + closes the window,
         // or logs + closes on failure. Dialog-cancel keeps the editor
         // open (no outcome published).
-        match action {
-            ToolbarAction::Save => self.handle_save(ui.ctx()),
-            ToolbarAction::Copy => self.handle_copy(ui.ctx()),
-            ToolbarAction::Upload => self.handle_upload(ui.ctx()),
-            // Undo / Redo / Delete replay the same dispatch a
+        match panel_action {
+            // The panel only fires Delete today (the Selection
+            // section); Save/Copy/Upload live on the topbar. Delete
+            // replays the same dispatch a Del keypress would produce
+            // (the dispatcher owns all state mutation).
             // Ctrl+Z / Ctrl+Y / Del keypress would produce (the
             // dispatcher owns all state mutation); their outcomes are
             // always `Continue`.
@@ -1124,21 +1109,9 @@ impl EditorApp {
                     modifiers: Modifiers::default(),
                 });
             }
-            ToolbarAction::NewCapture(mode) => self.handle_new_capture(mode, ui.ctx()),
-            ToolbarAction::None => {}
-        }
-
-        // The `+` popup's fired action, if any (handled after the
-        // toolbar so both can fire in one frame only by an explicit
-        // double-click).
-        if let Some(page_action) = page_action {
-            match page_action {
-                panel::PageChromeAction::Capture => {
-                    self.handle_new_capture(NewCaptureMode::Region, ui.ctx());
-                }
-                panel::PageChromeAction::Open => self.handle_page_open(ui.ctx()),
-                panel::PageChromeAction::Paste => self.handle_page_paste(ui.ctx()),
-            }
+            // Save / Copy / Upload / NewCapture are unreachable from
+            // the panel today — the topbar owns them.
+            _ => {}
         }
     }
 }
@@ -1154,7 +1127,9 @@ impl EditorApp {
             TopbarAction::Copy => self.handle_copy(ctx),
             TopbarAction::Save => self.handle_save(ctx),
             TopbarAction::Upload => self.handle_upload(ctx),
-            TopbarAction::Open | TopbarAction::Paste | TopbarAction::Settings => {}
+            TopbarAction::Open => self.handle_page_open(ctx),
+            TopbarAction::Paste => self.handle_page_paste(ctx),
+            TopbarAction::Settings => {} // inert until the settings route lands
         }
     }
 
@@ -3431,8 +3406,8 @@ mod tests {
         };
         frame(&ctx, &mut app, vec![]);
         let del = ctx
-            .read_response(egui::Id::new("delete"))
-            .expect("first frame registered the Delete chip");
+            .read_response(egui::Id::new("panel-delete"))
+            .expect("first frame registered the Selection section's Delete button");
         let at = del.rect.center();
         frame(
             &ctx,

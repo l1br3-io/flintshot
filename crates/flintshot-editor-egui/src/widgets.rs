@@ -265,13 +265,14 @@ pub(crate) fn section(
     ui: &mut egui::Ui,
     id: egui::Id,
     title: &str,
+    default_open: bool,
     mut body: impl FnMut(&mut egui::Ui),
 ) -> SectionResponse {
     use crate::theme::palette as p;
     let mut open = ui
         .ctx()
         .data_mut(|d| d.get_temp::<bool>(id))
-        .unwrap_or(false);
+        .unwrap_or(default_open);
 
     let header_h = 26.0;
     let (header_rect, _) = ui.allocate_exact_size(
@@ -590,14 +591,14 @@ mod tests {
         let id = egui::Id::new("sec");
         // Frame 1: closed — click the header to open.
         run(&ctx, 0.0, vec![], |ui| {
-            let resp = section(ui, id, "Stroke", |_| {});
+            let resp = section(ui, id, "Stroke", false, |_| {});
             assert!(!resp.open, "starts closed");
         });
         let header = ctx
             .read_response(id)
             .expect("the header registers under the caller's id");
         run(&ctx, DT, click_events(header.rect.center()), |ui| {
-            let resp = section(ui, id, "Stroke", |_| {});
+            let resp = section(ui, id, "Stroke", false, |_| {});
             assert!(resp.open, "the header click opens the section");
         });
         // Frames 3..N: open persists; the body height grows with the
@@ -606,7 +607,7 @@ mod tests {
         for i in 2u16..=30 {
             let resp = std::cell::Cell::new(0.0_f32);
             run(&ctx, f32::from(i) * DT, vec![], |ui| {
-                let r = section(ui, id, "Stroke", |body| {
+                let r = section(ui, id, "Stroke", false, |body| {
                     body.label("stroke width controls");
                     body.add_space(8.0);
                     body.label("a second line");
@@ -636,15 +637,15 @@ mod tests {
         set_animations(&ctx, false);
         let id = egui::Id::new("sec");
         run(&ctx, 0.0, vec![], |ui| {
-            section(ui, id, "Stroke", |_| {});
+            section(ui, id, "Stroke", false, |_| {});
         });
         let header = ctx.read_response(id).expect("the header renders");
         run(&ctx, DT, click_events(header.rect.center()), |ui| {
-            section(ui, id, "Stroke", |_| {});
+            section(ui, id, "Stroke", false, |_| {});
         });
         let height = std::cell::Cell::new(0.0_f32);
         run(&ctx, 2.0 * DT, vec![], |ui| {
-            let resp = section(ui, id, "Stroke", |body| {
+            let resp = section(ui, id, "Stroke", false, |body| {
                 body.label("stroke width controls");
                 body.add_space(8.0);
                 body.label("a second line");

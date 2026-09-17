@@ -27,8 +27,8 @@
 //!   gold per-tool hint, kbd chips) under the editor zones.
 //! - `rail` (private) — the left tool rail (48 px forest strip, the
 //!   tool vocabulary + glyphs, `ToolGate`) drawn by `app`.
-//! - `panel` (private) — the docked right side panel (contextual
-//!   bay, bottom actions) drawn by `app`.
+//! - `panel` (private) — the 236 px properties panel (contextual
+//!   collapsible sections per the binding map) drawn by `app`.
 //! - `popover` (private) — the color / stroke picker bay that
 //!   opens as a popover from a single pod button.
 //!
