@@ -31,6 +31,7 @@ use crate::home::HomeDirective;
 use crate::magnifier::Magnifier;
 use crate::overlay::{mask_color, mask_rects, usable_selection};
 use crate::panel::{self, ToolbarAction};
+use crate::rail;
 
 /// The selection-first phase's hint line (spec copy). Visible while
 /// the phase is live; every clause stays truthful for the whole
@@ -182,6 +183,8 @@ pub(crate) struct EditorApp {
     /// The docked side panel's cross-frame state (hover-lift
     /// progress, grain texture).
     panel: panel::PanelState,
+    /// The left tool rail's persistent state (grain texture).
+    rail: rail::RailState,
     /// The floating cluster's chip rects from the last frame —
     /// presses that begin there are chrome, never canvas gestures
     /// (misses between chips pass through to the canvas).
@@ -265,6 +268,7 @@ impl EditorApp {
             open_clamp_pending: page.is_some(),
             page,
             panel: panel::PanelState::default(),
+            rail: rail::RailState::default(),
             floating_rects: Vec::new(),
         }
     }
@@ -278,7 +282,7 @@ impl EditorApp {
     /// The rail's tool gate for the current frame: the live
     /// selection-first phase locks every non-Select chip (selection
     /// is the only job), and the first crop restores the full set.
-    fn rail_gate(&self) -> panel::ToolGate {
+    fn rail_gate(&self) -> rail::ToolGate {
         rail_gate(self.phase_active())
     }
 
@@ -447,7 +451,7 @@ impl EditorApp {
         // re-issuing the expanded width) and image +
         // [`header::HEADER_HEIGHT`] tall.
         let new_size = egui::vec2(
-            target_w + self.panel.width(),
+            target_w + panel::PANEL_WIDTH,
             target_h + crate::header::HEADER_HEIGHT + crate::statusbar::STATUSBAR_HEIGHT,
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
@@ -945,6 +949,11 @@ impl EditorApp {
         // right). Editor-only — the router draws home / settings
         // without it, per the mockups.
         crate::statusbar::show(ui, self.state.image.dimensions(), self.state.tool);
+        // Tool rail: the left zone (draw order: top → bottom → left
+        // → right). Tool switching mutates the shared state directly;
+        // the gate reflects the selection-first phase.
+        let gate = self.rail_gate();
+        rail::show(ui, &mut self.state, gate, &mut self.rail);
         // Side panel. Must come before CentralPanel so egui reserves
         // the right-hand strip (the retired top rail's reservation,
         // rotated). Pods, chips, and the `+` popup live in
@@ -953,12 +962,10 @@ impl EditorApp {
         // and `&mut self.panel`. The `+` popup offers the page
         // actions only when a bridge exists to route them (worker
         // windows get the Capture-only popup).
-        let gate = self.rail_gate();
         let (action, popup_page) = panel::show(
             ui,
             &mut self.state,
             self.copied,
-            gate,
             self.page.is_some(),
             &mut self.panel,
         );
@@ -1821,11 +1828,11 @@ fn parse_magnifier_key(name: &str) -> egui::Key {
 /// live phase locks the rail to `Select`; an ended (or never
 /// requested) phase renders the full set. Pure so the phase→gate
 /// contract is testable without a live `Ui`.
-fn rail_gate(phase_active: bool) -> panel::ToolGate {
+fn rail_gate(phase_active: bool) -> rail::ToolGate {
     if phase_active {
-        panel::ToolGate::SelectOnly
+        rail::ToolGate::SelectOnly
     } else {
-        panel::ToolGate::All
+        rail::ToolGate::All
     }
 }
 
@@ -1998,8 +2005,8 @@ mod tests {
     /// rail; ended / never-requested phase → full rail.
     #[test]
     fn rail_gate_tracks_phase() {
-        assert_eq!(rail_gate(true), panel::ToolGate::SelectOnly);
-        assert_eq!(rail_gate(false), panel::ToolGate::All);
+        assert_eq!(rail_gate(true), rail::ToolGate::SelectOnly);
+        assert_eq!(rail_gate(false), rail::ToolGate::All);
     }
 
     #[test]
@@ -3321,6 +3328,7 @@ mod tests {
     /// floats INSIDE the canvas rect) must not start an annotation
     /// drag either — the floating rect gate holds exactly like the
     /// panel gate.
+
     #[test]
     fn press_beginning_on_the_floating_cluster_never_starts_a_gesture() {
         let ctx = egui::Context::default();
@@ -3328,6 +3336,9 @@ mod tests {
         state.tool = Tool::Rect;
         state.selected_index = None;
         let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        // Settle pass: egui's Area sizing pass places the cluster on
+        // frame 1 and pins the exact rect on frame 2.
         editor_frame(&ctx, &mut app, vec![]);
         let chips = app.floating_rects.clone();
         assert!(!chips.is_empty(), "frames cached the floating chip rects");

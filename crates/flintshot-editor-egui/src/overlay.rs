@@ -150,6 +150,7 @@ use crate::app::{
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
 use crate::panel::{self, ToolbarAction};
+use crate::rail;
 
 /// Window title + WM class for the overlay viewport. Distinct from
 /// the editor window so WMs / compositors can route it.
@@ -550,7 +551,7 @@ pub(crate) fn toolbar_anchor(sel: egui::Rect, panel: egui::Rect, size: egui::Vec
 }
 
 /// The floating toolbar's compact rail row: the shared
-/// [`panel::TOOL_PODS`] walk plus a history pod, each rendered as
+/// [`rail::TOOL_PODS`] walk plus a history pod, each rendered as
 /// its own rounded island (plan decision 4 — the editor rail's
 /// chips, glyphs, and pod grouping; the overlay has no capture
 /// `+`). Tool clicks switch `state.tool` directly, the same
@@ -558,7 +559,7 @@ pub(crate) fn toolbar_anchor(sel: egui::Rect, panel: egui::Rect, size: egui::Vec
 /// actions for the caller to replay.
 fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction {
     let mut action = ToolbarAction::None;
-    for pod in panel::TOOL_PODS {
+    for pod in rail::TOOL_PODS {
         panel::pod_island(ui, |ui| {
             for spec in pod.tools {
                 let selected = state.tool == spec.tool;
@@ -2492,7 +2493,7 @@ mod tests {
                 let _ = overlay_rail_row(ui, state);
             });
         });
-        let rects = panel::TOOL_PODS
+        let rects = rail::TOOL_PODS
             .iter()
             .flat_map(|p| p.tools.iter())
             .map(|spec| {
@@ -2517,7 +2518,7 @@ mod tests {
         // Five tool pods + the history pod, each one painted island.
         assert_eq!(
             islands,
-            panel::TOOL_PODS.len() + 1,
+            rail::TOOL_PODS.len() + 1,
             "every pod renders as its own white cutout island"
         );
         // One row: shared centre line, strictly left to right.
@@ -2527,7 +2528,7 @@ mod tests {
         }
         // Pod boundaries sit after each pod's last chip (the history
         // pod trails the tool pods).
-        let mut sizes: Vec<usize> = panel::TOOL_PODS.iter().map(|p| p.tools.len()).collect();
+        let mut sizes: Vec<usize> = rail::TOOL_PODS.iter().map(|p| p.tools.len()).collect();
         sizes.push(3);
         let mut boundary = vec![false; rects.len() - 1];
         let mut i = 0;
