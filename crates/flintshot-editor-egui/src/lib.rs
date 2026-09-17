@@ -23,6 +23,8 @@
 //!   owns the eframe lifecycle and the outcome slot.
 //! - `theme` (private) — the pop-up book design-token system (cream
 //!   paper, white cutouts, forest accents) applied to every window.
+//! - `statusbar` (private) — the 30 px forest footer (dims readout,
+//!   gold per-tool hint, kbd chips) under the editor zones.
 //! - `panel` (private) — the docked right side panel (tools,
 //!   contextual bay, bottom actions) drawn by `app`.
 //! - `popover` (private) — the color / stroke picker bay that
@@ -51,6 +53,7 @@ mod overlay;
 mod panel;
 mod popover;
 mod shell;
+mod statusbar;
 mod theme;
 // The shared cutout widgets ship ahead of their first consumers
 // (statusbar / rail / topbar / panel / settings land in tasks 003+).
