@@ -27,6 +27,10 @@ pub(crate) enum Surface {
     Editor,
     /// The capture-progress page.
     Loading,
+    /// The settings page (constructed when its route lands,
+    /// Task 010; the enable matrix already pins it).
+    #[allow(dead_code)]
+    Settings,
 }
 
 /// What a topbar interaction fired this frame.
@@ -71,14 +75,27 @@ impl Enable {
     /// disabled; Capture / Copy / Save / Upload are local.
     pub(crate) const WORKER: Enable = Enable(Self::CAPTURE | Self::COPY);
 
-    /// Nothing live (home before its task wires the heroes, and the
-    /// loading route while a grab is in flight).
+    /// Nothing live.
     pub(crate) const NONE: Enable = Enable(0);
 
     /// Whether `flag` is enabled.
     #[must_use]
     pub(crate) const fn has(self, flag: u8) -> bool {
         self.0 & flag != 0
+    }
+}
+
+/// The per-route enablement matrix (spec §Routes): Home wires
+/// Capture + Open (Copy has no image to copy — the mockup's
+/// disabled tooltip explains); Editor is fully live; Settings keeps
+/// Capture only; Loading disables everything while a grab is in
+/// flight.
+pub(crate) fn enable_for(surface: Surface) -> Enable {
+    match surface {
+        Surface::Home => Enable(Enable::CAPTURE | Enable::OPEN),
+        Surface::Editor => Enable::ALL,
+        Surface::Settings => Enable(Enable::CAPTURE),
+        Surface::Loading => Enable::NONE,
     }
 }
 
@@ -115,7 +132,7 @@ pub(crate) fn show(
                         enable.has(Enable::OPEN),
                         &mut fired,
                     );
-                    hero(
+                    let copy_resp = hero(
                         ui,
                         "topbar-copy",
                         "⧉",
@@ -124,6 +141,10 @@ pub(crate) fn show(
                         enable.has(Enable::COPY),
                         &mut fired,
                     );
+                    if surface == Surface::Home && !enable.has(Enable::COPY) {
+                        copy_resp
+                            .on_hover_text("No image is open — copy is available in the editor");
+                    }
                     hero(
                         ui,
                         "topbar-capture",
@@ -180,6 +201,7 @@ fn brand(ui: &mut egui::Ui, surface: Surface) {
         Surface::Editor => " | Editor",
         Surface::Home => "",
         Surface::Loading => " | Loading",
+        Surface::Settings => " | Settings",
     };
     if !route.is_empty() {
         let galley = ui.painter().layout_no_wrap(
@@ -201,6 +223,7 @@ fn breadcrumb(ui: &mut egui::Ui, surface: Surface) {
         Surface::Home => (&["Home"][..], 0usize),
         Surface::Editor => (&["Home", "Editor"][..], 1),
         Surface::Loading => (&["Home", "Loading"][..], 1),
+        Surface::Settings => (&["Home", "Settings"][..], 1),
     };
     for (i, stage) in stages.iter().enumerate() {
         let cur = i == current;
@@ -243,7 +266,7 @@ fn hero(
     hero_key: bool,
     enabled: bool,
     fired: &mut Option<TopbarAction>,
-) {
+) -> egui::Response {
     let action = match id {
         "topbar-capture" => TopbarAction::Capture,
         "topbar-copy" => TopbarAction::Copy,
@@ -260,6 +283,7 @@ fn hero(
     if enabled && resp.clicked() {
         *fired = Some(action);
     }
+    resp
 }
 
 /// The `⋯` overflow: an about note + route-varying items. Editor
@@ -621,6 +645,33 @@ mod tests {
                 .is_some(),
             "Settings is on every surface"
         );
+    }
+
+    /// The per-route enablement matrix (spec §Routes): exactly one
+    /// answer per surface × button.
+    #[test]
+    fn enable_matrix_matches_the_spec() {
+        let e = |s: Surface| enable_for(s);
+        for (surface, matrix) in [
+            (Surface::Home, (true, false, true, false)),
+            (Surface::Editor, (true, true, true, true)),
+            (Surface::Settings, (true, false, false, false)),
+            (Surface::Loading, (false, false, false, false)),
+        ] {
+            let (capture, copy, open, editor_items) = matrix;
+            assert_eq!(
+                e(surface).has(Enable::CAPTURE),
+                capture,
+                "{surface:?}: capture"
+            );
+            assert_eq!(e(surface).has(Enable::COPY), copy, "{surface:?}: copy");
+            assert_eq!(e(surface).has(Enable::OPEN), open, "{surface:?}: open");
+            assert_eq!(
+                e(surface).has(Enable::EDITOR_ITEMS),
+                editor_items,
+                "{surface:?}: editor items"
+            );
+        }
     }
 
     /// The breadcrumb's current stage paints gold; on the editor it
