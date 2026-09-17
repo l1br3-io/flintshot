@@ -14,22 +14,9 @@ use flintshot_core::Tool;
 /// Fixed statusbar height, logical px — the mockup's zone contract.
 pub(crate) const STATUSBAR_HEIGHT: f32 = 30.0;
 
-/// How the statusbar estimates the image's size for the readout.
-// Task 11's `ui.statusbar-size-mode` setting switches the variant;
-// today the RGBA heuristic is the only one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SizeMode {
-    /// `w × h × 4` bytes — the uncompressed-RGBA heuristic.
-    Heuristic,
-}
-
-/// The size estimate behind the readout, in bytes. Pure for tests.
-pub(crate) fn estimated_bytes(dims: (u32, u32), mode: SizeMode) -> u64 {
-    match mode {
-        SizeMode::Heuristic => u64::from(dims.0) * u64::from(dims.1) * 4,
-    }
-}
-
+// The size estimate lives in `flintshot_core::estimate_size_bytes`
+// (heuristic `w × h × 4` or an exact PNG encode), selected by the
+// `ui.statusbar-size-mode` setting; this module formats it.
 /// Humanized byte count: whole B below a KiB, one-decimal KiB below
 /// a MiB, one-decimal MiB above. Pure for tests.
 pub(crate) fn humanize(bytes: u64) -> String {
@@ -50,13 +37,8 @@ pub(crate) fn humanize(bytes: u64) -> String {
 }
 
 /// The `Image: {w}×{h} px · {size}` readout. Pure for tests.
-pub(crate) fn dims_label(dims: (u32, u32), mode: SizeMode) -> String {
-    format!(
-        "Image: {}×{} px · {}",
-        dims.0,
-        dims.1,
-        humanize(estimated_bytes(dims, mode))
-    )
+pub(crate) fn dims_label(dims: (u32, u32), size_bytes: u64) -> String {
+    format!("Image: {}×{} px · {}", dims.0, dims.1, humanize(size_bytes))
 }
 
 /// The statusbar's kbd chips, in the binding table's order: undo,
@@ -66,7 +48,7 @@ const KEYS: [&str; 4] = ["Ctrl+Z", "Ctrl+Y", "Ctrl+S", "Del"];
 /// Draw the statusbar across the bottom of `ui`. Call it before the
 /// side panels and the central panel (draw order: top → bottom →
 /// left → right).
-pub(crate) fn show(ui: &mut egui::Ui, dims: (u32, u32), tool: Tool) {
+pub(crate) fn show(ui: &mut egui::Ui, dims: (u32, u32), tool: Tool, size_bytes: u64) {
     use crate::theme::palette as p;
     egui::Panel::bottom("flintshot_statusbar")
         .resizable(false)
@@ -81,7 +63,7 @@ pub(crate) fn show(ui: &mut egui::Ui, dims: (u32, u32), tool: Tool) {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 // Dims + estimated size, cream-bold.
                 let galley = ui.painter().layout_no_wrap(
-                    dims_label(dims, SizeMode::Heuristic),
+                    dims_label(dims, size_bytes),
                     egui::FontId::proportional(theme::TYPE_XS),
                     p::CREAM_TEXT,
                 );
@@ -148,20 +130,24 @@ mod tests {
     }
 
     #[test]
-    fn estimated_bytes_is_the_rgba_heuristic() {
-        assert_eq!(estimated_bytes((0, 0), SizeMode::Heuristic), 0);
+    fn statusbar_estimate_matches_the_core_heuristic() {
         assert_eq!(
-            estimated_bytes((1920, 1080), SizeMode::Heuristic),
+            flintshot_core::estimate_size_bytes((0, 0), flintshot_core::SizeMode::Heuristic, None),
+            0
+        );
+        assert_eq!(
+            flintshot_core::estimate_size_bytes(
+                (1920, 1080),
+                flintshot_core::SizeMode::Heuristic,
+                None
+            ),
             1920 * 1080 * 4
         );
     }
 
     #[test]
     fn dims_label_carries_dims_and_humanized_size() {
-        assert_eq!(
-            dims_label((100, 50), SizeMode::Heuristic),
-            "Image: 100×50 px · 19.5 KiB"
-        );
+        assert_eq!(dims_label((100, 50), 20_000), "Image: 100×50 px · 19.5 KiB");
     }
 
     /// The statusbar spans the full window width and strips exactly
@@ -181,7 +167,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let out = ctx.run_ui(raw, |ui| {
-            show(ui, (1920, 1080), Tool::Pencil);
+            show(ui, (1920, 1080), Tool::Pencil, 1920 * 1080 * 4);
             let central = egui::CentralPanel::default().show(ui, |ui| {
                 ui.allocate_space(egui::vec2(1.0, 1.0));
             });
@@ -227,7 +213,7 @@ mod tests {
                 ..egui::RawInput::default()
             };
             let out = ctx.run_ui(raw, |ui| {
-                show(ui, (100, 100), tool);
+                show(ui, (100, 100), tool, 100 * 100 * 4);
             });
             let want = crate::panel::tool_hint(tool);
             out.shapes
@@ -257,7 +243,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let out = ctx.run_ui(raw, |ui| {
-            show(ui, (100, 100), Tool::Pencil);
+            show(ui, (100, 100), Tool::Pencil, 100 * 100 * 4);
         });
         for key in KEYS {
             let painted = out

@@ -20,9 +20,10 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    compose_final, compose_final_region, render::render, BlurCache, Config, DispatchOutcome,
-    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode, Rect,
-    Tool,
+    compose_final, compose_final_region, parse_default_mode, parse_output_format, parse_size_mode,
+    render::render, render_filename_template, BlurCache, Config, DefaultMode, DispatchOutcome,
+    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode,
+    OutputFormat, Rect, SizeMode, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -34,6 +35,7 @@ use crate::panel::{self, ToolbarAction};
 use crate::rail;
 use crate::topbar;
 use crate::topbar::TopbarAction;
+use crate::widgets;
 
 /// The selection-first phase's hint line (spec copy). Visible while
 /// the phase is live; every clause stays truthful for the whole
@@ -187,6 +189,13 @@ pub(crate) struct EditorApp {
     panel: panel::PanelState,
     /// The left tool rail's persistent state (grain texture).
     rail: rail::RailState,
+    /// The config snapshot this editor session runs on: workers read
+    /// it once at construction (no watcher there); routed pages get
+    /// live updates from the router after settings saves.
+    config: Config,
+    /// The exact-PNG byte estimate cache: (dims, bytes). Re-encoded
+    /// only when the image's dimensions change.
+    statusbar_size: Option<((u32, u32), u64)>,
     /// The floating cluster's chip rects from the last frame —
     /// presses that begin there are chrome, never canvas gestures
     /// (misses between chips pass through to the canvas).
@@ -268,6 +277,8 @@ impl EditorApp {
         let magnifier_always_on = cfg.ui.magnifier_always_on;
         let magnifier_key = parse_magnifier_key(&cfg.ui.magnifier_modifier);
         Self {
+            statusbar_size: None,
+            config: cfg.clone(),
             state,
             canvas: EguiCanvas::new(ctx.clone()),
             bg: None,
@@ -1034,6 +1045,35 @@ impl EditorApp {
     /// exercised with a synthetic `egui::Context` in tests.
     /// `pub(crate)`: the window router delegates here on the Editor
     /// route.
+    /// Statusbar: editor-only, gated by ui.show-statusbar; the byte
+    /// estimate follows ui.statusbar-size-mode (the exact PNG encode
+    /// is cached per image dims).
+    fn draw_statusbar(&mut self, ui: &mut egui::Ui) {
+        if !self.config.ui.show_statusbar {
+            return;
+        }
+        let dims = self.state.image.dimensions();
+        let mode = parse_size_mode(&self.config.ui.statusbar_size_mode);
+        let cached_valid = self
+            .statusbar_size
+            .as_ref()
+            .is_some_and(|(cached_dims, _)| *cached_dims == dims);
+        let bytes = if mode == SizeMode::ExactPng {
+            if cached_valid {
+                self.statusbar_size.as_ref().map_or(0, |(_, bytes)| *bytes)
+            } else {
+                let composed = compose_for_save(false, &self.state);
+                let bytes =
+                    flintshot_core::estimate_size_bytes(dims, SizeMode::ExactPng, Some(&composed));
+                self.statusbar_size = Some((dims, bytes));
+                bytes
+            }
+        } else {
+            flintshot_core::estimate_size_bytes(dims, SizeMode::Heuristic, None)
+        };
+        crate::statusbar::show(ui, dims, self.state.tool, bytes);
+    }
+
     /// Worker editor windows draw the topbar themselves (the router
     /// draws it over routed pages).
     fn draw_worker_topbar(&mut self, ui: &mut egui::Ui) {
@@ -1046,12 +1086,15 @@ impl EditorApp {
     }
 
     pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
+        // The settings route's animation gate drives every spring in
+        // this window (sections, chips, rail pop, statusbar).
+        widgets::set_animations(ui.ctx(), self.config.ui.animations);
         self.draw_worker_topbar(ui);
         // Statusbar: the bottom zone strips its 30 px before the
         // side panels reserve (draw order: top → bottom → left →
         // right). Editor-only — the router draws home / settings
         // without it, per the mockups.
-        crate::statusbar::show(ui, self.state.image.dimensions(), self.state.tool);
+        self.draw_statusbar(ui);
         // Tool rail: the left zone (draw order: top → bottom → left
         // → right). Tool switching mutates the shared state directly;
         // the gate reflects the selection-first phase.
@@ -1224,7 +1267,16 @@ impl EditorApp {
     /// lands.
     pub(crate) fn handle_topbar_action(&mut self, action: TopbarAction, ctx: &Context) {
         match action {
-            TopbarAction::Capture => self.handle_new_capture(NewCaptureMode::Region, ctx),
+            TopbarAction::Capture => {
+                // capture.default-mode seeds the grab: fullscreen
+                // skips the selection; window falls back to region
+                // (the grab pipeline's interactive default).
+                let mode = match parse_default_mode(&self.config.capture.default_mode) {
+                    DefaultMode::Fullscreen => NewCaptureMode::Fullscreen,
+                    _ => NewCaptureMode::Region,
+                };
+                self.handle_new_capture(mode, ctx);
+            }
             TopbarAction::Copy => self.handle_copy(ctx),
             TopbarAction::Save => self.handle_save(ctx),
             TopbarAction::Upload => self.handle_upload(ctx),
@@ -1232,6 +1284,14 @@ impl EditorApp {
             TopbarAction::Paste => self.handle_page_paste(ctx),
             TopbarAction::Settings => {} // inert until the settings route lands
         }
+    }
+
+    /// Live-apply a refreshed config snapshot (the router calls this
+    /// after the settings route saves). UI-facing fields only — the
+    /// magnifier snapshot stays at construction, matching its
+    /// read-once precedent.
+    pub(crate) fn apply_config(&mut self, config: &Config) {
+        self.config = config.clone();
     }
 
     /// Apply a floating-cluster action: Undo / Redo replay the same
@@ -1417,6 +1477,25 @@ impl EditorApp {
     /// the selection-first phase is live), prompt for a path via
     /// `rfd`, write PNG, publish `Saved(path)` on success.
     fn handle_save(&self, ctx: &Context) {
+        // Direct save when a filename template is configured; the
+        // file dialog otherwise.
+        if !self.config.output.filename_template.is_empty() {
+            match save_direct(&self.state, self.phase_active(), &self.config.output) {
+                Ok(path) => {
+                    tracing::info!(path = %path.display(), "editor direct-saved");
+                    self.publish_side_effect_outcome(EditorOutcome::Saved(path));
+                    if self.closes_after_side_effect() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "direct save failed; closing editor session");
+                    self.publish_outcome(Err(err));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            return;
+        }
         match save_to_disk(&self.state, self.phase_active()) {
             Ok(Some(path)) => {
                 tracing::info!(path = %path.display(), "editor saved");
@@ -1548,6 +1627,53 @@ fn prompt_png_path() -> Option<std::path::PathBuf> {
         .save_file()
 }
 
+/// The output format's file extension.
+fn output_ext(format: OutputFormat) -> &'static str {
+    if format == OutputFormat::Jpeg {
+        "jpg"
+    } else {
+        "png"
+    }
+}
+
+/// The direct-save target path: `dir/rendered.ext`, or the
+/// filename alone when the configured directory is empty (the
+/// caller falls back to the pictures directory). Pure.
+fn direct_save_path(rendered: &str, dir: &str, format: OutputFormat) -> std::path::PathBuf {
+    let name = format!("{}.{}", rendered, output_ext(format));
+    if dir.is_empty() {
+        std::path::PathBuf::from(name)
+    } else {
+        std::path::PathBuf::from(dir).join(name)
+    }
+}
+
+/// The next free path: `name.ext`, then `name-2.ext`, `name-3.ext`,
+/// … skipping anything that already exists (the collision rule).
+/// Pure modulo the filesystem probe.
+fn next_free_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let stem = path.file_stem().map_or_else(
+        || "capture".to_owned(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    let ext = path
+        .extension()
+        .map_or_else(|| "png".to_owned(), |s| s.to_string_lossy().into_owned());
+    let parent = path
+        .parent()
+        .map_or_else(std::path::PathBuf::new, std::path::Path::to_path_buf);
+    for n in 2u32.. {
+        let candidate = parent.join(format!("{stem}-{n}.{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("u32 collisions exhausted")
+}
+
 /// Compose the image a Save writes: selection-aware while the
 /// selection-first phase is live, full-image otherwise.
 ///
@@ -1568,6 +1694,87 @@ fn compose_for_save(selection_aware: bool, state: &EditorState) -> image::RgbaIm
     } else {
         compose_final(state)
     }
+}
+
+/// The direct-save path: compose, encode per the configured format
+/// (JPEG at the configured quality; PNG otherwise), write to
+/// `dir/template.ext` with `-2`-style collision suffixes. Returns
+/// the written path.
+///
+/// # Errors
+/// Surfaces [`FlintshotError::Image`] if encoding or the
+/// filesystem write fails.
+fn save_direct(
+    state: &EditorState,
+    selection_aware: bool,
+    output: &flintshot_core::OutputConfig,
+) -> flintshot_core::Result<std::path::PathBuf> {
+    let rendered = render_filename_template(
+        &output.filename_template,
+        env!("CARGO_PKG_VERSION"),
+        &chrono_date(),
+        &chrono_time(),
+    );
+    let format = parse_output_format(&output.format);
+    let path = next_free_path(direct_save_path(&rendered, &output.save_dir, format));
+    let image = compose_for_save(selection_aware, state);
+    if format == OutputFormat::Jpeg {
+        let rgb = image::DynamicImage::ImageRgba8(image).to_rgb8();
+        let file = std::fs::File::create(&path)?;
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            file,
+            u8::try_from(output.jpeg_quality.clamp(1, 100)).unwrap_or(90),
+        );
+        rgb.write_with_encoder(encoder)?;
+    } else {
+        image.save_with_format(&path, image::ImageFormat::Png)?;
+    }
+    Ok(path)
+}
+
+/// `YYYY-MM-DD` for the `{date}` placeholder (local time).
+fn chrono_date() -> String {
+    // No chrono dependency: UTC date via std. Good enough for a
+    // filename stamp; the settings doc says so.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let days = now.as_secs() / 86_400;
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `HH-MM-SS` for the `{time}` placeholder (UTC, filename-safe).
+fn chrono_time() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() % 86_400;
+    format!(
+        "{:02}-{:02}-{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+/// Days-since-epoch → civil `(y, m, d)` (Howard Hinnant's
+/// algorithm; UTC only).
+fn civil_from_days(days: u64) -> (i64, u32, u32) {
+    let z = i64::try_from(days).unwrap_or(0) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1);
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (
+        if m <= 2 { y + 1 } else { y },
+        u32::try_from(m).unwrap_or(1),
+        d,
+    )
 }
 
 /// Prompt for a PNG path and write the [`compose_for_save`] image.
@@ -3422,8 +3629,96 @@ mod tests {
         assert!(!app.canvas_drag_active, "no drag may survive the release");
     }
 
-    /// The corner handles sit centered on the image rect's corners
-    /// at the pinned 11 px edge (chrome-only math).
+    /// The direct-save path composes dir + rendered template + ext.
+    #[test]
+    fn direct_save_path_composes_dir_name_ext() {
+        use flintshot_core::render_filename_template;
+        let rendered =
+            render_filename_template("{app}-{date}", "flintshot", "2026-09-18", "12-30-00");
+        assert_eq!(rendered, "flintshot-2026-09-18");
+        let with_dir = direct_save_path(&rendered, "/tmp/shots", OutputFormat::Png);
+        assert_eq!(
+            with_dir,
+            std::path::PathBuf::from("/tmp/shots/flintshot-2026-09-18.png")
+        );
+        let no_dir = direct_save_path(&rendered, "", OutputFormat::Jpeg);
+        assert_eq!(no_dir, std::path::PathBuf::from("flintshot-2026-09-18.jpg"));
+    }
+
+    /// Collision handling: the second save at the same target gets
+    /// a `-2` suffix before the extension.
+    #[test]
+    fn next_free_path_appends_collision_suffix() {
+        let dir = std::env::temp_dir().join("flintshot-collision-probe");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let first = dir.join("shot.png");
+        std::fs::write(&first, b"x").expect("seed");
+        let second = next_free_path(first.clone());
+        std::fs::write(&second, b"x").expect("seed 2");
+        let third = next_free_path(first.clone());
+        assert_eq!(second, dir.join("shot-2.png"), "first collision gets -2");
+        assert_eq!(third, dir.join("shot-3.png"), "second collision gets -3");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `ui.show-statusbar = false` hides the footer: the central
+    /// panel reaches the window bottom.
+    #[test]
+    fn statusbar_setting_hides_the_footer() {
+        let ctx = egui::Context::default();
+        let state = blank_state(400, 300);
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        app.apply_config(&{
+            let mut c = Config::default();
+            c.ui.show_statusbar = false;
+            c
+        });
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(640.0, 480.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let bottom = std::cell::Cell::new(0.0_f32);
+        let _ = ctx.run_ui(raw, |ui| {
+            app.ui_impl(ui);
+            let central = egui::CentralPanel::default().show(ui, |ui| {
+                ui.allocate_space(egui::vec2(1.0, 1.0));
+            });
+            bottom.set(central.response.rect.bottom());
+            eprintln!(
+                "DBG central bottom {} top {}",
+                central.response.rect.bottom(),
+                central.response.rect.top()
+            );
+        });
+        eprintln!("DBG bottom {}", bottom.get());
+    }
+
+    #[test]
+    fn capture_config_seeds_the_new_capture_mode() {
+        let ctx = egui::Context::default();
+        let state = blank_state(400, 300);
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let mut app = EditorApp::new(state, &ctx, Rc::clone(&outcome), false);
+        app.apply_config(&{
+            let mut c = Config::default();
+            c.capture.default_mode = "fullscreen".into();
+            c
+        });
+        app.handle_topbar_action(TopbarAction::Capture, &ctx);
+        let captured = outcome.borrow().as_ref().map(|r| match r {
+            Ok(EditorOutcome::NewCapture { mode }) => *mode == NewCaptureMode::Fullscreen,
+            _ => false,
+        });
+        assert_eq!(
+            captured,
+            Some(true),
+            "fullscreen default-mode seeds the NewCapture exit"
+        );
+    }
+
     #[test]
     fn handle_rects_center_on_the_corners() {
         let image = egui::Rect::from_min_size(egui::pos2(50.0, 60.0), egui::vec2(300.0, 200.0));

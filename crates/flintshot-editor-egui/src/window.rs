@@ -470,6 +470,11 @@ impl WindowApp {
                     // SAVE_DEBOUNCE coalesces rapid edits, and the
                     // final write always lands.
                     if let Some(config) = page.drain_save(now) {
+                        // Live-apply to the routed editor session,
+                        // if one is open under this route.
+                        if let Some(editor) = self.editor.as_mut() {
+                            editor.apply_config(config);
+                        }
                         self.home.save_config(config);
                     }
                     if escape {
