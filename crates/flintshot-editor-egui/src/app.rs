@@ -448,7 +448,7 @@ impl EditorApp {
         // [`header::HEADER_HEIGHT`] tall.
         let new_size = egui::vec2(
             target_w + self.panel.width(),
-            target_h + crate::header::HEADER_HEIGHT,
+            target_h + crate::header::HEADER_HEIGHT + crate::statusbar::STATUSBAR_HEIGHT,
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
         ctx.request_repaint();
@@ -940,6 +940,11 @@ impl EditorApp {
         if self.page.is_none() {
             crate::header::show(ui, crate::header::Doc::Editor, None);
         }
+        // Statusbar: the bottom zone strips its 30 px before the
+        // side panels reserve (draw order: top → bottom → left →
+        // right). Editor-only — the router draws home / settings
+        // without it, per the mockups.
+        crate::statusbar::show(ui, self.state.image.dimensions(), self.state.tool);
         // Side panel. Must come before CentralPanel so egui reserves
         // the right-hand strip (the retired top rail's reservation,
         // rotated). Pods, chips, and the `+` popup live in
