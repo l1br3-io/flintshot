@@ -32,6 +32,8 @@ use crate::magnifier::Magnifier;
 use crate::overlay::{mask_color, mask_rects, usable_selection};
 use crate::panel::{self, ToolbarAction};
 use crate::rail;
+use crate::topbar;
+use crate::topbar::TopbarAction;
 
 /// The selection-first phase's hint line (spec copy). Visible while
 /// the phase is live; every clause stays truthful for the whole
@@ -449,10 +451,10 @@ impl EditorApp {
         // header reserves a strip above — the window is image +
         // the live panel width (a collapsed rail must not keep
         // re-issuing the expanded width) and image +
-        // [`header::HEADER_HEIGHT`] tall.
+        // [`topbar::TOPBAR_HEIGHT`] tall.
         let new_size = egui::vec2(
             target_w + panel::PANEL_WIDTH,
-            target_h + crate::header::HEADER_HEIGHT + crate::statusbar::STATUSBAR_HEIGHT,
+            target_h + crate::topbar::TOPBAR_HEIGHT + crate::statusbar::STATUSBAR_HEIGHT,
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
         ctx.request_repaint();
@@ -937,13 +939,19 @@ impl EditorApp {
     /// exercised with a synthetic `egui::Context` in tests.
     /// `pub(crate)`: the window router delegates here on the Editor
     /// route.
-    pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
-        // Worker editor windows (no router above them) draw their
-        // own header; routed pages inherit the router's — drawing
-        // it here too would double it.
-        if self.page.is_none() {
-            crate::header::show(ui, crate::header::Doc::Editor, None);
+    /// Worker editor windows draw the topbar themselves (the router
+    /// draws it over routed pages).
+    fn draw_worker_topbar(&mut self, ui: &mut egui::Ui) {
+        if self.page.is_some() {
+            return;
         }
+        if let Some(a) = topbar::show(ui, topbar::Surface::Editor, None, topbar::Enable::WORKER) {
+            self.handle_topbar_action(a, ui.ctx());
+        }
+    }
+
+    pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
+        self.draw_worker_topbar(ui);
         // Statusbar: the bottom zone strips its 30 px before the
         // side panels reserve (draw order: top → bottom → left →
         // right). Editor-only — the router draws home / settings
@@ -1136,6 +1144,20 @@ impl EditorApp {
 }
 
 impl EditorApp {
+    /// Apply a topbar action (worker windows; the router forwards
+    /// routed-page actions here too). Open / Paste have no worker
+    /// bridge and stay disabled; Settings is inert until its route
+    /// lands.
+    pub(crate) fn handle_topbar_action(&mut self, action: TopbarAction, ctx: &Context) {
+        match action {
+            TopbarAction::Capture => self.handle_new_capture(NewCaptureMode::Region, ctx),
+            TopbarAction::Copy => self.handle_copy(ctx),
+            TopbarAction::Save => self.handle_save(ctx),
+            TopbarAction::Upload => self.handle_upload(ctx),
+            TopbarAction::Open | TopbarAction::Paste | TopbarAction::Settings => {}
+        }
+    }
+
     /// Apply a floating-cluster action: Undo / Redo replay the same
     /// dispatches their keyboard twins produce, the magnifier chip
     /// flips the always-on flag, and the zoom chips' factor step

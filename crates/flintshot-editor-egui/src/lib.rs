@@ -9,9 +9,9 @@
 //!   drives the per-frame render loop.
 //! - `chrome` (private) — the Move-tool hover / grab outline shared
 //!   by the editor window and the overlay (see `crate::chrome`).
-//! - `header` (private) — the quiet top bar (identity, tab-strip
-//!   seam, AI seam, overflow menu) on every routed surface and the
-//!   worker editor window.
+//! - `topbar` (private) — the 44 px forest top bar (flame brand,
+//!   breadcrumb, Capture / Copy / Open heroes, `⋯` overflow) on
+//!   every routed surface and the worker editor window.
 //! - `floating` (private) — the on-canvas quick cluster (undo /
 //!   redo / magnifier / loupe zoom) drawn over the canvas.
 //! - [`magnifier`] — the toolkit-owned pixel-zoom inset widget (no
@@ -48,7 +48,6 @@ mod app;
 mod canvas;
 mod chrome;
 mod floating;
-mod header;
 mod home;
 mod magnifier;
 mod overlay;
@@ -58,6 +57,7 @@ mod rail;
 mod shell;
 mod statusbar;
 mod theme;
+mod topbar;
 // The shared cutout widgets ship ahead of their first consumers
 // (statusbar / rail / topbar / panel / settings land in tasks 003+).
 #[allow(dead_code)]

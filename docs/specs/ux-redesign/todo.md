@@ -4,7 +4,7 @@
 - [x] 002 widgets
 - [x] 003 statusbar
 - [x] 004 tool-rail
-- [ ] 005 topbar-editor
+- [x] 005 topbar-editor
 - [ ] 006 panel-sections
 - [ ] 007 topbar-home
 - [ ] 008 canvas-dressing
