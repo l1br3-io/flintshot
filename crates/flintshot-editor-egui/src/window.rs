@@ -68,6 +68,9 @@ pub enum Route {
     /// The capture-progress page (spinner + status while the portal
     /// delivers). Stub until Task 008.
     Loading,
+    /// The settings page (Task 010): reached from every route's
+    /// `⋯` overflow; Escape returns to Home.
+    Settings,
 }
 
 /// An editor route waiting to run: the editor state plus its
@@ -158,7 +161,7 @@ pub(crate) fn route_geometry(route: &Route) -> RouteGeometry {
             resizable: false,
             title: HOME_WINDOW_TITLE,
         },
-        Route::Editor(..) | Route::Loading => RouteGeometry {
+        Route::Editor(..) | Route::Loading | Route::Settings => RouteGeometry {
             size: EDITOR_PAGE_DEFAULT_SIZE,
             resizable: true,
             title: WINDOW_TITLE,
@@ -183,6 +186,9 @@ pub(crate) struct WindowApp {
     /// The live editor app, when the Editor route is active. A new
     /// image replaces it wholesale (Replace semantics).
     editor: Option<EditorApp>,
+    /// The settings page, when the Settings route is active. Built
+    /// on route entry from the bridge's config snapshot.
+    settings: Option<crate::settings::SettingsApp>,
     /// The page bridge shared with every editor construction.
     page_bridge: PageBridgeSlot,
     /// The app crate's routing state (routed-editor events).
@@ -228,6 +234,7 @@ impl WindowApp {
         Self {
             route,
             home: HomeApp::new(home_bridge, initial_status),
+            settings: None,
             editor,
             page_bridge,
             host,
@@ -277,6 +284,15 @@ impl WindowApp {
             }
             Route::Home | Route::Loading => {
                 self.editor = None;
+                self.settings = None;
+            }
+            Route::Settings => {
+                self.editor = None;
+                self.settings = Some(crate::settings::SettingsApp::new(
+                    self.home.load_config(),
+                    self.home.display_server(),
+                    self.home.version(),
+                ));
             }
         }
         self.route = route.clone();
@@ -370,7 +386,12 @@ impl WindowApp {
             Route::Home => self.home.logic_impl(ctx),
             // Editor: the editor app's own logic handles its input;
             // its directives (Hide → close) stay its own business.
-            Route::Editor(..) => {}
+            Route::Editor(..) | Route::Settings => {
+                // Editor: the editor app's own logic handles its
+                // input; its directives stay its own business.
+                // Settings: Escape + the debounce drain run in
+                // ui_impl, which owns the page borrow.
+            }
             Route::Loading => {
                 // The spinner animates and the delivery polls run on
                 // the heartbeat, not input.
@@ -398,6 +419,7 @@ impl WindowApp {
             Route::Home => crate::topbar::Surface::Home,
             Route::Editor(..) => crate::topbar::Surface::Editor,
             Route::Loading => crate::topbar::Surface::Loading,
+            Route::Settings => crate::topbar::Surface::Settings,
         };
         let status = if matches!(self.route, Route::Home) {
             Some(self.home.status_line())
@@ -417,6 +439,16 @@ impl WindowApp {
             Some(crate::topbar::TopbarAction::Open) if matches!(self.route, Route::Home) => {
                 self.home.handle_open(ui.ctx());
             }
+            // The ⋯ overflow's Settings entry opens the settings
+            // route from every route (spec §Settings route).
+            Some(crate::topbar::TopbarAction::Settings) => {
+                self.settings = Some(crate::settings::SettingsApp::new(
+                    self.home.load_config(),
+                    self.home.display_server(),
+                    self.home.version(),
+                ));
+                self.request_route(ui.ctx(), Route::Settings);
+            }
             Some(a) if matches!(self.route, Route::Editor(..)) => {
                 if let Some(editor) = self.editor.as_mut() {
                     editor.handle_topbar_action(a, ui.ctx());
@@ -424,10 +456,27 @@ impl WindowApp {
             }
             _ => {}
         }
-        match &self.route {
+        match &mut self.route {
             Route::Home => self.home.ui_impl(ui),
             Route::Editor(..) => {}
             Route::Loading => draw_loading(ui),
+            Route::Settings => {
+                if let Some(page) = self.settings.as_mut() {
+                    let now = ui.ctx().input(|i| i.time);
+                    let escape = crate::settings::SettingsPage::show(ui, page, now);
+                    // Debounce drain: persist once the window has
+                    // passed. GOTCHA: the config watcher reloads the
+                    // app's config on every write — the page's
+                    // SAVE_DEBOUNCE coalesces rapid edits, and the
+                    // final write always lands.
+                    if let Some(config) = page.drain_save(now) {
+                        self.home.save_config(config);
+                    }
+                    if escape {
+                        self.request_route(ui.ctx(), Route::Home);
+                    }
+                }
+            }
         }
         if let Some(editor) = self.editor.as_mut() {
             editor.ui_impl(ui);
