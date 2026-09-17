@@ -193,6 +193,25 @@ pub(crate) struct EditorApp {
     floating_rects: Vec<egui::Rect>,
 }
 
+/// The paper-cutout ring around the image: 8 px cream — the cutout
+/// stroke's width — per the mockup's canvas dressing.
+pub(crate) const CANVAS_RING: f32 = 8.0;
+
+/// The corner-handle edge, logical px (mockup: 11 px handles).
+pub(crate) const HANDLE_EDGE: f32 = 11.0;
+
+/// The four corner handles centered on the image rect's corners.
+/// Chrome-only math — pure for tests.
+pub(crate) fn handle_rects(image: egui::Rect, edge: f32) -> [egui::Rect; 4] {
+    let at = |p: egui::Pos2| egui::Rect::from_center_size(p, egui::vec2(edge, edge));
+    [
+        at(image.left_top()),
+        at(image.right_top()),
+        at(image.left_bottom()),
+        at(image.right_bottom()),
+    ]
+}
+
 impl EditorApp {
     /// Construct the app. The canvas captures a clone of the
     /// [`Context`] for texture loading outside the per-frame `ui` call.
@@ -522,6 +541,82 @@ impl EditorApp {
         if clamped != crate::shell::EDITOR_PAGE_DEFAULT_SIZE {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(clamped));
         }
+    }
+
+    /// The canvas paper dressing: the capture as a paper cutout —
+    /// paper shadow, cream ring, forest hairline around the image —
+    /// plus four corner handles. Chrome-only: painted over the
+    /// composed output, never in `render()` / saves. Hidden during
+    /// the selection-first phase (the dim mask owns the moment).
+    fn paint_canvas_dressing(&self, painter: &egui::Painter) {
+        use crate::theme::palette as p;
+        if self.phase_active() {
+            return;
+        }
+        let Some(image_rect) = self.image_screen_rect() else {
+            return;
+        };
+        let radius = egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS);
+        let ring = image_rect.expand(CANVAS_RING);
+        // Paper shadow under everything.
+        painter.add(crate::theme::SHADOW_PAPER.as_shape(ring, radius));
+        // The cream ring around the image.
+        painter.rect(
+            ring,
+            radius,
+            p::PAPER_CREAM,
+            egui::Stroke::NONE,
+            egui::StrokeKind::Middle,
+        );
+        painter.rect(
+            image_rect,
+            radius,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(CANVAS_RING, p::PAPER_CREAM),
+            egui::StrokeKind::Inside,
+        );
+        // The forest hairline at the ring's outer edge.
+        painter.rect(
+            ring,
+            radius,
+            egui::Color32::TRANSPARENT,
+            crate::theme::HAIRLINE_STROKE,
+            egui::StrokeKind::Middle,
+        );
+        // The corner handles: cream squares with hairline borders.
+        for handle in handle_rects(image_rect, HANDLE_EDGE) {
+            painter.rect(
+                handle,
+                egui::CornerRadius::same(3),
+                p::PAPER_CREAM,
+                egui::Stroke::new(1.0, p::FOREST),
+                egui::StrokeKind::Middle,
+            );
+        }
+    }
+
+    /// The image's on-screen logical rect (the fit transform
+    /// applied). `None` before the first layout pass.
+    fn image_screen_rect(&self) -> Option<egui::Rect> {
+        let canvas_rect = self.canvas_rect?;
+        let view = self.canvas.view_over(canvas_rect);
+        let (w, h) = self.state.image.dimensions();
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "image dims ≤ 2^24 are exact in f32"
+        )]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "image dims ≤ 2^24 are exact in f32"
+        )]
+        let corners = {
+            let (w, h) = (w as f32, h as f32);
+            (
+                view.image_to_logical(flintshot_core::Point::new(0.0, 0.0)),
+                view.image_to_logical(flintshot_core::Point::new(w, h)),
+            )
+        };
+        Some(egui::Rect::from_two_pos(corners.0, corners.1))
     }
 
     /// Paint the magnifier inset when its trigger is active and the
@@ -1038,13 +1133,6 @@ impl EditorApp {
             self.paint_selection_phase(ui.ctx(), ui.painter());
         }
 
-        // Magnifier inset overlay (Task 005). Painted after render
-        // succeeds, in screen-logical space (uses the cached
-        // `canvas_rect`, not the canvas-bound painter). Suppressed
-        // during text-editing so the trigger key doesn't pop the
-        // loupe over the caret.
-        self.paint_magnifier_if_active(ui.ctx(), ui.painter());
-
         // Move-tool object chrome (prominent-move spec): dashed hover
         // outline / solid ember grab outline, under the magnifier —
         // the overlay's chrome ordering.
@@ -1052,9 +1140,22 @@ impl EditorApp {
 
         // Persistent-selection outline (annotation-delete spec):
         // dashed forest bbox of the selected annotation, last among
-        // the chrome. Chrome-only by construction — it lives in the
-        // shell's paint pass, never in `render()` / composed output.
+        // the annotation chrome. Chrome-only by construction — it
+        // lives in the shell's paint pass, never in `render()` /
+        // composed output.
         self.paint_selected_chrome_if_any(ui.ctx(), ui.painter());
+
+        // The paper-cutout dressing (shadow + ring + handles), after
+        // the annotation chrome and under the magnifier, per the
+        // mockup's stacking. Hidden during the selection-first phase.
+        self.paint_canvas_dressing(ui.painter());
+
+        // Magnifier inset overlay (Task 005). Painted after render
+        // succeeds, in screen-logical space (uses the cached
+        // `canvas_rect`, not the canvas-bound painter). Suppressed
+        // during text-editing so the trigger key doesn't pop the
+        // loupe over the caret.
+        self.paint_magnifier_if_active(ui.ctx(), ui.painter());
 
         // Floating quick cluster (undo / redo / magnifier / loupe
         // zoom) over the canvas's top-left corner. The chip rects
@@ -3321,10 +3422,24 @@ mod tests {
         assert!(!app.canvas_drag_active, "no drag may survive the release");
     }
 
-    /// A press that begins on the floating quick cluster (which
-    /// floats INSIDE the canvas rect) must not start an annotation
-    /// drag either — the floating rect gate holds exactly like the
-    /// panel gate.
+    /// The corner handles sit centered on the image rect's corners
+    /// at the pinned 11 px edge (chrome-only math).
+    #[test]
+    fn handle_rects_center_on_the_corners() {
+        let image = egui::Rect::from_min_size(egui::pos2(50.0, 60.0), egui::vec2(300.0, 200.0));
+        let handles = handle_rects(image, HANDLE_EDGE);
+        assert_eq!(handles.len(), 4);
+        for (handle, corner) in handles.iter().zip([
+            image.left_top(),
+            image.right_top(),
+            image.left_bottom(),
+            image.right_bottom(),
+        ]) {
+            assert_eq!(handle.center(), corner, "handle centered on {corner:?}");
+            assert!((handle.width() - HANDLE_EDGE).abs() < 1.0);
+            assert!((handle.height() - HANDLE_EDGE).abs() < 1.0);
+        }
+    }
 
     #[test]
     fn press_beginning_on_the_floating_cluster_never_starts_a_gesture() {

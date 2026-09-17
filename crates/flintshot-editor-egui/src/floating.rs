@@ -33,10 +33,72 @@ pub(crate) enum FloatingAction {
     LoupeZoomOut,
 }
 
-/// Draw the cluster over `canvas_rect`. Returns the fired action
-/// (if any) and the chip rects for the shell's press gating — chip
-/// rects only: a pointer-miss between chips passes through to the
-/// canvas (the spec's passthrough contract).
+/// Which canvas corner a cluster pins to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Corner {
+    /// Inside the top-left edge.
+    TopLeft,
+    /// Inside the bottom-right edge.
+    BottomRight,
+}
+
+/// The pin position for a cluster of `size` in `canvas_rect` at
+/// `corner` — the cluster's top-left, `CLUSTER_MARGIN` inside the
+/// canvas edge. Pure so the mockup arrangement is unit-testable.
+pub(crate) fn corner_anchor(
+    canvas_rect: egui::Rect,
+    size: egui::Vec2,
+    corner: Corner,
+) -> egui::Pos2 {
+    match corner {
+        Corner::TopLeft => canvas_rect.left_top() + egui::vec2(CLUSTER_MARGIN, CLUSTER_MARGIN),
+        Corner::BottomRight => {
+            canvas_rect.right_bottom() - egui::vec2(CLUSTER_MARGIN, CLUSTER_MARGIN) - size
+        }
+    }
+}
+
+/// A floating chip's outer size (the 28 px glyph square plus the
+/// cream cutout's padding).
+const CHIP_SIZE: f32 = 28.0;
+
+fn run_cluster(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    chip_rects: &mut Vec<egui::Rect>,
+    action: &mut Option<FloatingAction>,
+    chips: Vec<(
+        &'static str,
+        &'static str,
+        bool,
+        rail::Glyph,
+        Option<FloatingAction>,
+    )>,
+) {
+    let mut island = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    panel::pod_island(&mut island, |ui| {
+        for (id, tooltip, selected, glyph, on_click) in chips {
+            let resp = cutout_chip(ui, egui::Id::new(id), tooltip, selected, glyph);
+            chip_rects.push(resp.rect);
+            if resp.clicked() {
+                if let Some(a) = on_click {
+                    *action = Some(a);
+                }
+            }
+        }
+    });
+}
+
+/// Draw the floating clusters over `canvas_rect`: undo / redo at
+/// the top-left corner, the magnifier toggle + loupe zoom chips at
+/// the bottom-right (the mockup's arrangement). Returns the fired
+/// action (if any) and the chip rects for the shell's press gating —
+/// chip rects only: a pointer-miss between chips passes through to
+/// the canvas (the spec's passthrough contract).
 pub(crate) fn show(
     ctx: &egui::Context,
     canvas_rect: egui::Rect,
@@ -45,72 +107,153 @@ pub(crate) fn show(
 ) -> (Option<FloatingAction>, Vec<egui::Rect>) {
     let mut action = None;
     let mut chip_rects = Vec::new();
-    let anchor = canvas_rect.left_top() + egui::vec2(CLUSTER_MARGIN, CLUSTER_MARGIN);
+
+    // One full-canvas, click-transparent area hosts both clusters:
+    // the history cluster at the top-left corner, the magnifier
+    // cluster at the bottom-right (the mockup's arrangement). Child
+    // UIs pin the islands to their corner rects; the area's
+    // background takes no sense, so pointer misses pass through to
+    // the canvas (the spec's passthrough contract). The corner
+    // offsets are the same math as [`corner_anchor`], with the
+    // island sizes derived from the fixed chip grid.
+    let history_size = egui::vec2(
+        2.0 * CHIP_SIZE + theme::SPACE_SCALE[1] + 2.0 * f32::from(theme::POD_PAD),
+        CHIP_SIZE + 2.0 * f32::from(theme::POD_PAD),
+    );
+    let mag_size = egui::vec2(
+        3.0 * CHIP_SIZE + 2.0 * theme::SPACE_SCALE[1] + 2.0 * f32::from(theme::POD_PAD),
+        CHIP_SIZE + 2.0 * f32::from(theme::POD_PAD),
+    );
     egui::Area::new(egui::Id::new("floating_controls"))
         .order(egui::Order::Middle)
-        .fixed_pos(anchor)
+        .constrain(true)
+        .fixed_pos(canvas_rect.min)
         .show(ctx, |ui| {
-            panel::pod_island(ui, |ui| {
-                let mut chip = |id: &'static str,
-                                tooltip: &str,
-                                selected: bool,
-                                glyph: rail::Glyph,
-                                on_click: Option<FloatingAction>| {
-                    let resp = panel::chip(ui, egui::Id::new(id), tooltip, selected, glyph, true);
-                    chip_rects.push(resp.rect);
-                    if resp.clicked() {
-                        if let Some(a) = on_click {
-                            action = Some(a);
-                        }
-                    }
-                };
-                chip(
-                    "undo",
-                    "Undo · Ctrl+Z",
-                    false,
-                    panel::g_undo,
-                    Some(FloatingAction::Undo),
-                );
-                chip(
-                    "redo",
-                    "Redo · Ctrl+Y",
-                    false,
-                    panel::g_redo,
-                    Some(FloatingAction::Redo),
-                );
-                chip(
-                    "magnifier-toggle",
-                    "Magnifier always on",
-                    magnifier_always_on,
-                    g_magnifier,
-                    Some(FloatingAction::ToggleMagnifier),
-                );
-                chip(
-                    "zoom-out",
-                    "Loupe zoom out",
-                    false,
-                    g_minus,
-                    Some(FloatingAction::LoupeZoomOut),
-                );
-                chip(
-                    "zoom-in",
-                    "Loupe zoom in",
-                    false,
-                    panel::g_plus,
-                    Some(FloatingAction::LoupeZoomIn),
-                );
-                // The zoom clicks step the factor right after the
-                // generic bookkeeping above.
-                if action == Some(FloatingAction::LoupeZoomIn) {
-                    magnifier.zoom_in();
-                }
-                if action == Some(FloatingAction::LoupeZoomOut) {
-                    magnifier.zoom_out();
-                }
-            });
-            ui.min_rect()
+            ui.set_max_size(canvas_rect.size());
+            let history_rect = egui::Rect::from_min_size(
+                corner_anchor(canvas_rect, history_size, Corner::TopLeft),
+                history_size,
+            );
+            let mag_rect = egui::Rect::from_min_size(
+                corner_anchor(canvas_rect, mag_size, Corner::BottomRight),
+                mag_size,
+            );
+            run_cluster(
+                ui,
+                history_rect,
+                &mut chip_rects,
+                &mut action,
+                vec![
+                    (
+                        "undo",
+                        "Undo · Ctrl+Z",
+                        false,
+                        panel::g_undo,
+                        Some(FloatingAction::Undo),
+                    ),
+                    (
+                        "redo",
+                        "Redo · Ctrl+Y",
+                        false,
+                        panel::g_redo,
+                        Some(FloatingAction::Redo),
+                    ),
+                ],
+            );
+            run_cluster(
+                ui,
+                mag_rect,
+                &mut chip_rects,
+                &mut action,
+                vec![
+                    (
+                        "magnifier-toggle",
+                        "Magnifier always on",
+                        magnifier_always_on,
+                        g_magnifier,
+                        Some(FloatingAction::ToggleMagnifier),
+                    ),
+                    (
+                        "zoom-out",
+                        "Loupe zoom out",
+                        false,
+                        g_minus,
+                        Some(FloatingAction::LoupeZoomOut),
+                    ),
+                    (
+                        "zoom-in",
+                        "Loupe zoom in",
+                        false,
+                        panel::g_plus,
+                        Some(FloatingAction::LoupeZoomIn),
+                    ),
+                ],
+            );
+            // The zoom clicks step the factor right after the
+            // generic bookkeeping above.
+            if action == Some(FloatingAction::LoupeZoomIn) {
+                magnifier.zoom_in();
+            }
+            if action == Some(FloatingAction::LoupeZoomOut) {
+                magnifier.zoom_out();
+            }
         });
+
     (action, chip_rects)
+}
+
+/// A cream cutout chip: white inner outline on a cream square, a
+/// gold-tinted hover that pops (the rest-level shadow deepens), and
+/// the forest-selected active state for toggles.
+fn cutout_chip(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    tooltip: &str,
+    selected: bool,
+    glyph: rail::Glyph,
+) -> egui::Response {
+    use crate::theme::palette as p;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(CHIP_SIZE, CHIP_SIZE), egui::Sense::hover());
+    let resp = ui
+        .interact(rect, id, egui::Sense::click())
+        .on_hover_text(tooltip);
+    let radius = egui::CornerRadius::same(crate::theme::POD_RADIUS);
+    // Pop on hover: the resting shadow deepens to lift.
+    ui.painter().add(if resp.hovered() || selected {
+        theme::SHADOW_LIFT.as_shape(rect, radius)
+    } else {
+        theme::SHADOW_RESTING.as_shape(rect, radius)
+    });
+    ui.painter().rect(
+        rect,
+        radius,
+        if selected {
+            p::with_alpha(p::GOLD, 60)
+        } else {
+            p::PAPER_CREAM
+        },
+        egui::Stroke::NONE,
+        egui::StrokeKind::Middle,
+    );
+    // The white inner outline, 2 px inset.
+    let inner = rect.shrink(2.0);
+    ui.painter().rect(
+        inner,
+        radius,
+        p::PAPER_CREAM,
+        egui::Stroke::new(1.5, p::PAPER),
+        egui::StrokeKind::Inside,
+    );
+    let ink = if selected { p::FOREST_INK } else { p::INK };
+    glyph(ui.painter(), rect, ink);
+    if format!("{id:?}").contains("magnifier") {
+        eprintln!(
+            "DBG chip {id:?} rect {rect:?} hovered {} clicked {}",
+            resp.hovered(),
+            resp.clicked()
+        );
+    }
+    resp
 }
 
 /// A loupe glyph: circle with a handle — the magnifier's own icon.
@@ -136,12 +279,6 @@ fn g_minus(p: &egui::Painter, r: egui::Rect, c: egui::Color32) {
         egui::Stroke::new(2.0, c),
     );
 }
-
-// Keep the theme import for the (currently token-only) dressing
-// shared with the panel's chips.
-const _: () = {
-    let _ = theme::POD_GAP;
-};
 
 #[cfg(test)]
 mod tests {
@@ -174,6 +311,15 @@ mod tests {
     fn action_after_click_on(id: &str, always_on: bool) -> (Option<FloatingAction>, Magnifier) {
         let mut mag = Magnifier::new();
         let ctx = frame(vec![], always_on, &mut mag);
+        // Settle passes first, THEN read the settled rect: Areas
+        // place on the sizing pass and pin on the next.
+        let raw = egui::RawInput {
+            screen_rect: Some(canvas(800.0, 600.0)),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on, &mut mag);
+        });
         let chip = ctx
             .read_response(egui::Id::new(id))
             .unwrap_or_else(|| panic!("pass 1 registered {id}"));
@@ -188,6 +334,10 @@ mod tests {
                 let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on, mag);
             });
         };
+        // Settle passes: Areas place on the sizing pass and pin on
+        // the next, so two passes precede the pointer read.
+        pass(&ctx, vec![], &mut mag);
+        pass(&ctx, vec![], &mut mag);
         // Hover-settle: pointer at the chip for one pass, then the
         // press + release clicks.
         pass(&ctx, vec![egui::Event::PointerMoved(at)], &mut mag);
@@ -234,6 +384,25 @@ mod tests {
     }
 
     #[test]
+    fn debug_undo_hover() {
+        let mut mag = Magnifier::new();
+        let ctx = frame(vec![], false, &mut mag);
+        let chip = ctx.read_response(egui::Id::new("undo")).expect("undo");
+        let at = chip.rect.center();
+        let raw = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(at)],
+            screen_rect: Some(canvas(800.0, 600.0)),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            let _ = show(ui.ctx(), canvas(800.0, 600.0), false, &mut mag);
+            if let Some(r) = ctx.read_response(egui::Id::new("undo")) {
+                eprintln!("DBG UNDO hovered {}", r.hovered());
+            }
+        });
+    }
+
+    #[test]
     fn magnifier_chip_fires_the_toggle() {
         assert_eq!(
             action_after_click_on("magnifier-toggle", false).0,
@@ -276,6 +445,23 @@ mod tests {
     /// The cluster publishes its chip rects — the shell's press
     /// gate consumes them (a chip press must never start a canvas
     /// gesture; misses between chips pass through).
+    /// The corner-anchor math: top-left pins inside the canvas's
+    /// top-left edge; bottom-right pins inside the bottom-right edge
+    /// minus the cluster's own size.
+    #[test]
+    fn corner_anchor_pins_each_corner() {
+        let canvas = canvas(800.0, 600.0);
+        let size = egui::vec2(112.0, 40.0);
+        let tl = corner_anchor(canvas, size, Corner::TopLeft);
+        assert_eq!(tl, egui::pos2(8.0, 8.0), "top-left: margin inside");
+        let br = corner_anchor(canvas, size, Corner::BottomRight);
+        assert_eq!(
+            br,
+            egui::pos2(800.0 - 8.0 - 112.0, 600.0 - 8.0 - 40.0),
+            "bottom-right: margin inside minus the cluster's size"
+        );
+    }
+
     #[test]
     fn show_publishes_chip_rects_inside_the_canvas() {
         let mut mag = Magnifier::new();

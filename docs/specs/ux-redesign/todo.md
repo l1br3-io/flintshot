@@ -7,7 +7,7 @@
 - [x] 005 topbar-editor
 - [ ] 006 panel-sections
 - [x] 007 topbar-home
-- [ ] 008 canvas-dressing
+- [x] 008 canvas-dressing
 - [ ] 009 settings-config
 - [ ] 010 settings-route
 - [ ] 011 settings-consumers
