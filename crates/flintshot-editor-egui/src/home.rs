@@ -113,6 +113,30 @@ pub trait HomeBridge {
     fn recent_images(&mut self) -> Vec<PathBuf> {
         Vec::new()
     }
+
+    // -- Settings-route plumbing (defaults keep test doubles
+    //    compiling; the app crate's real bridge overrides these) --
+
+    /// Load the current config. Default: built-in defaults.
+    fn load_config(&mut self) -> flintshot_core::Config {
+        flintshot_core::Config::default()
+    }
+
+    /// Persist the config through the existing save + watcher
+    /// round-trip. Default: no-op.
+    fn save_config(&mut self, _config: &flintshot_core::Config) {}
+
+    /// The detected display server, for the System section's
+    /// readonly row. Default: `"unknown"`.
+    fn display_server(&mut self) -> String {
+        "unknown".to_owned()
+    }
+
+    /// The running version, for the System section's readonly row.
+    /// Default: `"dev"`.
+    fn version(&mut self) -> String {
+        "dev".to_owned()
+    }
 }
 
 /// Recents per grid row — the mockup's 4-column layout.
@@ -208,6 +232,24 @@ impl HomeApp {
         self.bridge.request_capture();
         self.capture_clicked_at = Some(std::time::Instant::now());
         ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+
+    // -- Settings-route passthroughs (the router drives the page) --
+
+    pub(crate) fn load_config(&mut self) -> flintshot_core::Config {
+        self.bridge.load_config()
+    }
+
+    pub(crate) fn save_config(&mut self, config: &flintshot_core::Config) {
+        self.bridge.save_config(config);
+    }
+
+    pub(crate) fn display_server(&mut self) -> String {
+        self.bridge.display_server()
+    }
+
+    pub(crate) fn version(&mut self) -> String {
+        self.bridge.version()
     }
 
     /// The status line's current text (the header's overflow menu

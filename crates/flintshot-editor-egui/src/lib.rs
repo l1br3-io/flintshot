@@ -25,6 +25,9 @@
 //!   paper, white cutouts, forest accents) applied to every window.
 //! - `statusbar` (private) — the 30 px forest footer (dims readout,
 //!   gold per-tool hint, kbd chips) under the editor zones.
+//! - `settings` (private) — the settings route's page (cutout
+//!   section cards, wells / switches / readonly rows) over the
+//!   window bridge's config plumbing.
 //! - `rail` (private) — the left tool rail (48 px forest strip, the
 //!   tool vocabulary + glyphs, `ToolGate`) drawn by `app`.
 //! - `panel` (private) — the 236 px properties panel (contextual
@@ -54,6 +57,7 @@ mod overlay;
 mod panel;
 mod popover;
 mod rail;
+mod settings;
 mod shell;
 mod statusbar;
 mod theme;
