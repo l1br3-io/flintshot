@@ -115,6 +115,9 @@ pub trait HomeBridge {
     }
 }
 
+/// Recents per grid row — the mockup's 4-column layout.
+const RECENTS_PER_ROW: usize = 4;
+
 /// The eframe app for the home window. Owns no IPC state — see
 /// [`HomeBridge`].
 pub(crate) struct HomeApp {
@@ -201,7 +204,7 @@ impl HomeApp {
     /// the Capture button and its keyboard accelerator. Order
     /// matters: the intent must be registered before the close tears
     /// this app down.
-    fn start_capture(&mut self, ctx: &Context) {
+    pub(crate) fn start_capture(&mut self, ctx: &Context) {
         self.bridge.request_capture();
         self.capture_clicked_at = Some(std::time::Instant::now());
         ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -226,7 +229,7 @@ impl HomeApp {
     /// the window: the bridge arms the editor route and the window
     /// router swaps it in-place (editor-capture-ux Task 006 — the
     /// surface identity survives every non-capture transition).
-    fn handle_open(&mut self, _ctx: &Context) {
+    pub(crate) fn handle_open(&mut self, _ctx: &Context) {
         if let Some(path) = pick_image_path() {
             let _ = self.bridge.open_image(path);
         }
@@ -259,6 +262,41 @@ impl App for HomeApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.ui_impl(ui);
+    }
+}
+
+/// The recents caption: file stem + relative age ("shot · 5 mins
+/// ago"). Pure for tests.
+fn recent_caption(path: &std::path::Path) -> String {
+    let stem = path.file_stem().map_or_else(
+        || "capture".to_owned(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    let age = age_seconds(path).unwrap_or(u64::MAX);
+    format!("{stem} · {}", relative_time(age))
+}
+
+/// Seconds since `path` was last modified. `None` when the file is
+/// gone or its mtime predates the epoch's representable range.
+fn age_seconds(path: &std::path::Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let age = std::time::SystemTime::now().duration_since(modified).ok()?;
+    Some(age.as_secs())
+}
+
+/// Relative-time caption with the spec's thresholds: now (under a
+/// minute) · mins · hours · yesterday · days. Pure for tests.
+pub(crate) fn relative_time(secs: u64) -> &'static str {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    const YESTERDAY: u64 = 2 * DAY;
+    match secs {
+        s if s < MINUTE => "now",
+        s if s < HOUR => "mins ago",
+        s if s < DAY => "hours ago",
+        s if s < YESTERDAY => "yesterday",
+        _ => "days ago",
     }
 }
 
@@ -385,6 +423,7 @@ impl HomeApp {
     /// the display weight. Click (or the C accelerator, handled in
     /// `logic_impl`) fires the existing capture flow.
     fn hero_card(&mut self, ui: &mut egui::Ui) {
+        use crate::theme::palette as p;
         let eased = crate::theme::ease::spring(self.age / HERO_POP_IN_SECONDS);
         let eased = if self.age >= HERO_POP_IN_SECONDS {
             1.0
@@ -394,80 +433,153 @@ impl HomeApp {
         // Pop-in: the card grows from an inset; overshoot lets it
         // breathe slightly past the resting size.
         let inset = ((1.0 - eased) * 40.0).max(0.0);
-        let label = "Take a screenshot";
-        let galley = ui.painter().layout_no_wrap(
-            label.to_owned(),
-            egui::FontId::new(
-                crate::theme::TYPE_XL,
-                egui::FontFamily::Name(crate::theme::FAMILY_DISPLAY.into()),
-            ),
-            crate::theme::palette::CREAM_TEXT,
-        );
-        let hint = ui.painter().layout_no_wrap(
-            " [C]".to_owned(),
-            egui::FontId::proportional(crate::theme::TYPE_SM),
-            crate::theme::palette::CREAM_TEXT,
-        );
-        let width = 26.0 + galley.size().x + hint.size().x + 26.0;
-        let full = egui::vec2(width, 72.0);
+        let width = ui.available_width().max(320.0);
+        let full = egui::vec2(width, 120.0);
         let (rect, _) = ui.allocate_exact_size(full, egui::Sense::hover());
         let card = rect.shrink(inset);
         let resp = ui
             .interact(rect, egui::Id::new("hero-capture"), egui::Sense::click())
             .on_hover_text("Capture · C");
         let radius = egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS);
+        // The paper shadow: the hero is a card lying on the desk.
         ui.painter()
-            .add(crate::theme::SHADOW_LIFT.as_shape(card, radius));
+            .add(crate::theme::SHADOW_PAPER.as_shape(card, radius));
         ui.painter().rect(
             card,
             radius,
-            crate::theme::palette::FOREST_DEEP,
-            crate::theme::CUTOUT_STROKE,
+            p::FOREST_DEEP,
+            egui::Stroke::NONE,
             egui::StrokeKind::Inside,
         );
-        let ink = crate::theme::palette::CREAM_TEXT;
-        let pos = egui::pos2(
-            card.left() + 26.0,
-            card.center().y - f32::midpoint(galley.size().y, hint.size().y),
+        // The mockup's white inner outline (inset, 2.5 px).
+        let outline = card.shrink(6.0);
+        ui.painter().rect(
+            outline,
+            radius,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(2.5, p::CREAM_TEXT),
+            egui::StrokeKind::Inside,
         );
-        ui.painter().galley(pos, galley.clone(), ink);
+        // The rotated flame badge.
+        let flame_center = egui::pos2(card.left() + 48.0, card.center().y);
+        let (sin, cos) = (-8.0_f32.to_radians()).sin_cos();
+        let rot = |dx: f32, dy: f32| {
+            egui::pos2(
+                flame_center.x + dx * cos - dy * sin,
+                flame_center.y + dx * sin + dy * cos,
+            )
+        };
+        let badge = [
+            rot(-12.0, -12.0),
+            rot(12.0, -12.0),
+            rot(12.0, 12.0),
+            rot(-12.0, 12.0),
+        ];
+        ui.painter().add(egui::Shape::convex_polygon(
+            badge.to_vec(),
+            p::GOLD,
+            egui::Stroke::NONE,
+        ));
+        ui.painter().text(
+            flame_center,
+            egui::Align2::CENTER_CENTER,
+            "🔥",
+            egui::FontId::proportional(crate::theme::TYPE_SM),
+            p::FOREST_INK,
+        );
+        // The headline with the gold emphasis.
+        let lead = ui.painter().layout_no_wrap(
+            "Capture. Annotate. Hand it off — ".to_owned(),
+            egui::FontId::new(
+                crate::theme::TYPE_XL,
+                egui::FontFamily::Name(crate::theme::FAMILY_DISPLAY.into()),
+            ),
+            p::CREAM_TEXT,
+        );
+        let gold = ui.painter().layout_no_wrap(
+            "in seconds.".to_owned(),
+            egui::FontId::new(
+                crate::theme::TYPE_XL,
+                egui::FontFamily::Name(crate::theme::FAMILY_DISPLAY.into()),
+            ),
+            p::GOLD,
+        );
+        let text_w = lead.size().x + gold.size().x;
+        let lead_h = lead.size().y;
+        let base = egui::pos2(
+            (card.center().x - text_w / 2.0).max(outline.left() + 60.0),
+            card.center().y - lead_h / 2.0,
+        );
+        ui.painter().galley(base, lead.clone(), p::CREAM_TEXT);
         ui.painter()
-            .galley(pos + egui::vec2(0.0, galley.size().y), hint.clone(), ink);
+            .galley(base + egui::vec2(lead.size().x, 0.0), gold, p::GOLD);
         if resp.clicked() {
             let ctx = ui.ctx().clone();
             self.start_capture(&ctx);
         }
     }
 
-    /// Open / Paste as secondary white cutout cards.
+    /// The three mockup hcards: New capture / Open image / Paste —
+    /// cream cutouts with a hover lift.
     fn secondary_cards(&mut self, ui: &mut egui::Ui) {
+        use crate::theme::palette as p;
         ui.horizontal(|ui| {
-            for (id, label, hint) in [
-                ("home-open", "Open…", " · O"),
-                ("home-paste", "Paste", " · P"),
+            for (id, icon, label, hint) in [
+                ("home-capture", "✚", "New capture", " · C"),
+                ("home-open", "🗀", "Open image", " · O"),
+                ("home-paste", "📋", "Paste", " · P"),
             ] {
                 let galley = ui.painter().layout_no_wrap(
                     format!("{label}{hint}"),
                     egui::FontId::proportional(crate::theme::TYPE_MD),
-                    crate::theme::palette::INK,
+                    p::INK,
                 );
-                let w = 16.0 + galley.size().x + 16.0;
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 34.0), egui::Sense::hover());
+                let w = 16.0 + 20.0 + 8.0 + galley.size().x + 16.0;
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::hover());
                 let resp = ui
                     .interact(rect, egui::Id::new(id), egui::Sense::click())
                     .on_hover_text(label);
+                // Hover lift: 2 px up, a touch wider.
+                let lift = if resp.hovered() { 2.0 } else { 0.0 };
+                let card = rect.translate(egui::vec2(0.0, -lift));
+                ui.painter().add(if resp.hovered() {
+                    crate::theme::SHADOW_LIFT
+                        .as_shape(card, egui::CornerRadius::same(crate::theme::POD_RADIUS))
+                } else {
+                    crate::theme::SHADOW_RESTING
+                        .as_shape(card, egui::CornerRadius::same(crate::theme::POD_RADIUS))
+                });
                 ui.painter().rect(
-                    rect,
-                    egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS),
-                    crate::theme::palette::PAPER_CREAM,
-                    crate::theme::HAIRLINE_STROKE,
+                    card,
+                    egui::CornerRadius::same(crate::theme::POD_RADIUS),
+                    if resp.hovered() {
+                        p::with_alpha(p::GOLD, 30)
+                    } else {
+                        p::PAPER_CREAM
+                    },
+                    if resp.hovered() {
+                        egui::Stroke::new(1.25, p::FOREST)
+                    } else {
+                        crate::theme::HAIRLINE_STROKE
+                    },
                     egui::StrokeKind::Middle,
                 );
-                let pos = egui::pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0);
-                ui.painter().galley(pos, galley, crate::theme::palette::INK);
+                ui.painter().text(
+                    egui::pos2(card.left() + 16.0, card.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    icon,
+                    egui::FontId::proportional(crate::theme::TYPE_MD),
+                    p::INK,
+                );
+                let pos = egui::pos2(
+                    card.left() + 16.0 + 20.0 + 8.0,
+                    card.center().y - galley.size().y / 2.0,
+                );
+                ui.painter().galley(pos, galley, p::INK);
                 if resp.clicked() {
                     let ctx = ui.ctx().clone();
                     match id {
+                        "home-capture" => self.start_capture(&ctx),
                         "home-open" => self.handle_open(&ctx),
                         _ => {
                             let _ = self.bridge.request_paste();
@@ -483,10 +595,11 @@ impl HomeApp {
     /// blank space. Dead paths render nothing (pruned at load;
     /// undecodable files skip their card silently).
     fn recents_section(&mut self, ui: &mut egui::Ui) {
+        use crate::theme::palette as p;
         ui.label(
-            egui::RichText::new("Recent")
+            egui::RichText::new("RECENT CAPTURES")
                 .size(crate::theme::TYPE_SM)
-                .color(crate::theme::palette::INK_SOFT),
+                .color(p::INK_SOFT),
         );
         if self.recent.is_empty() {
             let (rect, _) = ui.allocate_exact_size(
@@ -514,14 +627,18 @@ impl HomeApp {
                 .galley(pos, galley, crate::theme::palette::INK_SOFT);
             return;
         }
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing =
-                egui::vec2(crate::theme::SPACE_SCALE[2], crate::theme::SPACE_SCALE[2]);
-            let recent = self.recent.clone();
-            for path in &recent {
-                self.recent_card(ui, path);
-            }
-        });
+        // The mockup's 4-column grid: fixed-width cards chunked
+        // into rows of four.
+        let recent = self.recent.clone();
+        for row in recent.chunks(RECENTS_PER_ROW) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing =
+                    egui::vec2(crate::theme::SPACE_SCALE[2], crate::theme::SPACE_SCALE[2]);
+                for path in row {
+                    self.recent_card(ui, path);
+                }
+            });
+        }
     }
 
     /// One recent's thumb card: letterboxed thumbnail on white,
@@ -549,12 +666,21 @@ impl HomeApp {
             },
             egui::StrokeKind::Middle,
         );
+        // Caption: file stem + relative time, ink-soft, under the
+        // thumb. Reserves 16 px inside the card.
+        let caption = recent_caption(path);
+        let caption_galley = ui.painter().layout_no_wrap(
+            caption,
+            egui::FontId::proportional(crate::theme::TYPE_XS),
+            crate::theme::palette::INK_SOFT,
+        );
         // Letterbox: the fitted image centers in the card.
         let thumb = texture.size_vec2();
         let (tw, th) = (thumb.x, thumb.y);
-        let scale = 96.0 / tw.max(th);
+        let scale = 80.0 / tw.max(th);
         let size = egui::vec2(tw * scale, th * scale);
-        let img_rect = egui::Rect::from_center_size(rect.center(), size);
+        let thumb_center = egui::pos2(rect.center().x, rect.center().y - 6.0);
+        let img_rect = egui::Rect::from_center_size(thumb_center, size);
         ui.painter().image(
             texture.id(),
             img_rect,
@@ -563,6 +689,14 @@ impl HomeApp {
                 max: egui::pos2(1.0, 1.0),
             },
             crate::theme::palette::PAPER_CREAM,
+        );
+        ui.painter().galley(
+            egui::pos2(
+                rect.center().x - caption_galley.size().x / 2.0,
+                rect.bottom() - 18.0,
+            ),
+            caption_galley,
+            crate::theme::palette::INK_SOFT,
         );
         if resp.clicked() {
             let _ = self.bridge.open_image(path.clone());
@@ -835,6 +969,35 @@ mod tests {
         let bridge = RecordingBridge::default();
         let mut boxed: Box<dyn HomeBridge> = Box::new(bridge);
         assert!(!boxed.open_image(PathBuf::from("/tmp/bad.png")));
+    }
+
+    #[test]
+    fn relative_time_hits_every_threshold() {
+        assert_eq!(relative_time(0), "now");
+        assert_eq!(relative_time(59), "now");
+        assert_eq!(relative_time(60), "mins ago");
+        assert_eq!(relative_time(3_599), "mins ago");
+        assert_eq!(relative_time(3_600), "hours ago");
+        assert_eq!(relative_time(86_399), "hours ago");
+        assert_eq!(relative_time(86_400), "yesterday");
+        assert_eq!(relative_time(172_799), "yesterday");
+        assert_eq!(relative_time(172_800), "days ago");
+    }
+
+    #[test]
+    fn caption_is_stem_plus_relative_time() {
+        // A just-modified file reads "now"; the stem is file-stem
+        // only (no extension, no directory).
+        let dir = std::env::temp_dir();
+        let path = dir.join("flintshot_caption_probe.png");
+        std::fs::write(&path, b"x").expect("write probe");
+        let caption = recent_caption(&path);
+        std::fs::remove_file(&path).ok();
+        assert!(
+            caption.starts_with("flintshot_caption_probe · "),
+            "caption starts with the stem, got {caption}"
+        );
+        assert!(caption.ends_with("now"), "a fresh file reads now");
     }
 
     #[test]

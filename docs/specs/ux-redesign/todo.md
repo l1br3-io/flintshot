@@ -6,7 +6,7 @@
 - [x] 004 tool-rail
 - [x] 005 topbar-editor
 - [ ] 006 panel-sections
-- [ ] 007 topbar-home
+- [x] 007 topbar-home
 - [ ] 008 canvas-dressing
 - [ ] 009 settings-config
 - [ ] 010 settings-route

@@ -404,19 +404,25 @@ impl WindowApp {
         } else {
             None
         };
-        let enable = if matches!(self.route, Route::Editor(..)) {
-            crate::topbar::Enable::ALL
-        } else {
-            crate::topbar::Enable::NONE
-        };
+        let enable = crate::topbar::enable_for(surface);
         let topbar_action = crate::topbar::show(ui, surface, status.as_deref(), enable);
-        // Routed editor pages forward to the editor's handlers;
-        // home / loading wire their heroes with the home topbar
-        // task, and Settings is inert until its route lands.
-        if matches!(self.route, Route::Editor(..)) {
-            if let (Some(a), Some(editor)) = (topbar_action, self.editor.as_mut()) {
-                editor.handle_topbar_action(a, ui.ctx());
+        // Route the fired action: editor pages forward everything to
+        // the editor's dispatcher; Home dispatches Capture / Open to
+        // the home app's own paths; Loading is fully disabled and
+        // Settings stays inert until its route lands.
+        match topbar_action {
+            Some(crate::topbar::TopbarAction::Capture) if matches!(self.route, Route::Home) => {
+                self.home.start_capture(ui.ctx());
             }
+            Some(crate::topbar::TopbarAction::Open) if matches!(self.route, Route::Home) => {
+                self.home.handle_open(ui.ctx());
+            }
+            Some(a) if matches!(self.route, Route::Editor(..)) => {
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.handle_topbar_action(a, ui.ctx());
+                }
+            }
+            _ => {}
         }
         match &self.route {
             Route::Home => self.home.ui_impl(ui),
@@ -472,6 +478,28 @@ mod tests {
         }
     }
 
+    /// A home bridge counting Capture requests — the topbar's
+    /// Capture dispatch contract on the Home route.
+    #[derive(Clone, Default)]
+    struct CountingBridge {
+        captures: Rc<std::cell::Cell<usize>>,
+    }
+
+    impl HomeBridge for CountingBridge {
+        fn request_capture(&mut self) {
+            self.captures.set(self.captures.get() + 1);
+        }
+        fn open_image(&mut self, _path: std::path::PathBuf) -> bool {
+            false
+        }
+        fn request_paste(&mut self) -> bool {
+            false
+        }
+        fn poll_directive(&mut self) -> Option<HomeDirective> {
+            None
+        }
+    }
+
     /// A home bridge replaying pre-loaded directives (the pump's
     /// queue stand-in) — the Loading route's directive contract.
     #[derive(Clone, Default)]
@@ -507,6 +535,75 @@ mod tests {
             outcome,
             slot,
         )
+    }
+
+    /// The topbar's Capture hero dispatches to the home bridge on
+    /// the Home route — one click, exactly one capture request.
+    #[test]
+    fn home_topbar_capture_fires_the_bridge_request() {
+        let bridge = CountingBridge::default();
+        let slot: RouteSlot = Rc::new(RefCell::new(Route::Home));
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let mut app = WindowApp::new(
+            &egui::Context::default(),
+            WindowStart::Home,
+            Box::new(bridge.clone()),
+            Rc::new(RefCell::new(Box::new(StubPageBridge::default()))),
+            Box::new(RecordingHost::default()),
+            "connected".into(),
+            outcome,
+            slot,
+        );
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let frame = |ctx: &egui::Context, app: &mut WindowApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                // logic_impl only polls route state; the click
+                // contract is pure UI.
+                app.ui_impl(ui);
+            });
+        };
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let capture = ctx
+            .read_response(egui::Id::new("topbar-capture"))
+            .expect("the topbar Capture hero registers on Home")
+            .rect;
+        frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(capture.center())],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(capture.center()),
+                egui::Event::PointerButton {
+                    pos: capture.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: capture.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(
+            bridge.captures.get(),
+            1,
+            "one topbar Capture click = one bridge capture request"
+        );
     }
 
     /// The external-capture seam holds mid-delivery: a Hide directive
