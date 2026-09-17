@@ -10,5 +10,5 @@
 - [x] 008 canvas-dressing
 - [x] 009 settings-config
 - [x] 010 settings-route
-- [ ] 011 settings-consumers
+- [x] 011 settings-consumers
 - [ ] 012 sweep-docs
