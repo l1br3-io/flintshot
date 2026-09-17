@@ -375,7 +375,7 @@ impl HomeApp {
             ui.label(
                 egui::RichText::new(&self.ui.status)
                     .color(crate::theme::palette::INK_SOFT)
-                    .size(crate::theme::TYPE_CAPTION),
+                    .size(crate::theme::TYPE_SM),
             );
         });
     }
@@ -398,15 +398,15 @@ impl HomeApp {
         let galley = ui.painter().layout_no_wrap(
             label.to_owned(),
             egui::FontId::new(
-                crate::theme::TYPE_DISPLAY,
+                crate::theme::TYPE_XL,
                 egui::FontFamily::Name(crate::theme::FAMILY_DISPLAY.into()),
             ),
-            crate::theme::palette::CUTOUT_WHITE,
+            crate::theme::palette::CREAM_TEXT,
         );
         let hint = ui.painter().layout_no_wrap(
             " [C]".to_owned(),
-            egui::FontId::proportional(crate::theme::TYPE_CAPTION),
-            crate::theme::palette::CUTOUT_WHITE,
+            egui::FontId::proportional(crate::theme::TYPE_SM),
+            crate::theme::palette::CREAM_TEXT,
         );
         let width = 26.0 + galley.size().x + hint.size().x + 26.0;
         let full = egui::vec2(width, 72.0);
@@ -415,9 +415,9 @@ impl HomeApp {
         let resp = ui
             .interact(rect, egui::Id::new("hero-capture"), egui::Sense::click())
             .on_hover_text("Capture · C");
-        let radius = egui::CornerRadius::same(crate::theme::POD_RADIUS);
+        let radius = egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS);
         ui.painter()
-            .add(crate::theme::SHADOW_LIFTED.as_shape(card, radius));
+            .add(crate::theme::SHADOW_LIFT.as_shape(card, radius));
         ui.painter().rect(
             card,
             radius,
@@ -425,7 +425,7 @@ impl HomeApp {
             crate::theme::CUTOUT_STROKE,
             egui::StrokeKind::Inside,
         );
-        let ink = crate::theme::palette::CUTOUT_WHITE;
+        let ink = crate::theme::palette::CREAM_TEXT;
         let pos = egui::pos2(
             card.left() + 26.0,
             card.center().y - f32::midpoint(galley.size().y, hint.size().y),
@@ -448,7 +448,7 @@ impl HomeApp {
             ] {
                 let galley = ui.painter().layout_no_wrap(
                     format!("{label}{hint}"),
-                    egui::FontId::proportional(crate::theme::TYPE_BODY),
+                    egui::FontId::proportional(crate::theme::TYPE_MD),
                     crate::theme::palette::INK,
                 );
                 let w = 16.0 + galley.size().x + 16.0;
@@ -458,8 +458,8 @@ impl HomeApp {
                     .on_hover_text(label);
                 ui.painter().rect(
                     rect,
-                    egui::CornerRadius::same(crate::theme::POD_RADIUS),
-                    crate::theme::palette::CUTOUT_WHITE,
+                    egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS),
+                    crate::theme::palette::PAPER_CREAM,
                     crate::theme::HAIRLINE_STROKE,
                     egui::StrokeKind::Middle,
                 );
@@ -485,7 +485,7 @@ impl HomeApp {
     fn recents_section(&mut self, ui: &mut egui::Ui) {
         ui.label(
             egui::RichText::new("Recent")
-                .size(crate::theme::TYPE_CAPTION)
+                .size(crate::theme::TYPE_SM)
                 .color(crate::theme::palette::INK_SOFT),
         );
         if self.recent.is_empty() {
@@ -496,14 +496,14 @@ impl HomeApp {
             let _ = ui.interact(rect, egui::Id::new("recents-empty"), egui::Sense::hover());
             ui.painter().rect(
                 rect,
-                egui::CornerRadius::same(crate::theme::POD_RADIUS),
-                crate::theme::palette::CUTOUT_WHITE,
+                egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS),
+                crate::theme::palette::PAPER_CREAM,
                 crate::theme::HAIRLINE_STROKE,
                 egui::StrokeKind::Middle,
             );
             let galley = ui.painter().layout_no_wrap(
                 "No captures yet — your recent shots will land here".to_owned(),
-                egui::FontId::proportional(crate::theme::TYPE_CAPTION),
+                egui::FontId::proportional(crate::theme::TYPE_SM),
                 crate::theme::palette::INK_SOFT,
             );
             let pos = egui::pos2(
@@ -540,10 +540,10 @@ impl HomeApp {
             .on_hover_text(path.to_string_lossy().to_string());
         ui.painter().rect(
             rect,
-            egui::CornerRadius::same(crate::theme::POD_RADIUS),
-            crate::theme::palette::CUTOUT_WHITE,
+            egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS),
+            crate::theme::palette::PAPER_CREAM,
             if resp.hovered() {
-                egui::Stroke::new(1.25, crate::theme::palette::AUTUMN_GOLD)
+                egui::Stroke::new(1.25, crate::theme::palette::FOREST)
             } else {
                 crate::theme::HAIRLINE_STROKE
             },
@@ -562,7 +562,7 @@ impl HomeApp {
                 min: egui::pos2(0.0, 0.0),
                 max: egui::pos2(1.0, 1.0),
             },
-            crate::theme::palette::CUTOUT_WHITE,
+            crate::theme::palette::PAPER_CREAM,
         );
         if resp.clicked() {
             let _ = self.bridge.open_image(path.clone());

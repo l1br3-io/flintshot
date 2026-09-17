@@ -248,8 +248,8 @@ fn collapse_toggle(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
 /// gate greys locked chips without hiding them.
 fn tools_card(ui: &mut egui::Ui, state: &mut EditorState, gate: ToolGate) {
     egui::Frame::new()
-        .fill(theme::palette::CUTOUT_WHITE)
-        .corner_radius(egui::CornerRadius::same(theme::POD_RADIUS))
+        .fill(theme::palette::PAPER_CREAM)
+        .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
         .inner_margin(egui::Margin::same(theme::POD_PAD))
         .stroke(theme::HAIRLINE_STROKE)
         .shadow(theme::SHADOW_RESTING)
@@ -342,7 +342,7 @@ fn bay(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("Start at")
-                        .size(theme::TYPE_CAPTION)
+                        .size(theme::TYPE_SM)
                         .color(theme::palette::INK_SOFT),
                 );
                 ui.add(
@@ -379,11 +379,11 @@ fn fill_toggle(ui: &mut egui::Ui, state: &mut EditorState) {
     let on = state.fill_shapes;
     ui.painter().rect(
         rect,
-        egui::CornerRadius::same(theme::CHIP_RADIUS),
+        egui::CornerRadius::same(theme::POD_RADIUS),
         if on {
             theme::palette::FOREST_DEEP
         } else {
-            theme::palette::CUTOUT_WHITE
+            theme::palette::PAPER_CREAM
         },
         if on {
             egui::Stroke::NONE
@@ -398,9 +398,9 @@ fn fill_toggle(ui: &mut egui::Ui, state: &mut EditorState) {
         } else {
             "Fill".to_owned()
         },
-        egui::FontId::proportional(theme::TYPE_CAPTION),
+        egui::FontId::proportional(theme::TYPE_SM),
         if on {
-            theme::palette::CUTOUT_WHITE
+            theme::palette::PAPER_CREAM
         } else {
             theme::palette::INK_SOFT
         },
@@ -410,7 +410,7 @@ fn fill_toggle(ui: &mut egui::Ui, state: &mut EditorState) {
         rect.center().y - galley.size().y / 2.0,
     );
     let ink = if on {
-        theme::palette::CUTOUT_WHITE
+        theme::palette::PAPER_CREAM
     } else {
         theme::palette::INK_SOFT
     };
@@ -456,13 +456,13 @@ fn export_island(ui: &mut egui::Ui, delete_enabled: bool) -> ToolbarAction {
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             let rect = ui.max_rect();
-            let radius = egui::CornerRadius::same(theme::POD_RADIUS);
+            let radius = egui::CornerRadius::same(theme::CUTOUT_RADIUS);
             ui.painter()
                 .add(theme::SHADOW_RESTING.as_shape(rect, radius));
             ui.painter().rect(
                 rect,
                 radius,
-                theme::palette::CUTOUT_WHITE,
+                theme::palette::PAPER_CREAM,
                 theme::HAIRLINE_STROKE,
                 egui::StrokeKind::Middle,
             );
@@ -511,13 +511,13 @@ fn copy_square(ui: &mut egui::Ui, copied: bool) -> egui::Response {
         .on_hover_text("Copy · Ctrl+C");
     ui.painter().rect(
         rect,
-        egui::CornerRadius::same(theme::CHIP_RADIUS),
+        egui::CornerRadius::same(theme::POD_RADIUS),
         theme::palette::FOREST_DEEP,
         egui::Stroke::NONE,
         egui::StrokeKind::Middle,
     );
     let glyph = if copied { g_check } else { g_copy };
-    glyph(ui.painter(), rect, theme::palette::CUTOUT_WHITE);
+    glyph(ui.painter(), rect, theme::palette::CREAM_TEXT);
     resp
 }
 
@@ -532,7 +532,7 @@ fn copy_hero(ui: &mut egui::Ui, copied: bool) -> egui::Response {
     let resp = ui
         .interact(rect, egui::Id::new("copy_action"), egui::Sense::click())
         .on_hover_text("Copy · Ctrl+C");
-    let radius = egui::CornerRadius::same(theme::POD_RADIUS);
+    let radius = egui::CornerRadius::same(theme::CUTOUT_RADIUS);
     ui.painter()
         .add(theme::SHADOW_RESTING.as_shape(rect, radius));
     ui.painter().rect(
@@ -547,19 +547,18 @@ fn copy_hero(ui: &mut egui::Ui, copied: bool) -> egui::Response {
         egui::vec2(20.0, 40.0),
     );
     let glyph = if copied { g_check } else { g_copy };
-    glyph(ui.painter(), glyph_rect, theme::palette::CUTOUT_WHITE);
+    glyph(ui.painter(), glyph_rect, theme::palette::CREAM_TEXT);
     let label = if copied { "Copied" } else { "Copy" };
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        egui::FontId::proportional(theme::TYPE_BODY),
-        theme::palette::CUTOUT_WHITE,
+        egui::FontId::proportional(theme::TYPE_MD),
+        theme::palette::CREAM_TEXT,
     );
     let pos = egui::pos2(
         glyph_rect.right() + 6.0,
         rect.center().y - galley.size().y / 2.0,
     );
-    ui.painter()
-        .galley(pos, galley, theme::palette::CUTOUT_WHITE);
+    ui.painter().galley(pos, galley, theme::palette::CREAM_TEXT);
     resp
 }
 
@@ -636,7 +635,7 @@ fn popup_button(ui: &mut egui::Ui, id: egui::Id, label: &str, hint: Option<&str>
         resp = resp.on_hover_text(hint);
     }
     let fill = if resp.hovered() {
-        theme::palette::HOLIDAY_FAINT
+        theme::palette::PAPER_DIM
     } else {
         egui::Color32::TRANSPARENT
     };
@@ -651,7 +650,7 @@ fn popup_button(ui: &mut egui::Ui, id: egui::Id, label: &str, hint: Option<&str>
         rect.left_center() + egui::vec2(6.0, 0.0),
         egui::Align2::LEFT_CENTER,
         label,
-        egui::FontId::proportional(theme::TYPE_BODY),
+        egui::FontId::proportional(theme::TYPE_MD),
         theme::palette::INK,
     );
     resp.clicked()
@@ -911,8 +910,8 @@ pub(crate) const REPLACE_HINT: &str = "new content replaces the image — unsave
 /// anchor layout too.
 pub(crate) fn pod_island<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::new()
-        .fill(theme::palette::CUTOUT_WHITE)
-        .corner_radius(CornerRadius::same(theme::POD_RADIUS))
+        .fill(theme::palette::PAPER_CREAM)
+        .corner_radius(CornerRadius::same(theme::CUTOUT_RADIUS))
         .inner_margin(egui::Margin::same(theme::POD_PAD))
         .stroke(theme::HAIRLINE_STROKE)
         .shadow(theme::SHADOW_RESTING)
@@ -946,7 +945,7 @@ pub(crate) fn select_bay(ui: &mut egui::Ui, state: &mut EditorState) {
         ui.label(
             egui::RichText::new(dims_label(n))
                 .color(theme::palette::INK)
-                .size(theme::TYPE_CAPTION),
+                .size(theme::TYPE_SM),
         );
         if ui.button("Crop · Enter").clicked() {
             state.confirm_selection();
@@ -1014,9 +1013,9 @@ pub(crate) fn blur_bay(ui: &mut egui::Ui, state: &mut EditorState) {
 fn segmented_chip(ui: &mut egui::Ui, id: egui::Id, label: &str, selected: bool) -> bool {
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        egui::FontId::proportional(theme::TYPE_CAPTION),
+        egui::FontId::proportional(theme::TYPE_SM),
         if selected {
-            theme::palette::CUTOUT_WHITE
+            theme::palette::CREAM_TEXT
         } else {
             theme::palette::INK_SOFT
         },
@@ -1026,11 +1025,11 @@ fn segmented_chip(ui: &mut egui::Ui, id: egui::Id, label: &str, selected: bool) 
     let resp = ui.interact(rect, id, egui::Sense::click());
     ui.painter().rect(
         rect,
-        egui::CornerRadius::same(theme::CHIP_RADIUS),
+        egui::CornerRadius::same(theme::POD_RADIUS),
         if selected {
             theme::palette::FOREST_DEEP
         } else {
-            theme::palette::CUTOUT_WHITE
+            theme::palette::CREAM_TEXT
         },
         if selected {
             egui::Stroke::NONE
@@ -1040,7 +1039,7 @@ fn segmented_chip(ui: &mut egui::Ui, id: egui::Id, label: &str, selected: bool) 
         egui::StrokeKind::Middle,
     );
     let ink = if selected {
-        theme::palette::CUTOUT_WHITE
+        theme::palette::CREAM_TEXT
     } else {
         theme::palette::INK_SOFT
     };
@@ -1063,7 +1062,7 @@ fn text_style_popup(ui: &mut egui::Ui, state: &mut EditorState) {
             let head = |ui: &mut egui::Ui, text: &str| {
                 ui.label(
                     egui::RichText::new(text)
-                        .size(theme::TYPE_CAPTION)
+                        .size(theme::TYPE_SM)
                         .color(theme::palette::INK_SOFT),
                 );
             };
@@ -1136,7 +1135,7 @@ pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
             .color(theme::palette::INK_SOFT)
-            .size(theme::TYPE_CAPTION),
+            .size(theme::TYPE_SM),
     );
 }
 
@@ -1193,20 +1192,20 @@ pub(crate) fn chip(
     let fill = if selected {
         theme::palette::FOREST_DEEP
     } else if enabled && resp.hovered() {
-        theme::palette::HOLIDAY_FAINT
+        theme::palette::PAPER_DIM
     } else {
-        theme::palette::CUTOUT_WHITE
+        theme::palette::PAPER_CREAM
     };
     let border = if selected {
         Stroke::NONE
     } else if enabled && resp.hovered() {
-        Stroke::new(1.25, theme::palette::AUTUMN_GOLD)
+        Stroke::new(1.25, theme::palette::FOREST)
     } else {
         theme::HAIRLINE_STROKE
     };
     ui.painter().rect(
         rect,
-        CornerRadius::same(theme::CHIP_RADIUS),
+        CornerRadius::same(theme::POD_RADIUS),
         fill,
         border,
         StrokeKind::Middle,
@@ -1214,7 +1213,7 @@ pub(crate) fn chip(
     let color = if !enabled {
         theme::palette::INK_SOFT.gamma_multiply(0.5)
     } else if selected {
-        theme::palette::CUTOUT_WHITE
+        theme::palette::PAPER_CREAM
     } else if resp.hovered() {
         theme::palette::INK
     } else {
@@ -1259,7 +1258,7 @@ pub(crate) fn labeled_chip(
 ) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        FontId::proportional(theme::TYPE_BODY),
+        FontId::proportional(theme::TYPE_MD),
         theme::palette::INK,
     );
     let galley_size = galley.size();
@@ -1281,20 +1280,20 @@ pub(crate) fn labeled_chip(
     let fill = if selected {
         theme::palette::FOREST_DEEP
     } else if enabled && resp.hovered() {
-        theme::palette::HOLIDAY_FAINT
+        theme::palette::PAPER_DIM
     } else {
-        theme::palette::CUTOUT_WHITE
+        theme::palette::PAPER_CREAM
     };
     let border = if selected {
         Stroke::NONE
     } else if enabled && resp.hovered() {
-        Stroke::new(1.25, theme::palette::AUTUMN_GOLD)
+        Stroke::new(1.25, theme::palette::FOREST)
     } else {
         theme::HAIRLINE_STROKE
     };
     ui.painter().rect(
         rect,
-        CornerRadius::same(theme::CHIP_RADIUS),
+        CornerRadius::same(theme::POD_RADIUS),
         fill,
         border,
         StrokeKind::Middle,
@@ -1302,7 +1301,7 @@ pub(crate) fn labeled_chip(
     let color = if !enabled {
         theme::palette::INK_SOFT.gamma_multiply(0.5)
     } else if selected {
-        theme::palette::CUTOUT_WHITE
+        theme::palette::CREAM_TEXT
     } else if resp.hovered() {
         theme::palette::INK
     } else {
@@ -1326,8 +1325,8 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
     let label = if copied { "Copied" } else { "Copy" };
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        FontId::proportional(theme::TYPE_BODY),
-        theme::palette::CUTOUT_WHITE,
+        FontId::proportional(theme::TYPE_MD),
+        theme::palette::CREAM_TEXT,
     );
     let galley_size = galley.size();
     let width = 10.0 + 18.0 + 5.0 + galley_size.x + 10.0;
@@ -1337,7 +1336,7 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
         .on_hover_text("Copy · Ctrl+C");
     ui.painter().rect(
         rect,
-        CornerRadius::same(theme::CHIP_RADIUS),
+        CornerRadius::same(theme::POD_RADIUS),
         theme::palette::FOREST_DEEP,
         Stroke::NONE,
         StrokeKind::Middle,
@@ -1347,13 +1346,12 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
         egui::vec2(18.0, 28.0),
     );
     let glyph = if copied { g_check } else { g_copy };
-    glyph(ui.painter(), glyph_rect, theme::palette::CUTOUT_WHITE);
+    glyph(ui.painter(), glyph_rect, theme::palette::CREAM_TEXT);
     let pos = egui::pos2(
         glyph_rect.right() + 5.0,
         rect.center().y - galley_size.y / 2.0,
     );
-    ui.painter()
-        .galley(pos, galley, theme::palette::CUTOUT_WHITE);
+    ui.painter().galley(pos, galley, theme::palette::CREAM_TEXT);
     resp
 }
 
@@ -1391,7 +1389,7 @@ fn custom_color_chip(ui: &mut egui::Ui, color: &mut Color) {
     ui.painter().rect(
         rect,
         CornerRadius::same(4),
-        theme::palette::CUTOUT_WHITE,
+        theme::palette::PAPER_CREAM,
         theme::HAIRLINE_STROKE,
         StrokeKind::Middle,
     );
@@ -1415,13 +1413,13 @@ fn stroke_chips(ui: &mut egui::Ui, state: &mut EditorState) {
         let selected = (state.stroke_width - preset).abs() < 0.001;
         let resp = ui.interact(rect, egui::Id::new(("stroke", i)), Sense::click());
         let fill = if selected || resp.hovered() {
-            theme::palette::HOLIDAY_FAINT
+            theme::palette::PAPER_DIM
         } else {
-            theme::palette::CUTOUT_WHITE
+            theme::palette::CREAM_TEXT
         };
         ui.painter().rect(
             rect,
-            CornerRadius::same(theme::CHIP_RADIUS),
+            CornerRadius::same(theme::POD_RADIUS),
             fill,
             theme::HAIRLINE_STROKE,
             StrokeKind::Middle,
@@ -1560,7 +1558,7 @@ fn g_text(p: &egui::Painter, r: egui::Rect, c: Color32) {
         r.center(),
         Align2::CENTER_CENTER,
         "T",
-        FontId::proportional(theme::TYPE_TITLE),
+        FontId::proportional(theme::TYPE_LG),
         c,
     );
 }
@@ -1583,7 +1581,7 @@ fn g_number(p: &egui::Painter, r: egui::Rect, c: Color32) {
         pt(r, 0.0, 0.5),
         Align2::CENTER_CENTER,
         "1",
-        FontId::proportional(theme::TYPE_CAPTION),
+        FontId::proportional(theme::TYPE_SM),
         c,
     );
 }
@@ -2049,8 +2047,8 @@ mod tests {
         assert!(
             rects.iter().any(|r| {
                 r.fill == theme::palette::FOREST_DEEP
-                    && r.corner_radius == egui::CornerRadius::same(theme::POD_RADIUS)
-                    && r.stroke.color == theme::palette::CUTOUT_WHITE
+                    && r.corner_radius == egui::CornerRadius::same(theme::CUTOUT_RADIUS)
+                    && r.stroke.color == theme::palette::PAPER_CREAM
             }),
             "the hero paints forest with a white cutout border"
         );
@@ -2173,8 +2171,9 @@ mod tests {
             for shape in shapes {
                 match shape {
                     egui::Shape::Rect(r)
-                        if r.fill == theme::palette::CUTOUT_WHITE
-                            && r.corner_radius == egui::CornerRadius::same(theme::POD_RADIUS) =>
+                        if r.fill == theme::palette::PAPER_CREAM
+                            && r.corner_radius
+                                == egui::CornerRadius::same(theme::CUTOUT_RADIUS) =>
                     {
                         out.push(r.rect);
                     }

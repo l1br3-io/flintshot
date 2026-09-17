@@ -73,7 +73,7 @@ fn wordmark(ui: &mut egui::Ui) {
     let galley = ui.painter().layout_no_wrap(
         "flintshot".to_owned(),
         egui::FontId::new(
-            theme::TYPE_TITLE,
+            theme::TYPE_LG,
             egui::FontFamily::Name(theme::FAMILY_DISPLAY.into()),
         ),
         theme::palette::INK,
@@ -95,7 +95,7 @@ fn single_tab(ui: &mut egui::Ui, doc: Doc) {
     };
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        egui::FontId::proportional(theme::TYPE_CAPTION),
+        egui::FontId::proportional(theme::TYPE_SM),
         theme::palette::INK_SOFT,
     );
     let w = 10.0 + galley.size().x + 10.0;
@@ -103,8 +103,8 @@ fn single_tab(ui: &mut egui::Ui, doc: Doc) {
     let _resp = ui.interact(rect, egui::Id::new("header-tab"), egui::Sense::hover());
     ui.painter().rect(
         rect,
-        egui::CornerRadius::same(theme::CHIP_RADIUS),
-        theme::palette::CUTOUT_WHITE,
+        egui::CornerRadius::same(theme::POD_RADIUS),
+        theme::palette::PAPER_CREAM,
         theme::HAIRLINE_STROKE,
         egui::StrokeKind::Middle,
     );
@@ -118,7 +118,7 @@ fn single_tab(ui: &mut egui::Ui, doc: Doc) {
 fn overflow_menu(ui: &mut egui::Ui, status: Option<&str>) {
     let galley = ui.painter().layout_no_wrap(
         "Menu".to_owned(),
-        egui::FontId::proportional(theme::TYPE_CAPTION),
+        egui::FontId::proportional(theme::TYPE_SM),
         theme::palette::INK_SOFT,
     );
     let w = 8.0 + galley.size().x + 8.0;
@@ -126,11 +126,11 @@ fn overflow_menu(ui: &mut egui::Ui, status: Option<&str>) {
     let resp = ui.interact(rect, egui::Id::new("header-menu"), egui::Sense::click());
     ui.painter().rect(
         rect,
-        egui::CornerRadius::same(theme::CHIP_RADIUS),
+        egui::CornerRadius::same(theme::POD_RADIUS),
         if resp.hovered() {
-            theme::palette::HOLIDAY_FAINT
+            theme::palette::PAPER_DIM
         } else {
-            theme::palette::CUTOUT_WHITE
+            theme::palette::PAPER_CREAM
         },
         theme::HAIRLINE_STROKE,
         egui::StrokeKind::Middle,
@@ -147,14 +147,14 @@ fn overflow_menu(ui: &mut egui::Ui, status: Option<&str>) {
                 ui.label(
                     egui::RichText::new(status)
                         .color(theme::palette::INK_SOFT)
-                        .size(theme::TYPE_CAPTION),
+                        .size(theme::TYPE_SM),
                 );
             }
             ui.separator();
             ui.label(
                 egui::RichText::new("Capture diagnostics: run `flintshot backends`")
                     .color(theme::palette::INK_SOFT)
-                    .size(theme::TYPE_CAPTION),
+                    .size(theme::TYPE_SM),
             );
         });
 }

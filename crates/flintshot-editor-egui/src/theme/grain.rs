@@ -33,7 +33,7 @@ pub(crate) fn tile(seed: u64, size: u32) -> Vec<Color32> {
         // Fleck polarity: white lift or ink speck, both from the
         // palette — no ad-hoc colors here.
         let base = if state & 1 == 0 {
-            palette::CUTOUT_WHITE
+            palette::PAPER_CREAM
         } else {
             palette::INK
         };
@@ -60,7 +60,7 @@ pub(crate) fn paint_grain(painter: &egui::Painter, rect: Rect, texture: &egui::T
         min: Pos2::ZERO,
         max: egui::pos2(rect.width() / tile.x, rect.height() / tile.y),
     };
-    painter.image(texture.id(), rect, uv, palette::CUTOUT_WHITE);
+    painter.image(texture.id(), rect, uv, palette::PAPER_CREAM);
 }
 
 /// `SplitMix64` step — small, stable, dependency-free.

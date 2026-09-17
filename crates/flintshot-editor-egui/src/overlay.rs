@@ -1132,7 +1132,7 @@ impl OverlayApp {
                 egui::Frame::new()
                     .fill(crate::theme::palette::PAPER_CREAM)
                     .inner_margin(egui::Margin::symmetric(8, 5))
-                    .corner_radius(egui::CornerRadius::same(crate::theme::POD_RADIUS))
+                    .corner_radius(egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS))
                     .stroke(crate::theme::HAIRLINE_STROKE)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -2476,8 +2476,8 @@ mod tests {
         rects
             .iter()
             .filter(|r| {
-                r.fill == crate::theme::palette::CUTOUT_WHITE
-                    && r.corner_radius == egui::CornerRadius::same(crate::theme::POD_RADIUS)
+                r.fill == crate::theme::palette::PAPER_CREAM
+                    && r.corner_radius == egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS)
             })
             .count()
     }
