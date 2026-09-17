@@ -392,18 +392,32 @@ impl WindowApp {
 
     /// Headless-callable core of [`App::ui`].
     pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
-        // The header spans every route (home, editor, loading) —
-        // one identity line across the window's whole life.
-        let doc = match &self.route {
-            Route::Home => crate::header::Doc::Home,
-            Route::Editor(..) | Route::Loading => crate::header::Doc::Editor,
+        // The topbar spans every route (home, editor, loading) —
+        // one identity + action line across the window's whole life.
+        let surface = match &self.route {
+            Route::Home => crate::topbar::Surface::Home,
+            Route::Editor(..) => crate::topbar::Surface::Editor,
+            Route::Loading => crate::topbar::Surface::Loading,
         };
         let status = if matches!(self.route, Route::Home) {
             Some(self.home.status_line())
         } else {
             None
         };
-        crate::header::show(ui, doc, status.as_deref());
+        let enable = if matches!(self.route, Route::Editor(..)) {
+            crate::topbar::Enable::ALL
+        } else {
+            crate::topbar::Enable::NONE
+        };
+        let topbar_action = crate::topbar::show(ui, surface, status.as_deref(), enable);
+        // Routed editor pages forward to the editor's handlers;
+        // home / loading wire their heroes with the home topbar
+        // task, and Settings is inert until its route lands.
+        if matches!(self.route, Route::Editor(..)) {
+            if let (Some(a), Some(editor)) = (topbar_action, self.editor.as_mut()) {
+                editor.handle_topbar_action(a, ui.ctx());
+            }
+        }
         match &self.route {
             Route::Home => self.home.ui_impl(ui),
             Route::Editor(..) => {}
