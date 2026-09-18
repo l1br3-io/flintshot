@@ -318,6 +318,16 @@ fn hero(
     resp
 }
 
+/// The overflow chip's `⋯`: three centered vector dots. Painted,
+/// never text — the embedded font chain's cmaps lack U+22EF, so
+/// the text glyph renders as tofu (ux-redesign-regressions spec's
+/// cmap scan).
+fn more_dots(p: &egui::Painter, rect: egui::Rect, c: Color32) {
+    for x in [-5.0_f32, 0.0, 5.0] {
+        p.circle_filled(crate::rail::pt(rect, x, 0.0), 1.75, c);
+    }
+}
+
 /// The `⋯` overflow: an about note + route-varying items. Editor
 /// surfaces get Save / Upload / Paste; every surface gets the
 /// Settings entry (inert until its route lands — the action is
@@ -348,13 +358,7 @@ fn overflow(
         ),
         egui::StrokeKind::Inside,
     );
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "⋯",
-        egui::FontId::proportional(theme::TYPE_MD),
-        theme::palette::CREAM_TEXT,
-    );
+    more_dots(ui.painter(), rect, theme::palette::CREAM_TEXT);
     egui::Popup::from_toggle_button_response(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
@@ -511,6 +515,47 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    /// The overflow chip's `⋯` is painted as vector dots, never
+    /// text: the embedded font chain's cmaps lack U+22EF, so the
+    /// text glyph renders as tofu (ux-redesign-regressions spec's
+    /// cmap scan).
+    #[test]
+    fn more_dots_paint_three_circles_inside_the_chip() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let rect = egui::Rect::from_min_size(egui::pos2(300.0, 7.0), egui::vec2(30.0, 30.0));
+        let full = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            more_dots(ui.painter(), rect, theme::palette::CREAM_TEXT);
+        });
+        let dots: Vec<(egui::Pos2, f32, Color32)> = full
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Circle(c) => Some((c.center, c.radius, c.fill)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dots.len(), 3, "exactly three dots, got {dots:?}");
+        let mut xs: Vec<f32> = dots.iter().map(|(c, _, _)| c.x).collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        for (center, radius, fill) in &dots {
+            assert!(rect.contains(*center), "dot {center} inside the chip");
+            assert!(*radius > 0.0, "dots are filled circles, not points");
+            assert_eq!(*fill, theme::palette::CREAM_TEXT);
+        }
+        let spread = [xs[1] - xs[0], xs[2] - xs[1]];
+        assert!(
+            (spread[0] - spread[1]).abs() < 0.01 && spread[0] > 0.0,
+            "dots are evenly spread on a row: {xs:?}"
+        );
+        for (center, _, _) in &dots {
+            assert!(
+                (center.y - rect.center().y).abs() < 0.01,
+                "dots sit on the chip's centerline"
+            );
+        }
     }
 
     /// The topbar is a top strip: the central panel starts at its

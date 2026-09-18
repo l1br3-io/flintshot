@@ -89,6 +89,9 @@ Categories used below:
   page geometry with Editor / Loading / Settings (1024×640,
   resizable); the initial viewport and every Home↔Editor transition
   batch fix together.
+- The topbar's `⋯` overflow chip rendered as tofu — U+22EF is
+  absent from every embedded font's cmap. The more glyph is now
+  painted as three vector dots (rail's `pt` glyph space).
 - Six alignment/UX regressions reported against the editor (all
   regression-tested headlessly):
   - the canvas `CentralPanel`'s default 8 px inner margin anchored
