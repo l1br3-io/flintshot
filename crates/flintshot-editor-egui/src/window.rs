@@ -69,7 +69,7 @@ pub enum Route {
     /// delivers). Stub until Task 008.
     Loading,
     /// The settings page (Task 010): reached from every route's
-    /// `⋯` overflow; Escape returns to Home.
+    /// dots overflow; Escape returns to Home.
     Settings,
 }
 
@@ -445,7 +445,7 @@ impl WindowApp {
             Some(crate::topbar::TopbarAction::Open) if matches!(self.route, Route::Home) => {
                 self.home.handle_open(ui.ctx());
             }
-            // The ⋯ overflow's Settings entry opens the settings
+            // The dots overflow's Settings entry opens the settings
             // route from every route (spec §Settings route).
             Some(crate::topbar::TopbarAction::Settings) => {
                 self.settings = Some(crate::settings::SettingsApp::new(

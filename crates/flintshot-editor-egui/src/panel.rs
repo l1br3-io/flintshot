@@ -893,7 +893,9 @@ pub(crate) fn g_upload(p: &egui::Painter, r: egui::Rect, c: Color32) {
 }
 
 /// Two sheets: full front rect, back corner peeking top-right.
-fn g_copy(p: &egui::Painter, r: egui::Rect, c: Color32) {
+/// `pub(crate)`: the topbar's Copy hero reuses this glyph (the
+/// glyph-kit rule — no duplicated sheet logic).
+pub(crate) fn g_copy(p: &egui::Painter, r: egui::Rect, c: Color32) {
     let front = egui::Rect::from_min_size(pt(r, -7.0, -4.0), egui::vec2(8.0, 10.0));
     p.rect(
         front,
