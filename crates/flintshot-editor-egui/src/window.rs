@@ -449,6 +449,14 @@ impl WindowApp {
                 ));
                 self.request_route(ui.ctx(), Route::Settings);
             }
+            // The breadcrumb's Home link: back to the home route
+            // from any stage that can navigate (mirrors the editor
+            // Esc path — the page swaps in place, same window).
+            Some(crate::topbar::TopbarAction::NavigateHome)
+                if !matches!(self.route, Route::Home) =>
+            {
+                self.request_route(ui.ctx(), Route::Home);
+            }
             Some(a) if matches!(self.route, Route::Editor(..)) => {
                 if let Some(editor) = self.editor.as_mut() {
                     editor.handle_topbar_action(a, ui.ctx());
@@ -658,6 +666,69 @@ mod tests {
             1,
             "one topbar Capture click = one bridge capture request"
         );
+    }
+
+    /// The breadcrumb's Home link routes the editor page home
+    /// in-place — the same swap Esc performs, asserted through the
+    /// route slot (the geometry batch follows the kind change).
+    #[test]
+    fn navigate_home_from_the_editor_routes_home() {
+        let (mut app, _bridge, _host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let frame = |ctx: &egui::Context, app: &mut WindowApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        };
+        // Settle: the topbar lays out, then the crumb link
+        // hit-tests a pass behind it.
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let crumb = ctx
+            .read_response(egui::Id::new(("topbar-crumb", 0)))
+            .expect("the Home crumb registers as a link on the editor route")
+            .rect;
+        frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(crumb.center())],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(crumb.center()),
+                egui::Event::PointerButton {
+                    pos: crumb.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: crumb.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(
+            matches!(app.route, Route::Home),
+            "the Home crumb routes the editor page home"
+        );
+        assert!(app.editor.is_none(), "the editor page is dropped");
     }
 
     /// The external-capture seam holds mid-delivery: a Hide directive

@@ -286,14 +286,14 @@ pub(crate) fn section(
     let target = if open { 1.0 } else { 0.0 };
     let eased = eased(ui.ctx(), id.with("unfold"), target, 0.22);
 
-    // Chevron: points right when closed, rotates down with the
-    // spring as the section unfolds.
+    // Chevron: apex pointing RIGHT when closed, rotating to point
+    // DOWN (flat side up) with the spring as the section unfolds.
     let c = egui::pos2(header_rect.left() + 8.0, header_rect.center().y);
     let angle = eased * std::f32::consts::FRAC_PI_2;
     let (sin, cos) = angle.sin_cos();
     let pt = |dx: f32, dy: f32| egui::pos2(c.x + dx * cos - dy * sin, c.y + dx * sin + dy * cos);
     ui.painter().add(egui::Shape::convex_polygon(
-        vec![pt(5.0, -4.0), pt(5.0, 4.0), pt(-4.0, 0.0)],
+        vec![pt(-4.0, -4.0), pt(-4.0, 4.0), pt(5.0, 0.0)],
         p::INK_SOFT,
         egui::Stroke::NONE,
     ));
@@ -657,6 +657,62 @@ mod tests {
             "gate off: the body is fully open one frame after the click, got {}",
             height.get()
         );
+    }
+
+    /// The collapse chevron's direction: apex RIGHT when closed (the
+    /// "expand me" affordance), apex DOWN when open — never left/up
+    /// (the first build pointed left and read as broken).
+    #[test]
+    fn section_chevron_apex_points_right_closed_and_down_open() {
+        let chevron_points = |open: bool| {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx);
+            set_animations(&ctx, false); // eased jumps to target
+            let id = egui::Id::new("sec");
+            if open {
+                // One click opens; the next frame paints the settled
+                // chevron.
+                run(&ctx, 0.0, vec![], |ui| {
+                    let _ = section(ui, id, "Stroke", false, |_| {});
+                });
+                let header = ctx.read_response(id).expect("the header registers");
+                run(&ctx, DT, click_events(header.rect.center()), |ui| {
+                    let _ = section(ui, id, "Stroke", false, |_| {});
+                });
+            }
+            let shapes = shapes_of(&ctx, 2.0 * DT, |ui| {
+                let _ = section(ui, id, "Stroke", false, |_| {});
+            });
+            shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    // `convex_polygon` paints as a closed PathShape.
+                    egui::Shape::Path(p) if p.closed && p.points.len() == 3 => {
+                        Some([p.points[0], p.points[1], p.points[2]])
+                    }
+                    _ => None,
+                })
+                .next_back()
+                .unwrap_or_else(|| panic!("open={open}: the chevron paints a triangle"))
+        };
+        let assert_direction = |pts: [Pos2; 3], open: bool| {
+            let axis: Vec<f32> = if open {
+                pts.iter().map(|p| p.y).collect() // apex down = max y
+            } else {
+                pts.iter().map(|p| p.x).collect() // apex right = max x
+            };
+            let max = axis.iter().copied().fold(f32::MIN, f32::max);
+            let min = axis.iter().copied().fold(f32::MAX, f32::min);
+            let at_max = axis.iter().filter(|v| (**v - max).abs() < 0.5).count();
+            let at_min = axis.iter().filter(|v| (**v - min).abs() < 0.5).count();
+            assert_eq!(
+                (at_max, at_min),
+                (1, 2),
+                "open={open}: one apex + a flat base side, points {pts:?}"
+            );
+        };
+        assert_direction(chevron_points(false), false);
+        assert_direction(chevron_points(true), true);
     }
 
     #[test]

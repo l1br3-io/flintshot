@@ -1,15 +1,15 @@
 //! Floating on-canvas controls — the editor's quick cluster.
 //!
 //! A small cutout-chip row pinned to the canvas's top-left corner:
-//! undo / redo, the magnifier always-on toggle, and the loupe's
-//! zoom in / out. The chips float *over* the screenshot (they are
+//! undo / redo, the magnifier always-on toggle, and the canvas
+//! view's zoom in / out (the shell applies the factor to the fit
+//! transform). The chips float *over* the screenshot (they are
 //! canvas chrome, not panel furniture), so [`show`] also publishes
 //! the cluster's rect — the shell must treat presses that begin
 //! there as non-canvas (see `crate::app`'s pointer gating), while
 //! every pointer-miss passes through to annotation gestures
 //! untouched.
 
-use crate::magnifier::Magnifier;
 use crate::panel;
 use crate::rail;
 use crate::theme;
@@ -27,10 +27,10 @@ pub(crate) enum FloatingAction {
     Redo,
     /// Flip the magnifier's always-on flag.
     ToggleMagnifier,
-    /// Step the loupe's zoom factor up one stop.
-    LoupeZoomIn,
-    /// Step the loupe's zoom factor down one stop.
-    LoupeZoomOut,
+    /// Step the canvas view's zoom factor up one stop.
+    ZoomIn,
+    /// Step the canvas view's zoom factor down one stop.
+    ZoomOut,
 }
 
 /// Which canvas corner a cluster pins to.
@@ -94,16 +94,16 @@ fn run_cluster(
 }
 
 /// Draw the floating clusters over `canvas_rect`: undo / redo at
-/// the top-left corner, the magnifier toggle + loupe zoom chips at
+/// the top-left corner, the magnifier toggle + view zoom chips at
 /// the bottom-right (the mockup's arrangement). Returns the fired
 /// action (if any) and the chip rects for the shell's press gating —
 /// chip rects only: a pointer-miss between chips passes through to
-/// the canvas (the spec's passthrough contract).
+/// the canvas (the spec's passthrough contract). The zoom actions
+/// are the shell's to apply (the fit transform lives there).
 pub(crate) fn show(
     ctx: &egui::Context,
     canvas_rect: egui::Rect,
     magnifier_always_on: bool,
-    magnifier: &mut Magnifier,
 ) -> (Option<FloatingAction>, Vec<egui::Rect>) {
     let mut action = None;
     let mut chip_rects = Vec::new();
@@ -175,28 +175,20 @@ pub(crate) fn show(
                     ),
                     (
                         "zoom-out",
-                        "Loupe zoom out",
+                        "Zoom out",
                         false,
                         g_minus,
-                        Some(FloatingAction::LoupeZoomOut),
+                        Some(FloatingAction::ZoomOut),
                     ),
                     (
                         "zoom-in",
-                        "Loupe zoom in",
+                        "Zoom in",
                         false,
                         panel::g_plus,
-                        Some(FloatingAction::LoupeZoomIn),
+                        Some(FloatingAction::ZoomIn),
                     ),
                 ],
             );
-            // The zoom clicks step the factor right after the
-            // generic bookkeeping above.
-            if action == Some(FloatingAction::LoupeZoomIn) {
-                magnifier.zoom_in();
-            }
-            if action == Some(FloatingAction::LoupeZoomOut) {
-                magnifier.zoom_out();
-            }
         });
 
     (action, chip_rects)
@@ -276,6 +268,7 @@ fn g_minus(p: &egui::Painter, r: egui::Rect, c: egui::Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::magnifier::Magnifier;
 
     fn canvas(w: f32, h: f32) -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(w, h))
@@ -283,7 +276,7 @@ mod tests {
 
     /// One frame of the cluster over a roomy canvas; returns the
     /// context for response reads.
-    fn frame(events: Vec<egui::Event>, always_on: bool, mag: &mut Magnifier) -> egui::Context {
+    fn frame(events: Vec<egui::Event>, always_on: bool) -> egui::Context {
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
             events,
@@ -291,7 +284,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on, mag);
+            let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on);
         });
         ctx
     }
@@ -301,9 +294,8 @@ mod tests {
     /// (Area-hosted widgets hit-test a pass behind their layout).
     /// All passes share one context — `frame` above constructs a
     /// fresh one per call, so settle passes run inline.
-    fn action_after_click_on(id: &str, always_on: bool) -> (Option<FloatingAction>, Magnifier) {
-        let mut mag = Magnifier::new();
-        let ctx = frame(vec![], always_on, &mut mag);
+    fn action_after_click_on(id: &str, always_on: bool) -> Option<FloatingAction> {
+        let ctx = frame(vec![], always_on);
         // Settle passes first, THEN read the settled rect: Areas
         // place on the sizing pass and pin on the next.
         let raw = egui::RawInput {
@@ -311,29 +303,29 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on, &mut mag);
+            let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on);
         });
         let chip = ctx
             .read_response(egui::Id::new(id))
             .unwrap_or_else(|| panic!("pass 1 registered {id}"));
         let at = chip.rect.center();
-        let pass = |ctx: &egui::Context, events: Vec<egui::Event>, mag: &mut Magnifier| {
+        let pass = |ctx: &egui::Context, events: Vec<egui::Event>| {
             let raw = egui::RawInput {
                 events,
                 screen_rect: Some(canvas(800.0, 600.0)),
                 ..egui::RawInput::default()
             };
             let _ = ctx.run_ui(raw, |ui| {
-                let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on, mag);
+                let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on);
             });
         };
         // Settle passes: Areas place on the sizing pass and pin on
         // the next, so two passes precede the pointer read.
-        pass(&ctx, vec![], &mut mag);
-        pass(&ctx, vec![], &mut mag);
+        pass(&ctx, vec![]);
+        pass(&ctx, vec![]);
         // Hover-settle: pointer at the chip for one pass, then the
         // press + release clicks.
-        pass(&ctx, vec![egui::Event::PointerMoved(at)], &mut mag);
+        pass(&ctx, vec![egui::Event::PointerMoved(at)]);
         let mut action = None;
         let raw = egui::RawInput {
             events: vec![
@@ -354,16 +346,16 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let (a, _) = show(ui.ctx(), canvas(800.0, 600.0), always_on, &mut mag);
+            let (a, _) = show(ui.ctx(), canvas(800.0, 600.0), always_on);
             action = a;
         });
-        (action, mag)
+        action
     }
 
     #[test]
     fn undo_chip_fires_undo() {
         assert_eq!(
-            action_after_click_on("undo", false).0,
+            action_after_click_on("undo", false),
             Some(FloatingAction::Undo)
         );
     }
@@ -371,15 +363,14 @@ mod tests {
     #[test]
     fn redo_chip_fires_redo() {
         assert_eq!(
-            action_after_click_on("redo", false).0,
+            action_after_click_on("redo", false),
             Some(FloatingAction::Redo)
         );
     }
 
     #[test]
     fn undo_chip_reports_hover() {
-        let mut mag = Magnifier::new();
-        let ctx = frame(vec![], false, &mut mag);
+        let ctx = frame(vec![], false);
         // Settle passes: the Area places on the sizing pass and pins
         // on the next, so the chip rect read here is the final one.
         for _ in 0..2 {
@@ -389,7 +380,7 @@ mod tests {
                     ..egui::RawInput::default()
                 },
                 |ui| {
-                    let _ = show(ui.ctx(), canvas(800.0, 600.0), false, &mut mag);
+                    let _ = show(ui.ctx(), canvas(800.0, 600.0), false);
                 },
             );
         }
@@ -401,7 +392,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let _ = show(ui.ctx(), canvas(800.0, 600.0), false, &mut mag);
+            let _ = show(ui.ctx(), canvas(800.0, 600.0), false);
         });
         let after = ctx
             .read_response(egui::Id::new("undo"))
@@ -412,26 +403,28 @@ mod tests {
     #[test]
     fn magnifier_chip_fires_the_toggle() {
         assert_eq!(
-            action_after_click_on("magnifier-toggle", false).0,
+            action_after_click_on("magnifier-toggle", false),
             Some(FloatingAction::ToggleMagnifier)
         );
     }
 
+    /// The zoom chips report view-zoom actions — the shell's fit
+    /// transform applies them (the cluster itself owns no state).
     #[test]
-    fn zoom_chips_step_the_loupe_factor() {
-        let base = Magnifier::new().zoom();
-        let (action, mag) = action_after_click_on("zoom-in", false);
-        assert_eq!(action, Some(FloatingAction::LoupeZoomIn));
-        assert!(mag.zoom() > base, "one click steps the loupe up");
-        let (action, mag) = action_after_click_on("zoom-out", false);
-        assert_eq!(action, Some(FloatingAction::LoupeZoomOut));
-        assert!(
-            mag.zoom() < base,
-            "one click steps the loupe down from the base factor"
+    fn zoom_chips_report_view_zoom_actions() {
+        assert_eq!(
+            action_after_click_on("zoom-in", false),
+            Some(FloatingAction::ZoomIn)
         );
-        assert!(mag.zoom() >= 2.0, "never below the usable range");
+        assert_eq!(
+            action_after_click_on("zoom-out", false),
+            Some(FloatingAction::ZoomOut)
+        );
     }
 
+    /// The loupe's own factor still clamps at both ends (the
+    /// magnifier inset keeps its API; the view zoom replaced only
+    /// the chips' role).
     #[test]
     fn loupe_zoom_clamps_at_both_ends() {
         let mut mag = Magnifier::new();
@@ -471,7 +464,6 @@ mod tests {
 
     #[test]
     fn show_publishes_chip_rects_inside_the_canvas() {
-        let mut mag = Magnifier::new();
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
             screen_rect: Some(canvas(800.0, 600.0)),
@@ -479,7 +471,7 @@ mod tests {
         };
         let mut chips = Vec::new();
         let _ = ctx.run_ui(raw, |ui| {
-            let (_, rects) = show(ui.ctx(), canvas(800.0, 600.0), false, &mut mag);
+            let (_, rects) = show(ui.ctx(), canvas(800.0, 600.0), false);
             chips = rects;
         });
         assert_eq!(chips.len(), 5, "one rect per chip");

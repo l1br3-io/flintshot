@@ -122,6 +122,10 @@ pub(crate) struct EditorApp {
     /// dispatch skips that frame (the screenshot isn't visible yet
     /// either, so no drags can start).
     canvas_rect: Option<egui::Rect>,
+    /// User view-zoom multiplier over the fit scale (the floating
+    /// +/− chips step it; 1.0 = fit-to-view). See
+    /// [`VIEW_ZOOM_MIN`] / [`VIEW_ZOOM_MAX`].
+    view_zoom: f32,
     /// Whether the current primary-button press began inside the
     /// canvas. Set when `PointerDown` fires (which only happens on
     /// canvas hits), cleared on `PointerUp`. Without this guard,
@@ -206,20 +210,19 @@ pub(crate) struct EditorApp {
 /// stroke's width — per the mockup's canvas dressing.
 pub(crate) const CANVAS_RING: f32 = 8.0;
 
-/// The corner-handle edge, logical px (mockup: 11 px handles).
-pub(crate) const HANDLE_EDGE: f32 = 11.0;
+/// Breathing room between the cutout's ring box and the canvas
+/// panel's edge (the surrounding zones): keeps the ring's hairline
+/// and the paper shadow's penumbra off the panel border so the
+/// capture never sits flush against the window chrome.
+pub(crate) const CANVAS_PAD: f32 = 12.0;
 
-/// The four corner handles centered on the image rect's corners.
-/// Chrome-only math — pure for tests.
-pub(crate) fn handle_rects(image: egui::Rect, edge: f32) -> [egui::Rect; 4] {
-    let at = |p: egui::Pos2| egui::Rect::from_center_size(p, egui::vec2(edge, edge));
-    [
-        at(image.left_top()),
-        at(image.right_top()),
-        at(image.left_bottom()),
-        at(image.right_bottom()),
-    ]
-}
+/// The view-zoom floor (the − chip's clamp): half the fit size.
+pub(crate) const VIEW_ZOOM_MIN: f32 = 0.5;
+/// The view-zoom ceiling (the + chip's clamp): four× the fit size.
+pub(crate) const VIEW_ZOOM_MAX: f32 = 4.0;
+/// One +/− chip step. A power of two, so repeated addition from
+/// 1.0 stays exact in f32 and the "back to 100%" path is lossless.
+const VIEW_ZOOM_STEP: f32 = 0.25;
 
 impl EditorApp {
     /// Construct the app. The canvas captures a clone of the
@@ -284,6 +287,7 @@ impl EditorApp {
             bg: None,
             img_dims,
             canvas_rect: None,
+            view_zoom: 1.0,
             canvas_drag_active: false,
             outcome,
             clipboard: None,
@@ -309,6 +313,17 @@ impl EditorApp {
     /// construction and not yet ended by a crop.
     fn phase_active(&self) -> bool {
         self.phase == SelectionPhase::Live
+    }
+
+    /// Whether the view sits at the 1.0 fit zoom — the worker
+    /// resize policy's trigger (only the zoomed view letterboxes;
+    /// 1.0 keeps the image-sized window contract).
+    #[allow(
+        clippy::float_cmp,
+        reason = "0.25 steps are powers of two; 1.0 stays exact"
+    )]
+    fn at_fit_zoom(&self) -> bool {
+        self.view_zoom == 1.0
     }
 
     /// The rail's tool gate for the current frame: the live
@@ -452,8 +467,10 @@ impl EditorApp {
     }
 
     /// The worker window's image-sized viewport policy (unchanged,
-    /// spec: out of scope): resize until the panel exactly fits the
-    /// image, invalidating the caches when its dimensions change.
+    /// spec: out of scope): at the 1.0 view zoom, resize until the
+    /// panel exactly fits the image; any other zoom belongs to
+    /// [`Self::update_fit`]'s letterbox path (never resize — the
+    /// window's size is stable, only the view transform moves).
     #[allow(
         clippy::cast_precision_loss,
         reason = "image dims ≤ 2^24 are exact in f32"
@@ -461,10 +478,13 @@ impl EditorApp {
     fn handle_image_resize(&mut self, ctx: &Context) {
         self.invalidate_caches_on_dims_change();
         let current_dims = self.state.image.dimensions();
-        // Target panel size in logical px = image physical dims / ppp.
+        // Target panel size in logical px = image physical dims / ppp,
+        // plus the cutout ring's margin and the panel padding on
+        // every side so the dressing (ring + shadow penumbra) stays
+        // inside the canvas with air to spare.
         let ppp = ctx.pixels_per_point();
-        let target_w = current_dims.0 as f32 / ppp;
-        let target_h = current_dims.1 as f32 / ppp;
+        let target_w = current_dims.0 as f32 / ppp + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD;
+        let target_h = current_dims.1 as f32 / ppp + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD;
         // Current canvas panel width/height (logical). When the resize
         // has taken effect, these match the target.
         let (cur_w, cur_h) = self
@@ -490,13 +510,15 @@ impl EditorApp {
         ctx.request_repaint();
     }
 
-    /// The stable viewport's per-frame fit (page epochs): compute
-    /// the fit-to-view scale from the live canvas rect and center
-    /// the image inside it (letterbox). Never issues a resize — the
-    /// window's size is the user's; only the view transform moves.
-    /// Also owns the one-shot open-time clamp of the default window
-    /// size to a small monitor (egui reports `monitor_size` only
-    /// once the loop runs; the default fits real panels).
+    /// The per-frame fit (both lifecycles): compute the fit-to-view
+    /// scale from the live canvas rect, multiply by the user's view
+    /// zoom, and center the ring box inside the padded canvas
+    /// (letterbox). Never issues a resize — the window's size is the
+    /// user's (page epochs) or [`Self::handle_image_resize`]'s
+    /// (workers at 1.0); only the view transform moves. Also owns
+    /// the one-shot open-time clamp of the default window size to a
+    /// small monitor (egui reports `monitor_size` only once the loop
+    /// runs; the default fits real panels).
     #[allow(
         clippy::cast_precision_loss,
         reason = "image dims ≤ 2^24 are exact in f32"
@@ -508,13 +530,36 @@ impl EditorApp {
             return;
         };
         let (w, h) = self.state.image.dimensions();
-        let scale = crate::canvas::fit_scale((w as f32, h as f32), (rect.width(), rect.height()))
-            .unwrap_or(self.canvas.scale());
         let ppp = ctx.pixels_per_point();
+        // The fit unit is the ring box (image + the cutout's cream
+        // ring on every side), fitted inside the panel minus the
+        // padding — the dressing stays inside the canvas with air to
+        // spare instead of sitting flush against the window chrome.
+        let (bw, bh) = (w as f32 + 2.0 * CANVAS_RING, h as f32 + 2.0 * CANVAS_RING);
+        let pad_l = CANVAS_PAD / ppp;
+        let fit = crate::canvas::fit_scale(
+            (bw, bh),
+            (
+                (rect.width() - 2.0 * pad_l).max(0.0),
+                (rect.height() - 2.0 * pad_l).max(0.0),
+            ),
+        );
+        let scale = match fit {
+            Some(fit) => fit * self.view_zoom,
+            // Degenerate viewport: keep the previous transform
+            // rather than collapsing the canvas.
+            None => self.canvas.scale(),
+        };
+        let ring_l = CANVAS_RING * scale / ppp;
         let img_logical = egui::vec2(w as f32 * scale / ppp, h as f32 * scale / ppp);
+        let box_logical = img_logical + egui::vec2(2.0 * ring_l, 2.0 * ring_l);
+        // Center the ring box in the padded viewport; a zoomed-in
+        // box (bigger than the viewport) clamps to zero slack and
+        // anchors at the ring + pad inset (the panel clips the
+        // overflow).
         let offset = egui::vec2(
-            ((rect.width() - img_logical.x) / 2.0).max(0.0),
-            ((rect.height() - img_logical.y) / 2.0).max(0.0),
+            ((rect.width() - 2.0 * pad_l - box_logical.x) / 2.0).max(0.0) + ring_l + pad_l,
+            ((rect.height() - 2.0 * pad_l - box_logical.y) / 2.0).max(0.0) + ring_l + pad_l,
         );
         // "Changed" tolerates float jitter: sub-epsilon drift must
         // not request repaints every frame, and a quarter-pixel
@@ -554,11 +599,30 @@ impl EditorApp {
         }
     }
 
+    /// The paper shadow under the capture (the dressing's lowest
+    /// layer). Painted inside the canvas panel *before* the render
+    /// pass so the image covers the shadow shape's interior —
+    /// `Shadow::as_shape` fills its whole rect with a translucent
+    /// tint, which over the blit would read as an overlay. Hidden
+    /// during the selection-first phase (the dim mask owns the
+    /// moment). One frame behind the layout (the cached canvas rect).
+    fn paint_paper_shadow(&self, painter: &egui::Painter) {
+        if self.phase_active() {
+            return;
+        }
+        let Some(image_rect) = self.image_screen_rect() else {
+            return;
+        };
+        let radius = egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS);
+        painter.add(crate::theme::SHADOW_PAPER.as_shape(image_rect.expand(CANVAS_RING), radius));
+    }
+
     /// The canvas paper dressing: the capture as a paper cutout —
-    /// paper shadow, cream ring, forest hairline around the image —
-    /// plus four corner handles. Chrome-only: painted over the
-    /// composed output, never in `render()` / saves. Hidden during
-    /// the selection-first phase (the dim mask owns the moment).
+    /// cream ring and forest hairline around the image. Chrome-only:
+    /// painted over the composed output, never in `render()` /
+    /// saves. Hidden during the selection-first phase (the dim mask
+    /// owns the moment). Clipped to the canvas panel so the ring (and
+    /// its hairline) never bleeds over the surrounding zones.
     fn paint_canvas_dressing(&self, painter: &egui::Painter) {
         use crate::theme::palette as p;
         if self.phase_active() {
@@ -567,10 +631,12 @@ impl EditorApp {
         let Some(image_rect) = self.image_screen_rect() else {
             return;
         };
+        let Some(canvas_rect) = self.canvas_rect else {
+            return;
+        };
+        let painter = painter.with_clip_rect(canvas_rect);
         let radius = egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS);
         let ring = image_rect.expand(CANVAS_RING);
-        // Paper shadow under everything.
-        painter.add(crate::theme::SHADOW_PAPER.as_shape(ring, radius));
         // The cream ring around the image: a stroked band strictly
         // outside the image rect. A fill over `ring` would cover the
         // capture entirely, and an inside stroke would eat its border
@@ -592,16 +658,6 @@ impl EditorApp {
             crate::theme::HAIRLINE_STROKE,
             egui::StrokeKind::Middle,
         );
-        // The corner handles: cream squares with hairline borders.
-        for handle in handle_rects(image_rect, HANDLE_EDGE) {
-            painter.rect(
-                handle,
-                egui::CornerRadius::same(3),
-                p::PAPER_CREAM,
-                egui::Stroke::new(1.0, p::FOREST),
-                egui::StrokeKind::Middle,
-            );
-        }
     }
 
     /// The image's on-screen logical rect (the fit transform
@@ -1111,15 +1167,15 @@ impl EditorApp {
         // render paints the mask.
         self.end_phase_on_crop();
 
-        // Viewport policy by lifecycle: page epochs fit the image
-        // into the stable window (no resize commands); worker
-        // windows keep the image-sized window (resize until the
-        // panel matches).
-        if self.page.is_some() {
-            self.update_fit(ui.ctx());
-        } else {
+        // Viewport policy by lifecycle: worker windows keep the
+        // image-sized window while the view zoom is 1.0 (resize
+        // until the panel matches); page epochs — and workers under
+        // a user zoom — never resize, the fit path letterboxes
+        // inside the stable window instead.
+        if self.page.is_none() && self.at_fit_zoom() {
             self.handle_image_resize(ui.ctx());
         }
+        self.update_fit(ui.ctx());
 
         // Per-frame render: bind the painter, then walk the shared
         // render path. Render failure is terminal — publish `Err(_)`
@@ -1134,15 +1190,29 @@ impl EditorApp {
         // happy (`&mut self.canvas` + `&mut self.bg` + `&self.state`
         // are captured disjointly by the closure, while the outcome
         // publication happens against the unborrowed `self`).
-        let panel = egui::CentralPanel::default().show(ui, |ui| {
-            self.canvas.bind_painter(ui.painter());
-            render(
-                &self.state,
-                &mut self.canvas,
-                &mut self.bg,
-                &mut self.blur_cache,
-            )
-        });
+        // Zero inner margin: `Frame::central_panel` defaults to 8 px,
+        // which anchors the canvas's draws at the panel's *inner*
+        // rect while this shell maps pointers and chrome against
+        // `panel.response.rect` (the outer one) — an 8 px offset
+        // between where the cursor maps and where strokes land, and
+        // between the image and its dressing. One rect for both.
+        let panel = egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::same(0)))
+            .show(ui, |ui| {
+                // The paper shadow goes UNDER the render pass:
+                // `Shadow::as_shape` fills its whole rect (a
+                // translucent tint, blurred at the edges), so painted
+                // over the image it reads as an overlay. Under the
+                // blit, only the penumbra outside the cutout shows.
+                self.paint_paper_shadow(ui.painter());
+                self.canvas.bind_painter(ui.painter());
+                render(
+                    &self.state,
+                    &mut self.canvas,
+                    &mut self.bg,
+                    &mut self.blur_cache,
+                )
+            });
 
         // Cache the canvas's screen-logical rect so the next frame's
         // `logic()` can do pointer hit-testing. `panel.response.rect`
@@ -1198,17 +1268,12 @@ impl EditorApp {
         // loupe over the caret.
         self.paint_magnifier_if_active(ui.ctx(), ui.painter());
 
-        // Floating quick cluster (undo / redo / magnifier / loupe
+        // Floating quick cluster (undo / redo / magnifier / view
         // zoom) over the canvas's top-left corner. The chip rects
         // feed the next frame's press gate.
         let canvas_rect = self.canvas_rect;
         let (floating_action, chip_rects) = canvas_rect.map_or((None, Vec::new()), |rect| {
-            floating::show(
-                ui.ctx(),
-                rect,
-                self.magnifier_always_on,
-                &mut self.magnifier,
-            )
+            floating::show(ui.ctx(), rect, self.magnifier_always_on)
         });
         self.floating_rects = chip_rects;
         self.handle_floating_action(floating_action);
@@ -1281,6 +1346,13 @@ impl EditorApp {
             TopbarAction::Open => self.handle_page_open(ctx),
             TopbarAction::Paste => self.handle_page_paste(ctx),
             TopbarAction::Settings => {} // inert until the settings route lands
+            // The breadcrumb's Home link: worker windows have no
+            // home route behind them, so leaving the editor is the
+            // Esc contract — publish-if-unset and close.
+            TopbarAction::NavigateHome => {
+                self.publish_outcome_if_unset(Ok(EditorOutcome::Cancelled));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
     }
 
@@ -1294,8 +1366,9 @@ impl EditorApp {
 
     /// Apply a floating-cluster action: Undo / Redo replay the same
     /// dispatches their keyboard twins produce, the magnifier chip
-    /// flips the always-on flag, and the zoom chips' factor step
-    /// already happened inside the cluster.
+    /// flips the always-on flag, and the zoom chips step the view
+    /// zoom (the fit transform applies it on the next
+    /// [`Self::update_fit`] pass).
     fn handle_floating_action(&mut self, action: Option<floating::FloatingAction>) {
         match action {
             Some(floating::FloatingAction::Undo) => {
@@ -1319,12 +1392,13 @@ impl EditorApp {
             Some(floating::FloatingAction::ToggleMagnifier) => {
                 self.magnifier_always_on = !self.magnifier_always_on;
             }
-            // Zoom chips: the cluster already stepped the loupe's
-            // factor; nothing further to apply.
-            Some(
-                floating::FloatingAction::LoupeZoomIn | floating::FloatingAction::LoupeZoomOut,
-            )
-            | None => {}
+            Some(floating::FloatingAction::ZoomIn) => {
+                self.view_zoom = (self.view_zoom + VIEW_ZOOM_STEP).min(VIEW_ZOOM_MAX);
+            }
+            Some(floating::FloatingAction::ZoomOut) => {
+                self.view_zoom = (self.view_zoom - VIEW_ZOOM_STEP).max(VIEW_ZOOM_MIN);
+            }
+            None => {}
         }
     }
 
@@ -2963,6 +3037,185 @@ mod tests {
         );
     }
 
+    /// The floating +/− chips zoom the canvas view (the regression
+    /// behind "zoom + and - are not working": they used to step the
+    /// loupe's invisible factor). One + click steps the view scale
+    /// up on the next fit pass, and a zoomed worker view stops
+    /// issuing image-sized resize commands — the fit letterboxes
+    /// inside the stable window instead.
+    #[test]
+    fn zoom_chips_step_the_view_scale() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        // Settle: the floating Area pins a pass behind its layout.
+        for _ in 0..3 {
+            editor_frame(&ctx, &mut app, vec![]);
+        }
+        let before = app.canvas.scale();
+        let chip = ctx
+            .read_response(egui::Id::new("zoom-in"))
+            .expect("the zoom-in chip registers")
+            .rect;
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(chip.center())],
+        );
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(chip.center()),
+                egui::Event::PointerButton {
+                    pos: chip.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: chip.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(
+            (app.view_zoom - 1.25).abs() < 1e-6,
+            "one + click steps the zoom to 1.25×, got {}",
+            app.view_zoom
+        );
+        // The fit pass applies the zoom and no resize is issued
+        // while zoomed (the window is stable; the transform moves).
+        let full = editor_frame_output(&ctx, &mut app, vec![]);
+        assert!(
+            app.canvas.scale() > before,
+            "the view scale steps up with the zoom ({} → {})",
+            before,
+            app.canvas.scale()
+        );
+        assert!(
+            !inner_size_command_issued(&full),
+            "a zoomed worker view must not chase the image-sized window"
+        );
+    }
+
+    /// The zoom clamps at both ends and the 0.25 steps are exact:
+    /// mashing the + chip tops out at 4×, mashing the − chip bottoms
+    /// out at 0.5×, and stepping away from and back to 1.0 is
+    /// lossless (the worker resize policy's trigger).
+    #[test]
+    fn view_zoom_steps_clamp_and_recenter_exactly() {
+        let mut app = phase_app(false);
+        for _ in 0..30 {
+            app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        }
+        assert!(
+            (app.view_zoom - VIEW_ZOOM_MAX).abs() < 1e-6,
+            "mashing + clamps at {}×, got {}",
+            VIEW_ZOOM_MAX,
+            app.view_zoom
+        );
+        for _ in 0..60 {
+            app.handle_floating_action(Some(floating::FloatingAction::ZoomOut));
+        }
+        assert!(
+            (app.view_zoom - VIEW_ZOOM_MIN).abs() < 1e-6,
+            "mashing − clamps at {}×, got {}",
+            VIEW_ZOOM_MIN,
+            app.view_zoom
+        );
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        assert!(
+            (app.view_zoom - 1.0).abs() < 1e-6,
+            "+2 from the floor returns to exactly 1.0, got {}",
+            app.view_zoom
+        );
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomOut));
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomOut));
+        assert!(
+            (app.view_zoom - 1.0).abs() < 1e-6,
+            "+2/−2 around 1.0 lands back at exactly 1.0, got {}",
+            app.view_zoom
+        );
+    }
+
+    /// The fit reserves [`CANVAS_PAD`] of air between the ring box
+    /// and the panel edge on every side, and the view zoom
+    /// multiplies the fit: at 2× the letterbox collapses to the
+    /// ring + pad inset and the panel clips the overflow.
+    #[test]
+    fn update_fit_reserves_padding_and_applies_zoom() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        // ppp is 1 in a synthetic context; a panel the image fits
+        // into (400+2·8+2·12 = 440 wide, 300+40 = 340 tall fits in
+        // 600×380 with slack).
+        app.canvas_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(48.0, 44.0),
+            egui::vec2(600.0, 380.0),
+        ));
+        app.update_fit(&ctx);
+        assert!(
+            (app.canvas.scale() - 1.0).abs() < 1e-6,
+            "no upscaling at 1× zoom"
+        );
+        // Slack = (600−24−416)/2 = 80, (380−24−316)/2 = 20; inset =
+        // ring (8) + pad (12).
+        let offset = app.canvas.content_offset();
+        assert!(
+            ((offset.x - 100.0).abs() < 1e-3) && ((offset.y - 40.0).abs() < 1e-3),
+            "the ring box centers in the padded panel at ring+pad, got {offset:?}"
+        );
+        app.view_zoom = 2.0;
+        app.update_fit(&ctx);
+        assert!(
+            (app.canvas.scale() - 2.0).abs() < 1e-6,
+            "the zoom multiplies the fit, got {}",
+            app.canvas.scale()
+        );
+        let offset = app.canvas.content_offset();
+        assert!(
+            ((offset.x - 28.0).abs() < 1e-3) && ((offset.y - 28.0).abs() < 1e-3),
+            "an overflowing box anchors at ring (16) + pad (12), got {offset:?}"
+        );
+        // The padding invariant: the ring box's outer edge never
+        // touches the panel border.
+        let image = app.image_screen_rect().expect("canvas rect cached");
+        let panel = app.canvas_rect.expect("fixture");
+        assert!(
+            (image.min.x - panel.min.x - 28.0).abs() < 1e-3,
+            "the image anchor carries the ring + pad inset"
+        );
+    }
+
+    /// The breadcrumb's Home link on a worker window is the Esc
+    /// contract: publish-if-unset Cancelled, ready for the close.
+    #[test]
+    fn navigate_home_publishes_cancelled_on_worker_windows() {
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::clone(&outcome), false);
+        app.handle_topbar_action(TopbarAction::NavigateHome, &ctx);
+        assert!(
+            matches!(&*outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "the Home link leaves the worker editor like Esc"
+        );
+    }
+
     /// Whether the frame's full output asked the viewport to close.
     fn close_command_issued(full: &egui::FullOutput) -> bool {
         full.viewport_output
@@ -3390,8 +3643,16 @@ mod tests {
     /// before gesturing, or the drag lands skewed by the height
     /// delta (observed: 4px between Move and Rect).
     fn canvas_drag(ctx: &egui::Context, app: &mut EditorApp, from: (f32, f32), to: (f32, f32)) {
-        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
-        let press = egui::pos2(canvas.min.x + from.0, canvas.min.y + from.1);
+        // Gestures are specified in image px: map them through the
+        // app's live view (the fit letterbox + zoom move the anchor
+        // off the panel corner), so fixtures stay view-independent.
+        let screen_at = |app: &EditorApp, (x, y): (f32, f32)| {
+            let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+            app.canvas
+                .view_over(canvas)
+                .image_to_logical(flintshot_core::Point::new(x, y))
+        };
+        let press = screen_at(app, from);
         editor_frame(
             ctx,
             app,
@@ -3405,7 +3666,7 @@ mod tests {
                 },
             ],
         );
-        let drag = egui::pos2(canvas.min.x + to.0, canvas.min.y + to.1);
+        let drag = screen_at(app, to);
         editor_frame(ctx, app, vec![egui::Event::PointerMoved(drag)]);
         editor_frame(
             ctx,
@@ -3749,6 +4010,41 @@ mod tests {
                 }
             }
         }
+
+        // The paper shadow paints UNDER the blit: `Shadow::as_shape`
+        // fills its whole rect with a translucent tint, so painted
+        // over the capture it reads as an overlay.
+        let shadow_idx = full
+            .shapes
+            .iter()
+            .position(|cs| {
+                matches!(&cs.shape, egui::Shape::Rect(r)
+                    if r.fill == crate::theme::palette::SHADOW_PAPER)
+            })
+            .expect("the paper shadow paints");
+        let blit_idx = full
+            .shapes
+            .iter()
+            .position(|cs| matches!(&cs.shape, egui::Shape::Mesh(m) if m.texture_id == bg_id))
+            .expect("the capture's blit paints");
+        assert!(
+            shadow_idx < blit_idx,
+            "the shadow must precede the capture (shadow {shadow_idx}, blit {blit_idx})"
+        );
+
+        // The dressing never bleeds into the surrounding zones: any
+        // cream fill that touches the canvas is clipped to it.
+        let canvas = app.canvas_rect.expect("canvas rect cached");
+        for cs in &full.shapes {
+            if let egui::Shape::Rect(r) = &cs.shape {
+                if r.fill == crate::theme::palette::PAPER_CREAM && r.rect.intersects(canvas) {
+                    assert!(
+                        canvas.expand(1.0).contains_rect(cs.clip_rect),
+                        "dressing clip {cs:?} escapes the canvas {canvas:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -3772,23 +4068,6 @@ mod tests {
             Some(true),
             "fullscreen default-mode seeds the NewCapture exit"
         );
-    }
-
-    #[test]
-    fn handle_rects_center_on_the_corners() {
-        let image = egui::Rect::from_min_size(egui::pos2(50.0, 60.0), egui::vec2(300.0, 200.0));
-        let handles = handle_rects(image, HANDLE_EDGE);
-        assert_eq!(handles.len(), 4);
-        for (handle, corner) in handles.iter().zip([
-            image.left_top(),
-            image.right_top(),
-            image.left_bottom(),
-            image.right_bottom(),
-        ]) {
-            assert_eq!(handle.center(), corner, "handle centered on {corner:?}");
-            assert!((handle.width() - HANDLE_EDGE).abs() < 1.0);
-            assert!((handle.height() - HANDLE_EDGE).abs() < 1.0);
-        }
     }
 
     #[test]
