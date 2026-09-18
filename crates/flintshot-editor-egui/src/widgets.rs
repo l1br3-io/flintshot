@@ -49,30 +49,48 @@ fn eased(ctx: &egui::Context, id: egui::Id, target: f32, duration: f32) -> f32 {
 /// on hover. `hero_key` arms the gold border at rest (the button
 /// that owns the surface's hero shortcut). Disabled buttons dim to
 /// cream-dim and swallow input.
+/// The painted glyph edge the "Copied" icon slot reserves, logical
+/// px — `panel::g_check`'s ±7 glyph space plus padding.
+const COPIED_GLYPH_EDGE: f32 = 14.0;
+
+/// One hero ghost button; registers under `id` and reports clicks.
+/// `copied` swaps the icon slot to the painted check glyph
+/// (`panel::g_check` — the font chain's exotic codepoints are tofu)
+/// and the foreground to the gold accent: the Copy hero's ~2 s
+/// "Copied" state.
 pub(crate) fn ghost_button(
     ui: &mut egui::Ui,
     id: egui::Id,
     icon: &str,
     label: &str,
     hero_key: bool,
+    copied: bool,
 ) -> egui::Response {
     use crate::theme::palette as p;
-    let fg = if ui.is_enabled() {
-        p::CREAM_TEXT
-    } else {
+    let fg = if !ui.is_enabled() {
         p::CREAM_DIM
+    } else if copied {
+        p::GOLD
+    } else {
+        p::CREAM_TEXT
     };
     let font = egui::FontId::proportional(theme::TYPE_MD);
-    let icon_galley = ui
-        .painter()
-        .layout_no_wrap(icon.to_owned(), font.clone(), fg);
+    let icon_galley = if copied {
+        None
+    } else {
+        Some(
+            ui.painter()
+                .layout_no_wrap(icon.to_owned(), font.clone(), fg),
+        )
+    };
     let label_galley = ui.painter().layout_no_wrap(label.to_owned(), font, fg);
+    let icon_w = match &icon_galley {
+        Some(g) => g.size().x,
+        None => COPIED_GLYPH_EDGE,
+    };
     let pad_x = 12.0;
     let gap = 6.0;
-    let size = egui::vec2(
-        pad_x + icon_galley.size().x + gap + label_galley.size().x + pad_x,
-        30.0,
-    );
+    let size = egui::vec2(pad_x + icon_w + gap + label_galley.size().x + pad_x, 30.0);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let sense = if ui.is_enabled() {
         egui::Sense::click()
@@ -97,14 +115,22 @@ pub(crate) fn ghost_button(
         egui::Stroke::new(1.0, border),
         egui::StrokeKind::Inside,
     );
-    let text_w = icon_galley.size().x + gap + label_galley.size().x;
+    let text_w = icon_w + gap + label_galley.size().x;
     let x0 = rect.center().x - text_w / 2.0;
-    let icon_pos = egui::pos2(x0, rect.center().y - icon_galley.size().y / 2.0);
+    if let Some(icon_galley) = icon_galley {
+        let icon_pos = egui::pos2(x0, rect.center().y - icon_galley.size().y / 2.0);
+        ui.painter().galley(icon_pos, icon_galley, fg);
+    } else {
+        let glyph = egui::Rect::from_center_size(
+            egui::pos2(x0 + COPIED_GLYPH_EDGE / 2.0, rect.center().y),
+            egui::vec2(COPIED_GLYPH_EDGE, COPIED_GLYPH_EDGE),
+        );
+        crate::panel::g_check(ui.painter(), glyph, fg);
+    }
     let label_pos = egui::pos2(
-        x0 + icon_galley.size().x + gap,
+        x0 + icon_w + gap,
         rect.center().y - label_galley.size().y / 2.0,
     );
-    ui.painter().galley(icon_pos, icon_galley, fg);
     ui.painter().galley(label_pos, label_galley, fg);
     resp
 }
@@ -441,7 +467,7 @@ mod tests {
             let ctx = egui::Context::default();
             theme::apply(&ctx);
             run(&ctx, 0.0, vec![], |ui| {
-                ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", hero);
+                ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", hero, false);
             });
             assert!(
                 ctx.read_response(egui::Id::new("gb")).is_some(),
@@ -455,7 +481,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         run(&ctx, 0.0, vec![], |ui| {
-            ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", false);
+            ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", false, false);
         });
         let rect = ctx
             .read_response(egui::Id::new("gb"))
@@ -463,7 +489,7 @@ mod tests {
             .rect;
         let mut clicked = false;
         run(&ctx, DT, click_events(rect.center()), |ui| {
-            clicked = ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", false).clicked();
+            clicked = ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", false, false).clicked();
         });
         assert!(clicked, "a pointer press+release on the button clicks");
     }
@@ -473,7 +499,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         run(&ctx, 0.0, vec![], |ui| {
-            ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", false);
+            ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", false, false);
         });
         let rect = ctx
             .read_response(egui::Id::new("gb"))
@@ -481,7 +507,7 @@ mod tests {
             .rect;
         run(&ctx, DT, click_events(rect.center()), |ui| {
             ui.disable();
-            let resp = ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", false);
+            let resp = ghost_button(ui, egui::Id::new("gb"), "⧉", "Copy", false, false);
             assert!(!resp.clicked(), "a disabled button swallows clicks");
         });
     }

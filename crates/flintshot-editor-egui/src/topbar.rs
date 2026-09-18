@@ -105,11 +105,15 @@ pub(crate) fn enable_for(surface: Surface) -> Enable {
 }
 
 /// Draw the topbar across the top of `ui` and report what fired.
+/// `copied` arms the Copy hero's "Copied" state (check glyph, gold
+/// label) — the caller owns the ~2 s window (see `EditorApp`'s
+/// `copied_visible`).
 pub(crate) fn show(
     ui: &mut egui::Ui,
     surface: Surface,
     status: Option<&str>,
     enable: Enable,
+    copied: bool,
 ) -> Option<TopbarAction> {
     use crate::theme::palette as p;
     let mut fired = None;
@@ -135,15 +139,17 @@ pub(crate) fn show(
                         "Open",
                         false,
                         enable.has(Enable::OPEN),
+                        false,
                         &mut fired,
                     );
                     let copy_resp = hero(
                         ui,
                         "topbar-copy",
                         "⧉",
-                        "Copy",
+                        if copied { "Copied" } else { "Copy" },
                         true,
                         enable.has(Enable::COPY),
+                        copied,
                         &mut fired,
                     );
                     if surface == Surface::Home && !enable.has(Enable::COPY) {
@@ -157,6 +163,7 @@ pub(crate) fn show(
                         "Capture",
                         true,
                         enable.has(Enable::CAPTURE),
+                        false,
                         &mut fired,
                     );
                 });
@@ -289,7 +296,12 @@ fn breadcrumb(ui: &mut egui::Ui, surface: Surface, fired: &mut Option<TopbarActi
 }
 
 /// One hero ghost button; registers under `id` and reports clicks
-/// through `fired`.
+/// through `fired`. `copied` passes the Copy hero's "Copied" state
+/// through to [`widgets::ghost_button`].
+// Flat args by design: each hero call reads as one line and the
+// per-hero differences (icon / label / key / gate / copied) stay
+// visible at the call site — a spec struct would bury them.
+#[allow(clippy::too_many_arguments)]
 fn hero(
     ui: &mut egui::Ui,
     id: &'static str,
@@ -297,6 +309,7 @@ fn hero(
     label: &str,
     hero_key: bool,
     enabled: bool,
+    copied: bool,
     fired: &mut Option<TopbarAction>,
 ) -> egui::Response {
     let action = match id {
@@ -309,7 +322,7 @@ fn hero(
             if !enabled {
                 ui.disable();
             }
-            widgets::ghost_button(ui, egui::Id::new(id), icon, label, hero_key)
+            widgets::ghost_button(ui, egui::Id::new(id), icon, label, hero_key, copied)
         })
         .inner;
     if enabled && resp.clicked() {
@@ -566,7 +579,7 @@ mod tests {
         theme::apply(&ctx);
         let central_top = std::cell::Cell::new(0.0_f32);
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            let _ = show(ui, Surface::Editor, None, Enable::ALL);
+            let _ = show(ui, Surface::Editor, None, Enable::ALL, false);
             let central = egui::CentralPanel::default().show(ui, |ui| {
                 ui.allocate_space(egui::vec2(1.0, 1.0));
             });
@@ -588,7 +601,7 @@ mod tests {
             let ctx = egui::Context::default();
             theme::apply(&ctx);
             let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-                show(ui, surface, None, Enable::ALL);
+                show(ui, surface, None, Enable::ALL, false);
             });
             for id in [
                 "topbar-capture",
@@ -617,7 +630,7 @@ mod tests {
         theme::apply(&ctx);
         // Locate the Capture hero.
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, None, Enable::ALL);
+            show(ui, Surface::Editor, None, Enable::ALL, false);
         });
         let capture = ctx
             .read_response(egui::Id::new("topbar-capture"))
@@ -625,7 +638,7 @@ mod tests {
             .rect;
         let fired = std::cell::Cell::new(None);
         let _ = ctx.run_ui(screen(0.016, click_events(capture.center())), |ui| {
-            let f = show(ui, Surface::Editor, None, Enable::ALL);
+            let f = show(ui, Surface::Editor, None, Enable::ALL, false);
             fired.set(f);
         });
         assert_eq!(fired.get(), Some(TopbarAction::Capture));
@@ -636,10 +649,53 @@ mod tests {
             .expect("open hero")
             .rect;
         let _ = ctx.run_ui(screen(0.032, click_events(open.center())), |ui| {
-            let f = show(ui, Surface::Editor, None, Enable::WORKER);
+            let f = show(ui, Surface::Editor, None, Enable::WORKER, false);
             fired.set(f);
         });
         assert_eq!(fired.get(), None, "a disabled hero swallows clicks");
+    }
+
+    /// The Copy hero's "Copied" state: armed, the hero paints the
+    /// "Copied" galley and the gold painted check; unarmed, it paints
+    /// "Copy" and no check. Shapes-only — the clipboard is untouched.
+    #[test]
+    fn copy_hero_shows_the_copied_state_when_armed() {
+        fn hero_paints(copied: bool) -> (Vec<String>, bool) {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx);
+            let full = ctx.run_ui(screen(0.0, vec![]), |ui| {
+                let _ = show(ui, Surface::Editor, None, Enable::ALL, copied);
+            });
+            let texts = full
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text()),
+                    _ => None,
+                })
+                .map(str::to_owned)
+                .collect();
+            // `panel::g_check` is a 2.5-px gold stroked path — the
+            // only gold path stroke in the topbar.
+            let gold_check = full.shapes.iter().any(|cs| {
+                matches!(&cs.shape, egui::Shape::Path(p)
+                    if p.stroke.color == egui::epaint::ColorMode::Solid(theme::palette::GOLD)
+                        && (p.stroke.width - 2.5).abs() < 0.01)
+            });
+            (texts, gold_check)
+        }
+        let (texts, check) = hero_paints(true);
+        assert!(
+            texts.iter().any(|t| t == "Copied"),
+            "armed: the label reads Copied, got {texts:?}"
+        );
+        assert!(check, "armed: the gold check glyph paints");
+        let (texts, check) = hero_paints(false);
+        assert!(
+            texts.iter().any(|t| t == "Copy"),
+            "unarmed: the label reads Copy, got {texts:?}"
+        );
+        assert!(!check, "unarmed: no check glyph");
     }
 
     /// The overflow opens, Save fires, and the Settings entry is
@@ -649,7 +705,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, Some("connected"), Enable::ALL);
+            show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
         });
         let ovf = ctx
             .read_response(egui::Id::new("topbar-overflow"))
@@ -657,16 +713,16 @@ mod tests {
             .rect;
         // Open the menu.
         let _ = ctx.run_ui(screen(0.016, click_events(ovf.center())), |ui| {
-            show(ui, Surface::Editor, Some("connected"), Enable::ALL);
+            show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
         });
         // Settle passes: the popup anchors at the screen centre on
         // its open pass and re-anchors below the chip one pass later
         // (the same quirk the `+` popup tests document).
         let _ = ctx.run_ui(screen(0.024, vec![]), |ui| {
-            show(ui, Surface::Editor, Some("connected"), Enable::ALL);
+            show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
         });
         let _ = ctx.run_ui(screen(0.028, vec![]), |ui| {
-            show(ui, Surface::Editor, Some("connected"), Enable::ALL);
+            show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
         });
         // The items render.
         assert!(
@@ -693,7 +749,7 @@ mod tests {
             .rect;
         let fired = std::cell::Cell::new(None);
         let _ = ctx.run_ui(screen(0.032, click_events(save.center())), |ui| {
-            let f = show(ui, Surface::Editor, Some("connected"), Enable::ALL);
+            let f = show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
             fired.set(f);
         });
         assert_eq!(fired.get(), Some(TopbarAction::Save));
@@ -706,14 +762,14 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Home, Some("connected"), Enable::NONE);
+            show(ui, Surface::Home, Some("connected"), Enable::NONE, false);
         });
         let ovf = ctx
             .read_response(egui::Id::new("topbar-overflow"))
             .expect("overflow")
             .rect;
         let _ = ctx.run_ui(screen(0.016, click_events(ovf.center())), |ui| {
-            show(ui, Surface::Home, Some("connected"), Enable::NONE);
+            show(ui, Surface::Home, Some("connected"), Enable::NONE, false);
         });
         assert!(ctx.read_response(egui::Id::new("topbar-save")).is_none());
         assert!(ctx.read_response(egui::Id::new("topbar-paste")).is_none());
@@ -758,7 +814,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let out = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, None, Enable::ALL);
+            show(ui, Surface::Editor, None, Enable::ALL, false);
         });
         let gold_editor = out.shapes.iter().any(|cs| {
             matches!(
@@ -783,7 +839,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let out = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, None, Enable::ALL);
+            show(ui, Surface::Editor, None, Enable::ALL, false);
         });
         let texts = out
             .shapes
@@ -815,7 +871,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, None, Enable::ALL);
+            show(ui, Surface::Editor, None, Enable::ALL, false);
         });
         assert!(
             ctx.read_response(egui::Id::new(("topbar-crumb", 0)))
@@ -833,7 +889,7 @@ mod tests {
             .rect;
         let fired = std::cell::Cell::new(None);
         let _ = ctx.run_ui(screen(0.016, click_events(crumb.center())), |ui| {
-            fired.set(show(ui, Surface::Editor, None, Enable::ALL));
+            fired.set(show(ui, Surface::Editor, None, Enable::ALL, false));
         });
         assert_eq!(fired.get(), Some(TopbarAction::NavigateHome));
     }
@@ -845,7 +901,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let out = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Loading, None, Enable::NONE);
+            show(ui, Surface::Loading, None, Enable::NONE, false);
         });
         assert!(
             ctx.read_response(egui::Id::new(("topbar-crumb", 0)))

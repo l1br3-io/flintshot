@@ -151,10 +151,13 @@ pub(crate) struct EditorApp {
     /// `Clipboard` or exiting the process clears the selection.
     /// `None` until the first successful copy.
     clipboard: Option<arboard::Clipboard>,
-    /// Whether a copy has succeeded this session. Drives the
-    /// "Copied!" button feedback so the user knows the data is on the
-    /// clipboard and the editor is intentionally still open.
-    copied: bool,
+    /// Instant (egui input time) of the last successful copy, driving
+    /// the time-windowed "Copied" hero state. `None` until the first
+    /// copy. GOTCHA: the state is time-windowed, not latched — a
+    /// fresh `EditorApp` (every editor route constructs one) starts
+    /// unarmed for free, so no explicit clear exists and a stale
+    /// "Copied" can never survive into the next session.
+    copied_at: Option<f64>,
     /// Precomputed blur images for committed `Annotation::Blur` entries.
     /// Avoids recomputing the expensive Gaussian / pixelate pass every
     /// frame — without it, a few blur regions saturate the CPU at 60 fps
@@ -291,7 +294,7 @@ impl EditorApp {
             canvas_drag_active: false,
             outcome,
             clipboard: None,
-            copied: false,
+            copied_at: None,
             blur_cache: BlurCache::new(),
             magnifier: Magnifier::new(),
             magnifier_always_on,
@@ -1134,7 +1137,14 @@ impl EditorApp {
         if self.page.is_some() {
             return;
         }
-        if let Some(a) = topbar::show(ui, topbar::Surface::Editor, None, topbar::Enable::WORKER) {
+        let copied = self.copied_visible(ui.input(|i| i.time));
+        if let Some(a) = topbar::show(
+            ui,
+            topbar::Surface::Editor,
+            None,
+            topbar::Enable::WORKER,
+            copied,
+        ) {
             self.handle_topbar_action(a, ui.ctx());
         }
     }
@@ -1143,6 +1153,11 @@ impl EditorApp {
         // The settings route's animation gate drives every spring in
         // this window (sections, chips, rail pop, statusbar).
         widgets::set_animations(ui.ctx(), self.config.ui.animations);
+        // The "Copied" revert must land without input: while the
+        // window is open, repaint after at most the remaining time.
+        if let Some(delay) = copied_repaint_delay(self.copied_at, ui.input(|i| i.time)) {
+            ui.ctx().request_repaint_after(delay);
+        }
         self.draw_worker_topbar(ui);
         // Statusbar: the bottom zone strips its 30 px before the
         // side panels reserve (draw order: top → bottom → left →
@@ -1516,6 +1531,13 @@ impl EditorApp {
         !self.is_page() && close_after_copy(os_owns_clipboard())
     }
 
+    /// Whether the topbar Copy hero should paint its "Copied" state
+    /// at `now` (egui input time). Both lifecycles query this: the
+    /// worker's own topbar and the router over routed pages.
+    pub(crate) fn copied_visible(&self, now: f64) -> bool {
+        copied_window_open(self.copied_at, now)
+    }
+
     /// `+` chip / Ctrl+N handler: publish `NewCapture` and close —
     /// the closing window is the not-in-the-shot guarantee for the
     /// next grab. Uses `publish_outcome` (not `if_unset`): a prior
@@ -1612,7 +1634,7 @@ impl EditorApp {
         match copy_to_clipboard(&self.state, &mut self.clipboard) {
             Ok(()) => {
                 tracing::info!("editor copied to clipboard");
-                self.copied = true;
+                self.copied_at = Some(ctx.input(|i| i.time));
                 self.publish_side_effect_outcome(EditorOutcome::CopiedToClipboard);
                 if self.close_after_copy_window() {
                     tracing::debug!("OS-owned clipboard; closing after copy");
@@ -1925,6 +1947,27 @@ pub(crate) fn compose_selection_aware(state: &EditorState) -> image::RgbaImage {
 /// own the clipboard OS-side, so closing is safe there.
 fn close_after_copy(os_owns_clipboard: bool) -> bool {
     os_owns_clipboard
+}
+
+/// The "Copied" hero state's window: visible for this long after a
+/// successful copy, then the hero reverts.
+const COPIED_WINDOW_SECS: f64 = 2.0;
+
+/// Whether the "Copied" window is open at `now`: true only within
+/// [`COPIED_WINDOW_SECS`] of the copy instant. Pure seam so the
+/// timing is pinned headlessly.
+fn copied_window_open(copied_at: Option<f64>, now: f64) -> bool {
+    copied_at.is_some_and(|t| (0.0..=COPIED_WINDOW_SECS).contains(&(now - t)))
+}
+
+/// The repaint delay that lands the "Copied" revert without input:
+/// `Some(remaining)` while the window is open, `None` otherwise.
+fn copied_repaint_delay(copied_at: Option<f64>, now: f64) -> Option<std::time::Duration> {
+    if !copied_window_open(copied_at, now) {
+        return None;
+    }
+    let remaining = COPIED_WINDOW_SECS - (now - copied_at?);
+    Some(std::time::Duration::from_secs_f64(remaining.max(0.001)))
 }
 
 /// Whether this platform's OS owns the clipboard contents (the
@@ -2862,6 +2905,68 @@ mod tests {
         assert!(
             close_after_copy(true),
             "OS-owned clipboard (macOS/Windows): close after copy"
+        );
+    }
+
+    #[test]
+    fn copied_visible_only_inside_the_two_second_window() {
+        let mut app = phase_app(false);
+        app.copied_at = Some(10.0);
+        assert!(app.copied_visible(10.0), "at 0 s: visible");
+        assert!(app.copied_visible(11.9), "at 1.9 s: still visible");
+        assert!(!app.copied_visible(12.1), "at 2.1 s: reverted");
+        assert!(!app.copied_visible(9.9), "before the instant: unarmed");
+    }
+
+    #[test]
+    fn fresh_editor_starts_unarmed() {
+        // The state is time-windowed, not latched: a fresh EditorApp
+        // (every editor route constructs one) can never inherit a
+        // stale "Copied".
+        let app = phase_app(false);
+        assert!(!app.copied_visible(0.0));
+        assert!(!app.copied_visible(f64::MAX));
+    }
+
+    #[test]
+    fn copied_repaint_delay_tracks_the_remaining_window() {
+        assert_eq!(
+            copied_repaint_delay(None, 0.0),
+            None,
+            "unarmed: no revert repaint"
+        );
+        assert_eq!(
+            copied_repaint_delay(Some(10.0), 12.1),
+            None,
+            "past the window: no revert repaint"
+        );
+        let inside = copied_repaint_delay(Some(10.0), 11.0).expect("inside: repaints");
+        assert!(
+            inside <= std::time::Duration::from_secs_f64(1.0),
+            "at 1 s elapsed the remaining window is 1 s: got {inside:?}"
+        );
+        let fresh = copied_repaint_delay(Some(10.0), 10.0).expect("at the instant: repaints");
+        assert!(
+            fresh <= std::time::Duration::from_secs_f64(2.0) && !fresh.is_zero(),
+            "at 0 s elapsed the delay is at most the full window: got {fresh:?}"
+        );
+    }
+
+    #[test]
+    fn copied_state_requests_the_revert_repaint_in_frame() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = phase_app(false);
+        // A first frame primes egui's input time (raw time None → 0.0
+        // on the first pass); arming at 0.0 makes the state visible
+        // with the full window remaining.
+        let _ = editor_frame_output(&ctx, &mut app, vec![]);
+        app.copied_at = Some(ctx.input(|i| i.time));
+        let full = editor_frame_output(&ctx, &mut app, vec![]);
+        let delay = full.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(
+            delay <= std::time::Duration::from_secs(2),
+            "the revert lands within the 2 s window, got {delay:?}"
         );
     }
 

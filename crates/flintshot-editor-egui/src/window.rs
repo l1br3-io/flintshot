@@ -427,7 +427,13 @@ impl WindowApp {
             None
         };
         let enable = crate::topbar::enable_for(surface);
-        let topbar_action = crate::topbar::show(ui, surface, status.as_deref(), enable);
+        // The Copy hero's "Copied" state queries the live editor
+        // (routed pages); other surfaces stay unarmed.
+        let copied = self
+            .editor
+            .as_ref()
+            .is_some_and(|e| e.copied_visible(ui.input(|i| i.time)));
+        let topbar_action = crate::topbar::show(ui, surface, status.as_deref(), enable, copied);
         // Route the fired action: editor pages forward everything to
         // the editor's dispatcher; Home dispatches Capture / Open to
         // the home app's own paths; Loading is fully disabled and
