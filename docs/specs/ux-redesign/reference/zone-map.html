@@ -1,0 +1,661 @@
+<!--
+Reference of record for the ux-redesign effort (supersedes demo/ for
+layout + tokens). Saved verbatim from the user's mockup snippet.
+Routes: home + editor, with a zone-map validation overlay.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flintshot — Five-Zone Design Mockup (spec: ux-redesign)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,500;1,700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   DESIGN TOKENS — maps 1:1 to theme/palette.rs (token-consumption rule)
+   No literal colors outside this block, per spec §Code Style.
+   ============================================================ */
+:root {
+  /* palette */
+  --forest-deep:  #1F5233;   /* FOREST_DEEP  — topbar, statusbar fills   */
+  --forest-mid:   #2C6B45;   /* FOREST_MID   — left rail fill            */
+  --forest:       #3A8058;   /* FOREST       — hovers, borders           */
+  --forest-ink:   #16381F;   /* FOREST_INK   — deepest shade / text      */
+  --gold:         #E4B54A;   /* GOLD         — active tool, accents      */
+  --gold-deep:    #C99A2E;   /* GOLD_DEEP    — gold border / pressed     */
+  --paper:        #F6EFDE;   /* PAPER        — canvas desk               */
+  --paper-cream:  #FBF6EA;   /* PAPER_CREAM  — panel cards, controls     */
+  --paper-dim:    #EDE4CE;   /* PAPER_DIM    — wells, insets             */
+  --ink:          #2A2620;   /* INK          — primary text on paper     */
+  --ink-soft:     #6E6754;   /* INK_SOFT     — secondary text            */
+  --cream-text:   #F3EDDD;   /* CREAM_TEXT   — text on forest fills      */
+  --cream-dim:    #C9C2AC;   /* CREAM_DIM    — muted text on forest      */
+  --lock-grey:    #9A947F;   /* LOCKED       — gated tools               */
+
+  /* type ramp */
+  --fs-xs: 10.5px; --fs-sm: 12px; --fs-md: 13.5px; --fs-lg: 16px;
+  --fs-xl: 21px;   --fs-hero: 30px;
+
+  /* radii */
+  --r-cutout: 10px;   /* CUTOUT_RADIUS — cards, bars   */
+  --r-pod:    12px;   /* POD_RADIUS    — chips, buttons*/
+  --r-pill:   999px;
+
+  /* shadow levels */
+  --sh-resting: 0 1px 0 rgba(22,56,31,.35), 0 3px 8px rgba(22,56,31,.28);
+  --sh-lift:    0 2px 0 rgba(22,56,31,.35), 0 8px 18px rgba(22,56,31,.32);
+  --sh-pop:     0 3px 0 rgba(22,56,31,.30), 0 12px 26px rgba(22,56,31,.38);
+  --sh-paper:   0 6px 0 rgba(22,56,31,.16), 0 22px 44px rgba(22,56,31,.28);
+
+  /* spring easing (theme::ease::spring) */
+  --spring: cubic-bezier(.34, 1.56, .64, 1);
+  --ease:   cubic-bezier(.4, 0, .2, 1);
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { height:100%; }
+body {
+  font-family:'Plus Jakarta Sans', sans-serif;
+  background:#12100C;
+  display:flex; flex-direction:column; align-items:center;
+  padding:28px 16px 60px; gap:18px;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ---- meta chrome (NOT part of the app design) ---- */
+.meta { color:#8b8574; font-size:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:center;}
+.meta b { color:#E4B54A; font-weight:700; }
+.viewbtns { display:flex; gap:6px; background:#1d1a14; padding:5px; border-radius:var(--r-pill); border:1px solid #2e2a20; }
+.viewbtns button {
+  font:inherit; font-weight:700; font-size:12px; color:#8b8574; background:none; border:0;
+  padding:6px 16px; border-radius:var(--r-pill); cursor:pointer; transition:all .25s var(--spring);
+}
+.viewbtns button.on { background:var(--gold); color:var(--forest-ink); }
+
+/* ============================================================
+   APP WINDOW — 5 zones: topbar / rail / canvas / panel / statusbar
+   ============================================================ */
+.window {
+  width:min(1180px, 100%);
+  height:760px;
+  border-radius:var(--r-cutout);
+  overflow:hidden;
+  box-shadow:var(--sh-paper);
+  display:none;
+  flex-direction:column;
+  position:relative;
+}
+.window.show { display:flex; }
+
+/* ---------- ZONE 1: TOPBAR (forest-deep cutout) ---------- */
+.topbar {
+  height:44px; flex:0 0 44px;
+  background:var(--forest-deep);
+  border-bottom:2px solid rgba(243,237,221,.14);
+  box-shadow:0 2px 10px rgba(22,56,31,.45);
+  display:flex; align-items:center; gap:14px;
+  padding:0 12px 0 14px;
+  color:var(--cream-text);
+  z-index:30;
+}
+.brand { display:flex; align-items:center; gap:9px; user-select:none; }
+.brand .flame {
+  width:24px; height:24px; border-radius:8px;
+  background:var(--gold);
+  display:grid; place-items:center;
+  box-shadow:inset 0 -3px 0 rgba(22,56,31,.28), 0 2px 6px rgba(0,0,0,.3);
+  font-size:13px; color:var(--forest-ink);
+}
+.brand .name { font-weight:800; font-size:var(--fs-md); letter-spacing:.2px; }
+.brand .route { font-weight:500; color:var(--cream-dim); font-size:var(--fs-md); }
+.crumb { display:flex; align-items:center; gap:7px; font-size:var(--fs-sm); font-weight:500; }
+.crumb .stage { color:var(--cream-dim); }
+.crumb .stage.cur { color:var(--gold); font-weight:800; }
+.crumb .sep { color:var(--cream-dim); opacity:.5; font-size:11px; }
+.tb-spacer { flex:1; }
+.hero { display:flex; gap:6px; align-items:center; }
+.ghost {
+  display:flex; align-items:center; gap:7px;
+  font:inherit; font-size:var(--fs-sm); font-weight:700;
+  color:var(--cream-text);
+  background:rgba(243,237,221,.06);
+  border:1.5px solid rgba(243,237,221,.28);
+  border-radius:var(--r-pod);
+  padding:5px 13px 5px 10px;
+  cursor:pointer;
+  transition:transform .28s var(--spring), background .18s var(--ease), border-color .18s;
+}
+.ghost:hover { background:rgba(243,237,221,.14); border-color:var(--gold); transform:translateY(-1px) scale(1.04); }
+.ghost:active { transform:scale(.94); }
+.ghost .ico { font-size:13px; line-height:1; }
+.ghost:disabled { color:var(--cream-dim); border-color:rgba(243,237,221,.12); background:rgba(243,237,221,.02); cursor:not-allowed; transform:none; }
+.ghost:disabled:hover { border-color:rgba(243,237,221,.12); }
+.ghost.hero-key { border-color:rgba(228,181,74,.55); }
+.overflow {
+  width:30px; height:30px; border-radius:var(--r-pod);
+  display:grid; place-items:center;
+  color:var(--cream-text); background:rgba(243,237,221,.06);
+  border:1.5px solid rgba(243,237,221,.28);
+  cursor:pointer; font-size:15px; font-weight:800; letter-spacing:1px;
+  transition:transform .28s var(--spring), background .18s;
+  position:relative;
+}
+.overflow:hover { background:rgba(243,237,221,.14); transform:scale(1.08); }
+.overflow:active { transform:scale(.92); }
+/* overflow dropdown */
+.overflow-menu {
+  position:absolute; top:40px; right:0; width:212px;
+  background:var(--paper-cream); border-radius:var(--r-cutout);
+  box-shadow:var(--sh-pop); border:2px solid var(--paper);
+  outline:1.5px solid rgba(22,56,31,.35); outline-offset:-4px;
+  padding:6px; z-index:60; display:none;
+}
+.overflow.open .overflow-menu { display:block; animation:pop-in .3s var(--spring); }
+@keyframes pop-in { from { opacity:0; transform:translateY(-6px) scale(.95);} to {opacity:1; transform:none;} }
+.om-item {
+  display:flex; align-items:center; gap:9px;
+  padding:8px 10px; border-radius:8px; cursor:pointer;
+  color:var(--ink); font-size:var(--fs-sm); font-weight:600;
+}
+.om-item:hover { background:var(--paper-dim); }
+.om-item .ico { width:16px; text-align:center; }
+.om-item .kbd { margin-left:auto; font-size:var(--fs-xs); color:var(--ink-soft); font-weight:500; }
+.om-sep { height:1px; background:rgba(22,56,31,.15); margin:5px 8px; }
+.om-note { padding:7px 10px 5px; font-size:var(--fs-xs); color:var(--ink-soft); line-height:1.5; }
+
+/* ---------- MIDDLE BAND: rail / canvas / panel ---------- */
+.band { flex:1; display:flex; min-height:0; position:relative; background:var(--paper); }
+
+/* ---------- ZONE 2: LEFT TOOL RAIL (forest-mid cutout strip) ---------- */
+.rail {
+  width:48px; flex:0 0 48px;
+  background:var(--forest-mid);
+  border-right:2px solid rgba(243,237,221,.14);
+  box-shadow:2px 0 10px rgba(22,56,31,.25);
+  display:flex; flex-direction:column; align-items:center;
+  padding:8px 0; gap:4px; z-index:20;
+}
+.tool {
+  width:36px; height:36px; border-radius:10px; border:1.5px solid transparent;
+  display:grid; place-items:center; cursor:pointer;
+  color:var(--cream-text); font-size:15px;
+  background:transparent;
+  transition:transform .3s var(--spring), background .15s, border-color .15s, box-shadow .2s;
+  position:relative;
+}
+.tool:hover { background:rgba(243,237,221,.12); transform:translateY(-2px) scale(1.08); box-shadow:var(--sh-lift); }
+.tool:active { transform:scale(.88); }
+.tool.active {
+  background:var(--gold); color:var(--forest-ink);
+  border-color:#fff;
+  box-shadow:var(--sh-pop), inset 0 -3px 0 rgba(22,56,31,.22);
+  animation:tool-pop .38s var(--spring);
+}
+@keyframes tool-pop { 0%{transform:scale(.8);} 60%{transform:scale(1.15);} 100%{transform:scale(1);} }
+.tool.locked { color:var(--lock-grey); cursor:not-allowed; }
+.tool.locked:hover { background:rgba(243,237,221,.05); transform:none; box-shadow:none; }
+.rail-sep { width:26px; height:1.5px; background:rgba(243,237,221,.18); margin:4px 0; border-radius:2px; }
+
+/* ---------- ZONE 3: CANVAS (paper cutout + corner handles) ---------- */
+.canvas {
+  flex:1; min-width:0;
+  display:grid; place-items:center;
+  position:relative;
+  /* deterministic grain over the desk (never over the image) */
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0.1 0 0 0 0 0.2 0 0 0 0 0.12 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E"), var(--paper);
+}
+.paper {
+  width:min(620px, 78%); aspect-ratio:16/10;
+  background:var(--paper-cream);
+  border-radius:6px; position:relative;
+  box-shadow:var(--sh-paper), 0 0 0 3px #fff, 0 0 0 4.5px rgba(22,56,31,.4);
+  overflow:hidden;
+}
+/* the "screenshot" mock content */
+.shot { position:absolute; inset:0; display:flex; flex-direction:column; background:#E9F0F2; }
+.shot-bar { height:26px; background:#D7E2E5; display:flex; align-items:center; gap:5px; padding:0 10px; flex:0 0 26px;}
+.shot-bar i { width:9px; height:9px; border-radius:50%; display:block; }
+.shot-body { flex:1; display:flex; gap:14px; padding:16px; }
+.shot-col { flex:1; display:flex; flex-direction:column; gap:9px; }
+.sk { border-radius:5px; background:#CBD8DB; }
+.sk.w40{width:40%;} .sk.w60{width:60%;} .sk.w80{width:80%;} .sk.h14{height:14px;} .sk.h30{height:30px;} .sk.h70{height:70px;}
+/* annotations (chrome-only demo overlay) */
+.ann-rect { position:absolute; left:34%; top:26%; width:24%; height:34%; border:3.5px solid var(--gold-deep); border-radius:4px; pointer-events:none; }
+.ann-arrow { position:absolute; left:12%; top:14%; pointer-events:none; }
+.ann-text { position:absolute; left:40%; top:63%; font-weight:800; font-style:italic; font-size:22px; color:#C0392B; transform:rotate(-3deg); pointer-events:none; text-shadow:0 1px 0 rgba(255,255,255,.6);}
+.ann-num {
+  position:absolute; pointer-events:none;
+  width:26px; height:26px; border-radius:50%;
+  background:var(--gold); color:var(--forest-ink);
+  display:grid; place-items:center; font-weight:800; font-size:13px;
+  box-shadow:0 0 0 2.5px #fff, var(--sh-lift);
+}
+.ann-blur { position:absolute; left:8%; top:55%; width:22%; height:26%; pointer-events:none; backdrop-filter:blur(5px); border-radius:4px; box-shadow:inset 0 0 0 1.5px rgba(22,56,31,.25); }
+/* ZONE-6 dressing: corner handles (Task 006) */
+.handle {
+  position:absolute; width:11px; height:11px;
+  background:#fff; border-radius:2.5px;
+  box-shadow:0 0 0 1.5px rgba(22,56,31,.5), var(--sh-lift);
+  z-index:5;
+}
+.handle.tl{left:-6px; top:-6px;} .handle.tr{right:-6px; top:-6px;}
+.handle.bl{left:-6px; bottom:-6px;} .handle.br{right:-6px; bottom:-6px;}
+
+/* floating chips (arrangement per snippet; restyled cutouts) */
+.chips { position:absolute; display:flex; gap:8px; z-index:15; }
+.chips.undo { left:18px; top:18px; }
+.chips.view { right:18px; bottom:18px; }
+.chip {
+  width:36px; height:36px; border-radius:var(--r-pod);
+  background:var(--paper-cream); border:1.5px solid rgba(22,56,31,.35);
+  outline:2px solid #fff; outline-offset:-4px;
+  display:grid; place-items:center; cursor:pointer;
+  color:var(--ink); font-size:15px; box-shadow:var(--sh-resting);
+  transition:transform .3s var(--spring), box-shadow .2s;
+}
+.chip:hover { transform:translateY(-3px) scale(1.07); box-shadow:var(--sh-lift); }
+.chip:active { transform:scale(.9); }
+
+/* ---------- ZONE 4: RIGHT PROPERTIES PANEL (sections only) ---------- */
+.panel {
+  width:236px; flex:0 0 236px;
+  background:var(--paper);
+  border-left:2px solid rgba(243,237,221,.5);
+  box-shadow:-2px 0 10px rgba(22,56,31,.12);
+  overflow-y:auto; padding:12px 12px 16px; z-index:20;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9'/%3E%3CfeColorMatrix values='0 0 0 0 0.1 0 0 0 0 0.15 0 0 0 0 0.08 0 0 0 .04 0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.panel-title { font-size:var(--fs-xs); font-weight:800; letter-spacing:1.2px; text-transform:uppercase; color:var(--ink-soft); margin:2px 4px 10px; }
+.section {
+  background:var(--paper-cream);
+  border:1.5px solid rgba(22,56,31,.3);
+  outline:2px solid #fff; outline-offset:-4px;
+  border-radius:var(--r-cutout);
+  margin-bottom:9px;
+  box-shadow:var(--sh-resting);
+  overflow:hidden;
+}
+.sec-head {
+  display:flex; align-items:center; gap:8px;
+  padding:9px 10px; cursor:pointer; user-select:none;
+  font-size:var(--fs-sm); font-weight:700; color:var(--ink);
+}
+.sec-head .chev { margin-left:auto; transition:transform .35s var(--spring); font-size:11px; color:var(--ink-soft); }
+.section.closed .chev { transform:rotate(-90deg); }
+.sec-body {
+  max-height:300px; overflow:hidden;
+  transition:max-height .38s var(--spring), opacity .25s var(--ease);
+  opacity:1; padding:0 10px 11px;
+}
+.section.closed .sec-body { max-height:0; opacity:0; padding-bottom:0; }
+.ctl-label { font-size:var(--fs-xs); font-weight:700; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.7px; margin:8px 0 5px; }
+.swatches { display:flex; gap:6px; flex-wrap:wrap; }
+.sw { width:22px; height:22px; border-radius:7px; cursor:pointer; border:2px solid rgba(22,56,31,.25); transition:transform .28s var(--spring); }
+.sw:hover { transform:scale(1.18); }
+.sw.on { border-color:#fff; outline:2.5px solid var(--gold); transform:scale(1.1); }
+.wells { display:flex; gap:6px; }
+.well {
+  flex:1; text-align:center; padding:5px 0; border-radius:8px;
+  background:var(--paper-dim); border:1.5px solid rgba(22,56,31,.2);
+  font-size:var(--fs-sm); font-weight:600; color:var(--ink); cursor:pointer;
+}
+.well.on { background:var(--forest-mid); color:var(--cream-text); border-color:var(--forest-deep); }
+.toggle-row { display:flex; align-items:center; justify-content:space-between; margin-top:9px; font-size:var(--fs-sm); font-weight:600; color:var(--ink); }
+.switch { width:34px; height:19px; border-radius:var(--r-pill); background:var(--paper-dim); border:1.5px solid rgba(22,56,31,.3); position:relative; cursor:pointer; transition:background .2s; }
+.switch::after { content:''; position:absolute; top:1px; left:1px; width:13px; height:13px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:transform .3s var(--spring); }
+.switch.on { background:var(--gold); }
+.switch.on::after { transform:translateX(15px); }
+.btn-danger {
+  width:100%; margin-top:9px; padding:7px 0;
+  font:inherit; font-size:var(--fs-sm); font-weight:700; color:#A5341F;
+  background:#F6E3DC; border:1.5px solid rgba(165,52,31,.4); border-radius:9px; cursor:pointer;
+  transition:transform .28s var(--spring), background .15s;
+}
+.btn-danger:hover { background:#F0D2C8; transform:translateY(-1px); }
+.btn-danger:active { transform:scale(.97); }
+.btn-danger:disabled { color:var(--lock-grey); background:var(--paper-dim); border-color:rgba(22,56,31,.15); cursor:not-allowed; transform:none; }
+
+/* ---------- ZONE 5: STATUSBAR (forest-deep cutout footer) ---------- */
+.statusbar {
+  height:30px; flex:0 0 30px;
+  background:var(--forest-deep);
+  border-top:2px solid rgba(243,237,221,.14);
+  box-shadow:0 -2px 10px rgba(22,56,31,.35);
+  display:flex; align-items:center;
+  padding:0 14px; gap:16px;
+  color:var(--cream-dim); font-size:var(--fs-xs); font-weight:600;
+  z-index:30; letter-spacing:.2px;
+}
+.statusbar .dims { color:var(--cream-text); font-weight:700; }
+.statusbar .dot { opacity:.45; }
+.statusbar .hint { flex:1; text-align:center; color:var(--gold); font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.statusbar .keys { display:flex; gap:10px; }
+.statusbar kbd {
+  font:inherit; background:rgba(243,237,221,.1);
+  border:1px solid rgba(243,237,221,.25);
+  border-radius:5px; padding:1px 6px; color:var(--cream-text);
+}
+
+/* ---------- HOME ROUTE content (topbar + welcome zones, no statusbar) ---------- */
+.home { flex:1; overflow-y:auto; padding:34px 48px 40px; position:relative;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0.1 0 0 0 0 0.2 0 0 0 0 0.12 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E"), var(--paper);
+}
+.hero-card {
+  background:var(--forest-deep);
+  border-radius:var(--r-cutout);
+  outline:2.5px solid #fff; outline-offset:-6px;
+  box-shadow:var(--sh-paper);
+  color:var(--cream-text);
+  padding:38px 42px;
+  display:flex; align-items:center; gap:30px;
+}
+.hero-card h1 { font-size:var(--fs-hero); font-weight:800; line-height:1.15; }
+.hero-card h1 em { color:var(--gold); font-style:normal; }
+.hero-card p { margin-top:8px; font-size:var(--fs-md); color:var(--cream-dim); font-weight:500; max-width:400px; line-height:1.55; }
+.hero-flame { font-size:64px; filter:drop-shadow(0 6px 12px rgba(0,0,0,.35)); transform:rotate(-6deg); }
+.home-cards { display:flex; gap:14px; margin-top:18px; }
+.hcard {
+  flex:1; background:var(--paper-cream);
+  border:1.5px solid rgba(22,56,31,.3);
+  outline:2px solid #fff; outline-offset:-4px;
+  border-radius:var(--r-cutout); box-shadow:var(--sh-resting);
+  padding:16px 18px; cursor:pointer;
+  transition:transform .3s var(--spring), box-shadow .2s;
+}
+.hcard:hover { transform:translateY(-3px); box-shadow:var(--sh-lift); }
+.hcard .ico { font-size:19px; }
+.hcard h3 { font-size:var(--fs-md); font-weight:800; margin-top:6px; color:var(--ink); }
+.hcard p { font-size:var(--fs-sm); color:var(--ink-soft); margin-top:2px; font-weight:500; }
+.recent-title { margin:26px 4px 10px; font-size:var(--fs-xs); font-weight:800; letter-spacing:1.2px; text-transform:uppercase; color:var(--ink-soft); }
+.recents { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+.recent {
+  background:var(--paper-cream); border-radius:var(--r-cutout);
+  border:1.5px solid rgba(22,56,31,.25);
+  outline:2px solid #fff; outline-offset:-4px;
+  box-shadow:var(--sh-resting); overflow:hidden; cursor:pointer;
+  transition:transform .3s var(--spring), box-shadow .2s;
+}
+.recent:hover { transform:translateY(-3px) scale(1.02); box-shadow:var(--sh-lift); }
+.recent .thumb { aspect-ratio:16/10; display:flex; align-items:flex-end; padding:8px; gap:6px; }
+.recent .cap { padding:7px 10px 9px; font-size:var(--fs-xs); font-weight:700; color:var(--ink); display:flex; justify-content:space-between; }
+.recent .cap span { color:var(--ink-soft); font-weight:500; }
+
+/* ---------- zone map overlay (spec validation aid) ---------- */
+.zonemap { position:absolute; inset:0; z-index:100; pointer-events:none; display:none; }
+.window.zones .zonemap { display:block; }
+.zlabel {
+  position:absolute; border:2px dashed var(--gold);
+  border-radius:var(--r-cutout);
+  display:grid; place-items:center;
+  font-size:11px; font-weight:800; color:var(--gold);
+  background:rgba(228,181,74,.12); text-transform:uppercase; letter-spacing:1px;
+  text-shadow:0 1px 2px rgba(0,0,0,.5);
+}
+</style>
+</head>
+<body>
+
+<div class="meta">
+  <span><b>Flintshot</b> · five-zone redesign mockup · spec <b>ux-redesign</b></span>
+  <div class="viewbtns">
+    <button id="btn-home" onclick="show('home')">Home route</button>
+    <button id="btn-editor" onclick="show('editor')" class="on">Editor route</button>
+    <button id="btn-zones" onclick="toggleZones(this)">Zone map</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════ EDITOR ══════════════════════════════════ -->
+<div class="window show" id="win-editor">
+
+  <!-- ZONE 1 · TOPBAR: brand | breadcrumb | Capture/Copy/Open | ⋯ -->
+  <div class="topbar">
+    <div class="brand"><div class="flame">🔥</div><span class="name">Flintshot</span><span class="route">| Editor</span></div>
+    <div class="crumb"><span class="stage">Home</span><span class="sep">▸</span><span class="stage cur">Editor</span></div>
+    <div class="tb-spacer"></div>
+    <div class="hero">
+      <button class="ghost hero-key" onclick="toast('Capture → NewCaptureMode::Region')"><span class="ico">✚</span>Capture</button>
+      <button class="ghost hero-key" onclick="toast('ToolbarAction::Copy → clipboard')"><span class="ico">⧉</span>Copy</button>
+      <button class="ghost" onclick="toast('open_image file picker')"><span class="ico">🗀</span>Open</button>
+      <div class="overflow" id="ovf" onclick="document.getElementById('ovf').classList.toggle('open')">⋯
+        <div class="overflow-menu" onclick="event.stopPropagation()">
+          <div class="om-item" onclick="toast('Save')"><span class="ico">⤓</span>Save<span class="kbd">Ctrl+S</span></div>
+          <div class="om-item" onclick="toast('Upload')"><span class="ico">⇧</span>Upload</div>
+          <div class="om-item" onclick="toast('Paste')"><span class="ico">📋</span>Paste<span class="kbd">Ctrl+V</span></div>
+          <div class="om-sep"></div>
+          <div class="om-item" onclick="toast('About')"><span class="ico">ℹ</span>About Flintshot</div>
+          <div class="om-note">Diagnostics: run <b>flintshot backends</b><br>Status: X11 · vX.Y.Z</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="band">
+    <!-- ZONE 2 · LEFT TOOL RAIL: the ten real tools, gold active -->
+    <div class="rail" id="rail">
+      <div class="rail-sep"></div>
+      <div class="tool" data-tool="Move"       title="Move · V">✥</div>
+      <div class="tool" data-tool="Rectangle"  title="Rectangle · R">▭</div>
+      <div class="tool" data-tool="Ellipse"    title="Ellipse · O">◯</div>
+      <div class="tool" data-tool="Line"       title="Line · L">╱</div>
+      <div class="tool" data-tool="Arrow"      title="Arrow · A">➚</div>
+      <div class="rail-sep"></div>
+      <div class="tool active" data-tool="Pencil" title="Pencil · P">✎</div>
+      <div class="tool" data-tool="Marker"     title="Marker · M">🖍</div>
+      <div class="tool" data-tool="Text"       title="Text · T">T</div>
+      <div class="rail-sep"></div>
+      <div class="tool" data-tool="Number"     title="Number · N">②</div>
+      <div class="tool" data-tool="Blur"       title="Blur · B">▒</div>
+    </div>
+
+    <!-- ZONE 3 · CANVAS: paper cutout, corner handles, floating chips -->
+    <div class="canvas">
+      <div class="paper">
+        <div class="shot">
+          <div class="shot-bar">
+            <i style="background:#E88"></i><i style="background:#EC5"></i><i style="background:#7C6"></i>
+          </div>
+          <div class="shot-body">
+            <div class="shot-col"><div class="sk w60 h30"></div><div class="sk w80 h14"></div><div class="sk w40 h14"></div><div class="sk h70"></div></div>
+            <div class="shot-col"><div class="sk h70"></div><div class="sk w80 h14"></div><div class="sk w60 h14"></div><div class="sk w40 h30"></div></div>
+          </div>
+        </div>
+        <!-- demo annotations (render() output only — never baked chrome) -->
+        <div class="ann-rect"></div>
+        <div class="ann-text">Ship it!</div>
+        <div class="ann-blur"></div>
+        <svg class="ann-arrow" width="120" height="70" viewBox="0 0 120 70">
+          <path d="M8 60 C 40 20, 70 20, 100 30" fill="none" stroke="#C99A2E" stroke-width="5" stroke-linecap="round"/>
+          <path d="M100 30 l-16 -6 M100 30 l-6 16" stroke="#C99A2E" stroke-width="5" stroke-linecap="round"/>
+        </svg>
+        <div class="ann-num" style="left:57%; top:20%;">1</div>
+        <div class="ann-num" style="left:18%; top:42%;">2</div>
+        <!-- corner handles -->
+        <div class="handle tl"></div><div class="handle tr"></div>
+        <div class="handle bl"></div><div class="handle br"></div>
+      </div>
+      <!-- floating chips: undo/redo top-left, magnifier bottom-right -->
+      <div class="chips undo">
+        <div class="chip" title="Undo · Ctrl+Z">↩</div>
+        <div class="chip" title="Redo · Ctrl+Y">↪</div>
+      </div>
+      <div class="chips view">
+        <div class="chip" title="Magnifier">🔍</div>
+      </div>
+    </div>
+
+    <!-- ZONE 4 · RIGHT PROPERTIES PANEL: contextual sections only -->
+    <div class="panel">
+      <div class="panel-title" id="panel-title">Pencil · Properties</div>
+
+      <div class="section" data-sec="Stroke">
+        <div class="sec-head" onclick="toggleSec(this)">Stroke <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="ctl-label">Color</div>
+          <div class="swatches">
+            <div class="sw on" style="background:#C0392B"></div><div class="sw" style="background:#E4B54A"></div>
+            <div class="sw" style="background:#2C6B45"></div><div class="sw" style="background:#28648B"></div>
+            <div class="sw" style="background:#2A2620"></div><div class="sw" style="background:#FBF6EA"></div>
+          </div>
+          <div class="ctl-label">Width · 3 px</div>
+          <div class="wells"><div class="well">2</div><div class="well on">3</div><div class="well">5</div><div class="well">8</div></div>
+        </div>
+      </div>
+
+      <div class="section" data-sec="Fill">
+        <div class="sec-head" onclick="toggleSec(this)">Fill <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="toggle-row">Fill shapes <div class="switch" onclick="this.classList.toggle('on')"></div></div>
+        </div>
+      </div>
+
+      <div class="section" data-sec="Text" style="display:none">
+        <div class="sec-head" onclick="toggleSec(this)">Text <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="ctl-label">Size · 22 px</div>
+          <div class="wells"><div class="well">16</div><div class="well on">22</div><div class="well">30</div></div>
+          <div class="toggle-row">Bold <div class="switch on" onclick="this.classList.toggle('on')"></div></div>
+        </div>
+      </div>
+
+      <div class="section" data-sec="Effects" style="display:none">
+        <div class="sec-head" onclick="toggleSec(this)">Effects <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="ctl-label">Blur kind</div>
+          <div class="wells"><div class="well on">Pixelate</div><div class="well">Smooth</div></div>
+          <div class="ctl-label">Strength · 5</div>
+          <div class="wells"><div class="well">3</div><div class="well on">5</div><div class="well">8</div></div>
+        </div>
+      </div>
+
+      <div class="section" data-sec="Number" style="display:none">
+        <div class="sec-head" onclick="toggleSec(this)">Number <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <div class="ctl-label">Next number</div>
+          <div class="wells"><div class="well on">3</div><div class="well">4</div><div class="well">5</div></div>
+        </div>
+      </div>
+
+      <div class="section" data-sec="Selection">
+        <div class="sec-head" onclick="toggleSec(this)">Selection <span class="chev">▼</span></div>
+        <div class="sec-body">
+          <button class="btn-danger" title="Del">🗑 Delete annotation</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ZONE 5 · STATUSBAR: dims·size | hint | shortcuts -->
+  <div class="statusbar">
+    <span class="dims">Image: 1920×1080 px · 2.4 MiB</span><span class="dot">•</span>
+    <span class="hint" id="hint">Pencil — drag to sketch · hold Shift for straight lines</span>
+    <span class="keys"><kbd>Ctrl+Z</kbd><kbd>Ctrl+Y</kbd><kbd>Ctel+S</kbd><kbd>Del</kbd></span>
+  </div>
+
+  <div class="zonemap">
+    <div class="zlabel" style="left:0; top:0; right:0; height:44px;">1 · Topbar — brand · crumb · Capture/Copy/Open · ⋯</div>
+    <div class="zlabel" style="left:0; top:46px; width:48px; bottom:32px;">2 · Rail</div>
+    <div class="zlabel" style="left:50px; top:46px; right:238px; bottom:32px;">3 · Canvas — paper cutout · handles · floating chips</div>
+    <div class="zlabel" style="right:0; top:46px; width:236px; bottom:32px;">4 · Properties — sections only</div>
+    <div class="zlabel" style="left:0; right:0; bottom:0; height:30px;">5 · Statusbar — dims · hint · shortcuts</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════ HOME ══════════════════════════════════ -->
+<div class="window" id="win-home">
+  <div class="topbar">
+    <div class="brand"><div class="flame">🔥</div><span class="name">Flintshot</span></div>
+    <div class="crumb"><span class="stage cur">Home</span></div>
+    <div class="tb-spacer"></div>
+    <div class="hero">
+      <button class="ghost hero-key" onclick="toast('HomeBridge::request_capture')"><span class="ico">✚</span>Capture</button>
+      <button class="ghost hero-key" disabled title="No image is open — copy is available in the editor"><span class="ico">⧉</span>Copy</button>
+      <button class="ghost" onclick="toast('open_image file picker')"><span class="ico">🗀</span>Open</button>
+      <div class="overflow">⋯
+        <div class="overflow-menu">
+          <div class="om-item"><span class="ico">ℹ</span>About Flintshot</div>
+          <div class="om-note">Diagnostics: run <b>flintshot backends</b></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="home">
+    <div class="hero-card">
+      <div class="hero-flame">🔥</div>
+      <div>
+        <h1>Capture. Annotate.<br>Hand it off — <em>in seconds.</em></h1>
+        <p>Grab a region, mark it up with the pop-up book of tools, and copy or upload it — all without leaving your desktop.</p>
+      </div>
+    </div>
+    <div class="home-cards">
+      <div class="hcard"><div class="ico">✚</div><h3>New capture</h3><p>Grab a region of the screen</p></div>
+      <div class="hcard"><div class="ico">🗀</div><h3>Open image</h3><p>Pick a file to annotate</p></div>
+      <div class="hcard"><div class="ico">📋</div><h3>Paste</h3><p>Drop clipboard contents in</p></div>
+    </div>
+    <div class="recent-title">Recent captures</div>
+    <div class="recents">
+      <div class="recent"><div class="thumb" style="background:linear-gradient(135deg,#2C6B45,#1F5233)"></div><div class="cap">bug-report <span>2m</span></div></div>
+      <div class="recent"><div class="thumb" style="background:linear-gradient(135deg,#E4B54A,#C99A2E)"></div><div class="cap">dashboard <span>1h</span></div></div>
+      <div class="recent"><div class="thumb" style="background:linear-gradient(135deg,#28648B,#16381F)"></div><div class="cap">onboarding <span>3h</span></div></div>
+      <div class="recent"><div class="thumb" style="background:linear-gradient(135deg,#C0392B,#2A2620)"></div><div class="cap">flaky-test <span>yday</span></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="meta" id="toast" style="min-height:18px; color:#E4B54A; font-weight:700;"></div>
+
+<script>
+/* route switching */
+function show(w){
+  document.getElementById('win-editor').classList.toggle('show', w==='editor');
+  document.getElementById('win-home').classList.toggle('show', w==='home');
+  btn('btn-editor', w==='editor'); btn('btn-home', w==='home');
+}
+function btn(id,on){ document.getElementById(id).classList.toggle('on', on); }
+function toggleZones(b){ b.classList.toggle('on'); document.getElementById('win-editor').classList.toggle('zones'); }
+function toggleSec(h){ h.parentElement.classList.toggle('closed'); }
+function toast(m){ const t=document.getElementById('toast'); t.textContent='↳ '+m; clearTimeout(t._h); t._h=setTimeout(()=>t.textContent='',2200); }
+
+/* tool switching → contextual sections (per-tool section map, Task 004) */
+const SEC_MAP = { /* spec: sections map to real EditorState fields */
+  Move:[['Stroke',0],['Fill',0],['Text',0],['Effects',0],['Number',0],['Selection',1]],
+  Rectangle:[['Stroke',1],['Fill',1],['Text',0],['Effects',0],['Number',0],['Selection',1]],
+  Ellipse:[['Stroke',1],['Fill',1],['Text',0],['Effects',0],['Number',0],['Selection',1]],
+  Line:[['Stroke',1],['Fill',0],['Text',0],['Effects',0],['Number',0],['Selection',1]],
+  Arrow:[['Stroke',1],['Fill',0],['Text',0],['Effects',0],['Number',0],['Selection',1]],
+  Pencil:[['Stroke',1],['Fill',1],['Text',0],['Effects',0],['Number',0],['Selection',1]],
+  Marker:[['Stroke',1],['Fill',0],['Text',0],['Effects',0],['Number',0],['Selection',1]],
+  Text:[['Stroke',1],['Fill',0],['Text',1],['Effects',0],['Number',0],['Selection',1]],
+  Number:[['Stroke',1],['Fill',0],['Text',0],['Effects',0],['Number',1],['Selection',1]],
+  Blur:[['Stroke',0],['Fill',0],['Text',0],['Effects',1],['Number',0],['Selection',1]],
+};
+const HINTS = {
+  Move:'Move / Select — click an annotation to select · drag to move',
+  Rectangle:'Rectangle — drag to draw a box',
+  Ellipse:'Ellipse — drag to draw an oval',
+  Line:'Line — drag to draw · Shift snaps to 45°',
+  Arrow:'Arrow — drag from tail to head',
+  Pencil:'Pencil — drag to sketch · hold Shift for straight lines',
+  Marker:'Marker — drag to highlight · semi-transparent',
+  Text:'Text — click to place · type · Esc to finish',
+  Number:'Number — click to drop a numbered badge',
+  Blur:'Blur — drag a region to obscure',
+};
+document.querySelectorAll('.tool').forEach(t=>{
+  t.addEventListener('click',()=>{
+    if(t.classList.contains('locked')) return;
+    document.querySelectorAll('.tool').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    const tool=t.dataset.tool;
+    document.getElementById('panel-title').textContent=tool+' · Properties';
+    document.getElementById('hint').textContent=HINTS[tool];
+    document.querySelectorAll('.section').forEach(s=>{
+      const show = SEC_MAP[tool].find(([n])=>n===s.dataset.sec)?.[1];
+      s.style.display = show ? '' : 'none';
+    });
+  });
+});
+</script>
+</body>
+</html>

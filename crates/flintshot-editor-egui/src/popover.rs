@@ -16,8 +16,6 @@ use crate::theme;
 /// Which color the popover edits this time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColorTarget {
-    /// `EditorState::color` — shapes, markers, numbers.
-    Shape,
     /// `EditorState::text_color` — the Text tool's own color.
     Text,
 }
@@ -30,7 +28,6 @@ const POD_ID: &str = "color-stroke-pod";
 /// popover on click.
 pub(crate) fn pod_button(ui: &mut egui::Ui, state: &mut EditorState, target: ColorTarget) {
     let color = match target {
-        ColorTarget::Shape => state.color,
         ColorTarget::Text => state.text_color,
     };
     let resp = labeled_color_chip(ui, color, target);
@@ -39,17 +36,12 @@ pub(crate) fn pod_button(ui: &mut egui::Ui, state: &mut EditorState, target: Col
         .show(|ui| {
             ui.set_min_width(200.0);
             egui::Frame::new()
-                .fill(theme::palette::CUTOUT_WHITE)
-                .corner_radius(egui::CornerRadius::same(theme::POD_RADIUS))
+                .fill(theme::palette::PAPER_CREAM)
+                .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
                 .inner_margin(egui::Margin::same(theme::POD_PAD))
                 .stroke(theme::HAIRLINE_STROKE)
                 .show(ui, |ui| {
                     ui.vertical(|ui| match target {
-                        ColorTarget::Shape => {
-                            ui.horizontal(|ui| panel::swatch_row(ui, &mut state.color));
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| panel::stroke_row(ui, state));
-                        }
                         ColorTarget::Text => {
                             ui.horizontal(|ui| panel::swatch_row(ui, &mut state.text_color));
                         }
@@ -62,12 +54,11 @@ pub(crate) fn pod_button(ui: &mut egui::Ui, state: &mut EditorState, target: Col
 /// cutout-styled like every other chip.
 fn labeled_color_chip(ui: &mut egui::Ui, color: Color, target: ColorTarget) -> egui::Response {
     let label = match target {
-        ColorTarget::Shape => "Color · Stroke",
         ColorTarget::Text => "Text color",
     };
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        egui::FontId::proportional(theme::TYPE_BODY),
+        egui::FontId::proportional(theme::TYPE_MD),
         theme::palette::INK,
     );
     let galley_size = galley.size();
@@ -80,8 +71,8 @@ fn labeled_color_chip(ui: &mut egui::Ui, color: Color, target: ColorTarget) -> e
         .on_hover_text("Color and stroke width");
     ui.painter().rect(
         rect,
-        egui::CornerRadius::same(theme::CHIP_RADIUS),
-        theme::palette::CUTOUT_WHITE,
+        egui::CornerRadius::same(theme::POD_RADIUS),
+        theme::palette::PAPER_CREAM,
         theme::HAIRLINE_STROKE,
         egui::StrokeKind::Middle,
     );
@@ -161,8 +152,8 @@ mod tests {
     }
 
     #[test]
-    fn shape_pod_opens_the_full_picker_bay() {
-        let ctx = opened_popup(ColorTarget::Shape);
+    fn text_pod_opens_the_swatch_bay() {
+        let ctx = opened_popup(ColorTarget::Text);
         // Swatches register (berry = the leading default).
         let berry = theme::palette::SWATCHES[0];
         assert!(
@@ -170,14 +161,8 @@ mod tests {
                 .is_some(),
             "the popover offers the swatch row"
         );
-        // Custom color chip + stroke presets + slider register.
+        // Custom color chip registers.
         assert!(ctx.read_response(egui::Id::new("custom_color")).is_some());
-        for i in 0..theme::STROKE_PRESETS.len() {
-            assert!(
-                ctx.read_response(egui::Id::new(("stroke", i))).is_some(),
-                "stroke preset {i} offered"
-            );
-        }
     }
 
     #[test]
