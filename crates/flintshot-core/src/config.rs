@@ -86,11 +86,12 @@ pub struct UiConfig {
     /// value survives re-saves.
     #[serde(default = "default_interaction_mode")]
     pub interaction_mode: String,
-    /// When `true` (default), committing an annotation flips the
-    /// active tool to Move so the next press repositions what was
-    /// just drawn. `false` restores sticky tools for rapid
-    /// multi-draw workflows. Read once per editor session (matching
-    /// the magnifier precedent).
+    /// When `false` (default), tools are sticky — committing an
+    /// annotation keeps the active tool so rapid multi-draw workflows
+    /// need no re-press. `true` flips to Move after every eligible
+    /// commit so the next press repositions what was just drawn
+    /// (ADR-0040, superseded as the default by ADR-0058). Read once
+    /// per editor session (matching the magnifier precedent).
     #[serde(default = "default_flip_to_move")]
     pub flip_to_move: bool,
     /// When `true` (default), the editor shows the 30 px statusbar.
@@ -299,7 +300,7 @@ fn default_interaction_mode() -> String {
 }
 
 fn default_flip_to_move() -> bool {
-    true
+    false
 }
 
 fn default_show_statusbar() -> bool {
@@ -1213,7 +1214,7 @@ include-cursor = true  # hide cursor when capturing presentations
     }
 
     #[test]
-    fn flip_to_move_defaults_true_when_absent() {
+    fn flip_to_move_defaults_false_when_absent() {
         let cfg = Config::load_from(&{
             let dir = tempdir().unwrap();
             let path = dir.path().join("config.toml");
@@ -1221,27 +1222,27 @@ include-cursor = true  # hide cursor when capturing presentations
             path
         })
         .unwrap();
-        assert!(cfg.ui.flip_to_move, "absent field must default true");
-        assert!(UiConfig::default().flip_to_move, "Default impl matches");
+        assert!(!cfg.ui.flip_to_move, "absent field must default false");
+        assert!(!UiConfig::default().flip_to_move, "Default impl matches");
     }
 
     #[test]
-    fn flip_to_move_false_roundtrips() {
+    fn flip_to_move_true_roundtrips() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
         let mut cfg = Config::default();
-        cfg.ui.flip_to_move = false;
+        cfg.ui.flip_to_move = true;
         cfg.save_to(&path).unwrap();
 
         let written = fs::read_to_string(&path).unwrap();
         assert!(
-            written.contains("flip-to-move = false"),
+            written.contains("flip-to-move = true"),
             "flip-to-move not persisted:\n{written}"
         );
 
         let back = Config::load_from(&path).unwrap();
-        assert!(!back.ui.flip_to_move);
+        assert!(back.ui.flip_to_move);
     }
 
     #[test]
