@@ -83,6 +83,12 @@ Categories used below:
 
 ### Fixed
 
+- The home window kept the pre-redesign compact geometry (360×240,
+  non-resizable) — the redesigned home (topbar + hero + hcards +
+  recents) could not fit and clipped. Home now shares the stable
+  page geometry with Editor / Loading / Settings (1024×640,
+  resizable); the initial viewport and every Home↔Editor transition
+  batch fix together.
 - Six alignment/UX regressions reported against the editor (all
   regression-tested headlessly):
   - the canvas `CentralPanel`'s default 8 px inner margin anchored
