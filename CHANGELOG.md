@@ -83,6 +83,14 @@ Categories used below:
 
 ### Fixed
 
+- Worker-editor Copy "worked sometimes" on Linux: a successful copy
+  auto-closed the Wayland window, ending the process — and the
+  compositor does not reliably adopt an exited client's
+  `zwlr_data_control` selection (COSMIC empties it; arboard serves
+  the selection from an in-process thread, which is why `wl-copy`
+  forks). A worker Copy now never auto-closes on Linux (either
+  display server) — the user closes via Esc / X after pasting.
+  macOS/Windows keep the close (OS-owned clipboard).
 - The home window kept the pre-redesign compact geometry (360×240,
   non-resizable) — the redesigned home (topbar + hero + hcards +
   recents) could not fit and clipped. Home now shares the stable
