@@ -9,9 +9,9 @@
 //!   drives the per-frame render loop.
 //! - `chrome` (private) — the Move-tool hover / grab outline shared
 //!   by the editor window and the overlay (see `crate::chrome`).
-//! - `header` (private) — the quiet top bar (identity, tab-strip
-//!   seam, AI seam, overflow menu) on every routed surface and the
-//!   worker editor window.
+//! - `topbar` (private) — the 44 px forest top bar (flame brand,
+//!   breadcrumb, Capture / Copy / Open heroes, `⋯` overflow) on
+//!   every routed surface and the worker editor window.
 //! - `floating` (private) — the on-canvas quick cluster (undo /
 //!   redo / magnifier / loupe zoom) drawn over the canvas.
 //! - [`magnifier`] — the toolkit-owned pixel-zoom inset widget (no
@@ -23,8 +23,15 @@
 //!   owns the eframe lifecycle and the outcome slot.
 //! - `theme` (private) — the pop-up book design-token system (cream
 //!   paper, white cutouts, forest accents) applied to every window.
-//! - `panel` (private) — the docked right side panel (tools,
-//!   contextual bay, bottom actions) drawn by `app`.
+//! - `statusbar` (private) — the 30 px forest footer (dims readout,
+//!   gold per-tool hint, kbd chips) under the editor zones.
+//! - `settings` (private) — the settings route's page (cutout
+//!   section cards, wells / switches / readonly rows) over the
+//!   window bridge's config plumbing.
+//! - `rail` (private) — the left tool rail (48 px forest strip, the
+//!   tool vocabulary + glyphs, `ToolGate`) drawn by `app`.
+//! - `panel` (private) — the 236 px properties panel (contextual
+//!   collapsible sections per the binding map) drawn by `app`.
 //! - `popover` (private) — the color / stroke picker bay that
 //!   opens as a popover from a single pod button.
 //!
@@ -44,14 +51,21 @@ mod app;
 mod canvas;
 mod chrome;
 mod floating;
-mod header;
 mod home;
 mod magnifier;
 mod overlay;
 mod panel;
 mod popover;
+mod rail;
+mod settings;
 mod shell;
+mod statusbar;
 mod theme;
+mod topbar;
+// The shared cutout widgets ship ahead of their first consumers
+// (statusbar / rail / topbar / panel / settings land in tasks 003+).
+#[allow(dead_code)]
+mod widgets;
 mod window;
 
 pub use canvas::{CanvasView, EguiCanvas, EguiTexture};

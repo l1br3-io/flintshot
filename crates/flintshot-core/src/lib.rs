@@ -39,7 +39,11 @@ pub use capture::{
     registered_backends, select_backend, BackendReport, BackendReportEntry, CaptureOptions,
     Capturer, MonitorInfo, SessionKind, XcapCapturer,
 };
-pub use config::{config_path, CaptureConfig, Config, HotkeyConfig, UiConfig, UploadConfig};
+pub use config::{
+    config_path, estimate_size_bytes, heuristic_bytes, parse_default_mode, parse_output_format,
+    parse_size_mode, render_filename_template, sanitize_filename, CaptureConfig, Config,
+    DefaultMode, HotkeyConfig, OutputConfig, OutputFormat, SizeMode, UiConfig, UploadConfig,
+};
 pub use editor::{Annotation, BlurKind, EditorState, Snapshot, Tool};
 pub use error::{FlintshotError, Result};
 pub use freehand::{smooth_polyline, MARKER_ALPHA};

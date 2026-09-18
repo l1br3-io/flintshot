@@ -20,9 +20,10 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    compose_final, compose_final_region, render::render, BlurCache, Config, DispatchOutcome,
-    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode, Rect,
-    Tool,
+    compose_final, compose_final_region, parse_default_mode, parse_output_format, parse_size_mode,
+    render::render, render_filename_template, BlurCache, Config, DefaultMode, DispatchOutcome,
+    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode,
+    OutputFormat, Rect, SizeMode, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -31,6 +32,10 @@ use crate::home::HomeDirective;
 use crate::magnifier::Magnifier;
 use crate::overlay::{mask_color, mask_rects, usable_selection};
 use crate::panel::{self, ToolbarAction};
+use crate::rail;
+use crate::topbar;
+use crate::topbar::TopbarAction;
+use crate::widgets;
 
 /// The selection-first phase's hint line (spec copy). Visible while
 /// the phase is live; every clause stays truthful for the whole
@@ -117,6 +122,10 @@ pub(crate) struct EditorApp {
     /// dispatch skips that frame (the screenshot isn't visible yet
     /// either, so no drags can start).
     canvas_rect: Option<egui::Rect>,
+    /// User view-zoom multiplier over the fit scale (the floating
+    /// +/− chips step it; 1.0 = fit-to-view). See
+    /// [`VIEW_ZOOM_MIN`] / [`VIEW_ZOOM_MAX`].
+    view_zoom: f32,
     /// Whether the current primary-button press began inside the
     /// canvas. Set when `PointerDown` fires (which only happens on
     /// canvas hits), cleared on `PointerUp`. Without this guard,
@@ -182,11 +191,38 @@ pub(crate) struct EditorApp {
     /// The docked side panel's cross-frame state (hover-lift
     /// progress, grain texture).
     panel: panel::PanelState,
+    /// The left tool rail's persistent state (grain texture).
+    rail: rail::RailState,
+    /// The config snapshot this editor session runs on: workers read
+    /// it once at construction (no watcher there); routed pages get
+    /// live updates from the router after settings saves.
+    config: Config,
+    /// The exact-PNG byte estimate cache: (dims, bytes). Re-encoded
+    /// only when the image's dimensions change.
+    statusbar_size: Option<((u32, u32), u64)>,
     /// The floating cluster's chip rects from the last frame —
     /// presses that begin there are chrome, never canvas gestures
     /// (misses between chips pass through to the canvas).
     floating_rects: Vec<egui::Rect>,
 }
+
+/// The paper-cutout ring around the image: 8 px cream — the cutout
+/// stroke's width — per the mockup's canvas dressing.
+pub(crate) const CANVAS_RING: f32 = 8.0;
+
+/// Breathing room between the cutout's ring box and the canvas
+/// panel's edge (the surrounding zones): keeps the ring's hairline
+/// and the paper shadow's penumbra off the panel border so the
+/// capture never sits flush against the window chrome.
+pub(crate) const CANVAS_PAD: f32 = 12.0;
+
+/// The view-zoom floor (the − chip's clamp): half the fit size.
+pub(crate) const VIEW_ZOOM_MIN: f32 = 0.5;
+/// The view-zoom ceiling (the + chip's clamp): four× the fit size.
+pub(crate) const VIEW_ZOOM_MAX: f32 = 4.0;
+/// One +/− chip step. A power of two, so repeated addition from
+/// 1.0 stays exact in f32 and the "back to 100%" path is lossless.
+const VIEW_ZOOM_STEP: f32 = 0.25;
 
 impl EditorApp {
     /// Construct the app. The canvas captures a clone of the
@@ -244,11 +280,14 @@ impl EditorApp {
         let magnifier_always_on = cfg.ui.magnifier_always_on;
         let magnifier_key = parse_magnifier_key(&cfg.ui.magnifier_modifier);
         Self {
+            statusbar_size: None,
+            config: cfg.clone(),
             state,
             canvas: EguiCanvas::new(ctx.clone()),
             bg: None,
             img_dims,
             canvas_rect: None,
+            view_zoom: 1.0,
             canvas_drag_active: false,
             outcome,
             clipboard: None,
@@ -265,6 +304,7 @@ impl EditorApp {
             open_clamp_pending: page.is_some(),
             page,
             panel: panel::PanelState::default(),
+            rail: rail::RailState::default(),
             floating_rects: Vec::new(),
         }
     }
@@ -275,10 +315,21 @@ impl EditorApp {
         self.phase == SelectionPhase::Live
     }
 
+    /// Whether the view sits at the 1.0 fit zoom — the worker
+    /// resize policy's trigger (only the zoomed view letterboxes;
+    /// 1.0 keeps the image-sized window contract).
+    #[allow(
+        clippy::float_cmp,
+        reason = "0.25 steps are powers of two; 1.0 stays exact"
+    )]
+    fn at_fit_zoom(&self) -> bool {
+        self.view_zoom == 1.0
+    }
+
     /// The rail's tool gate for the current frame: the live
     /// selection-first phase locks every non-Select chip (selection
     /// is the only job), and the first crop restores the full set.
-    fn rail_gate(&self) -> panel::ToolGate {
+    fn rail_gate(&self) -> rail::ToolGate {
         rail_gate(self.phase_active())
     }
 
@@ -416,8 +467,10 @@ impl EditorApp {
     }
 
     /// The worker window's image-sized viewport policy (unchanged,
-    /// spec: out of scope): resize until the panel exactly fits the
-    /// image, invalidating the caches when its dimensions change.
+    /// spec: out of scope): at the 1.0 view zoom, resize until the
+    /// panel exactly fits the image; any other zoom belongs to
+    /// [`Self::update_fit`]'s letterbox path (never resize — the
+    /// window's size is stable, only the view transform moves).
     #[allow(
         clippy::cast_precision_loss,
         reason = "image dims ≤ 2^24 are exact in f32"
@@ -425,10 +478,13 @@ impl EditorApp {
     fn handle_image_resize(&mut self, ctx: &Context) {
         self.invalidate_caches_on_dims_change();
         let current_dims = self.state.image.dimensions();
-        // Target panel size in logical px = image physical dims / ppp.
+        // Target panel size in logical px = image physical dims / ppp,
+        // plus the cutout ring's margin and the panel padding on
+        // every side so the dressing (ring + shadow penumbra) stays
+        // inside the canvas with air to spare.
         let ppp = ctx.pixels_per_point();
-        let target_w = current_dims.0 as f32 / ppp;
-        let target_h = current_dims.1 as f32 / ppp;
+        let target_w = current_dims.0 as f32 / ppp + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD;
+        let target_h = current_dims.1 as f32 / ppp + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD;
         // Current canvas panel width/height (logical). When the resize
         // has taken effect, these match the target.
         let (cur_w, cur_h) = self
@@ -441,26 +497,28 @@ impl EditorApp {
         // until the panel reports the right size. GOTCHA: the old
         // top-rail layout added the toolbar's height below
         // `canvas_rect.min.y` here; the docked side panel instead
-        // reserves width to the *right* of the canvas, and the
-        // header reserves a strip above — the window is image +
-        // the live panel width (a collapsed rail must not keep
-        // re-issuing the expanded width) and image +
-        // [`header::HEADER_HEIGHT`] tall.
+        // reserves width to the *right* of the canvas, the topbar
+        // reserves a strip above and the statusbar below — the
+        // window is image + the panel width and image +
+        // [`topbar::TOPBAR_HEIGHT`] + [`statusbar::STATUSBAR_HEIGHT`]
+        // tall.
         let new_size = egui::vec2(
-            target_w + self.panel.width(),
-            target_h + crate::header::HEADER_HEIGHT,
+            target_w + panel::PANEL_WIDTH,
+            target_h + crate::topbar::TOPBAR_HEIGHT + crate::statusbar::STATUSBAR_HEIGHT,
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
         ctx.request_repaint();
     }
 
-    /// The stable viewport's per-frame fit (page epochs): compute
-    /// the fit-to-view scale from the live canvas rect and center
-    /// the image inside it (letterbox). Never issues a resize — the
-    /// window's size is the user's; only the view transform moves.
-    /// Also owns the one-shot open-time clamp of the default window
-    /// size to a small monitor (egui reports `monitor_size` only
-    /// once the loop runs; the default fits real panels).
+    /// The per-frame fit (both lifecycles): compute the fit-to-view
+    /// scale from the live canvas rect, multiply by the user's view
+    /// zoom, and center the ring box inside the padded canvas
+    /// (letterbox). Never issues a resize — the window's size is the
+    /// user's (page epochs) or [`Self::handle_image_resize`]'s
+    /// (workers at 1.0); only the view transform moves. Also owns
+    /// the one-shot open-time clamp of the default window size to a
+    /// small monitor (egui reports `monitor_size` only once the loop
+    /// runs; the default fits real panels).
     #[allow(
         clippy::cast_precision_loss,
         reason = "image dims ≤ 2^24 are exact in f32"
@@ -472,13 +530,36 @@ impl EditorApp {
             return;
         };
         let (w, h) = self.state.image.dimensions();
-        let scale = crate::canvas::fit_scale((w as f32, h as f32), (rect.width(), rect.height()))
-            .unwrap_or(self.canvas.scale());
         let ppp = ctx.pixels_per_point();
+        // The fit unit is the ring box (image + the cutout's cream
+        // ring on every side), fitted inside the panel minus the
+        // padding — the dressing stays inside the canvas with air to
+        // spare instead of sitting flush against the window chrome.
+        let (bw, bh) = (w as f32 + 2.0 * CANVAS_RING, h as f32 + 2.0 * CANVAS_RING);
+        let pad_l = CANVAS_PAD / ppp;
+        let fit = crate::canvas::fit_scale(
+            (bw, bh),
+            (
+                (rect.width() - 2.0 * pad_l).max(0.0),
+                (rect.height() - 2.0 * pad_l).max(0.0),
+            ),
+        );
+        let scale = match fit {
+            Some(fit) => fit * self.view_zoom,
+            // Degenerate viewport: keep the previous transform
+            // rather than collapsing the canvas.
+            None => self.canvas.scale(),
+        };
+        let ring_l = CANVAS_RING * scale / ppp;
         let img_logical = egui::vec2(w as f32 * scale / ppp, h as f32 * scale / ppp);
+        let box_logical = img_logical + egui::vec2(2.0 * ring_l, 2.0 * ring_l);
+        // Center the ring box in the padded viewport; a zoomed-in
+        // box (bigger than the viewport) clamps to zero slack and
+        // anchors at the ring + pad inset (the panel clips the
+        // overflow).
         let offset = egui::vec2(
-            ((rect.width() - img_logical.x) / 2.0).max(0.0),
-            ((rect.height() - img_logical.y) / 2.0).max(0.0),
+            ((rect.width() - 2.0 * pad_l - box_logical.x) / 2.0).max(0.0) + ring_l + pad_l,
+            ((rect.height() - 2.0 * pad_l - box_logical.y) / 2.0).max(0.0) + ring_l + pad_l,
         );
         // "Changed" tolerates float jitter: sub-epsilon drift must
         // not request repaints every frame, and a quarter-pixel
@@ -516,6 +597,91 @@ impl EditorApp {
         if clamped != crate::shell::EDITOR_PAGE_DEFAULT_SIZE {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(clamped));
         }
+    }
+
+    /// The paper shadow under the capture (the dressing's lowest
+    /// layer). Painted inside the canvas panel *before* the render
+    /// pass so the image covers the shadow shape's interior —
+    /// `Shadow::as_shape` fills its whole rect with a translucent
+    /// tint, which over the blit would read as an overlay. Hidden
+    /// during the selection-first phase (the dim mask owns the
+    /// moment). One frame behind the layout (the cached canvas rect).
+    fn paint_paper_shadow(&self, painter: &egui::Painter) {
+        if self.phase_active() {
+            return;
+        }
+        let Some(image_rect) = self.image_screen_rect() else {
+            return;
+        };
+        let radius = egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS);
+        painter.add(crate::theme::SHADOW_PAPER.as_shape(image_rect.expand(CANVAS_RING), radius));
+    }
+
+    /// The canvas paper dressing: the capture as a paper cutout —
+    /// cream ring and forest hairline around the image. Chrome-only:
+    /// painted over the composed output, never in `render()` /
+    /// saves. Hidden during the selection-first phase (the dim mask
+    /// owns the moment). Clipped to the canvas panel so the ring (and
+    /// its hairline) never bleeds over the surrounding zones.
+    fn paint_canvas_dressing(&self, painter: &egui::Painter) {
+        use crate::theme::palette as p;
+        if self.phase_active() {
+            return;
+        }
+        let Some(image_rect) = self.image_screen_rect() else {
+            return;
+        };
+        let Some(canvas_rect) = self.canvas_rect else {
+            return;
+        };
+        let painter = painter.with_clip_rect(canvas_rect);
+        let radius = egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS);
+        let ring = image_rect.expand(CANVAS_RING);
+        // The cream ring around the image: a stroked band strictly
+        // outside the image rect. A fill over `ring` would cover the
+        // capture entirely, and an inside stroke would eat its border
+        // (spec: the dressing never goes over the image). The band
+        // also masks the blit's square corners into the cutout's
+        // rounded ones.
+        painter.rect(
+            image_rect,
+            radius,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(CANVAS_RING, p::PAPER_CREAM),
+            egui::StrokeKind::Outside,
+        );
+        // The forest hairline at the ring's outer edge.
+        painter.rect(
+            ring,
+            radius,
+            egui::Color32::TRANSPARENT,
+            crate::theme::HAIRLINE_STROKE,
+            egui::StrokeKind::Middle,
+        );
+    }
+
+    /// The image's on-screen logical rect (the fit transform
+    /// applied). `None` before the first layout pass.
+    fn image_screen_rect(&self) -> Option<egui::Rect> {
+        let canvas_rect = self.canvas_rect?;
+        let view = self.canvas.view_over(canvas_rect);
+        let (w, h) = self.state.image.dimensions();
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "image dims ≤ 2^24 are exact in f32"
+        )]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "image dims ≤ 2^24 are exact in f32"
+        )]
+        let corners = {
+            let (w, h) = (w as f32, h as f32);
+            (
+                view.image_to_logical(flintshot_core::Point::new(0.0, 0.0)),
+                view.image_to_logical(flintshot_core::Point::new(w, h)),
+            )
+        };
+        Some(egui::Rect::from_two_pos(corners.0, corners.1))
     }
 
     /// Paint the magnifier inset when its trigger is active and the
@@ -933,36 +1099,67 @@ impl EditorApp {
     /// exercised with a synthetic `egui::Context` in tests.
     /// `pub(crate)`: the window router delegates here on the Editor
     /// route.
-    pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
-        // Worker editor windows (no router above them) draw their
-        // own header; routed pages inherit the router's — drawing
-        // it here too would double it.
-        if self.page.is_none() {
-            crate::header::show(ui, crate::header::Doc::Editor, None);
+    /// Statusbar: editor-only, gated by ui.show-statusbar; the byte
+    /// estimate follows ui.statusbar-size-mode (the exact PNG encode
+    /// is cached per image dims).
+    fn draw_statusbar(&mut self, ui: &mut egui::Ui) {
+        if !self.config.ui.show_statusbar {
+            return;
         }
-        // Side panel. Must come before CentralPanel so egui reserves
-        // the right-hand strip (the retired top rail's reservation,
-        // rotated). Pods, chips, and the `+` popup live in
-        // `crate::panel`; the plain call (no closure) keeps the
-        // borrow of `&mut self.state` disjoint from `self.copied`
-        // and `&mut self.panel`. The `+` popup offers the page
-        // actions only when a bridge exists to route them (worker
-        // windows get the Capture-only popup).
-        let gate = self.rail_gate();
-        let (action, popup_page) = panel::show(
-            ui,
-            &mut self.state,
-            self.copied,
-            gate,
-            self.page.is_some(),
-            &mut self.panel,
-        );
+        let dims = self.state.image.dimensions();
+        let mode = parse_size_mode(&self.config.ui.statusbar_size_mode);
+        let cached_valid = self
+            .statusbar_size
+            .as_ref()
+            .is_some_and(|(cached_dims, _)| *cached_dims == dims);
+        let bytes = if mode == SizeMode::ExactPng {
+            if cached_valid {
+                self.statusbar_size.as_ref().map_or(0, |(_, bytes)| *bytes)
+            } else {
+                let composed = compose_for_save(false, &self.state);
+                let bytes =
+                    flintshot_core::estimate_size_bytes(dims, SizeMode::ExactPng, Some(&composed));
+                self.statusbar_size = Some((dims, bytes));
+                bytes
+            }
+        } else {
+            flintshot_core::estimate_size_bytes(dims, SizeMode::Heuristic, None)
+        };
+        crate::statusbar::show(ui, dims, self.state.tool, bytes);
+    }
 
-        // The `+` popup's page actions (single-window): the sole
-        // visible home-parity surface on the editor (the chrome strip
-        // it duplicated is gone — editor-capture-ux OQ-1). Worker
-        // windows draw no popup entries beyond Capture.
-        let page_action = popup_page;
+    /// Worker editor windows draw the topbar themselves (the router
+    /// draws it over routed pages).
+    fn draw_worker_topbar(&mut self, ui: &mut egui::Ui) {
+        if self.page.is_some() {
+            return;
+        }
+        if let Some(a) = topbar::show(ui, topbar::Surface::Editor, None, topbar::Enable::WORKER) {
+            self.handle_topbar_action(a, ui.ctx());
+        }
+    }
+
+    pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
+        // The settings route's animation gate drives every spring in
+        // this window (sections, chips, rail pop, statusbar).
+        widgets::set_animations(ui.ctx(), self.config.ui.animations);
+        self.draw_worker_topbar(ui);
+        // Statusbar: the bottom zone strips its 30 px before the
+        // side panels reserve (draw order: top → bottom → left →
+        // right). Editor-only — the router draws home / settings
+        // without it, per the mockups.
+        self.draw_statusbar(ui);
+        // Tool rail: the left zone (draw order: top → bottom → left
+        // → right). Tool switching mutates the shared state directly;
+        // the gate reflects the selection-first phase.
+        let gate = self.rail_gate();
+        rail::show(ui, &mut self.state, gate, &mut self.rail);
+        // Properties panel. Must come before CentralPanel so egui
+        // reserves the right-hand strip. The plain call (no closure)
+        // keeps the borrow of `&mut self.state` disjoint from the
+        // panel's own state. Returns the Selection section's fired
+        // Delete, if any.
+        let panel_action = panel::show(ui, &mut self.state, &mut self.panel);
 
         // Selection-first phase: the toolbar's "Crop · Enter" button
         // crops through `confirm_selection`, bypassing `logic` — so
@@ -970,15 +1167,15 @@ impl EditorApp {
         // render paints the mask.
         self.end_phase_on_crop();
 
-        // Viewport policy by lifecycle: page epochs fit the image
-        // into the stable window (no resize commands); worker
-        // windows keep the image-sized window (resize until the
-        // panel matches).
-        if self.page.is_some() {
-            self.update_fit(ui.ctx());
-        } else {
+        // Viewport policy by lifecycle: worker windows keep the
+        // image-sized window while the view zoom is 1.0 (resize
+        // until the panel matches); page epochs — and workers under
+        // a user zoom — never resize, the fit path letterboxes
+        // inside the stable window instead.
+        if self.page.is_none() && self.at_fit_zoom() {
             self.handle_image_resize(ui.ctx());
         }
+        self.update_fit(ui.ctx());
 
         // Per-frame render: bind the painter, then walk the shared
         // render path. Render failure is terminal — publish `Err(_)`
@@ -993,15 +1190,29 @@ impl EditorApp {
         // happy (`&mut self.canvas` + `&mut self.bg` + `&self.state`
         // are captured disjointly by the closure, while the outcome
         // publication happens against the unborrowed `self`).
-        let panel = egui::CentralPanel::default().show(ui, |ui| {
-            self.canvas.bind_painter(ui.painter());
-            render(
-                &self.state,
-                &mut self.canvas,
-                &mut self.bg,
-                &mut self.blur_cache,
-            )
-        });
+        // Zero inner margin: `Frame::central_panel` defaults to 8 px,
+        // which anchors the canvas's draws at the panel's *inner*
+        // rect while this shell maps pointers and chrome against
+        // `panel.response.rect` (the outer one) — an 8 px offset
+        // between where the cursor maps and where strokes land, and
+        // between the image and its dressing. One rect for both.
+        let panel = egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(egui::Margin::same(0)))
+            .show(ui, |ui| {
+                // The paper shadow goes UNDER the render pass:
+                // `Shadow::as_shape` fills its whole rect (a
+                // translucent tint, blurred at the edges), so painted
+                // over the image it reads as an overlay. Under the
+                // blit, only the penumbra outside the cutout shows.
+                self.paint_paper_shadow(ui.painter());
+                self.canvas.bind_painter(ui.painter());
+                render(
+                    &self.state,
+                    &mut self.canvas,
+                    &mut self.bg,
+                    &mut self.blur_cache,
+                )
+            });
 
         // Cache the canvas's screen-logical rect so the next frame's
         // `logic()` can do pointer hit-testing. `panel.response.rect`
@@ -1033,13 +1244,6 @@ impl EditorApp {
             self.paint_selection_phase(ui.ctx(), ui.painter());
         }
 
-        // Magnifier inset overlay (Task 005). Painted after render
-        // succeeds, in screen-logical space (uses the cached
-        // `canvas_rect`, not the canvas-bound painter). Suppressed
-        // during text-editing so the trigger key doesn't pop the
-        // loupe over the caret.
-        self.paint_magnifier_if_active(ui.ctx(), ui.painter());
-
         // Move-tool object chrome (prominent-move spec): dashed hover
         // outline / solid ember grab outline, under the magnifier —
         // the overlay's chrome ordering.
@@ -1047,21 +1251,29 @@ impl EditorApp {
 
         // Persistent-selection outline (annotation-delete spec):
         // dashed forest bbox of the selected annotation, last among
-        // the chrome. Chrome-only by construction — it lives in the
-        // shell's paint pass, never in `render()` / composed output.
+        // the annotation chrome. Chrome-only by construction — it
+        // lives in the shell's paint pass, never in `render()` /
+        // composed output.
         self.paint_selected_chrome_if_any(ui.ctx(), ui.painter());
 
-        // Floating quick cluster (undo / redo / magnifier / loupe
+        // The paper-cutout dressing (shadow + ring + handles), after
+        // the annotation chrome and under the magnifier, per the
+        // mockup's stacking. Hidden during the selection-first phase.
+        self.paint_canvas_dressing(ui.painter());
+
+        // Magnifier inset overlay (Task 005). Painted after render
+        // succeeds, in screen-logical space (uses the cached
+        // `canvas_rect`, not the canvas-bound painter). Suppressed
+        // during text-editing so the trigger key doesn't pop the
+        // loupe over the caret.
+        self.paint_magnifier_if_active(ui.ctx(), ui.painter());
+
+        // Floating quick cluster (undo / redo / magnifier / view
         // zoom) over the canvas's top-left corner. The chip rects
         // feed the next frame's press gate.
         let canvas_rect = self.canvas_rect;
         let (floating_action, chip_rects) = canvas_rect.map_or((None, Vec::new()), |rect| {
-            floating::show(
-                ui.ctx(),
-                rect,
-                self.magnifier_always_on,
-                &mut self.magnifier,
-            )
+            floating::show(ui.ctx(), rect, self.magnifier_always_on)
         });
         self.floating_rects = chip_rects;
         self.handle_floating_action(floating_action);
@@ -1072,11 +1284,11 @@ impl EditorApp {
         // publishes the matching `EditorOutcome` + closes the window,
         // or logs + closes on failure. Dialog-cancel keeps the editor
         // open (no outcome published).
-        match action {
-            ToolbarAction::Save => self.handle_save(ui.ctx()),
-            ToolbarAction::Copy => self.handle_copy(ui.ctx()),
-            ToolbarAction::Upload => self.handle_upload(ui.ctx()),
-            // Undo / Redo / Delete replay the same dispatch a
+        match panel_action {
+            // The panel only fires Delete today (the Selection
+            // section); Save/Copy/Upload live on the topbar. Delete
+            // replays the same dispatch a Del keypress would produce
+            // (the dispatcher owns all state mutation).
             // Ctrl+Z / Ctrl+Y / Del keypress would produce (the
             // dispatcher owns all state mutation); their outcomes are
             // always `Continue`.
@@ -1104,30 +1316,59 @@ impl EditorApp {
                     modifiers: Modifiers::default(),
                 });
             }
-            ToolbarAction::NewCapture(mode) => self.handle_new_capture(mode, ui.ctx()),
-            ToolbarAction::None => {}
-        }
-
-        // The `+` popup's fired action, if any (handled after the
-        // toolbar so both can fire in one frame only by an explicit
-        // double-click).
-        if let Some(page_action) = page_action {
-            match page_action {
-                panel::PageChromeAction::Capture => {
-                    self.handle_new_capture(NewCaptureMode::Region, ui.ctx());
-                }
-                panel::PageChromeAction::Open => self.handle_page_open(ui.ctx()),
-                panel::PageChromeAction::Paste => self.handle_page_paste(ui.ctx()),
-            }
+            // Save / Copy / Upload / NewCapture are unreachable from
+            // the panel today — the topbar owns them.
+            _ => {}
         }
     }
 }
 
 impl EditorApp {
+    /// Apply a topbar action (worker windows; the router forwards
+    /// routed-page actions here too). Open / Paste have no worker
+    /// bridge and stay disabled; Settings is inert until its route
+    /// lands.
+    pub(crate) fn handle_topbar_action(&mut self, action: TopbarAction, ctx: &Context) {
+        match action {
+            TopbarAction::Capture => {
+                // capture.default-mode seeds the grab: fullscreen
+                // skips the selection; window falls back to region
+                // (the grab pipeline's interactive default).
+                let mode = match parse_default_mode(&self.config.capture.default_mode) {
+                    DefaultMode::Fullscreen => NewCaptureMode::Fullscreen,
+                    _ => NewCaptureMode::Region,
+                };
+                self.handle_new_capture(mode, ctx);
+            }
+            TopbarAction::Copy => self.handle_copy(ctx),
+            TopbarAction::Save => self.handle_save(ctx),
+            TopbarAction::Upload => self.handle_upload(ctx),
+            TopbarAction::Open => self.handle_page_open(ctx),
+            TopbarAction::Paste => self.handle_page_paste(ctx),
+            TopbarAction::Settings => {} // inert until the settings route lands
+            // The breadcrumb's Home link: worker windows have no
+            // home route behind them, so leaving the editor is the
+            // Esc contract — publish-if-unset and close.
+            TopbarAction::NavigateHome => {
+                self.publish_outcome_if_unset(Ok(EditorOutcome::Cancelled));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Live-apply a refreshed config snapshot (the router calls this
+    /// after the settings route saves). UI-facing fields only — the
+    /// magnifier snapshot stays at construction, matching its
+    /// read-once precedent.
+    pub(crate) fn apply_config(&mut self, config: &Config) {
+        self.config = config.clone();
+    }
+
     /// Apply a floating-cluster action: Undo / Redo replay the same
     /// dispatches their keyboard twins produce, the magnifier chip
-    /// flips the always-on flag, and the zoom chips' factor step
-    /// already happened inside the cluster.
+    /// flips the always-on flag, and the zoom chips step the view
+    /// zoom (the fit transform applies it on the next
+    /// [`Self::update_fit`] pass).
     fn handle_floating_action(&mut self, action: Option<floating::FloatingAction>) {
         match action {
             Some(floating::FloatingAction::Undo) => {
@@ -1151,12 +1392,13 @@ impl EditorApp {
             Some(floating::FloatingAction::ToggleMagnifier) => {
                 self.magnifier_always_on = !self.magnifier_always_on;
             }
-            // Zoom chips: the cluster already stepped the loupe's
-            // factor; nothing further to apply.
-            Some(
-                floating::FloatingAction::LoupeZoomIn | floating::FloatingAction::LoupeZoomOut,
-            )
-            | None => {}
+            Some(floating::FloatingAction::ZoomIn) => {
+                self.view_zoom = (self.view_zoom + VIEW_ZOOM_STEP).min(VIEW_ZOOM_MAX);
+            }
+            Some(floating::FloatingAction::ZoomOut) => {
+                self.view_zoom = (self.view_zoom - VIEW_ZOOM_STEP).max(VIEW_ZOOM_MIN);
+            }
+            None => {}
         }
     }
 
@@ -1307,6 +1549,25 @@ impl EditorApp {
     /// the selection-first phase is live), prompt for a path via
     /// `rfd`, write PNG, publish `Saved(path)` on success.
     fn handle_save(&self, ctx: &Context) {
+        // Direct save when a filename template is configured; the
+        // file dialog otherwise.
+        if !self.config.output.filename_template.is_empty() {
+            match save_direct(&self.state, self.phase_active(), &self.config.output) {
+                Ok(path) => {
+                    tracing::info!(path = %path.display(), "editor direct-saved");
+                    self.publish_side_effect_outcome(EditorOutcome::Saved(path));
+                    if self.closes_after_side_effect() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "direct save failed; closing editor session");
+                    self.publish_outcome(Err(err));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            return;
+        }
         match save_to_disk(&self.state, self.phase_active()) {
             Ok(Some(path)) => {
                 tracing::info!(path = %path.display(), "editor saved");
@@ -1438,6 +1699,53 @@ fn prompt_png_path() -> Option<std::path::PathBuf> {
         .save_file()
 }
 
+/// The output format's file extension.
+fn output_ext(format: OutputFormat) -> &'static str {
+    if format == OutputFormat::Jpeg {
+        "jpg"
+    } else {
+        "png"
+    }
+}
+
+/// The direct-save target path: `dir/rendered.ext`, or the
+/// filename alone when the configured directory is empty (the
+/// caller falls back to the pictures directory). Pure.
+fn direct_save_path(rendered: &str, dir: &str, format: OutputFormat) -> std::path::PathBuf {
+    let name = format!("{}.{}", rendered, output_ext(format));
+    if dir.is_empty() {
+        std::path::PathBuf::from(name)
+    } else {
+        std::path::PathBuf::from(dir).join(name)
+    }
+}
+
+/// The next free path: `name.ext`, then `name-2.ext`, `name-3.ext`,
+/// … skipping anything that already exists (the collision rule).
+/// Pure modulo the filesystem probe.
+fn next_free_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let stem = path.file_stem().map_or_else(
+        || "capture".to_owned(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    let ext = path
+        .extension()
+        .map_or_else(|| "png".to_owned(), |s| s.to_string_lossy().into_owned());
+    let parent = path
+        .parent()
+        .map_or_else(std::path::PathBuf::new, std::path::Path::to_path_buf);
+    for n in 2u32.. {
+        let candidate = parent.join(format!("{stem}-{n}.{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("u32 collisions exhausted")
+}
+
 /// Compose the image a Save writes: selection-aware while the
 /// selection-first phase is live, full-image otherwise.
 ///
@@ -1458,6 +1766,87 @@ fn compose_for_save(selection_aware: bool, state: &EditorState) -> image::RgbaIm
     } else {
         compose_final(state)
     }
+}
+
+/// The direct-save path: compose, encode per the configured format
+/// (JPEG at the configured quality; PNG otherwise), write to
+/// `dir/template.ext` with `-2`-style collision suffixes. Returns
+/// the written path.
+///
+/// # Errors
+/// Surfaces [`FlintshotError::Image`] if encoding or the
+/// filesystem write fails.
+fn save_direct(
+    state: &EditorState,
+    selection_aware: bool,
+    output: &flintshot_core::OutputConfig,
+) -> flintshot_core::Result<std::path::PathBuf> {
+    let rendered = render_filename_template(
+        &output.filename_template,
+        env!("CARGO_PKG_VERSION"),
+        &chrono_date(),
+        &chrono_time(),
+    );
+    let format = parse_output_format(&output.format);
+    let path = next_free_path(direct_save_path(&rendered, &output.save_dir, format));
+    let image = compose_for_save(selection_aware, state);
+    if format == OutputFormat::Jpeg {
+        let rgb = image::DynamicImage::ImageRgba8(image).to_rgb8();
+        let file = std::fs::File::create(&path)?;
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            file,
+            u8::try_from(output.jpeg_quality.clamp(1, 100)).unwrap_or(90),
+        );
+        rgb.write_with_encoder(encoder)?;
+    } else {
+        image.save_with_format(&path, image::ImageFormat::Png)?;
+    }
+    Ok(path)
+}
+
+/// `YYYY-MM-DD` for the `{date}` placeholder (local time).
+fn chrono_date() -> String {
+    // No chrono dependency: UTC date via std. Good enough for a
+    // filename stamp; the settings doc says so.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let days = now.as_secs() / 86_400;
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `HH-MM-SS` for the `{time}` placeholder (UTC, filename-safe).
+fn chrono_time() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() % 86_400;
+    format!(
+        "{:02}-{:02}-{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+/// Days-since-epoch → civil `(y, m, d)` (Howard Hinnant's
+/// algorithm; UTC only).
+fn civil_from_days(days: u64) -> (i64, u32, u32) {
+    let z = i64::try_from(days).unwrap_or(0) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1);
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (
+        if m <= 2 { y + 1 } else { y },
+        u32::try_from(m).unwrap_or(1),
+        d,
+    )
 }
 
 /// Prompt for a PNG path and write the [`compose_for_save`] image.
@@ -1816,11 +2205,11 @@ fn parse_magnifier_key(name: &str) -> egui::Key {
 /// live phase locks the rail to `Select`; an ended (or never
 /// requested) phase renders the full set. Pure so the phase→gate
 /// contract is testable without a live `Ui`.
-fn rail_gate(phase_active: bool) -> panel::ToolGate {
+fn rail_gate(phase_active: bool) -> rail::ToolGate {
     if phase_active {
-        panel::ToolGate::SelectOnly
+        rail::ToolGate::SelectOnly
     } else {
-        panel::ToolGate::All
+        rail::ToolGate::All
     }
 }
 
@@ -1993,8 +2382,8 @@ mod tests {
     /// rail; ended / never-requested phase → full rail.
     #[test]
     fn rail_gate_tracks_phase() {
-        assert_eq!(rail_gate(true), panel::ToolGate::SelectOnly);
-        assert_eq!(rail_gate(false), panel::ToolGate::All);
+        assert_eq!(rail_gate(true), rail::ToolGate::SelectOnly);
+        assert_eq!(rail_gate(false), rail::ToolGate::All);
     }
 
     #[test]
@@ -2648,6 +3037,185 @@ mod tests {
         );
     }
 
+    /// The floating +/− chips zoom the canvas view (the regression
+    /// behind "zoom + and - are not working": they used to step the
+    /// loupe's invisible factor). One + click steps the view scale
+    /// up on the next fit pass, and a zoomed worker view stops
+    /// issuing image-sized resize commands — the fit letterboxes
+    /// inside the stable window instead.
+    #[test]
+    fn zoom_chips_step_the_view_scale() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        // Settle: the floating Area pins a pass behind its layout.
+        for _ in 0..3 {
+            editor_frame(&ctx, &mut app, vec![]);
+        }
+        let before = app.canvas.scale();
+        let chip = ctx
+            .read_response(egui::Id::new("zoom-in"))
+            .expect("the zoom-in chip registers")
+            .rect;
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(chip.center())],
+        );
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(chip.center()),
+                egui::Event::PointerButton {
+                    pos: chip.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: chip.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(
+            (app.view_zoom - 1.25).abs() < 1e-6,
+            "one + click steps the zoom to 1.25×, got {}",
+            app.view_zoom
+        );
+        // The fit pass applies the zoom and no resize is issued
+        // while zoomed (the window is stable; the transform moves).
+        let full = editor_frame_output(&ctx, &mut app, vec![]);
+        assert!(
+            app.canvas.scale() > before,
+            "the view scale steps up with the zoom ({} → {})",
+            before,
+            app.canvas.scale()
+        );
+        assert!(
+            !inner_size_command_issued(&full),
+            "a zoomed worker view must not chase the image-sized window"
+        );
+    }
+
+    /// The zoom clamps at both ends and the 0.25 steps are exact:
+    /// mashing the + chip tops out at 4×, mashing the − chip bottoms
+    /// out at 0.5×, and stepping away from and back to 1.0 is
+    /// lossless (the worker resize policy's trigger).
+    #[test]
+    fn view_zoom_steps_clamp_and_recenter_exactly() {
+        let mut app = phase_app(false);
+        for _ in 0..30 {
+            app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        }
+        assert!(
+            (app.view_zoom - VIEW_ZOOM_MAX).abs() < 1e-6,
+            "mashing + clamps at {}×, got {}",
+            VIEW_ZOOM_MAX,
+            app.view_zoom
+        );
+        for _ in 0..60 {
+            app.handle_floating_action(Some(floating::FloatingAction::ZoomOut));
+        }
+        assert!(
+            (app.view_zoom - VIEW_ZOOM_MIN).abs() < 1e-6,
+            "mashing − clamps at {}×, got {}",
+            VIEW_ZOOM_MIN,
+            app.view_zoom
+        );
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        assert!(
+            (app.view_zoom - 1.0).abs() < 1e-6,
+            "+2 from the floor returns to exactly 1.0, got {}",
+            app.view_zoom
+        );
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomIn));
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomOut));
+        app.handle_floating_action(Some(floating::FloatingAction::ZoomOut));
+        assert!(
+            (app.view_zoom - 1.0).abs() < 1e-6,
+            "+2/−2 around 1.0 lands back at exactly 1.0, got {}",
+            app.view_zoom
+        );
+    }
+
+    /// The fit reserves [`CANVAS_PAD`] of air between the ring box
+    /// and the panel edge on every side, and the view zoom
+    /// multiplies the fit: at 2× the letterbox collapses to the
+    /// ring + pad inset and the panel clips the overflow.
+    #[test]
+    fn update_fit_reserves_padding_and_applies_zoom() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        // ppp is 1 in a synthetic context; a panel the image fits
+        // into (400+2·8+2·12 = 440 wide, 300+40 = 340 tall fits in
+        // 600×380 with slack).
+        app.canvas_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(48.0, 44.0),
+            egui::vec2(600.0, 380.0),
+        ));
+        app.update_fit(&ctx);
+        assert!(
+            (app.canvas.scale() - 1.0).abs() < 1e-6,
+            "no upscaling at 1× zoom"
+        );
+        // Slack = (600−24−416)/2 = 80, (380−24−316)/2 = 20; inset =
+        // ring (8) + pad (12).
+        let offset = app.canvas.content_offset();
+        assert!(
+            ((offset.x - 100.0).abs() < 1e-3) && ((offset.y - 40.0).abs() < 1e-3),
+            "the ring box centers in the padded panel at ring+pad, got {offset:?}"
+        );
+        app.view_zoom = 2.0;
+        app.update_fit(&ctx);
+        assert!(
+            (app.canvas.scale() - 2.0).abs() < 1e-6,
+            "the zoom multiplies the fit, got {}",
+            app.canvas.scale()
+        );
+        let offset = app.canvas.content_offset();
+        assert!(
+            ((offset.x - 28.0).abs() < 1e-3) && ((offset.y - 28.0).abs() < 1e-3),
+            "an overflowing box anchors at ring (16) + pad (12), got {offset:?}"
+        );
+        // The padding invariant: the ring box's outer edge never
+        // touches the panel border.
+        let image = app.image_screen_rect().expect("canvas rect cached");
+        let panel = app.canvas_rect.expect("fixture");
+        assert!(
+            (image.min.x - panel.min.x - 28.0).abs() < 1e-3,
+            "the image anchor carries the ring + pad inset"
+        );
+    }
+
+    /// The breadcrumb's Home link on a worker window is the Esc
+    /// contract: publish-if-unset Cancelled, ready for the close.
+    #[test]
+    fn navigate_home_publishes_cancelled_on_worker_windows() {
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::clone(&outcome), false);
+        app.handle_topbar_action(TopbarAction::NavigateHome, &ctx);
+        assert!(
+            matches!(&*outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "the Home link leaves the worker editor like Esc"
+        );
+    }
+
     /// Whether the frame's full output asked the viewport to close.
     fn close_command_issued(full: &egui::FullOutput) -> bool {
         full.viewport_output
@@ -3075,8 +3643,16 @@ mod tests {
     /// before gesturing, or the drag lands skewed by the height
     /// delta (observed: 4px between Move and Rect).
     fn canvas_drag(ctx: &egui::Context, app: &mut EditorApp, from: (f32, f32), to: (f32, f32)) {
-        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
-        let press = egui::pos2(canvas.min.x + from.0, canvas.min.y + from.1);
+        // Gestures are specified in image px: map them through the
+        // app's live view (the fit letterbox + zoom move the anchor
+        // off the panel corner), so fixtures stay view-independent.
+        let screen_at = |app: &EditorApp, (x, y): (f32, f32)| {
+            let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+            app.canvas
+                .view_over(canvas)
+                .image_to_logical(flintshot_core::Point::new(x, y))
+        };
+        let press = screen_at(app, from);
         editor_frame(
             ctx,
             app,
@@ -3090,7 +3666,7 @@ mod tests {
                 },
             ],
         );
-        let drag = egui::pos2(canvas.min.x + to.0, canvas.min.y + to.1);
+        let drag = screen_at(app, to);
         editor_frame(ctx, app, vec![egui::Event::PointerMoved(drag)]);
         editor_frame(
             ctx,
@@ -3312,10 +3888,188 @@ mod tests {
         assert!(!app.canvas_drag_active, "no drag may survive the release");
     }
 
-    /// A press that begins on the floating quick cluster (which
-    /// floats INSIDE the canvas rect) must not start an annotation
-    /// drag either — the floating rect gate holds exactly like the
-    /// panel gate.
+    /// The direct-save path composes dir + rendered template + ext.
+    #[test]
+    fn direct_save_path_composes_dir_name_ext() {
+        use flintshot_core::render_filename_template;
+        let rendered =
+            render_filename_template("{app}-{date}", "flintshot", "2026-09-18", "12-30-00");
+        assert_eq!(rendered, "flintshot-2026-09-18");
+        let with_dir = direct_save_path(&rendered, "/tmp/shots", OutputFormat::Png);
+        assert_eq!(
+            with_dir,
+            std::path::PathBuf::from("/tmp/shots/flintshot-2026-09-18.png")
+        );
+        let no_dir = direct_save_path(&rendered, "", OutputFormat::Jpeg);
+        assert_eq!(no_dir, std::path::PathBuf::from("flintshot-2026-09-18.jpg"));
+    }
+
+    /// Collision handling: the second save at the same target gets
+    /// a `-2` suffix before the extension.
+    #[test]
+    fn next_free_path_appends_collision_suffix() {
+        let dir = std::env::temp_dir().join("flintshot-collision-probe");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let first = dir.join("shot.png");
+        std::fs::write(&first, b"x").expect("seed");
+        let second = next_free_path(first.clone());
+        std::fs::write(&second, b"x").expect("seed 2");
+        let third = next_free_path(first.clone());
+        assert_eq!(second, dir.join("shot-2.png"), "first collision gets -2");
+        assert_eq!(third, dir.join("shot-3.png"), "second collision gets -3");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `ui.show-statusbar = false` hides the footer: the central
+    /// panel reaches the window bottom.
+    #[test]
+    fn statusbar_setting_hides_the_footer() {
+        let ctx = egui::Context::default();
+        let state = blank_state(400, 300);
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        app.apply_config(&{
+            let mut c = Config::default();
+            c.ui.show_statusbar = false;
+            c
+        });
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(640.0, 480.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        let canvas = app
+            .canvas_rect
+            .expect("ui_impl caches the central panel's rect");
+        assert!(
+            (canvas.bottom() - 480.0).abs() < 2.0,
+            "no footer: the canvas reaches the window bottom ({canvas:?})"
+        );
+    }
+
+    /// Task 008 regression: the paper-cutout dressing is chrome
+    /// AROUND the capture — no opaque shape may cover an interior
+    /// point of the image. The first ring implementation filled the
+    /// whole expanded rect with `PAPER_CREAM`, hiding the capture
+    /// entirely.
+    #[test]
+    fn canvas_dressing_never_covers_the_image() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(200, 150),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(640.0, 480.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw.clone(), |ui| app.ui_impl(ui));
+        let full = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+
+        let bg_id = app
+            .bg
+            .as_ref()
+            .expect("the bg texture uploads on frame 1")
+            .0
+            .id();
+        assert!(
+            full.shapes
+                .iter()
+                .any(|cs| matches!(&cs.shape, egui::Shape::Mesh(m) if m.texture_id == bg_id)),
+            "the capture's texture blit must be in the frame"
+        );
+
+        let image = app
+            .image_screen_rect()
+            .expect("frame 1 caches the canvas rect");
+        let [w, h] = [image.width(), image.height()];
+        let probes = [
+            image.center(),
+            egui::pos2(image.left() + w * 0.25, image.center().y),
+            egui::pos2(image.right() - w * 0.25, image.center().y),
+            egui::pos2(image.center().x, image.top() + h * 0.25),
+            egui::pos2(image.center().x, image.bottom() - h * 0.25),
+        ];
+        for cs in &full.shapes {
+            if let egui::Shape::Rect(r) = &cs.shape {
+                if r.fill == crate::theme::palette::PAPER_CREAM {
+                    for probe in probes {
+                        assert!(
+                            !r.rect.contains(probe),
+                            "dressing covers the capture at {probe:?} (rect {:?})",
+                            r.rect
+                        );
+                    }
+                }
+            }
+        }
+
+        // The paper shadow paints UNDER the blit: `Shadow::as_shape`
+        // fills its whole rect with a translucent tint, so painted
+        // over the capture it reads as an overlay.
+        let shadow_idx = full
+            .shapes
+            .iter()
+            .position(|cs| {
+                matches!(&cs.shape, egui::Shape::Rect(r)
+                    if r.fill == crate::theme::palette::SHADOW_PAPER)
+            })
+            .expect("the paper shadow paints");
+        let blit_idx = full
+            .shapes
+            .iter()
+            .position(|cs| matches!(&cs.shape, egui::Shape::Mesh(m) if m.texture_id == bg_id))
+            .expect("the capture's blit paints");
+        assert!(
+            shadow_idx < blit_idx,
+            "the shadow must precede the capture (shadow {shadow_idx}, blit {blit_idx})"
+        );
+
+        // The dressing never bleeds into the surrounding zones: any
+        // cream fill that touches the canvas is clipped to it.
+        let canvas = app.canvas_rect.expect("canvas rect cached");
+        for cs in &full.shapes {
+            if let egui::Shape::Rect(r) = &cs.shape {
+                if r.fill == crate::theme::palette::PAPER_CREAM && r.rect.intersects(canvas) {
+                    assert!(
+                        canvas.expand(1.0).contains_rect(cs.clip_rect),
+                        "dressing clip {cs:?} escapes the canvas {canvas:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn capture_config_seeds_the_new_capture_mode() {
+        let ctx = egui::Context::default();
+        let state = blank_state(400, 300);
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let mut app = EditorApp::new(state, &ctx, Rc::clone(&outcome), false);
+        app.apply_config(&{
+            let mut c = Config::default();
+            c.capture.default_mode = "fullscreen".into();
+            c
+        });
+        app.handle_topbar_action(TopbarAction::Capture, &ctx);
+        let captured = outcome.borrow().as_ref().map(|r| match r {
+            Ok(EditorOutcome::NewCapture { mode }) => *mode == NewCaptureMode::Fullscreen,
+            _ => false,
+        });
+        assert_eq!(
+            captured,
+            Some(true),
+            "fullscreen default-mode seeds the NewCapture exit"
+        );
+    }
+
     #[test]
     fn press_beginning_on_the_floating_cluster_never_starts_a_gesture() {
         let ctx = egui::Context::default();
@@ -3323,6 +4077,9 @@ mod tests {
         state.tool = Tool::Rect;
         state.selected_index = None;
         let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        // Settle pass: egui's Area sizing pass places the cluster on
+        // frame 1 and pins the exact rect on frame 2.
         editor_frame(&ctx, &mut app, vec![]);
         let chips = app.floating_rects.clone();
         assert!(!chips.is_empty(), "frames cached the floating chip rects");
@@ -3393,8 +4150,8 @@ mod tests {
         };
         frame(&ctx, &mut app, vec![]);
         let del = ctx
-            .read_response(egui::Id::new("delete"))
-            .expect("first frame registered the Delete chip");
+            .read_response(egui::Id::new("panel-delete"))
+            .expect("first frame registered the Selection section's Delete button");
         let at = del.rect.center();
         frame(
             &ctx,

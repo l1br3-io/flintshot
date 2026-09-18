@@ -68,6 +68,9 @@ pub enum Route {
     /// The capture-progress page (spinner + status while the portal
     /// delivers). Stub until Task 008.
     Loading,
+    /// The settings page (Task 010): reached from every route's
+    /// `⋯` overflow; Escape returns to Home.
+    Settings,
 }
 
 /// An editor route waiting to run: the editor state plus its
@@ -158,7 +161,7 @@ pub(crate) fn route_geometry(route: &Route) -> RouteGeometry {
             resizable: false,
             title: HOME_WINDOW_TITLE,
         },
-        Route::Editor(..) | Route::Loading => RouteGeometry {
+        Route::Editor(..) | Route::Loading | Route::Settings => RouteGeometry {
             size: EDITOR_PAGE_DEFAULT_SIZE,
             resizable: true,
             title: WINDOW_TITLE,
@@ -183,6 +186,9 @@ pub(crate) struct WindowApp {
     /// The live editor app, when the Editor route is active. A new
     /// image replaces it wholesale (Replace semantics).
     editor: Option<EditorApp>,
+    /// The settings page, when the Settings route is active. Built
+    /// on route entry from the bridge's config snapshot.
+    settings: Option<crate::settings::SettingsApp>,
     /// The page bridge shared with every editor construction.
     page_bridge: PageBridgeSlot,
     /// The app crate's routing state (routed-editor events).
@@ -228,6 +234,7 @@ impl WindowApp {
         Self {
             route,
             home: HomeApp::new(home_bridge, initial_status),
+            settings: None,
             editor,
             page_bridge,
             host,
@@ -277,6 +284,15 @@ impl WindowApp {
             }
             Route::Home | Route::Loading => {
                 self.editor = None;
+                self.settings = None;
+            }
+            Route::Settings => {
+                self.editor = None;
+                self.settings = Some(crate::settings::SettingsApp::new(
+                    self.home.load_config(),
+                    self.home.display_server(),
+                    self.home.version(),
+                ));
             }
         }
         self.route = route.clone();
@@ -370,7 +386,12 @@ impl WindowApp {
             Route::Home => self.home.logic_impl(ctx),
             // Editor: the editor app's own logic handles its input;
             // its directives (Hide → close) stay its own business.
-            Route::Editor(..) => {}
+            Route::Editor(..) | Route::Settings => {
+                // Editor: the editor app's own logic handles its
+                // input; its directives stay its own business.
+                // Settings: Escape + the debounce drain run in
+                // ui_impl, which owns the page borrow.
+            }
             Route::Loading => {
                 // The spinner animates and the delivery polls run on
                 // the heartbeat, not input.
@@ -392,22 +413,83 @@ impl WindowApp {
 
     /// Headless-callable core of [`App::ui`].
     pub(crate) fn ui_impl(&mut self, ui: &mut egui::Ui) {
-        // The header spans every route (home, editor, loading) —
-        // one identity line across the window's whole life.
-        let doc = match &self.route {
-            Route::Home => crate::header::Doc::Home,
-            Route::Editor(..) | Route::Loading => crate::header::Doc::Editor,
+        // The topbar spans every route (home, editor, loading) —
+        // one identity + action line across the window's whole life.
+        let surface = match &self.route {
+            Route::Home => crate::topbar::Surface::Home,
+            Route::Editor(..) => crate::topbar::Surface::Editor,
+            Route::Loading => crate::topbar::Surface::Loading,
+            Route::Settings => crate::topbar::Surface::Settings,
         };
         let status = if matches!(self.route, Route::Home) {
             Some(self.home.status_line())
         } else {
             None
         };
-        crate::header::show(ui, doc, status.as_deref());
-        match &self.route {
+        let enable = crate::topbar::enable_for(surface);
+        let topbar_action = crate::topbar::show(ui, surface, status.as_deref(), enable);
+        // Route the fired action: editor pages forward everything to
+        // the editor's dispatcher; Home dispatches Capture / Open to
+        // the home app's own paths; Loading is fully disabled and
+        // Settings stays inert until its route lands.
+        match topbar_action {
+            Some(crate::topbar::TopbarAction::Capture) if matches!(self.route, Route::Home) => {
+                self.home.start_capture(ui.ctx());
+            }
+            Some(crate::topbar::TopbarAction::Open) if matches!(self.route, Route::Home) => {
+                self.home.handle_open(ui.ctx());
+            }
+            // The ⋯ overflow's Settings entry opens the settings
+            // route from every route (spec §Settings route).
+            Some(crate::topbar::TopbarAction::Settings) => {
+                self.settings = Some(crate::settings::SettingsApp::new(
+                    self.home.load_config(),
+                    self.home.display_server(),
+                    self.home.version(),
+                ));
+                self.request_route(ui.ctx(), Route::Settings);
+            }
+            // The breadcrumb's Home link: back to the home route
+            // from any stage that can navigate (mirrors the editor
+            // Esc path — the page swaps in place, same window).
+            Some(crate::topbar::TopbarAction::NavigateHome)
+                if !matches!(self.route, Route::Home) =>
+            {
+                self.request_route(ui.ctx(), Route::Home);
+            }
+            Some(a) if matches!(self.route, Route::Editor(..)) => {
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.handle_topbar_action(a, ui.ctx());
+                }
+            }
+            _ => {}
+        }
+        match &mut self.route {
             Route::Home => self.home.ui_impl(ui),
             Route::Editor(..) => {}
             Route::Loading => draw_loading(ui),
+            Route::Settings => {
+                if let Some(page) = self.settings.as_mut() {
+                    let now = ui.ctx().input(|i| i.time);
+                    let escape = crate::settings::SettingsPage::show(ui, page, now);
+                    // Debounce drain: persist once the window has
+                    // passed. GOTCHA: the config watcher reloads the
+                    // app's config on every write — the page's
+                    // SAVE_DEBOUNCE coalesces rapid edits, and the
+                    // final write always lands.
+                    if let Some(config) = page.drain_save(now) {
+                        // Live-apply to the routed editor session,
+                        // if one is open under this route.
+                        if let Some(editor) = self.editor.as_mut() {
+                            editor.apply_config(config);
+                        }
+                        self.home.save_config(config);
+                    }
+                    if escape {
+                        self.request_route(ui.ctx(), Route::Home);
+                    }
+                }
+            }
         }
         if let Some(editor) = self.editor.as_mut() {
             editor.ui_impl(ui);
@@ -458,6 +540,28 @@ mod tests {
         }
     }
 
+    /// A home bridge counting Capture requests — the topbar's
+    /// Capture dispatch contract on the Home route.
+    #[derive(Clone, Default)]
+    struct CountingBridge {
+        captures: Rc<std::cell::Cell<usize>>,
+    }
+
+    impl HomeBridge for CountingBridge {
+        fn request_capture(&mut self) {
+            self.captures.set(self.captures.get() + 1);
+        }
+        fn open_image(&mut self, _path: std::path::PathBuf) -> bool {
+            false
+        }
+        fn request_paste(&mut self) -> bool {
+            false
+        }
+        fn poll_directive(&mut self) -> Option<HomeDirective> {
+            None
+        }
+    }
+
     /// A home bridge replaying pre-loaded directives (the pump's
     /// queue stand-in) — the Loading route's directive contract.
     #[derive(Clone, Default)]
@@ -493,6 +597,138 @@ mod tests {
             outcome,
             slot,
         )
+    }
+
+    /// The topbar's Capture hero dispatches to the home bridge on
+    /// the Home route — one click, exactly one capture request.
+    #[test]
+    fn home_topbar_capture_fires_the_bridge_request() {
+        let bridge = CountingBridge::default();
+        let slot: RouteSlot = Rc::new(RefCell::new(Route::Home));
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let mut app = WindowApp::new(
+            &egui::Context::default(),
+            WindowStart::Home,
+            Box::new(bridge.clone()),
+            Rc::new(RefCell::new(Box::new(StubPageBridge::default()))),
+            Box::new(RecordingHost::default()),
+            "connected".into(),
+            outcome,
+            slot,
+        );
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let frame = |ctx: &egui::Context, app: &mut WindowApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                // logic_impl only polls route state; the click
+                // contract is pure UI.
+                app.ui_impl(ui);
+            });
+        };
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let capture = ctx
+            .read_response(egui::Id::new("topbar-capture"))
+            .expect("the topbar Capture hero registers on Home")
+            .rect;
+        frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(capture.center())],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(capture.center()),
+                egui::Event::PointerButton {
+                    pos: capture.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: capture.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(
+            bridge.captures.get(),
+            1,
+            "one topbar Capture click = one bridge capture request"
+        );
+    }
+
+    /// The breadcrumb's Home link routes the editor page home
+    /// in-place — the same swap Esc performs, asserted through the
+    /// route slot (the geometry batch follows the kind change).
+    #[test]
+    fn navigate_home_from_the_editor_routes_home() {
+        let (mut app, _bridge, _host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let frame = |ctx: &egui::Context, app: &mut WindowApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        };
+        // Settle: the topbar lays out, then the crumb link
+        // hit-tests a pass behind it.
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let crumb = ctx
+            .read_response(egui::Id::new(("topbar-crumb", 0)))
+            .expect("the Home crumb registers as a link on the editor route")
+            .rect;
+        frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(crumb.center())],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(crumb.center()),
+                egui::Event::PointerButton {
+                    pos: crumb.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: crumb.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(
+            matches!(app.route, Route::Home),
+            "the Home crumb routes the editor page home"
+        );
+        assert!(app.editor.is_none(), "the editor page is dropped");
     }
 
     /// The external-capture seam holds mid-delivery: a Hide directive

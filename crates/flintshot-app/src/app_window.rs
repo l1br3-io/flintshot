@@ -1258,6 +1258,42 @@ impl HomeBridge for Bridge {
         self.shared.set_pending_capture(PumpCommand::Capture);
     }
 
+    // -- Settings-route plumbing (the real config handle) --
+
+    fn load_config(&mut self) -> flintshot_core::Config {
+        match Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not load config; using built-in defaults");
+                Config::default()
+            }
+        }
+    }
+
+    fn save_config(&mut self, config: &flintshot_core::Config) {
+        // GOTCHA: the config watcher reloads the app's config on
+        // every write; the settings page's SAVE_DEBOUNCE coalesces
+        // rapid edits so this write lands at most once per debounce
+        // window, and the final write always wins.
+        if let Err(e) = config.save() {
+            tracing::warn!(error = %e, "could not save config from the settings route");
+        }
+    }
+
+    fn display_server(&mut self) -> String {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            "Wayland".to_owned()
+        } else if std::env::var_os("DISPLAY").is_some() {
+            "X11".to_owned()
+        } else {
+            "unknown".to_owned()
+        }
+    }
+
+    fn version(&mut self) -> String {
+        env!("CARGO_PKG_VERSION").to_owned()
+    }
+
     fn open_image(&mut self, path: std::path::PathBuf) -> bool {
         match decode_image_file(&path) {
             Ok(state) => {

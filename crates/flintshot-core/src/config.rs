@@ -39,6 +39,9 @@ pub struct Config {
     /// Upload defaults (Phase 4; see [`UploadConfig`]).
     #[serde(default)]
     pub upload: UploadConfig,
+    /// Output defaults (settings route; see [`OutputConfig`]).
+    #[serde(default)]
+    pub output: OutputConfig,
 }
 
 /// Editor defaults: persist the user's last-used color, stroke width,
@@ -46,6 +49,10 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a settings table is naturally a flat row of on/off prefs"
+)]
 pub struct UiConfig {
     /// Default annotation color.
     #[serde(default = "default_color")]
@@ -86,6 +93,22 @@ pub struct UiConfig {
     /// the magnifier precedent).
     #[serde(default = "default_flip_to_move")]
     pub flip_to_move: bool,
+    /// When `true` (default), the editor shows the 30 px statusbar.
+    /// The settings route's `ui.show-statusbar` toggle writes here.
+    #[serde(default = "default_show_statusbar")]
+    pub show_statusbar: bool,
+    /// How the statusbar estimates the image's size:
+    /// `"heuristic"` (default; `w × h × 4`) or `"exact-png"` (a
+    /// PNG encode of the composed image). Unknown values resolve
+    /// `heuristic` with a warning — same string-tolerant policy as
+    /// `interaction-mode`.
+    #[serde(default = "default_statusbar_size_mode")]
+    pub statusbar_size_mode: String,
+    /// When `true` (default), UI microinteractions (spring pop,
+    /// section unfold, switch knob) run; `false` jumps every
+    /// transition to its end state.
+    #[serde(default = "default_animations")]
+    pub animations: bool,
 }
 
 impl Default for UiConfig {
@@ -99,6 +122,9 @@ impl Default for UiConfig {
             magnifier_always_on: false,
             interaction_mode: default_interaction_mode(),
             flip_to_move: default_flip_to_move(),
+            show_statusbar: default_show_statusbar(),
+            statusbar_size_mode: default_statusbar_size_mode(),
+            animations: default_animations(),
         }
     }
 }
@@ -133,6 +159,12 @@ pub struct CaptureConfig {
     /// [`Self::backend`].
     #[serde(default = "default_after_grab")]
     pub after_grab: String,
+    /// Which region the single Capture action grabs by default:
+    /// `"region"` (default; interactive selection), `"fullscreen"`,
+    /// or `"window"`. Unknown values resolve `region` with a
+    /// warning — same string-tolerant policy as [`Self::backend`].
+    #[serde(default = "default_default_mode")]
+    pub default_mode: String,
 }
 
 impl Default for CaptureConfig {
@@ -142,6 +174,7 @@ impl Default for CaptureConfig {
             default_delay_ms: default_delay_ms(),
             backend: default_capture_backend(),
             after_grab: default_after_grab(),
+            default_mode: default_default_mode(),
         }
     }
 }
@@ -267,6 +300,223 @@ fn default_interaction_mode() -> String {
 
 fn default_flip_to_move() -> bool {
     true
+}
+
+fn default_show_statusbar() -> bool {
+    true
+}
+
+fn default_statusbar_size_mode() -> String {
+    "heuristic".to_owned()
+}
+
+fn default_animations() -> bool {
+    true
+}
+
+fn default_default_mode() -> String {
+    "region".to_owned()
+}
+
+/// Output defaults for the settings route's `output.*` rows: the
+/// save format, JPEG quality, and the direct-save filename
+/// template / directory (used when a template is configured; the
+/// plain Save action keeps its file dialog otherwise).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub struct OutputConfig {
+    /// Saved-image format: `"png"` (default) or `"jpeg"`. Unknown
+    /// values resolve `png` with a warning.
+    #[serde(default = "default_output_format")]
+    pub format: String,
+    /// JPEG quality, 1–100 (default 90). Ignored for PNG.
+    #[serde(default = "default_jpeg_quality")]
+    pub jpeg_quality: u32,
+    /// Direct-save filename template, e.g.
+    /// `"{app}-{date}-{time}"`. Empty (default) = no direct save;
+    /// the Save action shows its file dialog. See
+    /// [`render_filename_template`].
+    #[serde(default)]
+    pub filename_template: String,
+    /// Direct-save directory. Empty (default) = the user's
+    /// pictures directory (platform standard).
+    #[serde(default)]
+    pub save_dir: String,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            format: default_output_format(),
+            jpeg_quality: default_jpeg_quality(),
+            filename_template: String::new(),
+            save_dir: String::new(),
+        }
+    }
+}
+
+fn default_output_format() -> String {
+    "png".to_owned()
+}
+
+fn default_jpeg_quality() -> u32 {
+    90
+}
+
+/// The `capture.default-mode` vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DefaultMode {
+    /// Interactive region selection.
+    Region,
+    /// The whole active monitor.
+    Fullscreen,
+    /// The focused window.
+    Window,
+}
+
+/// Resolve the configured default mode; unknown values warn and
+/// resolve [`DefaultMode::Region`] (string-tolerant policy).
+#[must_use]
+pub fn parse_default_mode(raw: &str) -> DefaultMode {
+    match raw {
+        "region" => DefaultMode::Region,
+        "fullscreen" => DefaultMode::Fullscreen,
+        "window" => DefaultMode::Window,
+        other => {
+            tracing::warn!("unknown capture.default-mode {other:?}; using \"region\"");
+            DefaultMode::Region
+        }
+    }
+}
+
+/// The `output.format` vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OutputFormat {
+    /// Lossless PNG (default).
+    Png,
+    /// Lossy JPEG at the configured quality.
+    Jpeg,
+}
+
+/// Resolve the configured output format; unknown values warn and
+/// resolve [`OutputFormat::Png`].
+#[must_use]
+pub fn parse_output_format(raw: &str) -> OutputFormat {
+    match raw {
+        "png" => OutputFormat::Png,
+        "jpeg" => OutputFormat::Jpeg,
+        other => {
+            tracing::warn!("unknown output.format {other:?}; using \"png\"");
+            OutputFormat::Png
+        }
+    }
+}
+
+/// How the settings route's size readout estimates the image's
+/// byte size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SizeMode {
+    /// `w × h × 4` — the uncompressed-RGBA heuristic (default).
+    Heuristic,
+    /// A PNG encode of the composed image — exact on-disk bytes.
+    ExactPng,
+}
+
+/// Resolve the configured size mode; unknown values warn and
+/// resolve [`SizeMode::Heuristic`].
+#[must_use]
+pub fn parse_size_mode(raw: &str) -> SizeMode {
+    match raw {
+        "heuristic" => SizeMode::Heuristic,
+        "exact-png" => SizeMode::ExactPng,
+        other => {
+            tracing::warn!("unknown ui.statusbar-size-mode {other:?}; using \"heuristic\"");
+            SizeMode::Heuristic
+        }
+    }
+}
+
+/// Estimate the image's byte size behind one API: the heuristic is
+/// `w × h × 4`; the exact mode PNG-encodes the composed image
+/// (falling back to the heuristic when no composed image is
+/// available — e.g. before the first render). Pure and
+/// deterministic for a given image.
+#[must_use]
+pub fn estimate_size_bytes(
+    dims: (u32, u32),
+    mode: SizeMode,
+    image: Option<&image::RgbaImage>,
+) -> u64 {
+    match mode {
+        SizeMode::Heuristic => heuristic_bytes(dims),
+        SizeMode::ExactPng => image.map_or_else(
+            || heuristic_bytes(dims),
+            |img| {
+                let mut buf = Vec::new();
+                if image::ImageEncoder::write_image(
+                    image::codecs::png::PngEncoder::new(&mut std::io::Cursor::new(&mut buf)),
+                    img.as_raw(),
+                    img.width(),
+                    img.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .is_err()
+                {
+                    return heuristic_bytes(dims);
+                }
+                u64::try_from(buf.len()).unwrap_or(u64::MAX)
+            },
+        ),
+    }
+}
+
+/// The RGBA heuristic: `w × h × 4`.
+#[must_use]
+pub fn heuristic_bytes(dims: (u32, u32)) -> u64 {
+    u64::from(dims.0) * u64::from(dims.1) * 4
+}
+
+/// Substitute `{app}` / `{date}` / `{time}` in a filename template
+/// and sanitize the result into a safe single-path-component
+/// filename. Unknown `{...}` placeholders pass through untouched
+/// (a typo stays visible in the saved name rather than silently
+/// vanishing). Pure.
+#[must_use]
+pub fn render_filename_template(template: &str, app: &str, date: &str, time: &str) -> String {
+    if template.is_empty() {
+        // The direct-save gate reads emptiness: no template, no
+        // direct save — an empty render, never a phantom "capture".
+        return String::new();
+    }
+    let rendered = template
+        .replace("{app}", app)
+        .replace("{date}", date)
+        .replace("{time}", time);
+    sanitize_filename(&rendered)
+}
+
+/// Strip path separators, drive/prefix punctuation, and control
+/// characters so a rendered template can never escape its
+/// directory or produce an invalid name. Empty input maps to
+/// `"capture"`. Pure.
+#[must_use]
+pub fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    if trimmed.is_empty() {
+        "capture".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn default_include_cursor() -> bool {
@@ -541,6 +791,117 @@ mod tests {
         assert_eq!(cfg.ui.default_font_size, 16.0);
         assert!(cfg.capture.include_cursor);
         assert_eq!(cfg.capture.default_delay_ms, 0);
+    }
+
+    #[test]
+    fn settings_fields_roundtrip_through_save_and_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.capture.default_mode = "fullscreen".into();
+        cfg.ui.show_statusbar = false;
+        cfg.ui.statusbar_size_mode = "exact-png".into();
+        cfg.ui.animations = false;
+        cfg.output.format = "jpeg".into();
+        cfg.output.jpeg_quality = 75;
+        cfg.output.filename_template = "{app}-{date}-{time}".into();
+        cfg.output.save_dir = "/tmp/shots".into();
+
+        cfg.save_to(&path).unwrap();
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.capture.default_mode, "fullscreen");
+        assert!(!back.ui.show_statusbar);
+        assert_eq!(back.ui.statusbar_size_mode, "exact-png");
+        assert!(!back.ui.animations);
+        assert_eq!(back.output.format, "jpeg");
+        assert_eq!(back.output.jpeg_quality, 75);
+        assert_eq!(back.output.filename_template, "{app}-{date}-{time}");
+        assert_eq!(back.output.save_dir, "/tmp/shots");
+    }
+
+    #[test]
+    fn old_config_without_settings_fields_loads_with_defaults() {
+        // A pre-settings-route TOML: none of the new fields exist.
+        // Every one of them must deserialize to its default.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("old.toml");
+        std::fs::write(
+            &path,
+            "[ui]\ndefault-stroke-width = 5.0\n[capture]\ninclude-cursor = false\n",
+        )
+        .unwrap();
+        let cfg = Config::load_from(&path).expect("old config loads");
+        assert_eq!(cfg.capture.default_mode, "region");
+        assert!(cfg.ui.show_statusbar);
+        assert_eq!(cfg.ui.statusbar_size_mode, "heuristic");
+        assert!(cfg.ui.animations);
+        assert_eq!(cfg.output.format, "png");
+        assert_eq!(cfg.output.jpeg_quality, 90);
+        assert!(cfg.output.filename_template.is_empty());
+        assert!(cfg.output.save_dir.is_empty());
+        // The old fields keep their own values.
+        assert_eq!(cfg.ui.default_stroke_width, 5.0);
+        assert!(!cfg.capture.include_cursor);
+    }
+
+    #[test]
+    fn settings_parsers_reject_unknowns_to_defaults() {
+        assert_eq!(parse_default_mode("region"), DefaultMode::Region);
+        assert_eq!(parse_default_mode("fullscreen"), DefaultMode::Fullscreen);
+        assert_eq!(parse_default_mode("window"), DefaultMode::Window);
+        assert_eq!(parse_default_mode("banana"), DefaultMode::Region);
+
+        assert_eq!(parse_output_format("png"), OutputFormat::Png);
+        assert_eq!(parse_output_format("jpeg"), OutputFormat::Jpeg);
+        assert_eq!(parse_output_format("webp"), OutputFormat::Png);
+
+        assert_eq!(parse_size_mode("heuristic"), SizeMode::Heuristic);
+        assert_eq!(parse_size_mode("exact-png"), SizeMode::ExactPng);
+        assert_eq!(parse_size_mode("telepathy"), SizeMode::Heuristic);
+    }
+
+    #[test]
+    fn filename_template_substitutes_known_and_keeps_unknown() {
+        let out =
+            render_filename_template("{app}-{date}-{time}", "flintshot", "2026-09-18", "12-30-00");
+        assert_eq!(out, "flintshot-2026-09-18-12-30-00");
+        // Unknown placeholders pass through untouched.
+        assert_eq!(
+            render_filename_template("shot-{zone}", "app", "d", "t"),
+            "shot-{zone}"
+        );
+        // Empty template stays empty (the direct-save gate reads
+        // emptiness, not the rendering).
+        assert_eq!(render_filename_template("", "app", "d", "t"), "");
+    }
+
+    #[test]
+    fn sanitize_filename_never_escapes_the_directory() {
+        assert_eq!(sanitize_filename("a/b/c"), "abc");
+        assert_eq!(sanitize_filename("..\\"), "capture");
+        assert_eq!(sanitize_filename("shot:*.png"), "shot.png");
+        assert_eq!(sanitize_filename("  .. "), "capture");
+        assert_eq!(sanitize_filename("ok-name_1.2"), "ok-name_1.2");
+    }
+
+    #[test]
+    fn size_estimator_spans_heuristic_and_exact_png() {
+        let dims = (1920, 1080);
+        assert_eq!(
+            estimate_size_bytes(dims, SizeMode::Heuristic, None),
+            1920 * 1080 * 4
+        );
+        // Exact: a real PNG encode of a solid image compresses far
+        // below the heuristic but stays positive.
+        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 0, 255]));
+        let exact = estimate_size_bytes((64, 64), SizeMode::ExactPng, Some(&img));
+        assert!(exact > 0 && exact < heuristic_bytes((64, 64)));
+        // Exact without a composed image falls back to the heuristic.
+        assert_eq!(
+            estimate_size_bytes(dims, SizeMode::ExactPng, None),
+            1920 * 1080 * 4
+        );
     }
 
     #[test]
