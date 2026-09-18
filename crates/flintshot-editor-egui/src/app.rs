@@ -1513,7 +1513,7 @@ impl EditorApp {
     /// rule satisfied by the long-lived window instead of a lingering
     /// process); worker mode keeps the platform rule.
     fn close_after_copy_window(&self) -> bool {
-        !self.is_page() && close_after_copy(std::env::var_os("WAYLAND_DISPLAY").is_some())
+        !self.is_page() && close_after_copy(os_owns_clipboard())
     }
 
     /// `+` chip / Ctrl+N handler: publish `NewCapture` and close —
@@ -1594,36 +1594,28 @@ impl EditorApp {
     /// Copy button handler: compose the final image, hand it to
     /// `arboard::Clipboard`, and publish `CopiedToClipboard`.
     ///
-    /// On X11 the clipboard is **owner-based**: the process that sets
-    /// the selection must stay alive and keep its `Clipboard` handle
-    /// alive, or the data is lost the moment the process exits. Closing
-    /// the editor window would terminate the process and wipe the
-    /// clipboard before the user can paste — so on X11 we **do not
-    /// close the window**; the handle lives in `self.clipboard`, the
-    /// Copy button shows "Copied!" feedback, and the user closes the
-    /// editor (Esc / X button) after pasting. The outcome is
-    /// pre-published either way, so a user-initiated close still
-    /// reports the copy.
-    ///
-    /// On Wayland (and by construction macOS/Windows, where the OS
-    /// owns the clipboard) the selection survives the process:
-    /// `arboard` drives the `zwlr_data_control` protocol there and
-    /// the compositor takes ownership when the selection is set. The
-    /// window closes immediately after the copy — Flameshot/Win11
-    /// semantics — instead of lingering for an X11 rule the session
-    /// never needed.
+    /// GOTCHA (probe evidence, ux-redesign-regressions spec §2): the
+    /// clipboard contents survive this window's close only where the
+    /// OS owns the clipboard (macOS/Windows). On Linux — **both**
+    /// display servers — the selection is served from an in-process
+    /// thread (arboard's wl-clipboard-rs model; `wl-copy` forks for
+    /// exactly this reason), and compositor adoption of an exited
+    /// client's `zwlr_data_control` selection is not guaranteed
+    /// (COSMIC rejects it; the old "the compositor takes ownership
+    /// when the selection is set" assumption is false). So a worker
+    /// Copy never auto-closes on Linux: the Copy hero shows the
+    /// "Copied" state and the user closes via Esc / X after pasting
+    /// (the outcome is pre-published, so the eventual close still
+    /// reports the copy). Page mode keeps the single window open on
+    /// every platform — the handle lives in `self.clipboard`.
     fn handle_copy(&mut self, ctx: &Context) {
         match copy_to_clipboard(&self.state, &mut self.clipboard) {
             Ok(()) => {
                 tracing::info!("editor copied to clipboard");
                 self.copied = true;
-                // Page mode keeps the window open on every platform —
-                // the single window is long-lived, so the X11
-                // owner-clipboard hold is satisfied by the window
-                // itself (`self.clipboard`), not a lingering process.
                 self.publish_side_effect_outcome(EditorOutcome::CopiedToClipboard);
                 if self.close_after_copy_window() {
-                    tracing::debug!("compositor-owned clipboard; closing after copy");
+                    tracing::debug!("OS-owned clipboard; closing after copy");
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
@@ -1919,16 +1911,35 @@ pub(crate) fn compose_selection_aware(state: &EditorState) -> image::RgbaImage {
     }
 }
 
-/// Compose the final image and place it on the system clipboard.
+/// Whether a successful worker Copy should close the editor window,
+/// given the platform's clipboard ownership model. Pure seam over a
+/// cfg constant so the table is pinned by tests on any platform.
 ///
-/// Whether a successful Copy should close the editor window, given
-/// that the session sets `WAYLAND_DISPLAY`. Pure seam over the env
-/// read at the call site so the platform policy is pinned by tests:
-/// the X11 owner-clipboard rule is the *only* reason to linger (the
-/// process must keep serving the selection), and it does not apply
-/// under Wayland's compositor-owned `zwlr_data_control`.
-fn close_after_copy(wayland_display_set: bool) -> bool {
-    wayland_display_set
+/// GOTCHA (probe evidence, ux-redesign-regressions spec §2): the old
+/// assumption — "the compositor takes ownership when the selection is
+/// set" — is false for arboard's wl-clipboard-rs thread-serve model
+/// (`wl-copy` forks for exactly this reason), and COSMIC does not
+/// adopt an exited client's `zwlr_data_control` selection. On Linux
+/// the serve thread must outlive the user's paste, on **both**
+/// display servers (X11 was already owner-clipboard). macOS/Windows
+/// own the clipboard OS-side, so closing is safe there.
+fn close_after_copy(os_owns_clipboard: bool) -> bool {
+    os_owns_clipboard
+}
+
+/// Whether this platform's OS owns the clipboard contents (the
+/// source process may exit freely). True on macOS/Windows; false on
+/// Linux, where the serving thread is in-process only.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn os_owns_clipboard() -> bool {
+    true
+}
+
+/// Linux (X11 and Wayland): the selection is served from an
+/// in-process thread — see [`close_after_copy`]'s probe note.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn os_owns_clipboard() -> bool {
+    false
 }
 
 /// When a non-degenerate `state.selection` is active, Copy emits just
@@ -2837,12 +2848,21 @@ mod tests {
     }
 
     #[test]
-    fn copy_closes_on_wayland_and_lingers_on_x11() {
-        // The X11 owner-clipboard rule is the only reason the editor
-        // ever stayed open after a copy; a Wayland session (where the
-        // env var is set) closes immediately.
-        assert!(close_after_copy(true), "Wayland: close after copy");
-        assert!(!close_after_copy(false), "X11: keep serving the selection");
+    fn copy_lingers_on_linux_closes_where_the_os_owns_the_clipboard() {
+        // Probe evidence (ux-redesign-regressions spec §2): COSMIC
+        // does not adopt an exited client's zwlr_data_control
+        // selection, and arboard serves the selection from an
+        // in-process thread — so a Linux worker copy must linger on
+        // both display servers. macOS/Windows own the clipboard
+        // OS-side, so the close is safe there.
+        assert!(
+            !close_after_copy(false),
+            "Linux (X11 or Wayland): keep serving the selection"
+        );
+        assert!(
+            close_after_copy(true),
+            "OS-owned clipboard (macOS/Windows): close after copy"
+        );
     }
 
     // --- Single-window page mode (single-window Task 003) ---
@@ -3295,12 +3315,11 @@ mod tests {
     }
 
     #[test]
-    fn worker_copy_still_closes_on_wayland() {
+    fn worker_copy_never_closes_on_linux() {
         let app = phase_app(false);
-        assert_eq!(
-            app.close_after_copy_window(),
-            close_after_copy(std::env::var_os("WAYLAND_DISPLAY").is_some()),
-            "worker mode keeps the platform-conditional close"
+        assert!(
+            !app.close_after_copy_window(),
+            "worker mode lingers on Linux — the serve thread must outlive the paste"
         );
     }
 
