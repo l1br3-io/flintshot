@@ -10,7 +10,7 @@
 //! - `chrome` (private) — the Move-tool hover / grab outline shared
 //!   by the editor window and the overlay (see `crate::chrome`).
 //! - `topbar` (private) — the 44 px forest top bar (flame brand,
-//!   breadcrumb, Capture / Copy / Open heroes, `⋯` overflow) on
+//!   breadcrumb, Capture / Copy / Open heroes, dots overflow) on
 //!   every routed surface and the worker editor window.
 //! - `floating` (private) — the on-canvas quick cluster (undo /
 //!   redo / magnifier / loupe zoom) drawn over the canvas.

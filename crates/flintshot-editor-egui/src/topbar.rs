@@ -1,9 +1,10 @@
 //! The topbar — zone 1 of the five-zone window: a 44 px forest-deep
-//! cutout bar with the flame brand + `Flintshot | Home ▸ Editor`
+//! cutout bar with the flame brand + the `Flintshot | Home > Editor`
+//! breadcrumb
 //! identity (the breadcrumb's past stages are links home, the
 //! current stage gold + bold), exactly three hero ghost buttons —
 //! **Capture** and **Copy** with the gold hero-key border,
-//! **Open** plain — and the `⋯` overflow.
+//! **Open** plain — and the dots overflow chip.
 //!
 //! One component serves every routed surface ([`Surface`]): the
 //! heroes stay, the overflow contents vary by route (editor:
@@ -135,7 +136,7 @@ pub(crate) fn show(
                     hero(
                         ui,
                         "topbar-open",
-                        "🗀",
+                        g_open,
                         "Open",
                         false,
                         enable.has(Enable::OPEN),
@@ -145,7 +146,7 @@ pub(crate) fn show(
                     let copy_resp = hero(
                         ui,
                         "topbar-copy",
-                        "⧉",
+                        crate::panel::g_copy,
                         if copied { "Copied" } else { "Copy" },
                         true,
                         enable.has(Enable::COPY),
@@ -159,7 +160,7 @@ pub(crate) fn show(
                     hero(
                         ui,
                         "topbar-capture",
-                        "✚",
+                        g_capture,
                         "Capture",
                         true,
                         enable.has(Enable::CAPTURE),
@@ -223,7 +224,8 @@ fn brand(ui: &mut egui::Ui, surface: Surface, fired: &mut Option<TopbarAction>) 
     breadcrumb(ui, surface, fired);
 }
 
-/// The breadcrumb (`Home ▸ Editor`): past stages are links back
+/// The breadcrumb (`Home > Editor`, painted chevrons): past
+/// stages are links back
 /// home — gold + underline on hover, a click reports
 /// [`TopbarAction::NavigateHome`] — while the current stage is
 /// static gold + bold. Links are live only on surfaces that can
@@ -283,14 +285,12 @@ fn breadcrumb(ui: &mut egui::Ui, surface: Surface, fired: &mut Option<TopbarActi
                 .galley(rect.min, galley, if cur { p::GOLD } else { p::CREAM_DIM });
         }
         if i + 1 < stages.len() {
-            ui.painter().text(
-                ui.cursor().min,
-                egui::Align2::LEFT_CENTER,
-                "▸",
-                egui::FontId::proportional(theme::TYPE_XS),
-                p::with_alpha(p::CREAM_DIM, 128),
-            );
-            ui.add_space(14.0);
+            // The stage separator: a painted chevron (the text
+            // glyph is tofu in the font chain, U+25B8 — cmap scan).
+            let (sep_rect, _) =
+                ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+            g_chevron(ui.painter(), sep_rect, p::with_alpha(p::CREAM_DIM, 128));
+            ui.add_space(2.0);
         }
     }
 }
@@ -305,7 +305,7 @@ fn breadcrumb(ui: &mut egui::Ui, surface: Surface, fired: &mut Option<TopbarActi
 fn hero(
     ui: &mut egui::Ui,
     id: &'static str,
-    icon: &str,
+    glyph: crate::rail::Glyph,
     label: &str,
     hero_key: bool,
     enabled: bool,
@@ -322,7 +322,7 @@ fn hero(
             if !enabled {
                 ui.disable();
             }
-            widgets::ghost_button(ui, egui::Id::new(id), icon, label, hero_key, copied)
+            widgets::ghost_button(ui, egui::Id::new(id), glyph, label, hero_key, copied)
         })
         .inner;
     if enabled && resp.clicked() {
@@ -331,7 +331,8 @@ fn hero(
     resp
 }
 
-/// The overflow chip's `⋯`: three centered vector dots. Painted,
+/// The overflow chip's dots glyph: three centered vector dots.
+/// Painted,
 /// never text — the embedded font chain's cmaps lack U+22EF, so
 /// the text glyph renders as tofu (ux-redesign-regressions spec's
 /// cmap scan).
@@ -341,7 +342,87 @@ fn more_dots(p: &egui::Painter, rect: egui::Rect, c: Color32) {
     }
 }
 
-/// The `⋯` overflow: an about note + route-varying items. Editor
+// --- the topbar glyph kit (ux-redesign-regressions task 002) ---
+//
+// Every icon the topbar renders is a painted vector glyph, never
+// text: the embedded font chain's cmaps lack U+22EF, U+29C9,
+// U+25B8, U+2913, U+21E7 and U+2713 (the spec's cmap scan), so
+// those codepoints render as tofu — and emoji-fallback codepoints
+// render inconsistently across hosts. Copy / save / upload / check
+// reuse `panel`'s existing `pub(crate)` glyphs; the rest live here.
+// Glyph space is ±7 with +Y down (`rail::pt`).
+
+/// Capture: a plus in a ring — the hero's "new capture" mark.
+fn g_capture(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    p.circle_stroke(crate::rail::pt(r, 0.0, 0.0), 6.0, egui::Stroke::new(2.0, c));
+    crate::rail::seg(p, r, (-3.0, 0.0), (3.0, 0.0), c, 2.0);
+    crate::rail::seg(p, r, (0.0, -3.0), (0.0, 3.0), c, 2.0);
+}
+
+/// Open: a folder — tabbed top edge, closed body.
+fn g_open(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    p.add(egui::Shape::line(
+        vec![
+            crate::rail::pt(r, -7.0, -5.0),
+            crate::rail::pt(r, -2.0, -5.0),
+            crate::rail::pt(r, 0.0, -3.0),
+            crate::rail::pt(r, 7.0, -3.0),
+            crate::rail::pt(r, 7.0, 5.0),
+            crate::rail::pt(r, -7.0, 5.0),
+            crate::rail::pt(r, -7.0, -5.0),
+        ],
+        egui::Stroke::new(2.0, c),
+    ));
+}
+
+/// Paste: a clipboard sheet with its clip peeking above.
+fn g_paste(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    p.rect(
+        egui::Rect::from_min_size(crate::rail::pt(r, -5.0, -4.0), egui::vec2(10.0, 11.0)),
+        egui::CornerRadius::same(2),
+        Color32::TRANSPARENT,
+        egui::Stroke::new(2.0, c),
+        egui::StrokeKind::Middle,
+    );
+    p.rect(
+        egui::Rect::from_min_size(crate::rail::pt(r, -2.0, -6.0), egui::vec2(4.0, 2.5)),
+        egui::CornerRadius::same(1),
+        c,
+        egui::Stroke::NONE,
+        egui::StrokeKind::Middle,
+    );
+}
+
+/// About: an information dot and stem.
+fn g_about(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    p.circle_filled(crate::rail::pt(r, 0.0, -5.0), 1.6, c);
+    crate::rail::seg(p, r, (0.0, -1.5), (0.0, 6.0), c, 2.0);
+}
+
+/// Settings: a cog — center ring with four radial ticks.
+fn g_settings(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    p.circle_stroke(crate::rail::pt(r, 0.0, 0.0), 3.0, egui::Stroke::new(2.0, c));
+    for (dx, dy) in [(0.0_f32, -1.0), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)] {
+        crate::rail::seg(p, r, (dx * 4.5, dy * 4.5), (dx * 6.5, dy * 6.5), c, 2.0);
+    }
+}
+
+/// The breadcrumb separator: a small filled right-pointing
+/// triangle (U+25B8's text glyph is tofu in the font chain —
+/// the cmap scan).
+fn g_chevron(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            crate::rail::pt(r, -2.0, -4.0),
+            crate::rail::pt(r, 3.0, 0.0),
+            crate::rail::pt(r, -2.0, 4.0),
+        ],
+        c,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// The dots overflow: an about note + route-varying items. Editor
 /// surfaces get Save / Upload / Paste; every surface gets the
 /// Settings entry (inert until its route lands — the action is
 /// reported and callers ignore it for now).
@@ -377,31 +458,43 @@ fn overflow(
         .show(|ui| {
             ui.set_min_width(212.0);
             if enable.has(Enable::EDITOR_ITEMS) {
-                if om_row(ui, "topbar-save", "⤓", "Save", Some("Ctrl+S")) {
+                if om_row(
+                    ui,
+                    "topbar-save",
+                    crate::panel::g_save,
+                    "Save",
+                    Some("Ctrl+S"),
+                ) {
                     *fired = Some(TopbarAction::Save);
                 }
-                if om_row(ui, "topbar-upload", "⇧", "Upload", None) {
+                if om_row(ui, "topbar-upload", crate::panel::g_upload, "Upload", None) {
                     *fired = Some(TopbarAction::Upload);
                 }
-                if om_row(ui, "topbar-paste", "📋", "Paste", Some("Ctrl+V")) {
+                if om_row(ui, "topbar-paste", g_paste, "Paste", Some("Ctrl+V")) {
                     *fired = Some(TopbarAction::Paste);
                 }
                 om_separator(ui);
             }
             // The about row: informational, hover-only.
-            om_row_about(ui, "ℹ", "About Flintshot");
+            om_row_about(ui, g_about, "About Flintshot");
             om_note(ui, status);
             om_separator(ui);
-            if om_row(ui, "topbar-settings", "⚙", "Settings", None) {
+            if om_row(ui, "topbar-settings", g_settings, "Settings", None) {
                 *fired = Some(TopbarAction::Settings);
             }
             let _ = surface;
         });
 }
 
-/// One clickable overflow row: icon + label + optional kbd chip,
-/// paper-cream with a dim hover.
-fn om_row(ui: &mut egui::Ui, id: &'static str, icon: &str, label: &str, kbd: Option<&str>) -> bool {
+/// One clickable overflow row: painted glyph + label + optional
+/// kbd chip, paper-cream with a dim hover.
+fn om_row(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    glyph: crate::rail::Glyph,
+    label: &str,
+    kbd: Option<&str>,
+) -> bool {
     use crate::theme::palette as p;
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
@@ -418,13 +511,11 @@ fn om_row(ui: &mut egui::Ui, id: &'static str, icon: &str, label: &str, kbd: Opt
         egui::Stroke::NONE,
         egui::StrokeKind::Middle,
     );
-    ui.painter().text(
-        egui::pos2(rect.left() + 10.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        icon,
-        egui::FontId::proportional(theme::TYPE_SM),
-        p::INK,
+    let glyph_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 17.0, rect.center().y),
+        egui::vec2(14.0, 14.0),
     );
+    glyph(ui.painter(), glyph_rect, p::INK);
     ui.painter().text(
         egui::pos2(rect.left() + 32.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -446,17 +537,15 @@ fn om_row(ui: &mut egui::Ui, id: &'static str, icon: &str, label: &str, kbd: Opt
 
 /// The about row — informational (the About "action" is the note
 /// itself), so hover-only with the same row styling.
-fn om_row_about(ui: &mut egui::Ui, icon: &str, label: &str) {
+fn om_row_about(ui: &mut egui::Ui, glyph: crate::rail::Glyph, label: &str) {
     use crate::theme::palette as p;
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-    ui.painter().text(
-        egui::pos2(rect.left() + 10.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        icon,
-        egui::FontId::proportional(theme::TYPE_SM),
-        p::INK,
+    let glyph_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 17.0, rect.center().y),
+        egui::vec2(14.0, 14.0),
     );
+    glyph(ui.painter(), glyph_rect, p::INK);
     ui.painter().text(
         egui::pos2(rect.left() + 32.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -530,7 +619,7 @@ mod tests {
         ]
     }
 
-    /// The overflow chip's `⋯` is painted as vector dots, never
+    /// The overflow chip's dots are painted as vector circles, never
     /// text: the embedded font chain's cmaps lack U+22EF, so the
     /// text glyph renders as tofu (ux-redesign-regressions spec's
     /// cmap scan).
@@ -569,6 +658,103 @@ mod tests {
                 "dots sit on the chip's centerline"
             );
         }
+    }
+
+    /// The glyph kit, machine-checked (task 002 acceptance): every
+    /// kit glyph, painted into a 24 px rect on a test painter,
+    /// produces at least one shape whose visual bounds stay inside
+    /// (or stroke-adjacent to) the rect — no zero-size or runaway
+    /// geometry.
+    #[test]
+    fn glyph_kit_paints_bounds_inside_the_glyph_rect() {
+        let kit: &[(&str, crate::rail::Glyph)] = &[
+            ("capture", g_capture),
+            ("copy", crate::panel::g_copy),
+            ("open", g_open),
+            ("more", more_dots),
+            ("save", crate::panel::g_save),
+            ("upload", crate::panel::g_upload),
+            ("paste", g_paste),
+            ("about", g_about),
+            ("settings", g_settings),
+            ("check", crate::panel::g_check),
+            ("chevron", g_chevron),
+        ];
+        for (name, glyph) in kit {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx);
+            let rect = egui::Rect::from_min_size(egui::pos2(40.0, 40.0), egui::vec2(24.0, 24.0));
+            let full = ctx.run_ui(screen(0.0, vec![]), |ui| {
+                glyph(ui.painter(), rect, theme::palette::CREAM_TEXT);
+            });
+            let tol = 3.0_f32;
+            let bounds: Vec<egui::Rect> = full
+                .shapes
+                .iter()
+                .map(|s| s.shape.visual_bounding_rect())
+                .filter(|b| b.intersects(rect.expand(tol)))
+                .collect();
+            assert!(
+                !bounds.is_empty(),
+                "{name}: the glyph painted at least one shape"
+            );
+            for b in &bounds {
+                assert!(
+                    rect.expand(tol).contains_rect(*b),
+                    "{name}: shape bounds {b:?} runaway from the glyph rect {rect:?}"
+                );
+                assert!(
+                    b.width() > 0.0 || b.height() > 0.0,
+                    "{name}: zero-size shape {b:?}"
+                );
+            }
+        }
+    }
+
+    /// Tofu ban (task 003 acceptance): the cmap-verified-absent
+    /// codepoints — U+22EF, U+29C9, U+25B8, U+2913, U+21E7,
+    /// U+2713 (spec §3's scan of Plus Jakarta Sans, Ubuntu-Light,
+    /// `NotoEmoji`, emoji-icon-font) — must not appear anywhere in
+    /// `crates/flintshot-editor-egui/src`: icons are painted
+    /// vector glyphs, never font-chain text. Mirrors the
+    /// `Color32` token scan in `theme/mod.rs`; the needle chars
+    /// are assembled from codepoints at runtime so this test's
+    /// own source cannot trip the scan. Re-derive the list from a
+    /// cmap check of the actual font files if the chain changes.
+    #[test]
+    fn banned_tofu_codepoints_are_absent_from_the_crate_source() {
+        fn scan(dir: &std::path::Path, banned: &[char], hits: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    scan(&path, banned, hits);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let Ok(body) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    if banned.iter().any(|c| body.contains(*c)) {
+                        hits.push(path);
+                    }
+                }
+            }
+        }
+        // Assembled from codepoints so this test's own source
+        // cannot trip the scan. Re-derive from a cmap check of the
+        // actual font files if the chain changes.
+        let banned: Vec<char> = [0x22EF, 0x29C9, 0x25B8, 0x2913, 0x21E7, 0x2713]
+            .iter()
+            .filter_map(|&u| char::from_u32(u))
+            .collect();
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits = Vec::new();
+        scan(&src, &banned, &mut hits);
+        assert!(
+            hits.is_empty(),
+            "tofu codepoints in source (icons must be painted glyphs): {hits:?}"
+        );
     }
 
     /// The topbar is a top strip: the central panel starts at its
@@ -832,7 +1018,7 @@ mod tests {
     }
 
     /// The route suffix is gone: the identity reads
-    /// `Flintshot | Home ▸ Editor` — no duplicated `| Editor` label,
+    /// `Flintshot | Home > Editor` — no duplicated `| Editor` label,
     /// but the `|` separator between title and breadcrumb remains.
     #[test]
     fn route_suffix_is_gone_and_separator_remains() {
