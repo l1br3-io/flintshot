@@ -68,3 +68,5 @@ Format: **Context · Decision · Consequences**.
 | ADR-0056 | [The five-zone layout and action redistribution](ADR-0056-five-zone-layout.md) |
 | ADR-0057 | [Additive settings schema with live apply](ADR-0057-settings-config-schema.md) |
 | ADR-0058 | [Sticky tools by default](ADR-0058-sticky-tools-by-default.md) |
+| ADR-0059 | [Painted vector glyphs, never font-fallback icons](ADR-0059-painted-glyphs-over-font-icons.md) |
+| ADR-0060 | [A worker Copy lingers on Linux — process exit wipes the selection](ADR-0060-worker-copy-lingers-on-linux.md) |
