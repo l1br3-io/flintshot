@@ -65,6 +65,21 @@ Categories used below:
 - `capture.default-mode` seeds the topbar Capture exit (fullscreen
   skips the selection; window falls back to region).
 
+### Fixed
+
+- The editor hid the captured image: the task-008 paper-cutout ring
+  filled the whole expanded rect (image included) with opaque cream,
+  and a second inside stroke ate the capture's border. The ring is
+  now a stroked band strictly outside the image rect, masked by a
+  regression test (`canvas_dressing_never_covers_the_image`).
+- `flintshot-core` re-exported the task-011 config helpers
+  (`estimate_size_bytes`, `SizeMode`, …) only in the working tree —
+  the committed tree did not compile. The re-exports are committed.
+- Vacuous leftovers from the ux-redesign effort: the statusbar
+  hide-the-footer test lost its assertion to debug prints, and the
+  floating-chip module carried a `DBG` eprintln plus an
+  assertion-less debug test. Both are real tests again.
+
 ### Removed
 
 - The quiet header bar (tab-strip + AI seams), the side panel's tools

@@ -246,13 +246,6 @@ fn cutout_chip(
     );
     let ink = if selected { p::FOREST_INK } else { p::INK };
     glyph(ui.painter(), rect, ink);
-    if format!("{id:?}").contains("magnifier") {
-        eprintln!(
-            "DBG chip {id:?} rect {rect:?} hovered {} clicked {}",
-            resp.hovered(),
-            resp.clicked()
-        );
-    }
     resp
 }
 
@@ -384,9 +377,22 @@ mod tests {
     }
 
     #[test]
-    fn debug_undo_hover() {
+    fn undo_chip_reports_hover() {
         let mut mag = Magnifier::new();
         let ctx = frame(vec![], false, &mut mag);
+        // Settle passes: the Area places on the sizing pass and pins
+        // on the next, so the chip rect read here is the final one.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(canvas(800.0, 600.0)),
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    let _ = show(ui.ctx(), canvas(800.0, 600.0), false, &mut mag);
+                },
+            );
+        }
         let chip = ctx.read_response(egui::Id::new("undo")).expect("undo");
         let at = chip.rect.center();
         let raw = egui::RawInput {
@@ -396,10 +402,11 @@ mod tests {
         };
         let _ = ctx.run_ui(raw, |ui| {
             let _ = show(ui.ctx(), canvas(800.0, 600.0), false, &mut mag);
-            if let Some(r) = ctx.read_response(egui::Id::new("undo")) {
-                eprintln!("DBG UNDO hovered {}", r.hovered());
-            }
         });
+        let after = ctx
+            .read_response(egui::Id::new("undo"))
+            .expect("undo chip persists");
+        assert!(after.hovered(), "the pointer sits on the undo chip");
     }
 
     #[test]

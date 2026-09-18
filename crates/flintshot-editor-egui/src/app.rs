@@ -571,20 +571,18 @@ impl EditorApp {
         let ring = image_rect.expand(CANVAS_RING);
         // Paper shadow under everything.
         painter.add(crate::theme::SHADOW_PAPER.as_shape(ring, radius));
-        // The cream ring around the image.
-        painter.rect(
-            ring,
-            radius,
-            p::PAPER_CREAM,
-            egui::Stroke::NONE,
-            egui::StrokeKind::Middle,
-        );
+        // The cream ring around the image: a stroked band strictly
+        // outside the image rect. A fill over `ring` would cover the
+        // capture entirely, and an inside stroke would eat its border
+        // (spec: the dressing never goes over the image). The band
+        // also masks the blit's square corners into the cutout's
+        // rounded ones.
         painter.rect(
             image_rect,
             radius,
             egui::Color32::TRANSPARENT,
             egui::Stroke::new(CANVAS_RING, p::PAPER_CREAM),
-            egui::StrokeKind::Inside,
+            egui::StrokeKind::Outside,
         );
         // The forest hairline at the ring's outer edge.
         painter.rect(
@@ -3680,20 +3678,77 @@ mod tests {
             )),
             ..egui::RawInput::default()
         };
-        let bottom = std::cell::Cell::new(0.0_f32);
-        let _ = ctx.run_ui(raw, |ui| {
-            app.ui_impl(ui);
-            let central = egui::CentralPanel::default().show(ui, |ui| {
-                ui.allocate_space(egui::vec2(1.0, 1.0));
-            });
-            bottom.set(central.response.rect.bottom());
-            eprintln!(
-                "DBG central bottom {} top {}",
-                central.response.rect.bottom(),
-                central.response.rect.top()
-            );
-        });
-        eprintln!("DBG bottom {}", bottom.get());
+        let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        let canvas = app
+            .canvas_rect
+            .expect("ui_impl caches the central panel's rect");
+        assert!(
+            (canvas.bottom() - 480.0).abs() < 2.0,
+            "no footer: the canvas reaches the window bottom ({canvas:?})"
+        );
+    }
+
+    /// Task 008 regression: the paper-cutout dressing is chrome
+    /// AROUND the capture — no opaque shape may cover an interior
+    /// point of the image. The first ring implementation filled the
+    /// whole expanded rect with `PAPER_CREAM`, hiding the capture
+    /// entirely.
+    #[test]
+    fn canvas_dressing_never_covers_the_image() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(200, 150),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(640.0, 480.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw.clone(), |ui| app.ui_impl(ui));
+        let full = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+
+        let bg_id = app
+            .bg
+            .as_ref()
+            .expect("the bg texture uploads on frame 1")
+            .0
+            .id();
+        assert!(
+            full.shapes
+                .iter()
+                .any(|cs| matches!(&cs.shape, egui::Shape::Mesh(m) if m.texture_id == bg_id)),
+            "the capture's texture blit must be in the frame"
+        );
+
+        let image = app
+            .image_screen_rect()
+            .expect("frame 1 caches the canvas rect");
+        let [w, h] = [image.width(), image.height()];
+        let probes = [
+            image.center(),
+            egui::pos2(image.left() + w * 0.25, image.center().y),
+            egui::pos2(image.right() - w * 0.25, image.center().y),
+            egui::pos2(image.center().x, image.top() + h * 0.25),
+            egui::pos2(image.center().x, image.bottom() - h * 0.25),
+        ];
+        for cs in &full.shapes {
+            if let egui::Shape::Rect(r) = &cs.shape {
+                if r.fill == crate::theme::palette::PAPER_CREAM {
+                    for probe in probes {
+                        assert!(
+                            !r.rect.contains(probe),
+                            "dressing covers the capture at {probe:?} (rect {:?})",
+                            r.rect
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
