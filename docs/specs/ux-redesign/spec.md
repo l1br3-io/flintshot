@@ -49,7 +49,7 @@ config field or action; read-only rows are visually dashed/locked.
 | Fonts        | Plus Jakarta Sans only (mockups comply)                                     |
 | Pin          | Removed feature — does not exist, not part of this effort                   |
 | Palette      | Refreshed to the mockup's token values (table below) — approved via mockup  |
-| Floating chips | Restyled to cutout chips; undo/redo top-left, magnifier bottom-right; no Fit chip (no canvas zoom exists) |
+| Floating chips | Restyled to cutout chips; undo/redo top-left, magnifier + view zoom +/− bottom-right (the chips step the canvas view's zoom multiplier over the fit) |
 
 ### Assumptions (surface-correction invited)
 
@@ -148,7 +148,7 @@ retire; all consumers move to this table in the palette task.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ 1 Topbar  🔥 Flintshot | Route | Home ▸ Editor  ✚Capture ⧉Copy 🗀Open ⋯ │ 44px forest-deep
+│ 1 Topbar  🔥 Flintshot | Home ▸ Editor       ✚Capture ⧉Copy 🗀Open ⋯ │ 44px forest-deep
 ├────┬──────────────────────────────────────────────┬──────────────┤
 │ 2  │                                              │ 4 Properties │
 │Rail│  3 Canvas — paper cutout (white ring,       │ {Tool} ·     │
@@ -163,8 +163,10 @@ retire; all consumers move to this table in the palette task.
 ### Zone contracts
 
 1. **Topbar** (44px, forest-deep, cutout shadow, cream text): flame
-   badge + `Flintshot` + route suffix (`| Editor` on editor); breadcrumb
-   (`Home ▸ Editor`, current stage gold+bold); right: Capture / Copy /
+   badge + `Flintshot` + `|` separator + breadcrumb (`Home ▸ Editor`;
+   past stages are links home — gold + underline on hover, a click
+   routes Home / closes worker editors like Esc; the current stage is
+   gold+bold, static; Loading stays inert); right: Capture / Copy /
    Open ghost buttons (Capture + Copy `hero-key` gold-tinted border;
    disabled state cream-dim) + `⋯` overflow. Editor overflow: Save
    (`Ctrl+S`), Upload, Paste (`Ctrl+V`), separator, About, note (status
@@ -178,9 +180,10 @@ retire; all consumers move to this table in the palette task.
    (+ lock clause).
 3. **Canvas**: paper desk (`PAPER` + grain, never over the image); the
    capture as a paper cutout — white ring + forest hairline + paper
-   shadow; four white corner handles (chrome only, never composed);
+   shadow, with 12 px of padding between the ring box and the panel
+   edge (the dressing never sits flush against the window chrome);
    floating chips restyled as cutouts (undo/redo top-left, magnifier
-   bottom-right).
+   + view zoom bottom-right).
 4. **Properties panel** (236px, paper + grain): `{Tool} · Properties`
    uppercase title; contextual collapsible sections (chevron + spring
    height); section map below is **binding**.

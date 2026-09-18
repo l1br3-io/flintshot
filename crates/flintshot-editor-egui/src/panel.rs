@@ -731,27 +731,34 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
     resp
 }
 
+/// The swatch row + the custom-color chip, flowing left-to-right and
+/// wrapping when the body narrows (the section body itself is a
+/// justified top-down column — without this wrapper every swatch
+/// stacks on its own row).
 pub(crate) fn swatch_row(ui: &mut egui::Ui, color: &mut Color) {
-    for sw in theme::palette::SWATCHES {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
-        let selected = to_color32(*color) == sw;
-        let resp = ui.interact(
-            rect,
-            egui::Id::new(("swatch", sw.r(), sw.g(), sw.b())),
-            Sense::click(),
-        );
-        let ring = if selected {
-            Stroke::new(2.0, theme::palette::FOREST_DEEP)
-        } else {
-            theme::HAIRLINE_STROKE
-        };
-        ui.painter()
-            .rect(rect, CornerRadius::same(4), sw, ring, StrokeKind::Middle);
-        if resp.clicked() {
-            *color = from_color32(sw);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        for sw in theme::palette::SWATCHES {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
+            let selected = to_color32(*color) == sw;
+            let resp = ui.interact(
+                rect,
+                egui::Id::new(("swatch", sw.r(), sw.g(), sw.b())),
+                Sense::click(),
+            );
+            let ring = if selected {
+                Stroke::new(2.0, theme::palette::FOREST_DEEP)
+            } else {
+                theme::HAIRLINE_STROKE
+            };
+            ui.painter()
+                .rect(rect, CornerRadius::same(4), sw, ring, StrokeKind::Middle);
+            if resp.clicked() {
+                *color = from_color32(sw);
+            }
         }
-    }
-    custom_color_chip(ui, color);
+        custom_color_chip(ui, color);
+    });
 }
 
 /// `+` chip opening a custom-color popup (full sRGB editor).
@@ -780,35 +787,39 @@ fn custom_color_chip(ui: &mut egui::Ui, color: &mut Color) {
 }
 
 /// S / M / L stroke presets as dot chips; a dot sized by the preset
-/// communicates the effect faster than numbers.
+/// communicates the effect faster than numbers. Flows left-to-right
+/// (same wrapper rationale as [`swatch_row`]).
 fn stroke_chips(ui: &mut egui::Ui, state: &mut EditorState) {
-    for (i, preset) in theme::STROKE_PRESETS.iter().enumerate() {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
-        let selected = (state.stroke_width - preset).abs() < 0.001;
-        let resp = ui.interact(rect, egui::Id::new(("stroke", i)), Sense::click());
-        let fill = if selected || resp.hovered() {
-            theme::palette::PAPER_DIM
-        } else {
-            theme::palette::CREAM_TEXT
-        };
-        ui.painter().rect(
-            rect,
-            CornerRadius::same(theme::POD_RADIUS),
-            fill,
-            theme::HAIRLINE_STROKE,
-            StrokeKind::Middle,
-        );
-        let dot = if selected {
-            theme::palette::FOREST_DEEP
-        } else {
-            theme::palette::INK
-        };
-        ui.painter()
-            .circle(rect.center(), preset / 2.0 + 1.2, dot, Stroke::NONE);
-        if resp.clicked() {
-            state.stroke_width = *preset;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        for (i, preset) in theme::STROKE_PRESETS.iter().enumerate() {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
+            let selected = (state.stroke_width - preset).abs() < 0.001;
+            let resp = ui.interact(rect, egui::Id::new(("stroke", i)), Sense::click());
+            let fill = if selected || resp.hovered() {
+                theme::palette::PAPER_DIM
+            } else {
+                theme::palette::CREAM_TEXT
+            };
+            ui.painter().rect(
+                rect,
+                CornerRadius::same(theme::POD_RADIUS),
+                fill,
+                theme::HAIRLINE_STROKE,
+                StrokeKind::Middle,
+            );
+            let dot = if selected {
+                theme::palette::FOREST_DEEP
+            } else {
+                theme::palette::INK
+            };
+            ui.painter()
+                .circle(rect.center(), preset / 2.0 + 1.2, dot, Stroke::NONE);
+            if resp.clicked() {
+                state.stroke_width = *preset;
+            }
         }
-    }
+    });
 }
 
 fn to_color32(c: Color) -> Color32 {
@@ -974,6 +985,37 @@ mod tests {
     }
 
     // --- Tool switching + gate (migrated from the rail era) ---
+
+    /// The Stroke section's swatches flow left-to-right in a row (the
+    /// section body is a justified top-down column — without the
+    /// wrapper every swatch stacks on its own row, the "stroke
+    /// section is a column" regression).
+    #[test]
+    fn stroke_section_swatches_flow_in_a_row() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut state = panel_state();
+        state.tool = Tool::Rect;
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let ids: Vec<egui::Id> = theme::palette::SWATCHES
+            .iter()
+            .take(3)
+            .map(|sw| egui::Id::new(("swatch", sw.r(), sw.g(), sw.b())))
+            .collect();
+        let rects: Vec<egui::Rect> = ids
+            .iter()
+            .map(|id| {
+                ctx.read_response(*id)
+                    .unwrap_or_else(|| panic!("swatch {id:?} registers"))
+                    .rect
+            })
+            .collect();
+        let same_row = rects
+            .windows(2)
+            .all(|w| (w[0].min.y - w[1].min.y).abs() < 1.0 && w[1].min.x > w[0].max.x);
+        assert!(same_row, "swatches share a row left-to-right: {rects:?}");
+    }
 
     // --- Delete chip (migrated from the rail era) ---
 

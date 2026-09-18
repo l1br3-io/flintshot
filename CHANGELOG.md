@@ -54,6 +54,22 @@ Categories used below:
 
 ### Changed
 
+- The topbar identity reads `Flintshot | Home ▸ Editor` (the old
+  `Flintshot | Editor` + a second `Home ▸ Editor` breadcrumb
+  duplicated the route and read as two confusing labels). The
+  breadcrumb's past stages are real links: gold + underline on
+  hover, a click routes the single window Home in-place and closes
+  worker editor windows like Esc.
+- The floating +/− chips zoom the **canvas view** (a 0.25-step
+  multiplier over the fit, clamped 0.5×–4×) instead of stepping
+  the magnifier loupe's invisible factor — they visibly did
+  nothing. Zoomed worker views stop chasing the image-sized
+  window: the fit letterboxes inside the stable window, and
+  returning to exactly 1.0× restores the image-sized policy.
+- The captured image's paper frame keeps 12 px of padding from the
+  canvas panel edge (ring + shadow penumbra no longer sit flush
+  against the window chrome; the fit and the worker resize both
+  budget it).
 - The editor's byte-size readout follows `ui.statusbar-size-mode`
   (`heuristic` `w × h × 4` by default, `exact-png` for a real PNG
   encode, cached per image dims).
@@ -67,6 +83,30 @@ Categories used below:
 
 ### Fixed
 
+- Six alignment/UX regressions reported against the editor (all
+  regression-tested headlessly):
+  - the canvas `CentralPanel`'s default 8 px inner margin anchored
+    draws at the panel's inner rect while pointers/chrome mapped
+    against the outer one — annotations landed 8 px off the cursor
+    and the dressing sat 8 px off the image (both now share one
+    zero-margin rect);
+  - the paper shadow (`Shadow::as_shape`) fills its whole rect with
+    a translucent tint, so painted over the capture it read as an
+    overlay — it now paints under the render pass, leaving only the
+    penumbra;
+  - the dressing (ring + hairline) bled over the rail / properties
+    panel / statusbar when the canvas matched the image — the fit
+    and the worker-window resize now budget the 8 px ring, and the
+    dressing is clipped to the canvas panel;
+  - the decorative corner handles read as broken controls — removed;
+  - the Stroke section's swatches and S/M/L chips stacked one per
+    row (the section body is a justified column) — they flow in
+    wrapping rows again;
+  - the section collapse chevron pointed left/up — apex right when
+    closed, rotating to down when open.
+- The app-window clipboard-marker test asserted the pre-grab
+  clipboard snapshot was empty — it now tolerates a session
+  clipboard that carries an image (dev machines fail it otherwise).
 - The editor hid the captured image: the task-008 paper-cutout ring
   filled the whole expanded rect (image included) with opaque cream,
   and a second inside stroke ate the capture's border. The ring is

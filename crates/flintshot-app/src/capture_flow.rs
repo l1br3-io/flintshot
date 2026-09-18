@@ -966,9 +966,12 @@ mod tests {
         .expect("the marker path is Ok");
         match split {
             Some(NativeGrab::AwaitClipboard { pre_grab }) => {
-                // No image was readable before the grab in this
-                // environment — the digest snapshot is None.
-                assert_eq!(pre_grab, None);
+                // The snapshot is whatever the real clipboard held
+                // before the grab — `None` on a clean headless CI, a
+                // digest wherever a session clipboard carries an
+                // image. Its exact value is environment state, not
+                // the contract under test.
+                let _ = pre_grab;
             }
             other => panic!("expected AwaitClipboard, got {other:?}"),
         }

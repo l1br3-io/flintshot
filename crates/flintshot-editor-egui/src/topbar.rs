@@ -1,7 +1,8 @@
 //! The topbar — zone 1 of the five-zone window: a 44 px forest-deep
-//! cutout bar with the flame brand + route line, the `Home ▸ Editor`
-//! breadcrumb (current stage gold + bold), exactly three hero ghost
-//! buttons — **Capture** and **Copy** with the gold hero-key border,
+//! cutout bar with the flame brand + `Flintshot | Home ▸ Editor`
+//! identity (the breadcrumb's past stages are links home, the
+//! current stage gold + bold), exactly three hero ghost buttons —
+//! **Capture** and **Copy** with the gold hero-key border,
 //! **Open** plain — and the `⋯` overflow.
 //!
 //! One component serves every routed surface ([`Surface`]): the
@@ -50,6 +51,10 @@ pub(crate) enum TopbarAction {
     Paste,
     /// The overflow's Settings entry.
     Settings,
+    /// The breadcrumb's Home link — leave the current stage for
+    /// home (route home in-window; worker windows close, matching
+    /// Esc).
+    NavigateHome,
 }
 
 /// Which topbar buttons are live this frame, as a compact bitmask —
@@ -119,7 +124,7 @@ pub(crate) fn show(
         .show(ui, |ui| {
             ui.set_min_height(TOPBAR_HEIGHT - 4.0);
             ui.horizontal_centered(|ui| {
-                brand(ui, surface);
+                brand(ui, surface, &mut fired);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     overflow(ui, surface, status, enable, &mut fired);
                     ui.add_space(theme::SPACE_SCALE[1]);
@@ -166,8 +171,10 @@ pub(crate) fn show(
     fired
 }
 
-/// The flame badge + `Flintshot | Route` identity + breadcrumb.
-fn brand(ui: &mut egui::Ui, surface: Surface) {
+/// The flame badge + `Flintshot` title + `|` + breadcrumb. The
+/// route lives only in the breadcrumb (the old `| Editor` suffix
+/// duplicated it and read as a second, confusing label).
+fn brand(ui: &mut egui::Ui, surface: Surface, fired: &mut Option<TopbarAction>) {
     use crate::theme::palette as p;
     // The gold flame badge, 24 px.
     let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
@@ -186,7 +193,7 @@ fn brand(ui: &mut egui::Ui, surface: Surface) {
         p::FOREST_INK,
     );
     ui.add_space(4.0);
-    // `Flintshot` in the display weight, then the route in dim.
+    // `Flintshot` in the display weight, then the dim `|` separator.
     let name = ui.painter().layout_no_wrap(
         "Flintshot".to_owned(),
         egui::FontId::new(
@@ -197,27 +204,25 @@ fn brand(ui: &mut egui::Ui, surface: Surface) {
     );
     let (rect, _) = ui.allocate_exact_size(name.size(), egui::Sense::hover());
     ui.painter().galley(rect.min, name, p::CREAM_TEXT);
-    let route = match surface {
-        Surface::Editor => " | Editor",
-        Surface::Home => "",
-        Surface::Loading => " | Loading",
-        Surface::Settings => " | Settings",
-    };
-    if !route.is_empty() {
-        let galley = ui.painter().layout_no_wrap(
-            route.to_owned(),
-            egui::FontId::proportional(theme::TYPE_MD),
-            p::CREAM_DIM,
-        );
-        let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
-        ui.painter().galley(rect.min, galley, p::CREAM_DIM);
-    }
+    ui.add_space(theme::SPACE_SCALE[0]);
+    let sep = ui.painter().layout_no_wrap(
+        "|".to_owned(),
+        egui::FontId::proportional(theme::TYPE_MD),
+        p::CREAM_DIM,
+    );
+    let (rect, _) = ui.allocate_exact_size(sep.size(), egui::Sense::hover());
+    ui.painter().galley(rect.min, sep, p::CREAM_DIM);
     ui.add_space(theme::POD_GAP);
-    breadcrumb(ui, surface);
+    breadcrumb(ui, surface, fired);
 }
 
-/// The `Home ▸ Editor` breadcrumb: past stages dim, current gold.
-fn breadcrumb(ui: &mut egui::Ui, surface: Surface) {
+/// The breadcrumb (`Home ▸ Editor`): past stages are links back
+/// home — gold + underline on hover, a click reports
+/// [`TopbarAction::NavigateHome`] — while the current stage is
+/// static gold + bold. Links are live only on surfaces that can
+/// navigate (Editor / Settings); Loading is mid-grab (inert) and
+/// Home is its own current stage.
+fn breadcrumb(ui: &mut egui::Ui, surface: Surface, fired: &mut Option<TopbarAction>) {
     use crate::theme::palette as p;
     let (stages, current) = match surface {
         Surface::Home => (&["Home"][..], 0usize),
@@ -225,6 +230,7 @@ fn breadcrumb(ui: &mut egui::Ui, surface: Surface) {
         Surface::Loading => (&["Home", "Loading"][..], 1),
         Surface::Settings => (&["Home", "Settings"][..], 1),
     };
+    let can_navigate = matches!(surface, Surface::Editor | Surface::Settings);
     for (i, stage) in stages.iter().enumerate() {
         let cur = i == current;
         let font = if cur {
@@ -241,8 +247,34 @@ fn breadcrumb(ui: &mut egui::Ui, surface: Surface) {
             if cur { p::GOLD } else { p::CREAM_DIM },
         );
         let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
-        ui.painter()
-            .galley(rect.min, galley, if cur { p::GOLD } else { p::CREAM_DIM });
+        if can_navigate && !cur {
+            let resp = ui
+                .interact(
+                    rect,
+                    egui::Id::new(("topbar-crumb", i)),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.hovered() {
+                ui.painter()
+                    .galley_with_override_text_color(rect.min, galley, p::GOLD);
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(rect.left(), rect.bottom() + 1.0),
+                        egui::pos2(rect.right(), rect.bottom() + 1.0),
+                    ],
+                    egui::Stroke::new(1.0, p::GOLD),
+                );
+            } else {
+                ui.painter().galley(rect.min, galley, p::CREAM_DIM);
+            }
+            if resp.clicked() {
+                *fired = Some(TopbarAction::NavigateHome);
+            }
+        } else {
+            ui.painter()
+                .galley(rect.min, galley, if cur { p::GOLD } else { p::CREAM_DIM });
+        }
         if i + 1 < stages.len() {
             ui.painter().text(
                 ui.cursor().min,
@@ -696,5 +728,89 @@ mod tests {
             )
         });
         assert!(gold_editor, "the current crumb stage paints gold");
+    }
+
+    /// The route suffix is gone: the identity reads
+    /// `Flintshot | Home ▸ Editor` — no duplicated `| Editor` label,
+    /// but the `|` separator between title and breadcrumb remains.
+    #[test]
+    fn route_suffix_is_gone_and_separator_remains() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let out = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL);
+        });
+        let texts = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !texts.iter().any(|t| t == " | Editor"),
+            "the duplicated route suffix must be gone (texts: {texts:?})"
+        );
+        assert!(
+            texts.iter().any(|t| t == "|"),
+            "the title/breadcrumb separator remains (texts: {texts:?})"
+        );
+        assert!(
+            texts.iter().any(|t| t == "Flintshot"),
+            "the title remains (texts: {texts:?})"
+        );
+    }
+
+    /// The breadcrumb's Home crumb is a real link on the editor
+    /// surface — one click reports [`TopbarAction::NavigateHome`].
+    /// The current stage is static (no click response at all).
+    #[test]
+    fn home_crumb_is_a_link_that_fires_navigate_home() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL);
+        });
+        assert!(
+            ctx.read_response(egui::Id::new(("topbar-crumb", 0)))
+                .is_some(),
+            "the Home crumb registers as a link"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new(("topbar-crumb", 1)))
+                .is_none(),
+            "the current stage registers no interaction"
+        );
+        let crumb = ctx
+            .read_response(egui::Id::new(("topbar-crumb", 0)))
+            .expect("home crumb")
+            .rect;
+        let fired = std::cell::Cell::new(None);
+        let _ = ctx.run_ui(screen(0.016, click_events(crumb.center())), |ui| {
+            fired.set(show(ui, Surface::Editor, None, Enable::ALL));
+        });
+        assert_eq!(fired.get(), Some(TopbarAction::NavigateHome));
+    }
+
+    /// Loading is mid-grab: its Home crumb paints but takes no
+    /// clicks (no navigation away from a delivery in flight).
+    #[test]
+    fn loading_crumb_stays_inert() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let out = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            show(ui, Surface::Loading, None, Enable::NONE);
+        });
+        assert!(
+            ctx.read_response(egui::Id::new(("topbar-crumb", 0)))
+                .is_none(),
+            "the Loading surface registers no crumb link"
+        );
+        let has_loading = out
+            .shapes
+            .iter()
+            .any(|cs| matches!(&cs.shape, egui::Shape::Text(t) if t.galley.job.text == "Loading"));
+        assert!(has_loading, "the stage still paints");
     }
 }
