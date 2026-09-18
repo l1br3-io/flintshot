@@ -100,6 +100,11 @@ Categories used below:
   the About row, and the breadcrumb chevron all paint now, and a
   tofu-ban scan test fails the build if any banned codepoint
   re-enters `flintshot-editor-egui`'s source.
+- The topbar Capture hero was a dead control on the Settings route
+  (the enable matrix kept it live; the router's dispatch arm only
+  matched Home). A Capture click on Settings now fires the same
+  bridge request + close choreography, and the settings page
+  restores after the grab resolves.
 - The editor's Copy hero now answers: for ~2 s after a successful
   copy it paints the gold check glyph and reads "Copied", then
   reverts on its own (a repaint lands the revert without input).
