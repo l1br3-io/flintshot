@@ -59,8 +59,8 @@ const LOADING_REPAINT: std::time::Duration = std::time::Duration::from_millis(50
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Route {
-    /// The three-button home page (compact, fixed geometry — OQ-4's
-    /// lean: its three buttons want a small window).
+    /// The capture home page (topbar + hero + hcards + recents) —
+    /// shares the stable page geometry with the other routes.
     Home,
     /// The editor page over a routed image, with its selection-first
     /// landing flag.
@@ -149,16 +149,16 @@ pub(crate) struct RouteGeometry {
 /// The geometry each route wants. Pure — the transition tests and
 /// the shell's `run_window` builder share it.
 ///
-/// The Editor and Loading routes deliberately share the stable
-/// geometry (Task 004): a Loading → Editor image swap issues **no**
-/// viewport churn at all — the batch is empty and the surface stays
-/// byte-identical.
+/// Every route deliberately shares the stable geometry: a route
+/// swap (Loading → Editor's image swap included) issues **no**
+/// viewport churn beyond the title — the batch carries identical
+/// sizes, so the surface stays byte-identical.
 #[must_use]
 pub(crate) fn route_geometry(route: &Route) -> RouteGeometry {
     match route {
         Route::Home => RouteGeometry {
-            size: egui::vec2(360.0, 240.0),
-            resizable: false,
+            size: EDITOR_PAGE_DEFAULT_SIZE,
+            resizable: true,
             title: HOME_WINDOW_TITLE,
         },
         Route::Editor(..) | Route::Loading | Route::Settings => RouteGeometry {
@@ -858,11 +858,13 @@ mod tests {
     }
 
     #[test]
-    fn home_route_keeps_its_compact_fixed_geometry() {
-        // OQ-4's lean: home stays the small non-resizable window.
+    fn home_route_uses_the_stable_geometry() {
+        // The redesigned home (topbar + hero + hcards) cannot fit the
+        // pre-redesign compact window — Home shares the stable page
+        // geometry with Editor / Loading / Settings.
         let g = route_geometry(&Route::Home);
-        assert_eq!(g.size, egui::vec2(360.0, 240.0));
-        assert!(!g.resizable);
+        assert_eq!(g.size, egui::vec2(1024.0, 640.0));
+        assert!(g.resizable);
         assert_eq!(g.title, "flintshot");
     }
 
