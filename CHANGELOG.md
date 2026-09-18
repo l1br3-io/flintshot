@@ -83,6 +83,13 @@ Categories used below:
 
 ### Fixed
 
+- The editor's Copy hero now answers: for ~2 s after a successful
+  copy it paints the gold check glyph and reads "Copied", then
+  reverts on its own (a repaint lands the revert without input).
+  The state is time-windowed, not latched, so a fresh editor can
+  never inherit a stale "Copied". Both lifecycles feed the hero —
+  routed pages (the router queries the live editor) and worker
+  windows.
 - Worker-editor Copy "worked sometimes" on Linux: a successful copy
   auto-closed the Wayland window, ending the process — and the
   compositor does not reliably adopt an exited client's
