@@ -64,3 +64,7 @@ Format: **Context · Decision · Consequences**.
 | ADR-0052 | [App-window presence by connection liveness](ADR-0052-app-window-presence-by-connection.md) |
 | ADR-0053 | [Single-window app — routed pages, in-process grabs, forwarded triggers](ADR-0053-single-window-app.md) |
 | ADR-0054 | [In-window routing — routes, not epochs; destruction reserved for captures](ADR-0054-in-window-routing.md) |
+| ADR-0055 | [The side-panel pivot and chip-rect input gating](ADR-0055-pop-up-book-panel-pivot.md) |
+| ADR-0056 | [The five-zone layout and action redistribution](ADR-0056-five-zone-layout.md) |
+| ADR-0057 | [Additive settings schema with live apply](ADR-0057-settings-config-schema.md) |
+| ADR-0058 | [Sticky tools by default](ADR-0058-sticky-tools-by-default.md) |
