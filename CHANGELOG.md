@@ -18,6 +18,20 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- **History tab in the editor panel** (effort
+  `properties-history-tabs`). The docked panel grew a
+  `PROPERTIES | HISTORY` tab header; the new History tab renders
+  the edit timeline — one labeled row per gesture (`Added arrow`,
+  `Moved 3 items`, `Cropped`, `Edited text`, …), oldest first, with
+  a current-state marker and dimmed future (redo) rows. Click any
+  row to jump straight to that moment; clicking a dimmed row redoes
+  forward. The floating undo/redo chips and `Ctrl+Z` /
+  `Ctrl+Shift+Z` chords keep working, and the timeline reflects
+  them live. The Properties tab (tool defaults / selection
+  inspector) is unchanged.
+
 ### Fixed
 
 - **Settings page no longer paints red duplicate-id debug overlays

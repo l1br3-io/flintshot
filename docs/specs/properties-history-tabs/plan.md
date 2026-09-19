@@ -53,11 +53,14 @@ undo/redo chips and key chords are untouched. Spec:
       click around the timeline; chips + chords unaffected
 
 ### Phase 3: Polish
-- [ ] Task 5: stale module docs, CHANGELOG, full gate → `tasks/005-polish-gate.md`
+- [x] Task 5: stale module docs, CHANGELOG, full gate → `tasks/005-polish-gate.md`
 
 ### Checkpoint: Complete
-- [ ] All spec success criteria met
-- [ ] `fmt` / `clippy -D warnings` / full test set green
+- [x] All spec success criteria met
+  (criteria 3 / 4 manual pass flagged for the user — automated
+  coverage: `clicking_rows_time_travels_and_chords_reflect_live`,
+  `restore_to_jumps_back_and_forward_round_trip`)
+- [x] `fmt` / `clippy -D warnings` / full test set green
 
 ## Risks and Mitigations
 

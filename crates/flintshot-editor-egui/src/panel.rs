@@ -1,29 +1,20 @@
 //! The docked side panel — the editor's control home.
 //!
-//! Right-docked, grain-textured cream paper, with a
-//! `PROPERTIES | HISTORY` tab header as its first row (segmented
-//! chips; the Properties tab is today's panel body, the History tab
-//! the labeled edit timeline — click any row to time-travel via
-//! `restore_to`). The panel is **collapsible** to
-//! a glyph rail (the `«` toggle in the action row; the rail's `»`
-//! restores it). Top → bottom: the action row (`+` capture chip,
-//! collapse toggle), **one** white cutout card holding the five
-//! semantic tool groups separated by hairlines (one card, not five
-//! floating islands — the disjointed shadowed cards read as clutter,
-//! and the per-pod hover-lift went with them), the contextual
-//! options section (exactly the selected tool's options; the
-//! color/stroke picker bay collapses behind one popover pod button —
-//! see `crate::popover`), and the bottom cluster: history + export
-//! chips in one quiet island with the Copy hero pinned below. The
-//! canvas beside it is never grained or shadowed.
-//!
-//! Layout note (the stretched-island bug this file must not
-//! reintroduce): `egui::Frame` inside a `bottom_up` layout grabs the
-//! full remaining main-direction space — the old bottom actions
-//! stretched their export island to a third of the window. The
-//! bottom cluster therefore allocates **exact** sizes
-//! (`allocate_exact_size` / `allocate_ui_with_layout` with an
-//! explicit desired size), which shrink-wrap by contract.
+//! Right-docked, grain-textured cream paper. The first row is the
+//! `PROPERTIES | HISTORY` tab header (two segmented chips — cutout
+//! at rest, ink-filled when active). The Properties tab is the
+//! contextual options surface: the mode title (`{Tool} ·
+//! Properties`, or `N selected · Properties` when the Select tool's
+//! multi-selection turns the panel into a selection inspector)
+//! followed by exactly that mode's section cards — the
+//! color/stroke picker bay collapses behind one popover pod button
+//! (see `crate::popover`). The History tab is the labeled edit
+//! timeline: past rows oldest-first, the current-state marker, and
+//! dimmed-but-clickable future rows — one click time-travels via
+//! `restore_to`. The tool rail (left), the topbar's Capture / Copy
+//! heroes, and the floating undo / redo clusters are other
+//! surfaces; the canvas beside this panel is never grained or
+//! shadowed.
 //!
 //! Input gating lives in `crate::app`: a press only starts a
 //! canvas gesture when it lands inside the cached `CentralPanel`
