@@ -7,4 +7,4 @@
 - [x] 005 — TraySupervisor: spawn retry, churn backoff, truthful `is_present`
 - [x] 006 — Reconnect policy + daemon-spawn rate limiter (pure fns)
 - [x] 007 — Pump reconnect loop: reconnecting status, respawn, re-announce
-- [ ] 008 — CHANGELOG `[Unreleased]` + ADR-0066
+- [x] 008 — CHANGELOG `[Unreleased]` + ADR-0066
