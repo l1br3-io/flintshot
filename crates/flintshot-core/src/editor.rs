@@ -686,11 +686,11 @@ impl EditorState {
     /// bounding box (e.g. an empty polyline) and thus nothing to
     /// grab or move by.
     fn begin_move(&mut self, index: usize, at: Point) -> bool {
-        if !self
+        if self
             .anns
             .get(index)
             .and_then(Annotation::bounding_box)
-            .is_some()
+            .is_none()
         {
             return false;
         }
