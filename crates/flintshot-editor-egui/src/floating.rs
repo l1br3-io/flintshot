@@ -175,14 +175,14 @@ pub(crate) fn show(
                     ),
                     (
                         "zoom-out",
-                        "Zoom out",
+                        "Zoom out · scroll wheel",
                         false,
                         g_minus,
                         Some(FloatingAction::ZoomOut),
                     ),
                     (
                         "zoom-in",
-                        "Zoom in",
+                        "Zoom in · scroll wheel",
                         false,
                         panel::g_plus,
                         Some(FloatingAction::ZoomIn),
