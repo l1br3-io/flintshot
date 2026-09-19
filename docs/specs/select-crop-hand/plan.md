@@ -40,33 +40,33 @@ hand-tool contract. Adds wheel zoom + middle-drag pan from any tool. Spec:
 ## Task Index
 
 ### Phase 1: Cutover
-- [ ] Task 1: Rename `Tool::Move` → `Tool::Hand` (mechanical, workspace-wide) → `tasks/001-rename-move-to-hand.md`
-- [ ] Task 2: Crop tool cutover — region machinery, rail/hotkeys/gates, overlay + phase pre-arm → `tasks/002-crop-tool-cutover.md`
+- [x] Task 1: Rename `Tool::Move` → `Tool::Hand` (mechanical, workspace-wide) → `tasks/001-rename-move-to-hand.md`
+- [x] Task 2: Crop tool cutover — region machinery, rail/hotkeys/gates, overlay + phase pre-arm → `tasks/002-crop-tool-cutover.md`
 
 ### Checkpoint: Cutover
-- [ ] Full finish sequence green (fmt / clippy `-D warnings` / tests / doc tests)
-- [ ] Overlay + selection-first flows work with Crop pre-armed
-- [ ] Review with human before Phase 2
+- [x] Full finish sequence green (fmt / clippy `-D warnings` / tests / doc tests)
+- [x] Overlay + selection-first flows work with Crop pre-armed
+- [x] Review with human before Phase 2
 
 ### Phase 2: Core semantics
-- [ ] Task 3: Select becomes the selection tool (marquee + routing + chrome + phase latch) → `tasks/003-select-tool-semantics.md`
-- [ ] Task 4: `flip-to-select` config rename + migration → `tasks/004-flip-to-select-config.md`
+- [x] Task 3: Select becomes the selection tool (marquee + routing + chrome + phase latch) → `tasks/003-select-tool-semantics.md`
+- [x] Task 4: `flip-to-select` config rename + migration → `tasks/004-flip-to-select-config.md`
 
 ### Checkpoint: Core semantics
-- [ ] Full finish sequence green
-- [ ] Select: click / toggle / marquee / drag-move / Del all work in `cargo run -- app`
-- [ ] Hand: plain drag does nothing yet (pan lands in Phase 3) — expected
-- [ ] Review with human before Phase 3
+- [x] Full finish sequence green
+- [x] Select: click / toggle / marquee / drag-move / Del all work in `cargo run -- app`
+- [x] Hand: plain drag does nothing yet (pan lands in Phase 3) — expected
+- [x] Review with human before Phase 3
 
 ### Phase 3: View + polish
-- [ ] Task 5: Pan + wheel zoom (pan state, clamping, zoom-to-cursor, middle-drag, hand-drag) → `tasks/005-pan-zoom.md`
-- [ ] Task 6: Panel / statusline polish (sections map, hints, glyphs final pass) → `tasks/006-panel-polish.md`
-- [ ] Task 7: Docs — CHANGELOG, ADR-0063 (tool remap + config migration), CLI help → `tasks/007-docs.md`
+- [x] Task 5: Pan + wheel zoom (pan state, clamping, zoom-to-cursor, middle-drag, hand-drag) → `tasks/005-pan-zoom.md`
+- [x] Task 6: Panel / statusline polish (sections map, hints, glyphs final pass) → `tasks/006-panel-polish.md`
+- [x] Task 7: Docs — CHANGELOG, ADR-0063 (tool remap + config migration), CLI help → `tasks/007-docs.md`
 
 ### Checkpoint: Complete
-- [ ] All spec acceptance criteria verified (manual checklist in spec)
-- [ ] Full finish sequence green
-- [ ] Ready for review / PR
+- [x] All spec acceptance criteria verified (manual checklist in spec)
+- [x] Full finish sequence green
+- [x] Ready for review / PR
 
 ## Risks and Mitigations
 
