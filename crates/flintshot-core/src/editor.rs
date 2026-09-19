@@ -414,6 +414,13 @@ pub struct EditorState {
     /// mouse drags) set it. Session boundaries (commit / cancel /
     /// re-edit open) leave it `None`.
     pub text_anchor: Option<usize>,
+    /// Char index the last in-text press landed on, staged as the
+    /// anchor seed for the first
+    /// [`text_drag_to_char`](Self::text_drag_to_char) of the gesture —
+    /// `None` disarms (only a press-then-drag can start a mouse
+    /// selection). Consumed by the seeding drag; reset at session
+    /// boundaries.
+    text_drag_seed: Option<usize>,
     /// Kind of the most recent inspector property edit, for undo
     /// coalescing — see
     /// [`end_property_edit`](Self::end_property_edit). `None` when no
@@ -469,6 +476,7 @@ impl EditorState {
             selected: Vec::new(),
             text_cursor: 0,
             text_anchor: None,
+            text_drag_seed: None,
             last_edit_kind: None,
             text_reedit: None,
             style_gesture_snapshot: None,
@@ -582,6 +590,7 @@ impl EditorState {
         if self.tool == Tool::Text {
             self.text_cursor = 0;
             self.text_anchor = None;
+            self.text_drag_seed = None;
         }
         self.pending = Some(ann);
     }
@@ -1384,6 +1393,80 @@ impl EditorState {
         (a != b).then_some(a..b)
     }
 
+    /// Click-to-position the caret inside the draft at a shell-resolved
+    /// char index. The pump's press-inside-pending interception calls
+    /// this *instead of* dispatching `PointerDown` (which would run
+    /// the commit-and-move-on path), so the draft stays open with the
+    /// caret repositioned. Collapses any selection and arms
+    /// drag-seeding for a following [`text_drag_to_char`]. No-op when
+    /// not editing text; `idx` clamps to `0..=len`.
+    pub fn text_press_at_char(&mut self, idx: usize) {
+        let Some(Annotation::Text { text, .. }) = &self.pending else {
+            return;
+        };
+        let len = text.chars().count();
+        let clamped = idx.min(len);
+        self.text_cursor = clamped;
+        self.text_anchor = None;
+        self.text_drag_seed = Some(clamped);
+    }
+
+    /// Drag-extend the selection to a shell-resolved char index. The
+    /// first drag after a press seeds the anchor at the pressed
+    /// position; later drags move only the cursor (anchor sticky, so
+    /// sweeping back and forth keeps one edge pinned). A drag without
+    /// a preceding in-text press is a full no-op — only
+    /// [`text_press_at_char`] arms seeding, so a stray drag can never
+    /// conjure a selection. No-op when not editing text; `idx` clamps
+    /// to `0..=len`.
+    pub fn text_drag_to_char(&mut self, idx: usize) {
+        let Some(Annotation::Text { text, .. }) = &self.pending else {
+            return;
+        };
+        // GOTCHA: only the first drag of a gesture seeds — the staged
+        // press index is consumed here, so a later stray drag (anchor
+        // still None because nothing was selected) no-ops.
+        if self.text_anchor.is_none() {
+            let Some(pressed) = self.text_drag_seed.take() else {
+                return;
+            };
+            self.text_anchor = Some(pressed);
+        }
+        let len = text.chars().count();
+        self.text_cursor = idx.min(len);
+    }
+
+    /// Select the word around the cursor — the double-click payload.
+    /// The pump collapses the cursor onto the click point first (the
+    /// press interception), so this resolves around the cursor with no
+    /// geometry. No-op when not editing text or when no word exists
+    /// (empty / whitespace-only draft).
+    pub fn text_select_word(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            let (a, b) = word_bounds_around(text, self.text_cursor);
+            if a == b {
+                return;
+            }
+            self.text_anchor = Some(a);
+            self.text_cursor = b;
+        }
+    }
+
+    /// Select the line around the cursor — the triple-click payload
+    /// (degenerates to whole-text for the common single-line
+    /// annotation). No-op when not editing text or on an empty line.
+    pub fn text_select_line(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            let a = cursor_line_start(text, self.text_cursor);
+            let b = cursor_line_end(text, self.text_cursor);
+            if a == b {
+                return;
+            }
+            self.text_anchor = Some(a);
+            self.text_cursor = b;
+        }
+    }
+
     /// Delete the selected range (if any), park the cursor at the
     /// range start, and clear the anchor — the shared "edit ops
     /// consume the selection" step. A collapsed or absent selection
@@ -1653,6 +1736,7 @@ impl EditorState {
         self.pending = Some(original);
         self.text_cursor = char_count;
         self.text_anchor = None;
+        self.text_drag_seed = None;
         self.selected.clear();
     }
 
@@ -2391,7 +2475,6 @@ fn word_right(text: &str, char_idx: usize) -> usize {
 /// boundary directly after a word resolves to that word; a boundary
 /// in a whitespace run resolves to the nearest word (backward
 /// preference). Empty text yields `(0, 0)`.
-#[allow(dead_code, reason = "consumed by Task 007's select_word arm")]
 fn word_bounds_around(text: &str, idx: usize) -> (usize, usize) {
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
@@ -4807,6 +4890,111 @@ mod tests {
         s.dispatch_input(&ctrl_key(Key::ArrowLeft));
         assert_eq!(s.text_cursor, 6, "Ctrl+Left to word start");
         assert_eq!(s.text_anchor, None, "plain word move collapses");
+    }
+
+    // --- Mouse selection APIs (text-selection-highlight Task 006) ---
+
+    #[test]
+    fn text_press_at_char_collapses_and_clamps() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_press_at_char(3);
+        assert_eq!(s.text_cursor, 3);
+        assert_eq!(s.text_anchor, None, "press collapses");
+        s.text_press_at_char(10);
+        assert_eq!(s.text_cursor, 5, "idx clamps to len");
+        s.text_press_at_char(usize::MAX);
+        assert_eq!(s.text_cursor, 5);
+        s.text_press_at_char(0);
+        assert_eq!(s.text_cursor, 0);
+    }
+
+    #[test]
+    fn text_drag_to_char_selects_from_press_point() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_press_at_char(1);
+        s.text_drag_to_char(4);
+        assert_eq!(s.text_anchor, Some(1), "first drag seeds from the press");
+        assert_eq!(s.text_cursor, 4);
+        s.text_drag_to_char(1);
+        assert_eq!(s.text_anchor, Some(1), "anchor sticky across drags");
+        assert_eq!(s.text_cursor, 1, "dragged back to collapsed");
+        s.text_drag_to_char(2);
+        assert_eq!(s.text_anchor, Some(1));
+        assert_eq!(s.text_cursor, 2);
+    }
+
+    #[test]
+    fn text_drag_without_press_never_selects() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        // No press: cursor sits at 5 from typing, anchor None.
+        s.text_drag_to_char(2);
+        assert_eq!(s.text_cursor, 5, "stray drag is a full no-op");
+        assert_eq!(s.text_anchor, None);
+    }
+
+    #[test]
+    fn text_select_word_and_line_around_cursor() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello world");
+        s.text_press_at_char(7);
+        s.text_select_word();
+        assert_eq!(s.text_anchor, Some(6));
+        assert_eq!(s.text_cursor, 11);
+        assert_eq!(s.selection_range(), Some(6..11));
+
+        let mut s = text_state();
+        type_draft(&mut s, "ab\ncd");
+        s.text_press_at_char(4); // end of line 1
+        s.text_select_line();
+        assert_eq!(s.text_anchor, Some(3));
+        assert_eq!(s.text_cursor, 5);
+    }
+
+    #[test]
+    fn mouse_selection_apis_noop_outside_text_draft() {
+        // No pending at all.
+        let mut s = text_state();
+        s.text_press_at_char(3);
+        s.text_drag_to_char(1);
+        s.text_select_word();
+        s.text_select_line();
+        assert!(s.pending.is_none());
+        assert_eq!(s.text_cursor, 0);
+
+        // Non-Text pending.
+        let mut s = text_state();
+        s.pending = Some(rect_ann(0.0, 0.0, 5.0, 5.0));
+        s.text_press_at_char(3);
+        s.text_drag_to_char(1);
+        s.text_select_word();
+        s.text_select_line();
+        assert_eq!(s.text_cursor, 0);
+
+        // Empty draft: no panics, no phantom selection.
+        let mut s = text_state();
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
+        s.text_press_at_char(2);
+        assert_eq!(s.text_cursor, 0, "clamps to 0 on empty text");
+        s.text_select_word();
+        s.text_select_line();
+        assert_eq!(s.text_anchor, None, "nothing to select in an empty draft");
+    }
+
+    #[test]
+    fn mouse_selection_apis_touch_no_history_or_selection_set() {
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        s.text_press_at_char(2);
+        s.text_drag_to_char(4);
+        s.text_select_word();
+        s.text_select_line();
+        assert!(s.undo.is_empty(), "no history entries from selection");
+        assert!(s.redo.is_empty());
+        assert!(s.selected.is_empty(), "ann selection untouched");
+        assert_eq!(s.anns.len(), 0, "committed anns untouched (lifted)");
     }
 
     // --- Gesture-bracketed restyle (text-select-edit Task 005) ---
