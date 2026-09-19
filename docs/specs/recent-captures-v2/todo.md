@@ -5,6 +5,6 @@
 - [x] 003-editor-copy-persist
 - [x] 004-capture-copy-persist
 - [x] 005-bridge-card-actions
-- [ ] 006-rich-recents-cards
+- [x] 006-rich-recents-cards
 - [ ] 007-settings-rows
 - [ ] 008-docs-changelog
