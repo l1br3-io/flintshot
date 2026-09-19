@@ -1,4 +1,5 @@
-//! Image-level operations computed in core (blur, pixelate, crop).
+//! Image-level operations computed in core (blur, pixelate, crop,
+//! resize).
 //!
 //! These are toolkit-independent: they operate on [`image::RgbaImage`]
 //! directly and produce results that any [`crate::Canvas`] can blit.
@@ -125,9 +126,103 @@ pub fn crop_region(source: &RgbaImage, rect: crate::Rect) -> RgbaImage {
     source.view(x0, y0, cw, ch).to_image()
 }
 
+/// Scale `source` to `target` using a Triangle filter (best
+/// quality-per-cost for downscale), never upscaling: each target axis
+/// clamps to `[1, source_axis]` first.
+///
+/// A clamped target equal to the source dims (or a zero-axis source)
+/// returns a clone — no resample. Deterministic: same input + target
+/// ⇒ same output. This is the pixel primitive behind
+/// [`crate::EditorState::resize`].
+#[must_use]
+pub fn resize(source: &RgbaImage, target: (u32, u32)) -> RgbaImage {
+    let (sw, sh) = source.dimensions();
+    if sw == 0 || sh == 0 {
+        return source.clone();
+    }
+    let tw = target.0.clamp(1, sw);
+    let th = target.1.clamp(1, sh);
+    if (tw, th) == (sw, sh) {
+        return source.clone();
+    }
+    image::imageops::resize(source, tw, th, image::imageops::FilterType::Triangle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Downscale produces exactly the requested dims; every pixel is
+    /// sampled (gradient survives, so it isn't a blank/solid output).
+    #[test]
+    fn resize_downscale_dims_exact() {
+        let mut img = RgbaImage::new(100, 80);
+        for y in 0..80 {
+            for x in 0..100 {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "x, y are 0..100, fit in u8"
+                )]
+                let (x8, y8) = (x as u8, y as u8);
+                img.put_pixel(x, y, image::Rgba([x8, y8, 128, 255]));
+            }
+        }
+        let out = resize(&img, (50, 40));
+        assert_eq!(out.dimensions(), (50, 40));
+        assert_ne!(out.get_pixel(0, 0).0, out.get_pixel(49, 39).0);
+    }
+
+    /// Upscale targets clamp to the source dims (identity, no
+    /// resample) — no input produces a larger image.
+    #[test]
+    fn resize_upscale_target_clamps_to_identity() {
+        let img = RgbaImage::from_pixel(100, 80, image::Rgba([7, 8, 9, 255]));
+        let out = resize(&img, (200, 160));
+        assert_eq!(out.dimensions(), (100, 80));
+        assert_eq!(out.get_pixel(42, 17).0, [7, 8, 9, 255]);
+    }
+
+    /// Zero / degenerate target axes clamp to 1, never 0.
+    #[test]
+    fn resize_zero_axes_clamp_to_one() {
+        let img = RgbaImage::from_pixel(10, 10, image::Rgba([1, 2, 3, 255]));
+        assert_eq!(resize(&img, (0, 0)).dimensions(), (1, 1));
+        assert_eq!(resize(&img, (0, 4)).dimensions(), (1, 4));
+        assert_eq!(resize(&img, (4, 0)).dimensions(), (4, 1));
+    }
+
+    /// A zero-axis source is passed through untouched (nothing to
+    /// sample; a 1-px target would be meaningless).
+    #[test]
+    fn resize_empty_source_returns_clone() {
+        let img = RgbaImage::new(0, 0);
+        assert_eq!(resize(&img, (10, 10)).dimensions(), (0, 0));
+    }
+
+    /// Odd aspect dims resize to the exact requested odd target.
+    #[test]
+    fn resize_odd_dims_exact() {
+        let img = RgbaImage::from_pixel(101, 51, image::Rgba([200, 100, 50, 255]));
+        let out = resize(&img, (50, 25));
+        assert_eq!(out.dimensions(), (50, 25));
+    }
+
+    /// Deterministic: same input + target ⇒ byte-identical output.
+    #[test]
+    fn resize_deterministic() {
+        let mut img = RgbaImage::new(64, 32);
+        for y in 0..32 {
+            for x in 0..64 {
+                #[allow(clippy::cast_possible_truncation, reason = "x, y are 0..64, fit in u8")]
+                let (x8, y8) = (x as u8, y as u8);
+                img.put_pixel(x, y, image::Rgba([x8 * 3, y8 * 5, 7, 255]));
+            }
+        }
+        let a = resize(&img, (21, 11));
+        let b = resize(&img, (21, 11));
+        assert_eq!(a.dimensions(), (21, 11));
+        assert_eq!(a.as_raw(), b.as_raw());
+    }
 
     /// Half-black / half-white image: blurring across the boundary
     /// must produce intermediate grey pixels at the seam.
