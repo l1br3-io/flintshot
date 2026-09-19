@@ -1996,7 +1996,7 @@ impl EditorApp {
             }
             return;
         }
-        match save_to_disk(&self.state, self.phase_active()) {
+        match save_to_disk(&self.state, self.phase_active(), &self.config.output) {
             Ok(Some(path)) => {
                 tracing::info!(path = %path.display(), "editor saved");
                 // GOTCHA (single-window): the page epoch stays open
@@ -2020,7 +2020,11 @@ impl EditorApp {
     }
 
     /// Copy button handler: compose the final image, hand it to
-    /// `arboard::Clipboard`, and publish `CopiedToClipboard`.
+    /// `arboard::Clipboard`, and publish `CopiedToClipboard`. When
+    /// `output.save-clipboard-copies` is on (default), the same
+    /// image is persisted to the resolved save directory and
+    /// recorded into recents — a copy is no longer invisible
+    /// history. A persist failure never fails the copy.
     ///
     /// GOTCHA (probe evidence, ux-redesign-regressions spec §2): the
     /// clipboard contents survive this window's close only where the
@@ -2041,6 +2045,12 @@ impl EditorApp {
             Ok(()) => {
                 tracing::info!("editor copied to clipboard");
                 self.copied_at = Some(ctx.input(|i| i.time));
+                if let Some(path) = persist_clipboard_copy_side_effect(&self.state, &self.config) {
+                    flintshot_core::recents::record(
+                        &path,
+                        self.config.ui.recent_captures_limit_clamped(),
+                    );
+                }
                 self.publish_side_effect_outcome(EditorOutcome::CopiedToClipboard);
                 if self.close_after_copy_window() {
                     tracing::debug!("OS-owned clipboard; closing after copy");
@@ -2108,13 +2118,50 @@ impl EditorApp {
     }
 }
 
-/// Prompt for a PNG save path via `rfd`. Blocks on the native modal
-/// — the eframe event loop is already blocking, and the dialog is
-/// what the user is interacting with anyway. `None` when the user
-/// cancels.
-fn prompt_png_path() -> Option<std::path::PathBuf> {
+/// Persist the copy side effect when `output.save-clipboard-copies`
+/// is on (default): the selection-aware image through core's
+/// clipboard-copy rules (template-or-builtin naming, the resolved
+/// save directory, collision suffixing, `[output] format`
+/// encoding). Returns the written path for the caller's recents
+/// record; `None` when the flag is off or the save failed — a
+/// failure logs and never fails the copy (the clipboard write
+/// already succeeded).
+fn persist_clipboard_copy_side_effect(
+    state: &EditorState,
+    config: &Config,
+) -> Option<std::path::PathBuf> {
+    if !config.output.save_clipboard_copies {
+        return None;
+    }
+    let img = compose_selection_aware(state);
+    match flintshot_core::persist_clipboard_copy(&img, &config.output) {
+        Ok(path) => {
+            tracing::info!(path = %path.display(), "clipboard copy persisted to the save location");
+            Some(path)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "persisting the clipboard copy; the copy itself succeeded");
+            None
+        }
+    }
+}
+
+/// The save dialog's prefill directory: the resolved save dir —
+/// the configured `save-dir`, or the platform pictures default
+/// (`~/Pictures/Flintshot`) when unset. The dialog lands somewhere
+/// sane even on the dialog-first path.
+fn save_dialog_dir(output: &flintshot_core::OutputConfig) -> std::path::PathBuf {
+    output.resolve_save_dir()
+}
+
+/// Prompt for a PNG save path via `rfd`, prefilled with `dir`.
+/// Blocks on the native modal — the eframe event loop is already
+/// blocking, and the dialog is what the user is interacting with
+/// anyway. `None` when the user cancels.
+fn prompt_png_path(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
         .add_filter("PNG image", &["png"])
+        .set_directory(dir)
         .set_file_name("flintshot.png")
         .save_file()
 }
@@ -2173,7 +2220,8 @@ fn save_direct(
     )
 }
 
-/// Prompt for a PNG path and write the [`compose_for_save`] image.
+/// Prompt for a PNG path (prefilled from `output`'s resolved save
+/// dir) and write the [`compose_for_save`] image.
 ///
 /// `selection_aware` comes from the caller's phase state — the only
 /// call site, [`EditorApp::handle_save`], passes
@@ -2191,8 +2239,9 @@ fn save_direct(
 fn save_to_disk(
     state: &EditorState,
     selection_aware: bool,
+    output: &flintshot_core::OutputConfig,
 ) -> flintshot_core::Result<Option<std::path::PathBuf>> {
-    let Some(path) = prompt_png_path() else {
+    let Some(path) = prompt_png_path(&save_dialog_dir(output)) else {
         return Ok(None);
     };
     compose_for_save(selection_aware, state)
@@ -2206,7 +2255,9 @@ fn save_to_disk(
 /// model is "the region defines what ships in the output" (Task
 /// 005), so a usable selection saves just the region; without one
 /// it saves the full composed frame (the `Ctrl+S`-before-any-drag
-/// case).
+/// case). The dialog prefill reads the persisted config (the
+/// overlay carries no live session config; a load failure warns
+/// and prefills the defaults).
 ///
 /// Returns `Ok(None)` when the user cancels the dialog.
 ///
@@ -2216,7 +2267,14 @@ fn save_to_disk(
 pub(crate) fn save_region_to_disk(
     state: &EditorState,
 ) -> flintshot_core::Result<Option<std::path::PathBuf>> {
-    save_to_disk(state, true)
+    let output = match flintshot_core::Config::load() {
+        Ok(c) => c.output,
+        Err(e) => {
+            tracing::warn!(error = %e, "loading config for the save dialog prefill; using defaults");
+            flintshot_core::OutputConfig::default()
+        }
+    };
+    save_to_disk(state, true, &output)
 }
 
 /// Compose the final image honouring an active `Tool::Crop`
@@ -2607,6 +2665,73 @@ mod tests {
     use super::*;
     use flintshot_core::Point;
     use flintshot_core::{Annotation, EditorState};
+
+    // ── Clipboard-copy persistence (recent-captures-v2 Task 003) ──
+
+    /// A config over a tempdir save location, with the persist flag.
+    fn copy_persist_config(dir: &std::path::Path, on: bool) -> Config {
+        let mut output = flintshot_core::OutputConfig::default();
+        output.save_dir = dir.to_string_lossy().into_owned();
+        output.save_clipboard_copies = on;
+        let mut config = Config::default();
+        config.output = output;
+        config
+    }
+
+    /// Off-flag: no file, `None` — the copy stays invisible history.
+    #[test]
+    fn clipboard_persistence_off_flag_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = copy_persist_config(dir.path(), false);
+        let out = persist_clipboard_copy_side_effect(&blank_state(4, 4), &config);
+        assert!(out.is_none());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no file written"
+        );
+    }
+
+    /// On-flag: the copy lands in the resolved dir and the path
+    /// names it (the caller records it into recents).
+    #[test]
+    fn clipboard_persistence_writes_the_resolved_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = copy_persist_config(dir.path(), true);
+        let path = persist_clipboard_copy_side_effect(&blank_state(4, 4), &config)
+            .expect("on-flag persists");
+        assert!(path.exists(), "the file is on disk");
+        assert!(
+            path.starts_with(dir.path()),
+            "lands in the configured dir: {path:?}"
+        );
+    }
+
+    /// A persist failure (the save dir is a regular file) returns
+    /// `None` without panicking — the clipboard write already
+    /// succeeded and must never fail over the save.
+    #[test]
+    fn clipboard_persistence_failure_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let config = copy_persist_config(&blocker, true);
+        let out = persist_clipboard_copy_side_effect(&blank_state(4, 4), &config);
+        assert!(out.is_none(), "a failed save never fails the copy");
+    }
+
+    /// The save dialog prefills the resolved save dir (configured,
+    /// or the platform pictures default when unset).
+    #[test]
+    fn save_dialog_dir_is_the_resolved_save_dir() {
+        let mut output = flintshot_core::OutputConfig::default();
+        output.save_dir = "/tmp/explicit".into();
+        assert_eq!(
+            save_dialog_dir(&output),
+            std::path::PathBuf::from("/tmp/explicit")
+        );
+        assert!(save_dialog_dir(&flintshot_core::OutputConfig::default()).ends_with("Flintshot"));
+    }
 
     /// Construct an all-white `EditorState` of the given pixel size.
     fn blank_state(w: u32, h: u32) -> EditorState {
