@@ -37,7 +37,7 @@ undo/redo chips and key chords are untouched. Spec:
 ## Task Index
 
 ### Phase 1: Core history model
-- [ ] Task 1: `EditKind` + labeled snapshots at every push site → `tasks/001-core-edit-kind.md`
+- [x] Task 1: `EditKind` + labeled snapshots at every push site → `tasks/001-core-edit-kind.md`
 - [ ] Task 2: `restore_to` time-travel mutation → `tasks/002-core-restore-to.md`
 
 ### Checkpoint: Core
