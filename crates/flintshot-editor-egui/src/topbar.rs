@@ -424,8 +424,8 @@ fn g_chevron(p: &egui::Painter, r: egui::Rect, c: Color32) {
 
 /// The dots overflow: an about note + route-varying items. Editor
 /// surfaces get Save / Upload / Paste; every surface gets the
-/// Settings entry (inert until its route lands — the action is
-/// reported and callers ignore it for now).
+/// Settings entry (the routed window swaps to the settings route;
+/// worker windows delegate through the shell's open-settings hook).
 fn overflow(
     ui: &mut egui::Ui,
     surface: Surface,

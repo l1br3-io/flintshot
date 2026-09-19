@@ -181,6 +181,10 @@ pub struct EguiShell {
     /// overlay window (graceful supersede close). `None` keeps the
     /// unclosable-from-outside behavior (open path).
     close: Option<CloseHandle>,
+    /// The worker editor's **open settings** hook (see
+    /// [`Self::with_open_settings`]). Page mode never consults it —
+    /// the router swaps routes itself before editor actions flow.
+    open_settings: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl EguiShell {
@@ -190,6 +194,7 @@ impl EguiShell {
         Self {
             selection_first: false,
             close: None,
+            open_settings: None,
         }
     }
 
@@ -218,11 +223,31 @@ impl EguiShell {
         self.close = Some(handle);
         self
     }
+
+    /// Attach the worker editor's **open settings** hook: fired when
+    /// the topbar overflow's Settings entry is clicked in a worker
+    /// window. Worker windows never route to Settings in-window (spec
+    /// §Settings route — there is no home page behind them), so the
+    /// app crate delegates: the daemon's `OpenSettings` choreography
+    /// focuses + routes an already-running app window, or spawns one
+    /// opened on Settings. The routed window's own Settings entries
+    /// are handled before editor actions flow, so the hook stays
+    /// worker-only.
+    #[must_use]
+    pub fn with_open_settings(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
+        self.open_settings = Some(std::sync::Arc::new(f));
+        self
+    }
 }
 
 impl EditorShell for EguiShell {
     fn run_editor(&self, state: EditorState) -> flintshot_core::Result<EditorOutcome> {
-        run_editor_blocking(state, self.selection_first, self.close.as_ref())
+        run_editor_blocking(
+            state,
+            self.selection_first,
+            self.close.as_ref(),
+            self.open_settings.as_ref(),
+        )
     }
 }
 
@@ -329,10 +354,13 @@ fn start_route(start: &WindowStart) -> Route {
 /// module for the phase lifecycle). `close`, when present, is
 /// installed into the window so the worker's supersede listener can
 /// close it from another thread (see [`CloseHandle`]).
+/// `open_settings`, when present, is the worker Settings entry's
+/// delegate (see [`EguiShell::with_open_settings`]).
 fn run_editor_blocking(
     state: EditorState,
     selection_first: bool,
     close: Option<&CloseHandle>,
+    open_settings: Option<&std::sync::Arc<dyn Fn() + Send + Sync>>,
 ) -> flintshot_core::Result<EditorOutcome> {
     let (img_w, img_h) = state.image.dimensions();
     // egui's `ViewportBuilder::with_inner_size` takes logical px.
@@ -361,12 +389,16 @@ fn run_editor_blocking(
 
     let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
     let outcome_for_app = Rc::clone(&outcome);
+    let open_settings_hook = open_settings.cloned();
 
     let app_creator: AppCreator<'_> = Box::new(move |cc| {
         if let Some(handle) = close {
             handle.install(&cc.egui_ctx);
         }
-        let app = EditorApp::new(state, &cc.egui_ctx, outcome_for_app, selection_first);
+        let mut app = EditorApp::new(state, &cc.egui_ctx, outcome_for_app, selection_first);
+        if let Some(hook) = open_settings_hook {
+            app.set_open_settings(hook);
+        }
         Ok(Box::new(app))
     });
 
@@ -563,6 +595,16 @@ mod tests {
     fn with_close_handle_stores_the_handle() {
         let shell = EguiShell::new().with_close_handle(CloseHandle::new());
         assert!(shell.close.is_some());
+    }
+
+    #[test]
+    fn with_open_settings_stores_the_hook() {
+        let shell = EguiShell::new().with_open_settings(|| {});
+        assert!(shell.open_settings.is_some());
+        assert!(
+            EguiShell::new().open_settings.is_none(),
+            "no hook by default"
+        );
     }
 
     #[test]

@@ -18,6 +18,20 @@ Categories used below:
 
 ## [Unreleased]
 
+### Fixed
+
+- **The topbar overflow's Settings entry now works from worker editor
+  windows** (`flintshot capture` / `flintshot open`). It rendered but
+  was a dead no-op there — worker windows never route to Settings
+  in-window (spec §Settings route). The entry now fires the daemon's
+  `OpenSettings` choreography: an already-running app window focuses
+  and routes itself to Settings; otherwise the daemon spawns one
+  opened on Settings. With no daemon at all, the worker spawns the
+  settings window itself. Plumbing: `EguiShell::with_open_settings`
+  hands the editor a delegate hook (`EditorApp` fires it on the
+  Settings action; the routed window still handles the entry itself,
+  unchanged).
+
 ### Added
 
 - **Multi-select annotations + selection inspector.** Under the Move
