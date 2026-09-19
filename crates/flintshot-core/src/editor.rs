@@ -373,6 +373,12 @@ pub struct EditorState {
     /// `redo`. While set, `pending` holds the text being re-edited and
     /// its slot in `anns` is vacant.
     pub text_reedit: Option<TextReeditSession>,
+    /// Staged pre-gesture snapshot for the restyle API
+    /// ([`begin_style_gesture`](Self::begin_style_gesture)). Set by
+    /// `begin`, consumed by
+    /// [`end_style_gesture`](Self::end_style_gesture) (which pushes it
+    /// onto `undo`). Dropped defensively by `crop` / `undo` / `redo`.
+    pub style_gesture_snapshot: Option<Snapshot>,
 }
 
 impl EditorState {
@@ -407,6 +413,7 @@ impl EditorState {
             selected_index: None,
             text_cursor: 0,
             text_reedit: None,
+            style_gesture_snapshot: None,
         }
     }
 
@@ -1346,12 +1353,99 @@ impl EditorState {
     /// `redo` bypass the modal dispatcher): restore the session's
     /// original into `anns` and drop the session + pending before the
     /// mutation runs, so it operates on the pre-session state instead
-    /// of splicing against a vacant slot. Selection is left to the
-    /// caller — all three guard users clear it themselves.
+    /// of splicing against a vacant slot. Selection and any staged
+    /// restyle gesture are dropped too — their indices and snapshots
+    /// refer to pre-mutation state the mutation is about to replace.
     fn restore_active_reedit(&mut self) {
         if let Some(session) = self.text_reedit.take() {
             self.revert_text_reedit(session);
             self.selected_index = None;
+        }
+        self.style_gesture_snapshot = None;
+    }
+
+    /// Stage the pre-gesture snapshot for a restyle gesture.
+    ///
+    /// Pairing contract: the shell calls `begin` when a style control
+    /// interaction starts (a discrete click, or the press half of a
+    /// slider / `DragValue` drag), any number of
+    /// [`restyle_selected_text`](Self::restyle_selected_text) calls
+    /// follow, and [`end_style_gesture`](Self::end_style_gesture)
+    /// closes the gesture with exactly one undo entry.
+    ///
+    /// First-wins: a second `begin` inside one gesture is a no-op
+    /// (each `end` consumes at most one staging). No-op entirely while
+    /// a re-edit session is active — the lifted-out text is absent
+    /// from `anns`, so an independent snapshot here would undo-delete
+    /// it; mid-session restyles absorb into the session's single
+    /// commit entry instead (spec Decisions).
+    pub fn begin_style_gesture(&mut self) {
+        if self.text_reedit.is_some() || self.style_gesture_snapshot.is_some() {
+            return;
+        }
+        // Stage only when a restyle target exists: a selected Text.
+        // (No selection, or a non-Text selection, makes the whole
+        // gesture a no-op — nothing to snapshot for.)
+        let text_selected = self
+            .selected_index
+            .is_some_and(|i| matches!(self.anns.get(i), Some(Annotation::Text { .. })));
+        if !text_selected {
+            return;
+        }
+        self.style_gesture_snapshot =
+            Some(Snapshot::anns_only(self.anns.clone(), self.next_number));
+    }
+
+    /// Write `style` onto the restyle target and sync the session
+    /// defaults.
+    ///
+    /// Target resolution: the re-edit session's `pending` draft when a
+    /// session is active, else `anns[selected_index]` — which must be
+    /// a `Text` (the Text tool only selects Text; anything else, or
+    /// nothing selected at all, is a full no-op, defaults included).
+    /// Never pushes history itself — bracket with
+    /// [`begin_style_gesture`](Self::begin_style_gesture) /
+    /// [`end_style_gesture`](Self::end_style_gesture). The anchor
+    /// `pos` is never touched; the bbox grows with the font size.
+    /// Session defaults (`font_size`, `text_color`, `font_family`,
+    /// `font_weight`, `font_style`, `text_align`, `line_spacing`,
+    /// `text_outline`, `text_background`) always follow the write so
+    /// the next placed text inherits the selection's look.
+    pub fn restyle_selected_text(&mut self, style: crate::text::TextStyle) {
+        let wrote = if self.text_reedit.is_some() {
+            self.pending
+                .as_mut()
+                .is_some_and(|ann| apply_text_style(ann, &style))
+        } else {
+            let Some(index) = self.selected_index else {
+                return;
+            };
+            self.anns
+                .get_mut(index)
+                .is_some_and(|ann| apply_text_style(ann, &style))
+        };
+        if !wrote {
+            return;
+        }
+        self.font_size = style.size;
+        self.text_color = style.color;
+        self.font_family = style.family;
+        self.font_weight = style.weight;
+        self.font_style = style.style;
+        self.text_align = style.align;
+        self.line_spacing = style.line_spacing;
+        self.text_outline = style.outline;
+        self.text_background = style.background;
+    }
+
+    /// Close a restyle gesture: push the staged snapshot onto `undo`,
+    /// clear `redo`, drop the staging. No-op when nothing is staged
+    /// (including the whole mid-session case, where `begin` never
+    /// staged).
+    pub fn end_style_gesture(&mut self) {
+        if let Some(snapshot) = self.style_gesture_snapshot.take() {
+            self.undo.push(snapshot);
+            self.redo.clear();
         }
     }
 
@@ -1468,6 +1562,37 @@ pub const NUMBER_MAX_DIAMETER: f32 = 96.0;
 /// Hit-test tolerance in physical pixels, added to half the stroke
 /// width so thin lines are still grabbable.
 const HIT_TEST_TOLERANCE_PX: f32 = 3.0;
+
+/// Write a [`crate::text::TextStyle`] onto a `Text` annotation's
+/// per-field style storage. Returns `false` (touching nothing) for
+/// non-`Text` variants — the restyle API is Text-only this effort.
+fn apply_text_style(ann: &mut Annotation, style: &crate::text::TextStyle) -> bool {
+    let Annotation::Text {
+        font_size,
+        color,
+        family,
+        weight,
+        style: font_style,
+        align,
+        line_spacing,
+        outline,
+        background,
+        ..
+    } = ann
+    else {
+        return false;
+    };
+    *font_size = style.size;
+    *color = style.color;
+    *family = style.family;
+    *weight = style.weight;
+    *font_style = style.style;
+    *align = style.align;
+    *line_spacing = style.line_spacing;
+    *outline = style.outline;
+    *background = style.background;
+    true
+}
 
 /// Normalize any `Rect` fields in `ann` so `min` is top-left.
 ///
@@ -3669,6 +3794,212 @@ mod tests {
             Annotation::Text { text, .. } => assert_eq!(text, "first"),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    // --- Gesture-bracketed restyle (text-select-edit Task 005) ---
+
+    /// A distinctive style that differs from `text_select_state`'s
+    /// 16 px / RED in every field the panel can edit.
+    fn loud_style() -> crate::text::TextStyle {
+        crate::text::TextStyle {
+            size: 32.0,
+            color: Color::rgb(9, 8, 7),
+            family: crate::text::FontFamily::Monospace,
+            weight: crate::text::FontWeight::Bold,
+            style: crate::text::FontStyle::Italic,
+            align: crate::text::TextAlign::Center,
+            line_spacing: 1.5,
+            outline: Some(crate::text::TextOutline {
+                color: Color::rgb(0, 0, 0),
+                width: 3.0,
+            }),
+            background: Some(Color::rgb(255, 235, 0)),
+        }
+    }
+
+    /// One gesture (many restyle calls between begin / end) restyles
+    /// the selected text, syncs the session defaults so the next
+    /// placed text inherits them, and pushes exactly one undo entry
+    /// that Ctrl+Z restores style from. The anchor never moves.
+    #[test]
+    fn restyle_gesture_one_entry_syncs_defaults_and_restores() {
+        let mut s = text_select_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(0), "fixture: selected");
+        s.begin_style_gesture();
+        // Re-begin inside the same gesture is first-wins: one entry.
+        s.begin_style_gesture();
+        let style = loud_style();
+        s.restyle_selected_text(style);
+        s.restyle_selected_text(style);
+        s.end_style_gesture();
+        // Second end with nothing staged is a no-op.
+        s.end_style_gesture();
+
+        match &s.anns[0] {
+            Annotation::Text {
+                pos,
+                font_size,
+                color,
+                family,
+                weight,
+                style: fs,
+                align,
+                line_spacing,
+                outline,
+                background,
+                ..
+            } => {
+                assert_eq!(*pos, Point::new(10.0, 10.0), "anchor never moves");
+                assert_eq!(*font_size, 32.0);
+                assert_eq!(*color, Color::rgb(9, 8, 7));
+                assert_eq!(*family, crate::text::FontFamily::Monospace);
+                assert_eq!(*weight, crate::text::FontWeight::Bold);
+                assert_eq!(*fs, crate::text::FontStyle::Italic);
+                assert_eq!(*align, crate::text::TextAlign::Center);
+                assert_eq!(*line_spacing, 1.5);
+                assert_eq!(*outline, style.outline);
+                assert_eq!(*background, style.background);
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        // Session defaults synced: the next placed draft inherits.
+        assert_eq!(s.font_size, 32.0);
+        assert_eq!(s.text_color, Color::rgb(9, 8, 7));
+        assert_eq!(s.font_family, crate::text::FontFamily::Monospace);
+        assert_eq!(s.font_weight, crate::text::FontWeight::Bold);
+        assert_eq!(s.font_style, crate::text::FontStyle::Italic);
+        assert_eq!(s.text_align, crate::text::TextAlign::Center);
+        assert_eq!(s.line_spacing, 1.5);
+        assert_eq!(s.text_outline, style.outline);
+        assert_eq!(s.text_background, style.background);
+        assert_eq!(s.undo.len(), 1, "exactly one entry per gesture");
+
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(70.0, 70.0),
+        });
+        match &s.pending {
+            Some(Annotation::Text {
+                font_size, color, ..
+            }) => {
+                assert_eq!(*font_size, 32.0, "next draft inherits the size");
+                assert_eq!(
+                    *color,
+                    Color::rgb(9, 8, 7),
+                    "next draft inherits the colour"
+                );
+            }
+            other => panic!("expected fresh draft, got {other:?}"),
+        }
+
+        s.pending = None;
+        s.dispatch_input(&ctrl('z'));
+        match &s.anns[0] {
+            Annotation::Text {
+                font_size, color, ..
+            } => {
+                assert_eq!(*font_size, 16.0, "Ctrl+Z restores the prior style");
+                assert_eq!(*color, Color::RED);
+            }
+            other => panic!("expected restored Text, got {other:?}"),
+        }
+    }
+
+    /// Mid-session restyles target the lifted-out draft and stage
+    /// nothing: the session's commit still pushes exactly one entry
+    /// covering content and style together.
+    #[test]
+    fn restyle_mid_session_targets_draft_and_absorbs() {
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        s.begin_style_gesture();
+        assert!(
+            s.style_gesture_snapshot.is_none(),
+            "begin no-ops while a session is active"
+        );
+        s.restyle_selected_text(loud_style());
+        match &s.pending {
+            Some(Annotation::Text {
+                text,
+                font_size,
+                color,
+                ..
+            }) => {
+                assert_eq!(text, "hello", "content untouched by restyle");
+                assert_eq!(*font_size, 32.0, "the draft carries the new style");
+                assert_eq!(*color, Color::rgb(9, 8, 7));
+            }
+            other => panic!("expected pending draft, got {other:?}"),
+        }
+        assert_eq!(s.font_size, 32.0, "defaults still sync mid-session");
+        s.end_style_gesture();
+        assert!(s.undo.is_empty(), "end with nothing staged pushes nothing");
+
+        s.dispatch_input(&InputEvent::TextInput('!'));
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.undo.len(), 1, "session commit is still one entry");
+        match &s.anns[0] {
+            Annotation::Text {
+                text,
+                font_size,
+                color,
+                ..
+            } => {
+                assert_eq!(text, "hello!");
+                assert_eq!(
+                    *font_size, 32.0,
+                    "style change covered by the session entry"
+                );
+                assert_eq!(*color, Color::rgb(9, 8, 7));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        s.dispatch_input(&ctrl('z'));
+        match &s.anns[0] {
+            Annotation::Text {
+                text,
+                font_size,
+                color,
+                ..
+            } => {
+                assert_eq!(text, "hello", "content restored");
+                assert_eq!(*font_size, 24.0, "style restored");
+                assert_eq!(*color, Color::rgb(1, 2, 3));
+            }
+            other => panic!("expected restored Text, got {other:?}"),
+        }
+    }
+
+    /// With no Text target (nothing selected, or a non-Text
+    /// annotation selected), all three calls are full no-ops —
+    /// not even the session defaults move.
+    #[test]
+    fn restyle_noops_without_text_target() {
+        let mut s = text_select_state();
+        let before = s.clone();
+        s.begin_style_gesture();
+        s.restyle_selected_text(loud_style());
+        s.end_style_gesture();
+        assert_eq!(s.anns, before.anns, "annotation untouched");
+        assert_eq!(s.font_size, before.font_size, "defaults untouched");
+        assert_eq!(s.text_color, before.text_color);
+        assert!(s.undo.is_empty(), "no history from a no-op gesture");
+
+        // Non-Text selection: restyle still a no-op.
+        let mut s = move_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(30.0, 25.0),
+        });
+        s.begin_style_gesture();
+        s.restyle_selected_text(loud_style());
+        s.end_style_gesture();
+        assert_eq!(s.font_size, 16.0, "a rect selection restyles nothing");
+        assert!(matches!(s.anns[0], Annotation::Rect { .. }));
     }
 
     // --- Task 14: Select / crop region tool tests ---
