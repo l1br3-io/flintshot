@@ -7,7 +7,7 @@
 //!   `impl Canvas` (background primitives live here).
 //! - [`app`] — the internal `EditorApp` (`impl eframe::App`) that
 //!   drives the per-frame render loop.
-//! - `chrome` (private) — the Move-tool hover / grab outline shared
+//! - `chrome` (private) — the Hand-tool hover / grab outline shared
 //!   by the editor window and the overlay (see `crate::chrome`).
 //! - `dblclick` (private) — press-time double-click detection shared
 //!   by the two event pumps, feeding core's `DoubleClick` re-edit

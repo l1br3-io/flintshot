@@ -359,7 +359,7 @@ impl EditorApp {
     /// toolbar action) so the mask never paints on the crop's own
     /// frame. One-way by design: undo pops the snapshot, the latch
     /// keeps the phase ended. On the latch, a still-`Select` tool
-    /// becomes `Move` — the phase force-armed `Select` at
+    /// becomes `Hand` — the phase force-armed `Select` at
     /// construction, so this restores the edit-phase default (the
     /// shell's own override, not the config-gated commit flip). The
     /// still-`Select` guard is defensive: the input gates (rail
@@ -373,7 +373,7 @@ impl EditorApp {
         if self.phase == SelectionPhase::Live && self.state.undo.iter().any(|s| s.image.is_some()) {
             self.phase = SelectionPhase::Ended;
             if self.state.tool == Tool::Select {
-                self.state.set_tool(Tool::Move);
+                self.state.set_tool(Tool::Hand);
             }
         }
     }
@@ -736,7 +736,7 @@ impl EditorApp {
             .show(painter, ctx, &self.state.image, cursor_phys, view);
     }
 
-    /// Paint the Move-tool hover / grab outline (see
+    /// Paint the Hand-tool hover / grab outline (see
     /// [`crate::chrome`]) over the shared render output. The hover
     /// variant is gated exactly like the cursor in [`Self::logic_impl`]
     /// — pointer inside the canvas (never the toolbar: it sits outside
@@ -794,7 +794,7 @@ impl EditorApp {
     fn paint_selected_chrome_if_any(&mut self, _ctx: &Context, painter: &egui::Painter) {
         let rects = crate::chrome::selected_chrome(&self.state);
         if rects.is_empty() {
-            if matches!(self.state.tool, Tool::Move | Tool::Text) && !self.state.selected.is_empty()
+            if matches!(self.state.tool, Tool::Hand | Tool::Text) && !self.state.selected.is_empty()
             {
                 self.state.selected.clear();
             }
@@ -904,7 +904,7 @@ impl EditorApp {
         // except Select is ignored — selection is the phase's only
         // job (S stays harmless: Select is what the phase armed).
         // Post-crop the keys work again. Switches route through core
-        // `set_tool`: leaving Move drops the persistent selection.
+        // `set_tool`: leaving Hand drops the persistent selection.
         if let Some(tool) = ctx.input(|i| {
             i.raw.events.iter().rev().find_map(|e| match e {
                 egui::Event::Key {
@@ -1017,11 +1017,11 @@ impl EditorApp {
             let _ = self.state.dispatch_input(&event);
         }
 
-        // Move-tool hover / grab cursor: the editor window's first
+        // Hand-tool hover / grab cursor: the editor window's first
         // hover cursor (prominent-move spec). Follows the same
         // condition as the chrome paint — a hover hit or a live move
         // drag — so cursor and outline can never disagree. Empty
-        // canvas under Move sets nothing (egui falls back to the
+        // canvas under Hand sets nothing (egui falls back to the
         // default arrow for the frame).
         let hover_at = (canvas_rect.contains(pos) && !self.canvas_drag_active).then_some(at);
         if crate::chrome::move_chrome(&self.state, hover_at).is_some() {
@@ -1312,7 +1312,7 @@ impl EditorApp {
             self.paint_selection_phase(ui.ctx(), ui.painter());
         }
 
-        // Move-tool object chrome (prominent-move spec): dashed hover
+        // Hand-tool object chrome (prominent-move spec): dashed hover
         // outline / solid ember grab outline, under the magnifier —
         // the overlay's chrome ordering.
         self.paint_move_chrome_if_any(ui.ctx(), ui.painter());
@@ -2348,7 +2348,7 @@ fn rail_gate(phase_active: bool) -> rail::ToolGate {
 pub(crate) fn tool_for_key(key: egui::Key) -> Option<Tool> {
     match key {
         egui::Key::S => Some(Tool::Select),
-        egui::Key::V => Some(Tool::Move),
+        egui::Key::V => Some(Tool::Hand),
         egui::Key::R => Some(Tool::Rect),
         egui::Key::E => Some(Tool::Ellipse),
         egui::Key::A => Some(Tool::Arrow),
@@ -2381,7 +2381,7 @@ mod tests {
     fn tool_shortcuts_are_complete_and_injective() {
         let pairs = [
             (egui::Key::S, Tool::Select),
-            (egui::Key::V, Tool::Move),
+            (egui::Key::V, Tool::Hand),
             (egui::Key::R, Tool::Rect),
             (egui::Key::E, Tool::Ellipse),
             (egui::Key::A, Tool::Arrow),
@@ -2528,13 +2528,13 @@ mod tests {
         let app = phase_app(false);
         assert_eq!(
             app.state.tool,
-            Tool::Move,
+            Tool::Hand,
             "the editor default is untouched"
         );
         assert!(!app.phase_active(), "no request → no phase");
     }
 
-    // --- Move-tool hover / grab chrome (prominent-move) ---
+    // --- Hand-tool hover / grab chrome (prominent-move) ---
 
     /// One eframe-shaped frame for the editor window: `logic_impl`
     /// then `ui_impl` inside a single egui pass over the given extra
@@ -2596,7 +2596,7 @@ mod tests {
         }
     }
 
-    /// An editor state on the default Move tool with one committed
+    /// An editor state on the default Hand tool with one committed
     /// rect annotation at (10,10)-(50,40) — something to hover.
     fn move_state_with_ann() -> EditorState {
         // The annotation sits below the floating cluster's band (the
@@ -2608,7 +2608,7 @@ mod tests {
             fill: None,
         });
         state.commit_annotation();
-        assert_eq!(state.tool, Tool::Move, "fixture: tool stays Move");
+        assert_eq!(state.tool, Tool::Hand, "fixture: tool stays Hand");
         state
     }
 
@@ -2657,7 +2657,7 @@ mod tests {
         assert_eq!(
             cursor_after_hover(&ctx, &mut app, (30.0, 65.0)),
             egui::CursorIcon::Move,
-            "hovering the annotation under Move must show the grab cursor"
+            "hovering the annotation under Hand must show the grab cursor"
         );
     }
 
@@ -2674,7 +2674,7 @@ mod tests {
         assert_eq!(
             cursor_after_hover(&ctx, &mut app, (5.0, 5.0)),
             egui::CursorIcon::Default,
-            "empty canvas under Move must leave the default cursor"
+            "empty canvas under Hand must leave the default cursor"
         );
     }
 
@@ -2755,8 +2755,8 @@ mod tests {
         assert!(!app.phase_active(), "fixture: the crop ended the phase");
         assert_eq!(
             app.state.tool,
-            Tool::Move,
-            "the edit phase opens on Move, not the phase's armed Select"
+            Tool::Hand,
+            "the edit phase opens on Hand, not the phase's armed Select"
         );
     }
 
@@ -3866,7 +3866,7 @@ mod tests {
     /// tool-dependent (annotation tools render a style bay). A test
     /// that mutates `state.tool` must run an empty settle frame
     /// before gesturing, or the drag lands skewed by the height
-    /// delta (observed: 4px between Move and Rect).
+    /// delta (observed: 4px between Hand and Rect).
     fn canvas_drag(ctx: &egui::Context, app: &mut EditorApp, from: (f32, f32), to: (f32, f32)) {
         // Gestures are specified in image px: map them through the
         // app's live view (the fit letterbox + zoom move the anchor
@@ -4414,7 +4414,7 @@ mod tests {
         // the viewport, where no pointer can reach it. Roomy screen
         // so the whole panel is visible — the inspector's section
         // stack (Stroke + Fill + Selection) is taller than the old
-        // Move-tool lone Selection card; positions are still
+        // Hand-tool lone Selection card; positions are still
         // response-derived.
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 768.0));
         let frame = |ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>| {
@@ -4472,7 +4472,7 @@ mod tests {
 
     // --- Editor window delete UX (annotation-delete Task 003) ---
 
-    /// An editor app on the Move tool with one committed, selected
+    /// An editor app on the Hand tool with one committed, selected
     /// annotation — the delete UX's starting state.
     fn app_with_selected_ann() -> (egui::Context, EditorApp) {
         let ctx = egui::Context::default();
@@ -4573,7 +4573,7 @@ mod tests {
     }
 
     /// Hotkey tool switches route through core `set_tool`: leaving
-    /// Move must drop the persistent selection (the invariant lives
+    /// Hand must drop the persistent selection (the invariant lives
     /// in the core method, not at each shell call site).
     #[test]
     fn tool_switch_away_from_move_deselects_through_shell() {
@@ -4582,7 +4582,7 @@ mod tests {
         assert_eq!(app.state.tool, Tool::Rect, "fixture: R armed Rect");
         assert!(
             app.state.selected.is_empty(),
-            "leaving Move via hotkey drops the selection"
+            "leaving Hand via hotkey drops the selection"
         );
     }
 

@@ -10,19 +10,19 @@ use crate::geom::{Color, Point, Rect, Stroke};
 
 /// Available annotation tools.
 ///
-/// `Default` is [`Tool::Move`] — the editor opens on the tool
+/// `Default` is [`Tool::Hand`] — the editor opens on the tool
 /// annotations land on for repositioning; `flintshot-app` overrides
 /// this from config. Tools are sticky across commits by default
-/// (see [`EditorState::flip_to_move`]); flipping to Move after a
+/// (see [`EditorState::flip_to_move`]); flipping to Hand after a
 /// commit is opt-in via `[ui] flip-to-move`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Tool {
     /// Region select / crop.
     Select,
-    /// Move a committed annotation by dragging it.
+    /// Select and move a committed annotation by dragging it.
     #[default]
-    Move,
+    Hand,
     /// Rectangle outline.
     Rect,
     /// Ellipse outline.
@@ -221,7 +221,7 @@ impl Snapshot {
     }
 }
 
-/// An in-flight annotation move started by a Move-tool press on a
+/// An in-flight annotation move started by a Hand-tool press on a
 /// committed annotation (see [`EditorState::moving`]).
 ///
 /// The drag translates the whole selection set by the incremental
@@ -302,7 +302,7 @@ pub struct EditorState {
     /// Currently-active tool.
     pub tool: Tool,
     /// Policy: committing an eligible annotation flips `tool` to
-    /// [`Tool::Move`] so the next press can reposition what was just
+    /// [`Tool::Hand`] so the next press can reposition what was just
     /// drawn. Defaults to `false` — tools are sticky (ADR-0058,
     /// superseding ADR-0040's default-on); plumbed from
     /// `[ui] flip-to-move` at editor-session start (read-once, like
@@ -351,17 +351,17 @@ pub struct EditorState {
     /// changes. Bounded by [`NUMBER_MIN_DIAMETER`] /
     /// [`NUMBER_MAX_DIAMETER`].
     pub number_diameter: f32,
-    /// In-flight annotation move for `Tool::Move` (press on a
+    /// In-flight annotation move for `Tool::Hand` (press on a
     /// committed annotation). `None` when no move drag is active.
-    /// While set, Move-tool `PointerDrag`s translate the grabbed
+    /// While set, Hand-tool `PointerDrag`s translate the grabbed
     /// annotation.
     pub moving: Option<AnnotationDrag>,
-    /// Selected annotation indices (the Move / Text-tool selection
+    /// Selected annotation indices (the Hand / Text-tool selection
     /// set).
     ///
     /// **Invariant: sorted ascending, no duplicates** — maintained
     /// by the private routing helpers; consumers may rely on stable
-    /// ascending order. Under Move, built by the dispatcher's press
+    /// ascending order. Under Hand, built by the dispatcher's press
     /// routing: plain click replaces the set with the hit
     /// annotation, Shift+click toggles membership, a miss clears.
     /// Under Text, a press on a committed Text selects it — the set
@@ -369,7 +369,7 @@ pub struct EditorState {
     /// and starts a fresh caret. **Kept after release** (persistent
     /// selection — the outline the shells render). Cleared by a
     /// miss press, [`set_tool`](Self::set_tool) away from the
-    /// selection-owning tool (Move / Text), `undo` / `redo` /
+    /// selection-owning tool (Hand / Text), `undo` / `redo` /
     /// `crop`, and [`delete_selected`](Self::delete_selected).
     /// Chrome-only: never composed into Save / Copy / Upload output,
     /// never restored by undo (the set is chrome, not content).
@@ -444,7 +444,7 @@ impl EditorState {
     }
 
     /// Switch the active tool, dropping a persistent selection when
-    /// leaving [`Tool::Move`] or [`Tool::Text`].
+    /// leaving [`Tool::Hand`] or [`Tool::Text`].
     ///
     /// Tool switches bypass the dispatcher (shells write `tool`
     /// directly from rail chips and hotkeys), so this method owns
@@ -454,7 +454,7 @@ impl EditorState {
     /// the switch originated. Staying on (or switching to) the
     /// selection-owning tool never clears.
     pub fn set_tool(&mut self, tool: Tool) {
-        if matches!(self.tool, Tool::Move | Tool::Text) && tool != self.tool {
+        if matches!(self.tool, Tool::Hand | Tool::Text) && tool != self.tool {
             self.selected.clear();
         }
         self.tool = tool;
@@ -475,7 +475,7 @@ impl EditorState {
     /// text-editing branch).
     ///
     /// Tools with a different input model (`Number`, `Select`,
-    /// `Move`) are no-ops here; they have dedicated entry points.
+    /// `Hand`) are no-ops here; they have dedicated entry points.
     ///
     /// If a `pending` annotation already exists it is replaced — the
     /// shell should `commit_annotation()` or `cancel_annotation()`
@@ -540,9 +540,9 @@ impl EditorState {
                 };
                 Annotation::text(at, "", style)
             }
-            // Number / Select / Move have non-drag input models; their
+            // Number / Select / Hand have non-drag input models; their
             // entry points are tool-specific (see method doc).
-            Tool::Number | Tool::Select | Tool::Move => return,
+            Tool::Number | Tool::Select | Tool::Hand => return,
         };
         if self.tool == Tool::Text {
             self.text_cursor = 0;
@@ -583,7 +583,7 @@ impl EditorState {
     /// `redo`, normalizes the pending annotation's rect (if any),
     /// then appends it to `anns`. When the [`flip_to_move`](Self::flip_to_move)
     /// policy is on and the committing tool owns the pending
-    /// annotation, the active tool switches to [`Tool::Move`] (no
+    /// annotation, the active tool switches to [`Tool::Hand`] (no
     /// undo entry). No-op when `pending` is `None`.
     pub fn commit_annotation(&mut self) {
         let Some(mut ann) = self.pending.take() else {
@@ -605,7 +605,7 @@ impl EditorState {
         // toolbar-switch flush runs after `tool` changed) must not
         // flip — the explicit tool choice wins.
         if self.flip_to_move && is_flip_eligible(owner) && owner == self.tool {
-            self.tool = Tool::Move;
+            self.tool = Tool::Hand;
         }
     }
 
@@ -668,9 +668,9 @@ impl EditorState {
         }
     }
 
-    // --- Annotation move (Tool::Move) ---
+    // --- Annotation move (Tool::Hand) ---
 
-    /// Route a Move-tool press: selection first (the set model),
+    /// Route a Hand-tool press: selection first (the set model),
     /// then the drag grab.
     ///
     /// - hit + Shift on a non-member: toggle in, grab (press-and-hold
@@ -1066,9 +1066,9 @@ impl EditorState {
                     // Select owns region selection only — a press on a
                     // committed annotation starts a fresh selection
                     // drag over it (annotation moves belong to
-                    // `Tool::Move`).
+                    // `Tool::Hand`).
                     self.begin_selection(*pos);
-                } else if self.tool == Tool::Move {
+                } else if self.tool == Tool::Hand {
                     // A press routes through the selection set first
                     // (Shift toggles, plain replaces, miss clears),
                     // then grabs the hit annotation for a drag. See
@@ -1095,7 +1095,7 @@ impl EditorState {
             InputEvent::PointerDrag { pos } => {
                 if self.tool == Tool::Select {
                     self.update_selection(*pos);
-                } else if self.tool == Tool::Move {
+                } else if self.tool == Tool::Hand {
                     self.update_move(*pos);
                 } else {
                     self.update_annotation(*pos);
@@ -1105,7 +1105,7 @@ impl EditorState {
             InputEvent::PointerUp => {
                 if self.tool == Tool::Select {
                     self.finish_selection();
-                } else if self.tool == Tool::Move {
+                } else if self.tool == Tool::Hand {
                     // Release ends the drag but keeps the selection —
                     // the press selected the annotation (persistent
                     // selection); Del / a miss press / tool switch own
@@ -1246,7 +1246,7 @@ impl EditorState {
                 self.commit_text_draft();
                 if self.tool == Tool::Select {
                     self.begin_selection(*pos);
-                } else if self.tool == Tool::Move {
+                } else if self.tool == Tool::Hand {
                     self.route_move_press(*pos, modifiers.shift);
                 } else if self.tool == Tool::Number {
                     self.place_number(*pos);
@@ -1732,8 +1732,8 @@ fn owning_tool(ann: &Annotation) -> Tool {
 }
 
 /// Whether committing `tool`'s annotation flips the active tool to
-/// Move. Number is exempt — its click-to-place-the-next-number input
-/// model exists for rapid sequential labeling; Select / Move produce
+/// Hand. Number is exempt — its click-to-place-the-next-number input
+/// model exists for rapid sequential labeling; Select / Hand produce
 /// no pending annotations.
 fn is_flip_eligible(tool: Tool) -> bool {
     matches!(
@@ -2143,7 +2143,7 @@ mod tests {
         assert_eq!(s.next_number, 1);
         assert!(s.selected.is_empty());
         assert!(s.selection.is_none(), "selection rect starts None");
-        assert_eq!(s.tool, Tool::Move, "Move is the default tool");
+        assert_eq!(s.tool, Tool::Hand, "Hand is the default tool");
         assert!(!s.flip_to_move, "flip policy defaults off (sticky tools)");
     }
 
@@ -2155,7 +2155,7 @@ mod tests {
 
     #[test]
     fn tool_default_is_move() {
-        assert_eq!(Tool::default(), Tool::Move);
+        assert_eq!(Tool::default(), Tool::Hand);
     }
 
     #[test]
@@ -2346,7 +2346,7 @@ mod tests {
             s.flip_to_move = true;
             drag_commit(&mut s, Point::new(10.0, 10.0), Point::new(50.0, 40.0));
             assert_eq!(s.anns.len(), 1, "{tool:?} drag must commit");
-            assert_eq!(s.tool, Tool::Move, "{tool:?} commit must flip to Move");
+            assert_eq!(s.tool, Tool::Hand, "{tool:?} commit must flip to Hand");
         }
     }
 
@@ -2361,7 +2361,7 @@ mod tests {
             modifiers: Modifiers::default(),
         });
         assert_eq!(s.anns.len(), 1);
-        assert_eq!(s.tool, Tool::Move, "Enter commit must flip to Move");
+        assert_eq!(s.tool, Tool::Hand, "Enter commit must flip to Hand");
     }
 
     #[test]
@@ -2422,7 +2422,7 @@ mod tests {
         );
         s.undo();
         assert!(s.anns.is_empty(), "undo removed the committed annotation");
-        assert_eq!(s.tool, Tool::Move, "undo does not touch the flipped tool");
+        assert_eq!(s.tool, Tool::Hand, "undo does not touch the flipped tool");
     }
 
     #[test]
@@ -2431,12 +2431,12 @@ mod tests {
         // active tool (unreachable via normal input, defensive) must
         // not flip — the ownership guard blocks it.
         let mut s = EditorState::new(blank_image());
-        s.tool = Tool::Move;
+        s.tool = Tool::Hand;
         s.flip_to_move = true;
         s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
         s.commit_annotation();
         assert_eq!(s.anns.len(), 1);
-        assert_eq!(s.tool, Tool::Move, "guard blocks non-owning commit");
+        assert_eq!(s.tool, Tool::Hand, "guard blocks non-owning commit");
     }
 
     /// TODO Task 7 acceptance: pending is None after cancel.
@@ -2537,7 +2537,7 @@ mod tests {
         assert!(!ann.contains(Point::new(50.0, -50.0)));
     }
 
-    /// `begin_annotation` for `Tool::Number` / `Select` / `Move` is a
+    /// `begin_annotation` for `Tool::Number` / `Select` / `Hand` is a
     /// no-op (different input model — those tools have dedicated entry
     /// points).
     /// `Tool::Text` is NOT in this list as of Task 12: a click places
@@ -2545,7 +2545,7 @@ mod tests {
     #[test]
     fn begin_annotation_skips_non_drag_tools() {
         let mut s = EditorState::new(blank_image());
-        for tool in [Tool::Number, Tool::Select, Tool::Move] {
+        for tool in [Tool::Number, Tool::Select, Tool::Hand] {
             s.tool = tool;
             s.begin_annotation(Point::new(1.0, 1.0));
             assert!(s.pending.is_none(), "{tool:?} should be a no-op");
@@ -3295,8 +3295,8 @@ mod tests {
     fn dispatch_text_pointer_commits_and_flips_to_move() {
         // Clicking elsewhere while a draft is active commits the
         // current draft. With the flip policy on (opt-in), the tool
-        // switches to Move — the click's own follow-up action then
-        // belongs to Move (here: a miss on the freshly committed
+        // switches to Hand — the click's own follow-up action then
+        // belongs to Hand (here: a miss on the freshly committed
         // text, so nothing begins). The old behavior placed a new
         // caret; that now requires staying on Text via a re-press.
         let mut s = text_state();
@@ -3307,7 +3307,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(50.0, 50.0)));
         assert_eq!(s.anns.len(), 1, "previous draft committed");
         assert!(s.pending.is_none(), "no new caret after the flip");
-        assert_eq!(s.tool, Tool::Move, "commit flipped the tool to Move");
+        assert_eq!(s.tool, Tool::Hand, "commit flipped the tool to Hand");
         match &s.anns[0] {
             Annotation::Text { pos, text, .. } => {
                 assert_eq!(*pos, Point::new(10.0, 10.0));
@@ -3494,7 +3494,7 @@ mod tests {
     }
 
     /// Leaving the Text tool clears a Text-tool selection; staying on
-    /// Text never clears. Mirrors the Move-tool rule.
+    /// Text never clears. Mirrors the Hand-tool rule.
     #[test]
     fn set_tool_away_from_text_clears_selection() {
         let mut s = text_select_state();
@@ -3505,8 +3505,8 @@ mod tests {
         assert_eq!(s.selected, vec![0], "fixture: selected");
         s.set_tool(Tool::Text);
         assert_eq!(s.selected, vec![0], "Text→Text switch keeps the selection");
-        s.set_tool(Tool::Move);
-        assert!(s.selected.is_empty(), "Text→Move deselects");
+        s.set_tool(Tool::Hand);
+        assert!(s.selected.is_empty(), "Text→Hand deselects");
         s.set_tool(Tool::Text);
         s.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(20.0, 15.0),
@@ -3750,9 +3750,9 @@ mod tests {
 
         // Non-Text tool over a text hit.
         let mut s = reedit_state();
-        s.tool = Tool::Move;
+        s.tool = Tool::Hand;
         dblclick(&mut s, Point::new(20.0, 15.0));
-        assert_eq!(s.anns.len(), 1, "Move treats DoubleClick as noise");
+        assert_eq!(s.anns.len(), 1, "Hand treats DoubleClick as noise");
         assert!(s.pending.is_none());
 
         // Mid-edit (fresh draft active): modal path swallows it.
@@ -4580,41 +4580,41 @@ mod tests {
         }
     }
 
-    // --- Annotation move (Tool::Move) tests ---
+    // --- Annotation move (Tool::Hand) tests ---
 
-    /// Helper: Move-tool state over 100×100 with one committed rect
+    /// Helper: Hand-tool state over 100×100 with one committed rect
     /// annotation at (10,10)–(50,40).
     fn move_state() -> EditorState {
         let mut s = hundred_state();
-        s.tool = Tool::Move;
+        s.tool = Tool::Hand;
         s.anns.push(rect_ann(10.0, 10.0, 50.0, 40.0));
         s
     }
 
-    /// Helper: Move-tool state with two non-overlapping committed
+    /// Helper: Hand-tool state with two non-overlapping committed
     /// rects — ann 0 at (10,10)–(50,40), ann 1 at (60,10)–(90,40).
     fn two_ann_move_state() -> EditorState {
         let mut s = hundred_state();
-        s.tool = Tool::Move;
+        s.tool = Tool::Hand;
         s.anns.push(rect_ann(10.0, 10.0, 50.0, 40.0));
         s.anns.push(rect_ann(60.0, 10.0, 90.0, 40.0));
         s
     }
 
-    /// Helper: Move-tool state with three non-overlapping committed
+    /// Helper: Hand-tool state with three non-overlapping committed
     /// rects, in a lower band so fixtures compose: ann 0 at
     /// (0,50)–(20,70), ann 1 at (60,50)–(80,70), ann 2 at
     /// (80,50)–(95,70).
     fn three_ann_move_state() -> EditorState {
         let mut s = hundred_state();
-        s.tool = Tool::Move;
+        s.tool = Tool::Hand;
         s.anns.push(rect_ann(0.0, 50.0, 20.0, 70.0));
         s.anns.push(rect_ann(60.0, 50.0, 80.0, 70.0));
         s.anns.push(rect_ann(80.0, 50.0, 95.0, 70.0));
         s
     }
 
-    /// Move press on a committed annotation grabs it for a move;
+    /// Hand press on a committed annotation grabs it for a move;
     /// the drag translates it with the grab point tracking the
     /// cursor; release clears the drag state.
     #[test]
@@ -4729,7 +4729,7 @@ mod tests {
     }
 
     /// Select press (on or off an annotation) always starts a fresh
-    /// region selection — annotation moves are `Tool::Move`'s job, so
+    /// region selection — annotation moves are `Tool::Hand`'s job, so
     /// Select never grabs.
     #[test]
     fn select_press_off_annotation_starts_selection() {
@@ -4750,7 +4750,7 @@ mod tests {
     }
 
     /// Select press directly on an annotation also starts a selection
-    /// — the separation contract: Select selects, Move moves.
+    /// — the separation contract: Select selects, Hand moves.
     #[test]
     fn select_press_on_annotation_starts_selection() {
         let mut s = move_state();
@@ -4769,7 +4769,7 @@ mod tests {
     #[test]
     fn move_press_on_line_moves_endpoints() {
         let mut s = hundred_state();
-        s.tool = Tool::Move;
+        s.tool = Tool::Hand;
         s.anns.push(Annotation::Line {
             a: Point::new(10.0, 10.0),
             b: Point::new(90.0, 10.0),
@@ -4791,12 +4791,12 @@ mod tests {
         }
     }
 
-    /// A Move-tool press on a degenerate annotation (empty polyline)
+    /// A Hand-tool press on a degenerate annotation (empty polyline)
     /// is a no-op — no move, no selection, nothing starts.
     #[test]
     fn move_press_on_degenerate_annotation_is_noop() {
         let mut s = hundred_state();
-        s.tool = Tool::Move;
+        s.tool = Tool::Hand;
         s.anns.push(Annotation::Pencil {
             points: Vec::new(),
             color: Color::RED,
@@ -4805,10 +4805,10 @@ mod tests {
         assert!(!s.begin_move(0, Point::new(50.0, 50.0)));
         s.dispatch_input(&down(Point::new(50.0, 50.0)));
         assert!(s.moving.is_none());
-        assert!(s.selection.is_none(), "Move never starts a selection");
+        assert!(s.selection.is_none(), "Hand never starts a selection");
     }
 
-    /// A Move-tool press that misses every annotation is a no-op —
+    /// A Hand-tool press that misses every annotation is a no-op —
     /// the tool only repositions, it never selects or draws.
     #[test]
     fn move_press_on_empty_space_is_noop() {
@@ -4829,7 +4829,7 @@ mod tests {
 
     // --- Annotation delete (annotation-delete Task 001) ---
     //
-    // Persistent selection: a Move-tool click selects an annotation
+    // Persistent selection: a Hand-tool click selects an annotation
     // and the selection survives release; Del / Backspace (or
     // `delete_selected` directly) remove exactly it as a fully
     // undoable anns-only snapshot.
@@ -4930,7 +4930,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&down(Point::new(30.0, 10.0)));
         assert_eq!(s.next_number, 3);
-        s.set_tool(Tool::Move);
+        s.set_tool(Tool::Hand);
         // Click bubble 1's centre to select it, then delete.
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerUp);
@@ -5069,14 +5069,14 @@ mod tests {
         assert_eq!(s.selected, vec![0], "fixture: selected");
         s.set_tool(Tool::Rect);
         assert_eq!(s.tool, Tool::Rect);
-        assert!(s.selected.is_empty(), "leaving Move deselects");
-        // Switching back, then Move→Move, must never clear.
-        s.set_tool(Tool::Move);
+        assert!(s.selected.is_empty(), "leaving Hand deselects");
+        // Switching back, then Hand→Hand, must never clear.
+        s.set_tool(Tool::Hand);
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.selected, vec![0], "fixture: reselected");
-        s.set_tool(Tool::Move);
-        assert_eq!(s.selected, vec![0], "Move→Move switch keeps the selection");
+        s.set_tool(Tool::Hand);
+        assert_eq!(s.selected, vec![0], "Hand→Hand switch keeps the selection");
     }
 
     #[test]
@@ -5100,13 +5100,13 @@ mod tests {
     #[test]
     fn text_flush_move_miss_press_clears_selection() {
         // Toolbar tool switch while a draft is open: the draft
-        // commits, and the follow-up Move press that misses every
+        // commits, and the follow-up Hand press that misses every
         // annotation must still clear a stale selection (the
         // text-mode press branch mirrors the normal one).
         let mut s = text_state();
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('x'));
-        s.tool = Tool::Move;
+        s.tool = Tool::Hand;
         s.selected = vec![0];
         s.dispatch_input(&down(Point::new(70.0, 70.0)));
         assert_eq!(s.anns.len(), 1, "the draft committed");
@@ -5241,14 +5241,14 @@ mod tests {
     }
 
     /// The text-draft commit-then-route press mirrors the normal
-    /// Move routing, Shift included: a shift hit toggles, a shift
+    /// Hand routing, Shift included: a shift hit toggles, a shift
     /// miss clears.
     #[test]
     fn text_flush_shift_press_routes_selection() {
         let mut s = text_state();
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('x'));
-        s.tool = Tool::Move;
+        s.tool = Tool::Hand;
         // Text "x" at (10,10), size 16: coarse bbox (10,10)-(18,26).
         s.dispatch_input(&shift_down(Point::new(12.0, 18.0)));
         assert_eq!(s.anns.len(), 1, "the draft committed");
