@@ -36,9 +36,10 @@ magnifier-always-on = false
 interaction-mode = "editor"
 
 # false (default): tools are sticky — committing an annotation
-# keeps the active tool for rapid multi-draw. true: flip to Move
-# after every eligible commit.
-flip-to-move = false
+# keeps the active tool for rapid multi-draw. true: flip to Select
+# after every eligible commit. (Legacy files may carry the old
+# `flip-to-move` key; it migrates on first save.)
+flip-to-select = false
 
 # Whether the editor shows its 30 px statusbar (cursor position,
 # selection size, byte estimate).

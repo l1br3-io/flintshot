@@ -1303,7 +1303,7 @@ fn run_overlay_with_config(
 }
 
 /// Build an [`EditorState`] for a fresh capture with the persisted
-/// `[ui]` defaults (color / stroke / font / flip-to-move) applied
+/// `[ui]` defaults (color / stroke / font / flip-to-select) applied
 /// (Task 15; prominent-move-tool Task 002). Shared by the
 /// editor-window and overlay shell paths so both sessions start
 /// from the same persisted tool settings.
@@ -1317,7 +1317,7 @@ pub(crate) fn state_from_config(
     state.text_color = cfg.ui.default_text_color;
     state.stroke_width = cfg.ui.default_stroke_width;
     state.font_size = cfg.ui.default_font_size;
-    state.flip_to_move = cfg.ui.flip_to_move;
+    state.flip_to_select = cfg.ui.flip_to_select;
     state
 }
 
@@ -2858,18 +2858,18 @@ mod tests {
         assert_eq!(state.tool, Tool::Select);
     }
 
-    /// The persisted `[ui] flip-to-move` knob must reach the state
+    /// The persisted `[ui] flip-to-select` knob must reach the state
     /// both ways — it gates the commit-flip policy for the session.
     #[cfg(feature = "egui")]
     #[test]
-    fn state_from_config_maps_flip_to_move_both_ways() {
+    fn state_from_config_maps_flip_to_select_both_ways() {
         let img = || image::RgbaImage::from_raw(2, 2, vec![255; 16]).expect("2×2×4 bytes");
         let mut cfg = Config::default();
-        cfg.ui.flip_to_move = false;
+        cfg.ui.flip_to_select = false;
         let state = state_from_config(img(), &cfg);
-        assert!(!state.flip_to_move, "false config must reach the state");
-        cfg.ui.flip_to_move = true;
+        assert!(!state.flip_to_select, "false config must reach the state");
+        cfg.ui.flip_to_select = true;
         let state = state_from_config(img(), &cfg);
-        assert!(state.flip_to_move, "true config must reach the state");
+        assert!(state.flip_to_select, "true config must reach the state");
     }
 }

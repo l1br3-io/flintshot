@@ -88,12 +88,16 @@ pub struct UiConfig {
     pub interaction_mode: String,
     /// When `false` (default), tools are sticky — committing an
     /// annotation keeps the active tool so rapid multi-draw workflows
-    /// need no re-press. `true` flips to Hand after every eligible
+    /// need no re-press. `true` flips to Select after every eligible
     /// commit so the next press repositions what was just drawn
     /// (ADR-0040, superseded as the default by ADR-0058). Read once
     /// per editor session (matching the magnifier precedent).
-    #[serde(default = "default_flip_to_move")]
-    pub flip_to_move: bool,
+    ///
+    /// Legacy files may still carry the pre-rename `flip-to-move`
+    /// key (values map 1:1); the serde alias reads it and the save
+    /// path rewrites it as `flip-to-select`.
+    #[serde(default = "default_flip_to_select", alias = "flip-to-move")]
+    pub flip_to_select: bool,
     /// When `true` (default), the editor shows the 30 px statusbar.
     /// The settings route's `ui.show-statusbar` toggle writes here.
     #[serde(default = "default_show_statusbar")]
@@ -122,7 +126,7 @@ impl Default for UiConfig {
             magnifier_modifier: default_magnifier_modifier(),
             magnifier_always_on: false,
             interaction_mode: default_interaction_mode(),
-            flip_to_move: default_flip_to_move(),
+            flip_to_select: default_flip_to_select(),
             show_statusbar: default_show_statusbar(),
             statusbar_size_mode: default_statusbar_size_mode(),
             animations: default_animations(),
@@ -299,7 +303,7 @@ fn default_interaction_mode() -> String {
     "editor".into()
 }
 
-fn default_flip_to_move() -> bool {
+fn default_flip_to_select() -> bool {
     false
 }
 
@@ -727,10 +731,29 @@ impl Config {
             "interaction-mode",
             toml_edit::Value::from(self.ui.interaction_mode.as_str()),
         );
+        // Legacy-key migration: a pre-rename `flip-to-move` entry
+        // moves onto the new key — value in place below, and the
+        // old key's leaf decor (any user comment) rides along;
+        // toml_edit's remove/insert drops key decor unless it is
+        // copied explicitly.
+        if ui.contains_key("flip-to-move") && !ui.contains_key("flip-to-select") {
+            let key_decor = ui
+                .key_mut("flip-to-move")
+                .map(|key| key.leaf_decor().clone());
+            if let Some(item) = ui.remove("flip-to-move") {
+                if let toml_edit::Entry::Vacant(vac) = ui.entry("flip-to-select") {
+                    vac.insert(item);
+                    if let (Some(decor), Some(mut key)) = (key_decor, ui.key_mut("flip-to-select"))
+                    {
+                        *key.leaf_decor_mut() = decor;
+                    }
+                }
+            }
+        }
         set_value(
             ui,
-            "flip-to-move",
-            toml_edit::Value::from(self.ui.flip_to_move),
+            "flip-to-select",
+            toml_edit::Value::from(self.ui.flip_to_select),
         );
     }
 }
@@ -1269,7 +1292,7 @@ include-cursor = true  # hide cursor when capturing presentations
     }
 
     #[test]
-    fn flip_to_move_defaults_false_when_absent() {
+    fn flip_to_select_defaults_false_when_absent() {
         let cfg = Config::load_from(&{
             let dir = tempdir().unwrap();
             let path = dir.path().join("config.toml");
@@ -1277,52 +1300,89 @@ include-cursor = true  # hide cursor when capturing presentations
             path
         })
         .unwrap();
-        assert!(!cfg.ui.flip_to_move, "absent field must default false");
-        assert!(!UiConfig::default().flip_to_move, "Default impl matches");
+        assert!(!cfg.ui.flip_to_select, "absent field must default false");
+        assert!(!UiConfig::default().flip_to_select, "Default impl matches");
     }
 
     #[test]
-    fn flip_to_move_true_roundtrips() {
+    fn flip_to_select_true_roundtrips() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
         let mut cfg = Config::default();
-        cfg.ui.flip_to_move = true;
+        cfg.ui.flip_to_select = true;
         cfg.save_to(&path).unwrap();
 
         let written = fs::read_to_string(&path).unwrap();
         assert!(
-            written.contains("flip-to-move = true"),
-            "flip-to-move not persisted:\n{written}"
+            written.contains("flip-to-select = true"),
+            "flip-to-select not persisted:\n{written}"
         );
 
         let back = Config::load_from(&path).unwrap();
-        assert!(back.ui.flip_to_move);
+        assert!(back.ui.flip_to_select);
     }
 
     #[test]
-    fn flip_to_move_preserves_existing_comment_on_key() {
+    fn flip_to_select_preserves_existing_comment_on_key() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
         let existing = "\
 [ui]
 # keep tools sticky while batching rects
-flip-to-move = false
+flip-to-select = false
 ";
         fs::write(&path, existing).unwrap();
 
         let mut cfg = Config::default();
-        cfg.ui.flip_to_move = false;
+        cfg.ui.flip_to_select = false;
         cfg.save_to(&path).unwrap();
         let written = fs::read_to_string(&path).unwrap();
         assert!(
             written.contains("# keep tools sticky while batching rects"),
-            "comment on flip-to-move lost:\n{written}"
+            "comment on flip-to-select lost:\n{written}"
         );
 
         let back = Config::load_from(&path).unwrap();
-        assert!(!back.ui.flip_to_move, "user value must survive re-save");
+        assert!(!back.ui.flip_to_select, "user value must survive re-save");
+    }
+
+    /// Legacy `flip-to-move` files migrate silently: the value reads
+    /// into `flip_to_select`, a re-save writes the new key (carrying
+    /// any comment), and the old key disappears.
+    #[test]
+    fn legacy_flip_to_move_key_migrates_on_resave() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let legacy = "\
+[ui]
+# flip after every commit
+flip-to-move = true
+";
+        fs::write(&path, legacy).unwrap();
+
+        let cfg = Config::load_from(&path).unwrap();
+        assert!(cfg.ui.flip_to_select, "legacy key value maps 1:1");
+
+        cfg.save_to(&path).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("flip-to-select = true"),
+            "re-save writes the new key:\n{written}"
+        );
+        assert!(
+            written.contains("# flip after every commit"),
+            "the legacy key's comment rides along:\n{written}"
+        );
+        assert!(
+            !written.contains("flip-to-move"),
+            "the legacy key is gone after re-save:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert!(back.ui.flip_to_select, "value survives the round-trip");
     }
 
     #[test]
@@ -1564,7 +1624,7 @@ backend = \"portal\"
         assert_eq!(from_asset.ui.magnifier_modifier, d.ui.magnifier_modifier);
         assert_eq!(from_asset.ui.magnifier_always_on, d.ui.magnifier_always_on);
         assert_eq!(from_asset.ui.interaction_mode, d.ui.interaction_mode);
-        assert_eq!(from_asset.ui.flip_to_move, d.ui.flip_to_move);
+        assert_eq!(from_asset.ui.flip_to_select, d.ui.flip_to_select);
         assert_eq!(from_asset.ui.show_statusbar, d.ui.show_statusbar);
         assert_eq!(from_asset.ui.statusbar_size_mode, d.ui.statusbar_size_mode);
         assert_eq!(from_asset.ui.animations, d.ui.animations);

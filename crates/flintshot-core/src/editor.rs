@@ -13,8 +13,8 @@ use crate::geom::{Color, Point, Rect, Stroke};
 /// `Default` is [`Tool::Select`] — the editor opens on the
 /// object-selection tool; `flintshot-app` overrides this from
 /// config. Tools are sticky across commits by default
-/// (see [`EditorState::flip_to_move`]); flipping to Hand after a
-/// commit is opt-in via `[ui] flip-to-move`.
+/// (see [`EditorState::flip_to_select`]); flipping to Select after a
+/// commit is opt-in via `[ui] flip-to-select`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Tool {
@@ -322,13 +322,14 @@ pub struct EditorState {
     /// Currently-active tool.
     pub tool: Tool,
     /// Policy: committing an eligible annotation flips `tool` to
-    /// [`Tool::Hand`] so the next press can reposition what was just
-    /// drawn. Defaults to `false` — tools are sticky (ADR-0058,
+    /// [`Tool::Select`] so the next press can reposition what was
+    /// just drawn. Defaults to `false` — tools are sticky (ADR-0058,
     /// superseding ADR-0040's default-on); plumbed from
-    /// `[ui] flip-to-move` at editor-session start (read-once, like
-    /// the magnifier config). The flip itself never creates an undo
-    /// entry — history stays purely about annotations.
-    pub flip_to_move: bool,
+    /// `[ui] flip-to-select` (legacy files: `flip-to-move`) at
+    /// editor-session start (read-once, like the magnifier config).
+    /// The flip itself never creates an undo entry — history stays
+    /// purely about annotations.
+    pub flip_to_select: bool,
     /// Active annotation color.
     pub color: Color,
     /// Active stroke width.
@@ -439,7 +440,7 @@ impl EditorState {
             marquee: None,
             marquee_additive: false,
             tool: Tool::default(),
-            flip_to_move: false,
+            flip_to_select: false,
             fill_shapes: false,
             color: Color::RED,
             stroke_width: 3.0,
@@ -605,7 +606,7 @@ impl EditorState {
     ///
     /// Pushes a snapshot of the current `anns` onto `undo`, clears
     /// `redo`, normalizes the pending annotation's rect (if any),
-    /// then appends it to `anns`. When the [`flip_to_move`](Self::flip_to_move)
+    /// then appends it to `anns`. When the [`flip_to_select`](Self::flip_to_select)
     /// policy is on and the committing tool owns the pending
     /// annotation, the active tool switches to [`Tool::Hand`] (no
     /// undo entry). No-op when `pending` is `None`.
@@ -628,8 +629,8 @@ impl EditorState {
         // the user already switched tools (the shell's
         // toolbar-switch flush runs after `tool` changed) must not
         // flip — the explicit tool choice wins.
-        if self.flip_to_move && is_flip_eligible(owner) && owner == self.tool {
-            self.tool = Tool::Hand;
+        if self.flip_to_select && is_flip_eligible(owner) && owner == self.tool {
+            self.tool = Tool::Select;
         }
     }
 
@@ -1815,7 +1816,7 @@ fn normalize_rects(ann: &mut Annotation) {
     }
 }
 
-/// Tool that owns (would produce) `ann`. Feeds the flip-to-move
+/// Tool that owns (would produce) `ann`. Feeds the flip-to-select
 /// ownership guard in [`EditorState::commit_annotation`].
 fn owning_tool(ann: &Annotation) -> Tool {
     match ann {
@@ -2246,7 +2247,7 @@ mod tests {
         assert!(s.marquee.is_none(), "marquee starts None");
         assert!(!s.marquee_additive, "marquee additivity starts plain");
         assert_eq!(s.tool, Tool::Select, "Select is the default tool");
-        assert!(!s.flip_to_move, "flip policy defaults off (sticky tools)");
+        assert!(!s.flip_to_select, "flip policy defaults off (sticky tools)");
     }
 
     #[test]
@@ -2422,7 +2423,7 @@ mod tests {
         assert_eq!(s.anns.len(), 2);
     }
 
-    // --- flip-to-move policy (prominent-move-tool) ---
+    // --- flip-to-select policy (prominent-move-tool) ---
 
     /// Full pointer drag through the dispatcher with the active tool,
     /// committing a non-degenerate annotation on release.
@@ -2433,7 +2434,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_flips_each_drag_tool_to_move() {
+    fn commit_flips_each_drag_tool_to_select() {
         for tool in [
             Tool::Rect,
             Tool::Ellipse,
@@ -2445,17 +2446,17 @@ mod tests {
         ] {
             let mut s = EditorState::new(blank_image());
             s.tool = tool;
-            s.flip_to_move = true;
+            s.flip_to_select = true;
             drag_commit(&mut s, Point::new(10.0, 10.0), Point::new(50.0, 40.0));
             assert_eq!(s.anns.len(), 1, "{tool:?} drag must commit");
-            assert_eq!(s.tool, Tool::Hand, "{tool:?} commit must flip to Hand");
+            assert_eq!(s.tool, Tool::Select, "{tool:?} commit must flip to Select");
         }
     }
 
     #[test]
-    fn text_enter_commit_flips_to_move() {
+    fn text_enter_commit_flips_to_select() {
         let mut s = text_state();
-        s.flip_to_move = true;
+        s.flip_to_select = true;
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('h'));
         s.dispatch_input(&InputEvent::Key {
@@ -2463,14 +2464,14 @@ mod tests {
             modifiers: Modifiers::default(),
         });
         assert_eq!(s.anns.len(), 1);
-        assert_eq!(s.tool, Tool::Hand, "Enter commit must flip to Hand");
+        assert_eq!(s.tool, Tool::Select, "Enter commit must flip to Select");
     }
 
     #[test]
     fn commit_flip_off_keeps_tool_sticky() {
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Rect;
-        s.flip_to_move = false;
+        s.flip_to_select = false;
         drag_commit(&mut s, Point::new(10.0, 10.0), Point::new(50.0, 40.0));
         assert_eq!(s.anns.len(), 1);
         assert_eq!(s.tool, Tool::Rect, "policy off → tool stays");
@@ -2482,7 +2483,7 @@ mod tests {
         // calling `commit_text_draft`; the explicit tool choice must
         // win over the flip.
         let mut s = text_state();
-        s.flip_to_move = true;
+        s.flip_to_select = true;
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('h'));
         s.tool = Tool::Rect;
@@ -2512,10 +2513,10 @@ mod tests {
     }
 
     #[test]
-    fn flip_adds_no_undo_entry_and_undo_keeps_move() {
+    fn flip_adds_no_undo_entry_and_undo_keeps_select() {
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Rect;
-        s.flip_to_move = true;
+        s.flip_to_select = true;
         drag_commit(&mut s, Point::new(10.0, 10.0), Point::new(50.0, 40.0));
         assert_eq!(
             s.undo.len(),
@@ -2524,7 +2525,7 @@ mod tests {
         );
         s.undo();
         assert!(s.anns.is_empty(), "undo removed the committed annotation");
-        assert_eq!(s.tool, Tool::Hand, "undo does not touch the flipped tool");
+        assert_eq!(s.tool, Tool::Select, "undo does not touch the flipped tool");
     }
 
     #[test]
@@ -2534,7 +2535,7 @@ mod tests {
         // not flip — the ownership guard blocks it.
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Hand;
-        s.flip_to_move = true;
+        s.flip_to_select = true;
         s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
         s.commit_annotation();
         assert_eq!(s.anns.len(), 1);
@@ -3516,22 +3517,22 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_text_pointer_commits_and_flips_to_move() {
+    fn dispatch_text_pointer_commits_and_flips_to_select() {
         // Clicking elsewhere while a draft is active commits the
         // current draft. With the flip policy on (opt-in), the tool
-        // switches to Hand — the click's own follow-up action then
-        // belongs to Hand (here: a miss on the freshly committed
+        // switches to Select — the click's own follow-up action then
+        // belongs to Select (here: a miss on the freshly committed
         // text, so nothing begins). The old behavior placed a new
         // caret; that now requires staying on Text via a re-press.
         let mut s = text_state();
-        s.flip_to_move = true;
+        s.flip_to_select = true;
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('h'));
         // Click somewhere else while the draft is active.
         s.dispatch_input(&down(Point::new(50.0, 50.0)));
         assert_eq!(s.anns.len(), 1, "previous draft committed");
         assert!(s.pending.is_none(), "no new caret after the flip");
-        assert_eq!(s.tool, Tool::Hand, "commit flipped the tool to Hand");
+        assert_eq!(s.tool, Tool::Select, "commit flipped the tool to Select");
         match &s.anns[0] {
             Annotation::Text { pos, text, .. } => {
                 assert_eq!(*pos, Point::new(10.0, 10.0));
@@ -3852,11 +3853,11 @@ mod tests {
 
     /// Edit + Enter commits the session: edited text back at its index,
     /// exactly one undo entry, `Ctrl+Z` restoring content *and* style.
-    /// No flip-to-move — the annotation is not new.
+    /// No flip-to-select — the annotation is not new.
     #[test]
     fn reedit_enter_commits_one_undo_entry() {
         let mut s = reedit_state();
-        s.flip_to_move = true;
+        s.flip_to_select = true;
         dblclick(&mut s, Point::new(20.0, 15.0));
         for ch in " world".chars() {
             s.dispatch_input(&InputEvent::TextInput(ch));
