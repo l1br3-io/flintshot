@@ -317,6 +317,13 @@ pub struct EditorState {
     pub text_background: Option<Color>,
     /// Next number to assign for `Tool::Number`.
     pub next_number: u32,
+    /// Active bubble diameter for `Tool::Number`, in physical px.
+    /// Session tool state (like [`color`](Self::color)): the panel's
+    /// Number section edits it, `place_number` stamps it into each
+    /// committed annotation, and committed bubbles never track later
+    /// changes. Bounded by [`NUMBER_MIN_DIAMETER`] /
+    /// [`NUMBER_MAX_DIAMETER`].
+    pub number_diameter: f32,
     /// In-flight annotation move for `Tool::Move` (press on a
     /// committed annotation). `None` when no move drag is active.
     /// While set, Move-tool `PointerDrag`s translate the grabbed
@@ -366,6 +373,7 @@ impl EditorState {
             text_outline: None,
             text_background: None,
             next_number: 1,
+            number_diameter: NUMBER_DEFAULT_DIAMETER,
             moving: None,
             selected_index: None,
             text_cursor: 0,
@@ -549,8 +557,9 @@ impl EditorState {
     /// `next_number` onto `undo` (so undo decrements the counter), and
     /// clears `redo`. The bubble's colour comes from the active
     /// [`color`](Self::color) (same picker the drawing tools use); its
-    /// diameter is a fixed default — a per-state size control is
-    /// currently out of scope.
+    /// diameter comes from [`number_diameter`](Self::number_diameter)
+    /// — the panel's Size control — and is stamped into the annotation
+    /// at commit, so later panel changes never resize placed bubbles.
     ///
     /// Public so a future keyboard shortcut ("place next number at
     /// cursor") can call it without going through `dispatch_input`.
@@ -559,7 +568,7 @@ impl EditorState {
             pos,
             n: self.next_number,
             color: self.color,
-            diameter: NUMBER_DEFAULT_DIAMETER,
+            diameter: self.number_diameter,
         };
         // Snapshot pre-placement state so undo restores next_number
         // to the pre-increment value. `mem::take` would wipe self.anns.
@@ -1248,6 +1257,19 @@ const BLUR_DEFAULT_STRENGTH: u8 = 8;
 /// matching the visual scale of numbered bubbles in flameshot /
 /// sharex-style annotation tools.
 const NUMBER_DEFAULT_DIAMETER: f32 = 28.0;
+
+/// Minimum Number-tool bubble diameter in physical pixels. Below this
+/// a two-digit label (font `diameter * 0.6`) drops under 10 px and
+/// stops being legible on the annotation's own bubble. Public so the
+/// properties panel's Size stepper clamps to the same bound core
+/// documents, instead of duplicating a literal.
+pub const NUMBER_MIN_DIAMETER: f32 = 16.0;
+
+/// Maximum Number-tool bubble diameter in physical pixels. A practical
+/// ceiling for labeling even 4K captures, well past the point where
+/// the bubble stops reading as a marker. Public for the same reason
+/// as [`NUMBER_MIN_DIAMETER`] — the panel's clamp lives in core.
+pub const NUMBER_MAX_DIAMETER: f32 = 96.0;
 
 /// Hit-test tolerance in physical pixels, added to half the stroke
 /// width so thin lines are still grabbable.
@@ -3373,6 +3395,91 @@ mod tests {
         s.dispatch_input(&ctrl('y'));
         assert_eq!(s.anns.len(), 1, "redo re-applied the bubble");
         assert_eq!(s.next_number, 2, "redo re-incremented the counter");
+    }
+
+    /// A fresh editor places bubbles at the default diameter (28 px)
+    /// — `number_diameter` starts at `NUMBER_DEFAULT_DIAMETER`.
+    #[test]
+    fn dispatch_number_default_diameter_is_28() {
+        let mut s = number_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        match &s.anns[0] {
+            Annotation::Number { diameter, .. } => assert_eq!(
+                *diameter, NUMBER_DEFAULT_DIAMETER,
+                "fresh state places at the default diameter"
+            ),
+            other => panic!("expected Number, got {other:?}"),
+        }
+    }
+
+    /// `number_diameter` is session tool state: set it to 64 and every
+    /// subsequent placement commits 64 — the setting persists across
+    /// placements (it is not consumed like the counter).
+    #[test]
+    fn dispatch_number_uses_number_diameter_for_new_placements() {
+        let mut s = number_state();
+        s.number_diameter = 64.0;
+        for pos in [Point::new(10.0, 10.0), Point::new(50.0, 10.0)] {
+            s.dispatch_input(&InputEvent::PointerDown { pos });
+        }
+        for (i, ann) in s.anns.iter().enumerate() {
+            match ann {
+                Annotation::Number { diameter, .. } => assert_eq!(
+                    *diameter,
+                    64.0,
+                    "bubble {} committed at the panel-set diameter",
+                    i + 1
+                ),
+                other => panic!("expected Number at index {i}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Committed bubbles are immutable snapshots: changing
+    /// `number_diameter` after a placement never resizes the bubble
+    /// already on canvas — only the next placement picks it up.
+    #[test]
+    fn number_diameter_change_leaves_committed_bubbles_immutable() {
+        let mut s = number_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.number_diameter = 96.0;
+        match &s.anns[0] {
+            Annotation::Number { diameter, .. } => assert_eq!(
+                *diameter, NUMBER_DEFAULT_DIAMETER,
+                "committed bubble keeps its placement-time diameter"
+            ),
+            other => panic!("expected Number, got {other:?}"),
+        }
+    }
+
+    /// The snapshot discipline is unchanged by a custom diameter:
+    /// undo removes the bubble and decrements the counter, redo
+    /// re-applies both — the existing round-trip, pinned at 64 px so
+    /// a regression that couples diameter to history fails loudly.
+    #[test]
+    fn dispatch_number_custom_diameter_undo_redo_restores_counter() {
+        let mut s = number_state();
+        s.number_diameter = 64.0;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+        });
+        s.dispatch_input(&ctrl('z'));
+        assert_eq!(s.anns.len(), 0, "undo removed the custom-diameter bubble");
+        assert_eq!(s.next_number, 1, "counter decremented");
+        s.dispatch_input(&ctrl('y'));
+        assert_eq!(s.anns.len(), 1, "redo re-applied the bubble");
+        match &s.anns[0] {
+            Annotation::Number { diameter, n, .. } => {
+                assert_eq!(*diameter, 64.0, "redo restored the custom diameter");
+                assert_eq!(*n, 1, "redo re-incremented the counter");
+            }
+            other => panic!("expected Number, got {other:?}"),
+        }
+        assert_eq!(s.next_number, 2);
     }
 
     /// Number's `PointerDrag` and `PointerUp` are no-ops: there's no
