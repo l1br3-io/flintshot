@@ -332,11 +332,12 @@ pub struct EditorState {
     /// annotation.
     pub moving: Option<AnnotationDrag>,
     /// Selected annotation index, if any. Set by the dispatcher when
-    /// a Move-tool press grabs an annotation; **kept after release**
-    /// (persistent selection — the outline the shells render).
-    /// Cleared by a miss press, [`set_tool`](Self::set_tool) away
-    /// from Move, `undo` / `redo` / `crop`, and
-    /// [`delete_selected`](Self::delete_selected). Chrome-only:
+    /// a Move-tool press grabs an annotation or a Text-tool press
+    /// lands on a committed Text; **kept after release** (persistent
+    /// selection — the outline the shells render). Cleared by a miss
+    /// press, [`set_tool`](Self::set_tool) away from the
+    /// selection-owning tool (Move / Text), `undo` / `redo` / `crop`,
+    /// and [`delete_selected`](Self::delete_selected). Chrome-only:
     /// never composed into Save / Copy / Upload output.
     pub selected_index: Option<usize>,
     /// Insertion-point position within the in-flight `Tool::Text`
@@ -383,16 +384,17 @@ impl EditorState {
     }
 
     /// Switch the active tool, dropping a persistent selection when
-    /// leaving [`Tool::Move`].
+    /// leaving [`Tool::Move`] or [`Tool::Text`].
     ///
     /// Tool switches bypass the dispatcher (shells write `tool`
     /// directly from rail chips and hotkeys), so this method owns
-    /// the "the selection is Move-tool chrome and must not outlive
-    /// the tool" invariant: route every switch through it and the
-    /// selection lifecycle stays correct no matter where the switch
-    /// originated. Staying on (or switching to) Move never clears.
+    /// the "the selection is tool chrome and must not outlive the
+    /// tool that produced it" invariant: route every switch through
+    /// it and the selection lifecycle stays correct no matter where
+    /// the switch originated. Staying on (or switching to) the
+    /// selection-owning tool never clears.
     pub fn set_tool(&mut self, tool: Tool) {
-        if self.tool == Tool::Move && tool != Tool::Move {
+        if matches!(self.tool, Tool::Move | Tool::Text) && tool != self.tool {
             self.selected_index = None;
         }
         self.tool = tool;
@@ -817,6 +819,37 @@ impl EditorState {
             .find_map(|(i, ann)| ann.contains(point).then_some(i))
     }
 
+    /// Index of the topmost **`Annotation::Text`** containing `point`.
+    ///
+    /// The Text tool's select-before-draft gate: non-Text annotations
+    /// are transparent to it, so a press on a shape is a miss and the
+    /// fresh-caret behaviour is byte-for-byte what it was before
+    /// selection existed (spec assumption: only Text is selectable
+    /// under `Tool::Text`).
+    #[must_use]
+    fn text_hit_test(&self, point: Point) -> Option<usize> {
+        self.anns
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, ann)| matches!(ann, Annotation::Text { .. }) && ann.contains(point))
+            .map(|(i, _)| i)
+    }
+
+    /// Text-tool `PointerDown` routing: a press on a committed Text
+    /// selects it (chrome + panel reflection); anything else — empty
+    /// canvas or a non-Text annotation — clears the selection and
+    /// starts a fresh caret. Shared by the normal and text-modal
+    /// dispatch branches so both shells see identical semantics.
+    fn text_pointer_down(&mut self, pos: Point) {
+        if let Some(index) = self.text_hit_test(pos) {
+            self.selected_index = Some(index);
+        } else {
+            self.selected_index = None;
+            self.begin_annotation(pos);
+        }
+    }
+
     /// Dispatch a toolkit-agnostic [`InputEvent`] and return the
     /// side-effect the shell should perform.
     ///
@@ -898,6 +931,12 @@ impl EditorState {
                     // drag). The dedicated entry point keeps the
                     // counter + snapshot logic in one place.
                     self.place_number(*pos);
+                } else if self.tool == Tool::Text {
+                    // Text selects before it drafts: a hit on a
+                    // committed Text picks it; a miss (or a non-Text
+                    // annotation) clears the selection and starts a
+                    // fresh caret exactly as before.
+                    self.text_pointer_down(*pos);
                 } else {
                     self.begin_annotation(*pos);
                 }
@@ -1046,6 +1085,8 @@ impl EditorState {
                     }
                 } else if self.tool == Tool::Number {
                     self.place_number(*pos);
+                } else if self.tool == Tool::Text {
+                    self.text_pointer_down(*pos);
                 } else {
                     self.begin_annotation(*pos);
                 }
@@ -3009,6 +3050,192 @@ mod tests {
         s.dispatch_input(&InputEvent::TextInput('h'));
         assert!(s.pending.is_none());
         assert_eq!(s.anns.len(), 0);
+    }
+
+    // --- Text-tool selection over committed text (text-select-edit) ---
+
+    /// Helper: Text-tool state over 100×100 with one committed text
+    /// "hello" anchored at (10,10) (default 16 px style → coarse
+    /// bbox ≈ (10,10)–(50,29)).
+    fn text_select_state() -> EditorState {
+        let mut s = hundred_state();
+        s.tool = Tool::Text;
+        s.anns.push(Annotation::text(
+            Point::new(10.0, 10.0),
+            "hello",
+            crate::text::TextStyle::simple(16.0, Color::RED),
+        ));
+        s
+    }
+
+    /// A Text-tool press on a committed Text selects it instead of
+    /// starting a new caret on top of it.
+    #[test]
+    fn text_press_on_committed_text_selects_it() {
+        let mut s = text_select_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(0), "press on text selects it");
+        assert!(s.pending.is_none(), "no fresh draft on top of the text");
+        assert!(s.anns.len() == 1, "no new annotation committed");
+        // A stray release must not commit anything phantom.
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.pending.is_none());
+        assert_eq!(s.selected_index, Some(0), "release keeps the selection");
+    }
+
+    /// A miss (empty canvas) clears a Text-tool selection and starts a
+    /// fresh caret exactly as before selection existed.
+    #[test]
+    fn text_press_on_miss_clears_selection_and_starts_draft() {
+        let mut s = text_select_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(0), "fixture: selected");
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(80.0, 80.0),
+        });
+        assert!(s.selected_index.is_none(), "miss clears the selection");
+        match &s.pending {
+            Some(Annotation::Text { pos, text, .. }) => {
+                assert_eq!(*pos, Point::new(80.0, 80.0), "fresh caret at the miss");
+                assert!(text.is_empty());
+            }
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    /// A hit on a non-Text annotation is a miss to the Text tool: the
+    /// selection clears and a fresh caret starts (spec assumption 4).
+    #[test]
+    fn text_press_on_non_text_annotation_is_a_miss() {
+        let mut s = text_select_state();
+        s.anns.push(rect_ann(60.0, 60.0, 90.0, 90.0));
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(0), "fixture: selected");
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(75.0, 75.0),
+        });
+        assert!(
+            s.selected_index.is_none(),
+            "press on the rect does not select it"
+        );
+        match &s.pending {
+            Some(Annotation::Text { pos, .. }) => {
+                assert_eq!(*pos, Point::new(75.0, 75.0), "caret starts on the rect");
+            }
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    /// Topmost-wins: when a Text overlaps another Text, the press
+    /// selects the later (drawn-on-top) one.
+    #[test]
+    fn text_press_selects_topmost_text() {
+        let mut s = text_select_state();
+        s.anns.push(Annotation::text(
+            Point::new(12.0, 12.0),
+            "overlap",
+            crate::text::TextStyle::simple(16.0, Color::RED),
+        ));
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(1), "topmost text wins");
+        assert!(s.pending.is_none());
+    }
+
+    /// Leaving the Text tool clears a Text-tool selection; staying on
+    /// Text never clears. Mirrors the Move-tool rule.
+    #[test]
+    fn set_tool_away_from_text_clears_selection() {
+        let mut s = text_select_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(0), "fixture: selected");
+        s.set_tool(Tool::Text);
+        assert_eq!(
+            s.selected_index,
+            Some(0),
+            "Text→Text switch keeps the selection"
+        );
+        s.set_tool(Tool::Move);
+        assert!(s.selected_index.is_none(), "Text→Move deselects");
+        s.set_tool(Tool::Text);
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(0), "fixture: reselected under Text");
+        s.set_tool(Tool::Rect);
+        assert!(s.selected_index.is_none(), "Text→Rect deselects");
+    }
+
+    /// `undo` / `redo` / `crop` clear a Text-tool selection through the
+    /// existing generic paths (pinned).
+    #[test]
+    fn undo_redo_crop_clear_text_tool_selection() {
+        let mut s = text_select_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(0), "fixture: selected");
+        s.dispatch_input(&ctrl('z'));
+        assert!(s.selected_index.is_none(), "undo drops the selection");
+        s.dispatch_input(&ctrl('y'));
+        assert!(s.selected_index.is_none(), "redo keeps it dropped");
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(0), "fixture: reselected");
+        s.crop(Rect::from_xywh(0.0, 0.0, 80.0, 80.0));
+        assert!(s.selected_index.is_none(), "crop drops the selection");
+    }
+
+    /// `Del` with a Text-tool selection removes exactly that annotation
+    /// with one undo entry; `Ctrl+Z` restores it.
+    #[test]
+    fn del_with_text_tool_selection_deletes_one_undo_entry() {
+        let mut s = text_select_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.selected_index, Some(0), "fixture: selected");
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Delete,
+            modifiers: Modifiers::default(),
+        });
+        assert!(s.anns.is_empty(), "selected text deleted");
+        assert!(s.selected_index.is_none(), "delete drops the selection");
+        assert_eq!(s.undo.len(), 1, "exactly one undo entry");
+        s.dispatch_input(&ctrl('z'));
+        assert_eq!(s.anns.len(), 1, "Ctrl+Z restores the deleted text");
+        match &s.anns[0] {
+            Annotation::Text { text, .. } => assert_eq!(text, "hello"),
+            other => panic!("expected restored Text, got {other:?}"),
+        }
+    }
+
+    /// While editing a draft, a `PointerDown` on a *different* committed
+    /// text commits the draft and selects that text (the modal branch
+    /// mirrors the normal one's select-before-draft gate).
+    #[test]
+    fn text_flush_click_on_committed_text_selects_it() {
+        let mut s = text_select_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(60.0, 60.0),
+        });
+        s.dispatch_input(&InputEvent::TextInput('x'));
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(20.0, 15.0),
+        });
+        assert_eq!(s.anns.len(), 2, "the draft was committed");
+        assert!(s.pending.is_none(), "no new caret on top of the text");
+        assert_eq!(s.selected_index, Some(0), "the committed text is selected");
     }
 
     // --- Task 14: Select / crop region tool tests ---

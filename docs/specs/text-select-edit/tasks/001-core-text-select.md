@@ -11,22 +11,22 @@ selected text through the existing `delete_selected` path.
 
 **Acceptance criteria:**
 
-- [ ] Text-tool press on a committed Text: `selected_index` set,
+- [x] Text-tool press on a committed Text: `selected_index` set,
       `pending` stays `None`. Press on empty canvas or a non-Text
       annotation: selection cleared, empty Text draft begins
       (current behavior preserved).
-- [ ] `set_tool` away from `Tool::Text` clears a Text-tool
+- [x] `set_tool` away from `Tool::Text` clears a Text-tool
       selection; staying on Text never clears. `undo` / `redo` /
       `crop` still clear it (existing generic paths, pinned by
       tests).
-- [ ] `Del` with a Text-tool selection removes exactly that
+- [x] `Del` with a Text-tool selection removes exactly that
       annotation with one undo entry; `Ctrl+Z` restores it.
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-core` (new dispatcher tests +
+- [x] `cargo test -p flintshot-core` (new dispatcher tests +
       existing suite green)
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
 
 **Dependencies:** None
 
