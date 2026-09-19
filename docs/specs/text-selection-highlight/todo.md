@@ -1,7 +1,7 @@
 # todo — text-selection-highlight
 
 - [x] 001 Core — anchor state + selection-aware edit ops
-- [ ] 002 Core — keyboard selection chords (Shift+arrows, Shift+Home/End, Ctrl+A, Delete)
+- [x] 002 Core — keyboard selection chords (Shift+arrows, Shift+Home/End, Ctrl+A, Delete)
 - [ ] 003 Core — bar caret replaces block caret
 - [ ] 004 Core — selection highlight rendering
 - [ ] 005 Core — word-boundary helpers + Ctrl+Shift word-wise chords
