@@ -43,7 +43,7 @@ pub(crate) struct ToolSpec {
 
 /// The tool chips in rail order, partitioned into pods (spec
 /// `toolbar-groups`): selection · shapes · freehand · labels ·
-/// redact. Move leads (labeled) because it is the resting tool the
+/// redact. Hand leads (labeled) because it is the resting tool the
 /// editor lands on after every commit — the rail teaches the
 /// tool's existence without a tooltip.
 ///
@@ -52,8 +52,8 @@ pub(crate) struct ToolSpec {
 /// [`TOOL_PODS`].
 const SELECTION_POD: &[ToolSpec] = &[
     ToolSpec {
-        tool: Tool::Move,
-        name: "Move",
+        tool: Tool::Hand,
+        name: "Hand",
         key: "V",
         glyph: g_move,
     },
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn tool_pods_partition_every_variant_in_spec_order() {
         let expected: &[(&str, &[Tool])] = &[
-            ("selection", &[Tool::Move, Tool::Select]),
+            ("selection", &[Tool::Hand, Tool::Select]),
             (
                 "shapes",
                 &[Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow],
@@ -581,7 +581,7 @@ mod tests {
         // duplicated in pods must fail.
         for tool in [
             Tool::Select,
-            Tool::Move,
+            Tool::Hand,
             Tool::Rect,
             Tool::Ellipse,
             Tool::Line,
@@ -598,12 +598,12 @@ mod tests {
                 .count();
             assert_eq!(hits, 1, "{tool:?} must sit in exactly one pod");
         }
-        // Move leads and Select seconds overall.
+        // Hand leads and Select seconds overall.
         let flat: Vec<Tool> = TOOL_PODS
             .iter()
             .flat_map(|p| p.tools.iter().map(|t| t.tool))
             .collect();
-        assert_eq!(flat.first(), Some(&Tool::Move));
+        assert_eq!(flat.first(), Some(&Tool::Hand));
         assert_eq!(flat.get(1), Some(&Tool::Select));
     }
 
@@ -611,14 +611,14 @@ mod tests {
     fn move_leads_the_rail_with_select_second() {
         let flat = flat();
         assert!(
-            flat.first().is_some_and(|t| t.tool == Tool::Move),
-            "Move must be the first rail chip"
+            flat.first().is_some_and(|t| t.tool == Tool::Hand),
+            "Hand must be the first rail chip"
         );
         assert!(
             flat.get(1).is_some_and(|t| t.tool == Tool::Select),
             "Select must be the second rail chip"
         );
-        assert_eq!(flat[0].name, "Move", "the label reads Move");
+        assert_eq!(flat[0].name, "Hand", "the label reads Hand");
     }
 
     #[test]

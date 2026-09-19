@@ -91,7 +91,7 @@ pub(crate) enum Section {
 )]
 pub(crate) fn sections_for(tool: Tool) -> &'static [Section] {
     match tool {
-        Tool::Move => &[Section::Selection],
+        Tool::Hand => &[Section::Selection],
         Tool::Rect | Tool::Ellipse | Tool::Pencil => {
             &[Section::Stroke, Section::Fill, Section::Selection]
         }
@@ -106,7 +106,7 @@ pub(crate) fn sections_for(tool: Tool) -> &'static [Section] {
     }
 }
 
-/// The panel title for this frame: with a live Move-tool selection
+/// The panel title for this frame: with a live Hand-tool selection
 /// the panel is a selection inspector (`N selected · Properties`);
 /// without, byte-for-byte the tool-defaults title (the Text tool's
 /// singleton selection keeps the tool-defaults layout). Pure for
@@ -119,14 +119,14 @@ pub(crate) fn panel_title(state: &EditorState) -> String {
     }
 }
 
-/// Whether the panel renders as the Move-tool selection inspector.
+/// Whether the panel renders as the Hand-tool selection inspector.
 /// The Text tool's singleton selection is a different contract — the
 /// tool-defaults panel stays up and the Text surfaces retarget to
 /// the selection in place (see [`effective_text_style`]); the
 /// inspector (intersection sections, `set_selected_*` mutators) is
-/// the Move tool's multi-selection surface alone.
+/// the Hand tool's multi-selection surface alone.
 fn inspector_mode(state: &EditorState) -> bool {
-    state.tool == Tool::Move && !state.selected.is_empty()
+    state.tool == Tool::Hand && !state.selected.is_empty()
 }
 
 /// The inspector's section map: the intersection sections the
@@ -474,7 +474,7 @@ pub(crate) fn text_style_row(ui: &mut egui::Ui, state: &mut EditorState) {
 }
 
 /// The Text tool's singleton selected `Text`, if any — the
-/// tool-defaults Text surfaces' restyle target. A Move-tool
+/// tool-defaults Text surfaces' restyle target. A Hand-tool
 /// selection (singleton or not) is the inspector's domain, never
 /// this path's; a non-Text member is a miss for the Text tool.
 fn text_selection(state: &EditorState) -> Option<&Annotation> {
@@ -492,7 +492,7 @@ fn text_selection(state: &EditorState) -> Option<&Annotation> {
 
 /// Whether a restyle target exists: a live re-edit session draft or
 /// the Text tool's singleton selected `Text` annotation. Everything
-/// else (no selection, a non-Text selection, a Move-tool inspector
+/// else (no selection, a non-Text selection, a Hand-tool inspector
 /// selection, a *fresh* draft) falls back to the defaults path —
 /// fresh drafts deliberately do not live-restyle (spec open
 /// question default).
@@ -756,7 +756,7 @@ pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
 pub(crate) fn tool_hint(tool: Tool) -> &'static str {
     match tool {
         Tool::Select => "drag a region · Copy uses it · Enter crops",
-        Tool::Move => "click selects · Shift+click adds · drag moves all · Del removes",
+        Tool::Hand => "click selects · Shift+click adds · drag moves all · Del removes",
         Tool::Text => "click to place the caret",
         Tool::Blur => "drag over what to hide",
         Tool::Number => "click to place the next number",
@@ -927,7 +927,7 @@ fn labeled_chip_width(label_width: f32) -> f32 {
 /// Copy-primary's glyph+label pattern (`copy_chip`): 28 px tall,
 /// galley-measured width, same rest / hover / selected visuals as
 /// `chip` (forest selected, white otherwise). The label is the
-/// emphasis, not new color. Renders the Move chip in both rails.
+/// emphasis, not new color. Renders the Hand chip in both rails.
 /// Disabled state mirrors [`chip`]'s (hairline border, dimmed,
 /// hover-only).
 pub(crate) fn labeled_chip(
@@ -1752,10 +1752,10 @@ mod tests {
     // --- Selection-inspector mode (multi-select-properties Task 004) ---
 
     /// A committed rect at a known spot, `n` of them selected, tool
-    /// Move (the only tool a selection survives under).
+    /// Hand (the only tool a selection survives under).
     fn inspector_state(n_usable: usize) -> EditorState {
         let mut state = panel_state();
-        state.tool = Tool::Move;
+        state.tool = Tool::Hand;
         state.anns.push(Annotation::Rect {
             rect: CoreRect::from_xywh(10.0, 10.0, 40.0, 30.0),
             stroke: CoreStroke::new(Color::RED, 3.0),
@@ -1951,7 +1951,7 @@ mod tests {
         // delete button stays reachable.
         let ctx = egui::Context::default();
         let mut state = panel_state();
-        state.tool = Tool::Move;
+        state.tool = Tool::Hand;
         state.anns.push(Annotation::Rect {
             rect: CoreRect::from_xywh(10.0, 10.0, 40.0, 30.0),
             stroke: CoreStroke::new(Color::RED, 3.0),

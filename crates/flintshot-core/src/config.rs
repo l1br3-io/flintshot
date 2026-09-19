@@ -88,7 +88,7 @@ pub struct UiConfig {
     pub interaction_mode: String,
     /// When `false` (default), tools are sticky — committing an
     /// annotation keeps the active tool so rapid multi-draw workflows
-    /// need no re-press. `true` flips to Move after every eligible
+    /// need no re-press. `true` flips to Hand after every eligible
     /// commit so the next press repositions what was just drawn
     /// (ADR-0040, superseded as the default by ADR-0058). Read once
     /// per editor session (matching the magnifier precedent).
