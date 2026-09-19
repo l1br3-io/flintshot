@@ -15,15 +15,15 @@ gating.
 
 **Acceptance criteria:**
 
-- [ ] Two rapid presses at the same canvas spot synthesize
+- [x] Two rapid presses at the same canvas spot synthesize
       `PointerDown` + `DoubleClick` in both shells; slow or distant
       presses do not fire the tracker.
-- [ ] Overlay gating preserved: no `DoubleClick` where presses are
+- [x] Overlay gating preserved: no `DoubleClick` where presses are
       swallowed (toolbar, outside-region under a live selection).
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-editor-egui` (tracker unit tests +
+- [x] `cargo test -p flintshot-editor-egui` (tracker unit tests +
       pump tests via the existing egui-ctx frame harness)
 - [ ] Manual: `cargo run -- capture` → place text → Enter →
       double-click → caret at end → append text → Enter → text
