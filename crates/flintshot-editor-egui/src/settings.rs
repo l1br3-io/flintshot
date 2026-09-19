@@ -133,6 +133,33 @@ impl SettingsApp {
             })
         })
     }
+
+    /// The path the save-location row displays: the configured
+    /// directory when set (whitespace-trimmed), or the resolved
+    /// platform default the writes would honor — never a
+    /// placeholder label.
+    pub(crate) fn effective_save_dir(&self) -> String {
+        if self.config.output.save_dir.trim().is_empty() {
+            self.config
+                .output
+                .resolve_save_dir()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            self.config.output.save_dir.trim().to_owned()
+        }
+    }
+}
+
+/// Apply a folder-pick (or its cancellation) to the working
+/// config: `Some(dir)` sets the save dir and arms the debounced
+/// save; `None` — the dialog was cancelled — changes nothing.
+/// Pure seam so tests skip the `rfd` dialog.
+fn apply_picked_folder(page: &mut SettingsApp, picked: Option<std::path::PathBuf>, now: f64) {
+    if let Some(dir) = picked {
+        page.config.output.save_dir = dir.to_string_lossy().into_owned();
+        page.mark_dirty(now);
+    }
 }
 
 pub(crate) struct SettingsPage;
@@ -319,16 +346,52 @@ fn output_section(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
             }
         });
         set_row(ui, "Save location", |ui| {
-            // The directory picker is the app crate's dialog; the
-            // readonly display shows the configured path.
-            readonly_value(
+            // The honest display: the effective path the writes
+            // will honor (configured or resolved default).
+            readonly_value(ui, &page.effective_save_dir());
+            // Browse: the native folder dialog (the Open control's
+            // blocking-modal precedent). A cancel changes nothing.
+            if link(ui, egui::Id::new("set-save-browse"), "Browse") {
+                let picked = rfd::FileDialog::new().pick_folder();
+                apply_picked_folder(page, picked, now);
+            }
+            // Reset: only meaningful once a dir is configured.
+            if !page.config.output.save_dir.trim().is_empty()
+                && link(ui, egui::Id::new("set-save-default"), "Use default")
+            {
+                page.config.output.save_dir.clear();
+                page.mark_dirty(now);
+            }
+        });
+        set_row(ui, "Save clipboard copies", |ui| {
+            let resp = widgets::switch(
                 ui,
-                if page.config.output.save_dir.is_empty() {
-                    "Pictures (default)"
-                } else {
-                    &page.config.output.save_dir
-                },
+                egui::Id::new("set-save-copies"),
+                page.config.output.save_clipboard_copies,
+                false,
             );
+            if resp.on != page.config.output.save_clipboard_copies {
+                page.config.output.save_clipboard_copies = resp.on;
+                page.mark_dirty(now);
+            }
+        });
+        set_row(ui, "Recent captures", |ui| {
+            // Preset wells (the page's mapping-table idiom): every
+            // pick is in-range by construction; out-of-range
+            // hand-edits clamp at use (the config accessor) and
+            // settle on the nearest preset once the user picks.
+            let limits = ["20", "50", "100", "200"];
+            let values = [20_u32, 50, 100, 200];
+            let idx = values
+                .iter()
+                .position(|v| *v == page.config.ui.recent_captures_limit)
+                .unwrap_or(1);
+            if let Some(pick) =
+                widgets::well_row(ui, egui::Id::new("set-recents-limit"), &limits, idx)
+            {
+                page.config.ui.recent_captures_limit = values[pick];
+                page.mark_dirty(now);
+            }
         });
         set_row(ui, "Copy after capture", |ui| {
             let on = page.config.capture.after_grab == "clipboard";
@@ -886,6 +949,153 @@ mod tests {
             "the card body covers all {lines} monospace lines (got {} px)",
             card.height()
         );
+    }
+
+    // ── Recent-captures-v2 Task 007 ──────────────────────────────
+
+    /// The displayed path is the one the save path honors: the
+    /// configured dir when set, the resolved platform default
+    /// otherwise — never a placeholder.
+    #[test]
+    fn effective_save_dir_spans_configured_and_default() {
+        let mut page = page();
+        assert!(
+            page.effective_save_dir().ends_with("Flintshot"),
+            "default shows the resolved platform dir, got {}",
+            page.effective_save_dir()
+        );
+        page.config.output.save_dir = "  /tmp/my-shots  ".into();
+        assert_eq!(page.effective_save_dir(), "/tmp/my-shots");
+    }
+
+    /// A picked folder lands in the working config and arms the
+    /// save; a cancelled dialog (`None`) changes nothing.
+    #[test]
+    fn apply_picked_folder_sets_or_ignores() {
+        let mut page = page();
+        apply_picked_folder(
+            &mut page,
+            Some(std::path::PathBuf::from("/tmp/picked")),
+            0.0,
+        );
+        assert_eq!(page.config.output.save_dir, "/tmp/picked");
+        assert!(page.save_due(2.0), "the pick armed the debounce");
+
+        let mut cancelled = page_gated(false);
+        apply_picked_folder(&mut cancelled, None, 0.0);
+        assert!(cancelled.config.output.save_dir.is_empty());
+        assert!(!cancelled.save_due(2.0), "a cancel arms nothing");
+    }
+
+    /// The save-location row: Browse renders always; "Use default"
+    /// renders only when a dir is configured, and clicking it
+    /// resets to the default (empty).
+    #[test]
+    fn save_location_row_browses_and_resets() {
+        let mut page = page();
+        let ctx = frame_with_animations(&mut page, false);
+        assert!(
+            ctx.read_response(egui::Id::new("set-save-browse"))
+                .is_some(),
+            "the browse action renders"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new("set-save-default"))
+                .is_none(),
+            "no reset link while on the default"
+        );
+
+        page.config.output.save_dir = "/tmp/my-shots".into();
+        let ctx = frame_with_animations(&mut page, false);
+        let reset = ctx
+            .read_response(egui::Id::new("set-save-default"))
+            .expect("the reset link renders once a dir is set")
+            .rect;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 900.0),
+                )),
+                events: click(reset),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                SettingsPage::show(ui, &mut page, 0.0);
+            },
+        );
+        assert!(
+            page.config.output.save_dir.is_empty(),
+            "the reset returned to the platform default"
+        );
+        assert!(page.save_due(2.0), "the reset armed the save");
+    }
+
+    /// The clipboard-copies switch flips its config field live.
+    #[test]
+    fn save_clipboard_copies_switch_writes_the_field() {
+        let mut page = page();
+        assert!(page.config.output.save_clipboard_copies, "default on");
+        let ctx = frame_with_animations(&mut page, false);
+        let sw = ctx
+            .read_response(egui::Id::new("set-save-copies"))
+            .expect("the switch renders")
+            .rect;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 900.0),
+                )),
+                events: click(sw),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                SettingsPage::show(ui, &mut page, 0.0);
+            },
+        );
+        assert!(
+            !page.config.output.save_clipboard_copies,
+            "the click flipped it"
+        );
+    }
+
+    /// The recents limit row renders preset wells and writes the
+    /// picked value.
+    #[test]
+    fn recents_limit_row_wells_write_the_field() {
+        let mut page = page();
+        let ctx = frame_with_animations(&mut page, false);
+        for i in 0..4 {
+            assert!(
+                ctx.read_response(egui::Id::new("set-recents-limit").with(i))
+                    .is_some(),
+                "segment {i} renders"
+            );
+        }
+        assert_eq!(page.config.ui.recent_captures_limit, 50);
+        let pick = ctx
+            .read_response(egui::Id::new("set-recents-limit").with(2))
+            .expect("the 100 segment")
+            .rect;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 900.0),
+                )),
+                events: click(pick),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                SettingsPage::show(ui, &mut page, 0.0);
+            },
+        );
+        assert_eq!(
+            page.config.ui.recent_captures_limit, 100,
+            "the pick wrote the field"
+        );
+        assert!(page.save_due(2.0), "the pick armed the save");
     }
 
     // ── Rebind row (settings-improvement Task 010) ───────────────
