@@ -287,17 +287,31 @@ pub(crate) enum PrepareCaptureOutcome {
 /// `CaptureReady` confirmation, bounded by [`PREPARE_REPLY_BOUND`]
 /// (mirrors [`hide_tray_for_capture_to`] with the same
 /// never-fail-the-capture semantics). Version skew: a daemon that
-/// predates the variant answers with silence or an unsupported error;
-/// the client then falls back to one tray-only handshake before
-/// proceeding, so new-worker/old-daemon keeps working through
-/// upgrades.
+/// predates the variant answers with the explicit `unsupported`
+/// error, and only then does the client fall back to one tray-only
+/// handshake before proceeding. A bound expiry is **not** skew: the
+/// daemon arms the gate before awaiting its own handshakes, so the
+/// capture is already registered and a second handshake would leak
+/// `hide_depth` (see [`Prepared::ArmedSlow`]).
 ///
 /// Internal step outcome of the async half; the tray-only fallback
 /// runs in the sync half (a nested `block_on` panics).
 enum Prepared {
     Ready,
     NoDaemon,
-    Fallback,
+    /// A known-old daemon answered `unsupported`: it never began
+    /// anything server-side, so the legacy tray-only hide handshake
+    /// is owed once before proceeding.
+    LegacyFallback,
+    /// The reply bound expired on a daemon that **did** `begin_capture`
+    /// for this prepare (the gate is armed before the daemon awaits
+    /// its own handshakes). The capture is registered but
+    /// unconfirmed: proceed, owe exactly one `ReportCaptured`, and
+    /// never send a second handshake — a tray-only retry would
+    /// `begin_capture` again, and the worker's single report then
+    /// leaves `hide_depth` at 1 (the tray ghosted until the 30 s
+    /// safety restore).
+    ArmedSlow,
 }
 
 pub(crate) fn prepare_capture_to(
@@ -337,23 +351,30 @@ pub(crate) fn prepare_capture_to(
         {
             Ok(Ok(payload)) => match decode_event(&payload)? {
                 IpcEvent::CaptureReady => Ok(Prepared::Ready),
-                // An old daemon's dispatch table answers unknown
-                // variants with the generic error — or with silence
-                // (the timeout arm): one tray-only retry bridges both.
-                IpcEvent::Error { code, .. } if code == "unsupported" => Ok(Prepared::Fallback),
+                // Only a known-old daemon's explicit `unsupported`
+                // reply owes the tray-only retry: it never began
+                // anything server-side. The timeout arm below is the
+                // *slow current daemon* case and must not retry.
+                IpcEvent::Error { code, .. } if code == "unsupported" => {
+                    Ok(Prepared::LegacyFallback)
+                }
                 other => Err(eyre::eyre!("unexpected reply to PrepareCapture: {other:?}")),
             },
             Ok(Err(e)) => Err(e),
-            Err(_) => Ok(Prepared::Fallback),
+            // A current daemon arms the tray gate before awaiting its
+            // own handshakes, so the bound expiring means the capture
+            // is already registered server-side — armed-but-slow, not
+            // legacy. See `Prepared::ArmedSlow`.
+            Err(_) => Ok(Prepared::ArmedSlow),
         }
     })?;
     match prepared {
         Prepared::Ready => Ok(PrepareCaptureOutcome::Registered { acked: true }),
         Prepared::NoDaemon => Ok(PrepareCaptureOutcome::NoDaemon),
-        Prepared::Fallback => {
+        Prepared::ArmedSlow => Ok(PrepareCaptureOutcome::Registered { acked: false }),
+        Prepared::LegacyFallback => {
             tracing::warn!(
-                "daemon did not confirm the prepare within {PREPARE_REPLY_BOUND:?}; \
-                 falling back to the tray-only hide once, then capturing anyway"
+                "daemon predates PrepareCapture; using the tray-only hide once, then capturing"
             );
             match hide_tray_for_capture_to(override_path) {
                 Ok(HideTrayOutcome::NoDaemon) => Ok(PrepareCaptureOutcome::NoDaemon),
@@ -420,10 +441,10 @@ mod tests {
     /// Skew fallback against a scripted "old daemon": the first reply
     /// is the generic unsupported error, so the client must retry
     /// once with `HideTrayForCapture` (which this server answers with
-    /// `TrayHidden`). `#[ignore]` (needs a real local socket). Run
-    /// with: `cargo test -p flintshot-app -- --ignored prepare`
+    /// `TrayHidden`). Runs against a real local socket (works
+    /// headless — local sockets need no display). Run with:
+    /// `cargo test -p flintshot-app -- prepare`
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "needs a real local socket (no display); run explicitly"]
     async fn prepare_capture_falls_back_to_tray_on_unsupported() {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -487,6 +508,79 @@ mod tests {
             outcome,
             PrepareCaptureOutcome::Registered { acked: true },
             "the tray-only fallback satisfied the handshake"
+        );
+    }
+
+    /// A current daemon that is merely **slow** (the reply exceeds
+    /// [`PREPARE_REPLY_BOUND`]) already `begin_capture`d the gate for
+    /// this handshake server-side — a second, tray-only handshake
+    /// would `begin_capture` again and the worker's single
+    /// `ReportCaptured` leaves `hide_depth` at 1 (the 30 s tray
+    /// ghost). The silent server pins the split: a timeout must
+    /// resolve to `Registered { acked: false }` with **no** second
+    /// connection — only the explicit `unsupported` reply (a
+    /// known-old daemon that never began) keeps the legacy fallback.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prepare_capture_timeout_does_not_run_the_tray_fallback() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use interprocess::local_socket::traits::tokio::Listener as _;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        static UNIQUE: AtomicU64 = AtomicU64::new(0);
+        let dir = tempfile::tempdir().unwrap();
+        let n = UNIQUE.fetch_add(1, Ordering::Relaxed);
+        let sock = dir.path().join(format!("flintshot-prepare-slow-{n}.sock"));
+        let path = sock.clone();
+
+        // The stand-in slow daemon: accepts the PrepareCapture
+        // connection, reads the frame, and stays silent forever — it
+        // never answers and never gets a second connection.
+        let listener_task = tokio::spawn(async move {
+            use interprocess::local_socket::traits::tokio::Listener as _;
+            let name = socket_name(&path).unwrap();
+            let listener = interprocess::local_socket::ListenerOptions::new()
+                .name(name)
+                .try_overwrite(true)
+                .create_tokio()
+                .unwrap();
+            let mut buf = [0u8; 4096];
+            {
+                let mut conn = listener.accept().await.unwrap();
+                let _n = conn.read(&mut buf).await.unwrap();
+                // Silence: hold the connection open without replying.
+                tokio::time::sleep(PREPARE_REPLY_BOUND * 4).await;
+                let _ = conn.shutdown().await;
+            }
+            listener
+        });
+
+        // Bridge: wait for the listener to exist before the client
+        // probes (the spawn races the socket file).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !sock.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let outcome = tokio::task::spawn_blocking(move || prepare_capture_to(Some(&sock)))
+            .await
+            .expect("client task")
+            .expect("scripted handshake");
+        assert_eq!(
+            outcome,
+            PrepareCaptureOutcome::Registered { acked: false },
+            "a slow prepare is armed-but-unconfirmed, not a legacy fallback"
+        );
+
+        // The no-second-connection pin: the slow daemon must never
+        // receive the tray-only `HideTrayForCapture` handshake. Bounded
+        // observation — never an unbounded wait.
+        let listener = listener_task.await.unwrap();
+        let second =
+            tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
+        assert!(
+            second.is_err(),
+            "the timeout path must not send a second (tray-only) handshake"
         );
     }
 }
