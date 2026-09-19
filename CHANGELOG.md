@@ -20,6 +20,12 @@ Categories used below:
 
 ### Added
 
+- **Adjustable Number-bubble size** (spec `docs/specs/number-tool/`):
+  the properties panel's Number section gains a **Size** stepper
+  (16–96 px, default 28) beside "Start at", bound to
+  `EditorState::number_diameter` and clamped to core's new pub
+  `NUMBER_MIN/MAX_DIAMETER`. Session tool state — the next placement
+  picks it up, committed bubbles never change, no history entries.
 - **Five-zone UI + settings route** (spec `docs/specs/ux-redesign/`):
   the single window re-laid out around the mockup's five zones —
   44 px topbar (flame brand, breadcrumb, Capture / Copy / Open hero
@@ -83,6 +89,13 @@ Categories used below:
 
 ### Fixed
 
+- **Number tool's digit is centered in its bubble** (spec
+  `docs/specs/number-tool/`): the shared render path passed the
+  bubble's center to `draw_text`, whose contract anchors a text run
+  top-left — the digit sat toward the bubble's bottom-right, in the
+  live editor and the saved/copied PNG alike. The label is now
+  measured and drawn at center minus half its size, in the shared
+  arm, so both canvases center together (WYSIWYG).
 - The editor's Copy hero now answers: for ~2 s after a successful
   copy it paints the gold check glyph and reads "Copied", then
   reverts on its own (a repaint lands the revert without input).
