@@ -1312,42 +1312,31 @@ impl EditorState {
                 self.backspace_text();
                 DispatchOutcome::Continue
             }
-            // Arrow / Home / End move the insertion point within the
-            // draft. Left/Right wrap across line breaks; Up/Down
-            // preserve the column; Home/End jump to the line edges.
+            // Delete replaces the selection, else forward-deletes the
+            // char after the caret.
             InputEvent::Key {
-                key: Key::ArrowLeft,
-                ..
+                key: Key::Delete, ..
             } => {
-                self.cursor_left();
+                self.delete_text();
                 DispatchOutcome::Continue
             }
+            // Ctrl+A selects the whole draft. Plain 'a' presses never
+            // arrive as Key events mid-edit (typed text comes in as
+            // TextInput), so the ctrl_only guard is the only gate
+            // needed.
             InputEvent::Key {
-                key: Key::ArrowRight,
-                ..
-            } => {
-                self.cursor_right();
+                key: Key::Char('a' | 'A'),
+                modifiers,
+            } if modifiers.ctrl_only() => {
+                self.select_all_text();
                 DispatchOutcome::Continue
             }
-            InputEvent::Key {
-                key: Key::ArrowUp, ..
-            } => {
-                self.cursor_up();
-                DispatchOutcome::Continue
-            }
-            InputEvent::Key {
-                key: Key::ArrowDown,
-                ..
-            } => {
-                self.cursor_down();
-                DispatchOutcome::Continue
-            }
-            InputEvent::Key { key: Key::Home, .. } => {
-                self.cursor_home();
-                DispatchOutcome::Continue
-            }
-            InputEvent::Key { key: Key::End, .. } => {
-                self.cursor_end();
+            // Every other key routes through the motion table: Shift
+            // chords extend the selection, plain presses move and
+            // collapse, unhandled modifier combos no-op (word-wise
+            // chords are a later task).
+            InputEvent::Key { key, modifiers } => {
+                self.dispatch_text_motion(*key, *modifiers);
                 DispatchOutcome::Continue
             }
             InputEvent::TextInput(ch) => {
@@ -1413,6 +1402,74 @@ impl EditorState {
         self.text_anchor = None;
     }
 
+    /// Shift-chord engine: seed the selection anchor at the current
+    /// cursor on the first press (later presses keep the original
+    /// anchor — standard anchor semantics), then move the cursor with
+    /// `mv`. No-op when no text draft is active.
+    fn extend_by(&mut self, mv: fn(&mut Self)) {
+        if self.is_editing_text() {
+            self.text_anchor = Some(self.text_anchor.unwrap_or(self.text_cursor));
+            mv(self);
+        }
+    }
+
+    /// Select the entire draft (Ctrl+A). An empty draft is a no-op —
+    /// there is nothing to highlight and a `0..0` "selection" would
+    /// be indistinguishable from collapsed.
+    fn select_all_text(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            let len = text.chars().count();
+            if len > 0 {
+                self.text_anchor = Some(0);
+                self.text_cursor = len;
+            }
+        }
+    }
+
+    /// Delete the character immediately after the cursor (forward
+    /// delete), or the whole selection when one exists. No-op at the
+    /// end of the draft or when no draft is active.
+    fn delete_text(&mut self) {
+        if self.selection_range().is_some() {
+            self.delete_selection();
+            return;
+        }
+        if let Some(Annotation::Text { text, .. }) = &mut self.pending {
+            if self.text_cursor < text.chars().count() {
+                let cur = char_to_byte(text, self.text_cursor);
+                let next = char_to_byte(text, self.text_cursor + 1);
+                text.replace_range(cur..next, "");
+            }
+        }
+    }
+
+    /// Arrow / Home / End motion while editing text, as a table:
+    /// Shift chords extend the selection (anchor seeded on the first
+    /// press via [`extend_by`](Self::extend_by)), modifier-free
+    /// presses move and collapse the selection. Other modifier combos
+    /// (word-wise chords, a later task) and non-motion keys no-op.
+    fn dispatch_text_motion(&mut self, key: crate::geom::Key, modifiers: crate::input::Modifiers) {
+        use crate::geom::Key;
+        let mv: Option<fn(&mut Self)> = match key {
+            Key::ArrowLeft => Some(Self::cursor_left),
+            Key::ArrowRight => Some(Self::cursor_right),
+            Key::ArrowUp => Some(Self::cursor_up),
+            Key::ArrowDown => Some(Self::cursor_down),
+            Key::Home => Some(Self::cursor_home),
+            Key::End => Some(Self::cursor_end),
+            _ => None,
+        };
+        let Some(mv) = mv else {
+            return;
+        };
+        if modifiers.shift {
+            self.extend_by(mv);
+        } else if modifiers == crate::input::Modifiers::default() {
+            mv(self);
+            self.text_anchor = None;
+        }
+    }
+
     /// Append a typed character to the in-flight text draft **at the
     /// cursor**, then advance the cursor past it. A non-empty
     /// selection is replaced by the stroke.
@@ -1463,11 +1520,10 @@ impl EditorState {
     }
 
     /// Move the cursor left one char (wrapping across line breaks to
-    /// the end of the previous line). Clamps at 0. Plain moves
-    /// collapse the selection (Shift chords are the exception).
+    /// the end of the previous line). Clamps at 0. Pure mover —
+    /// anchor policy (collapse / extend) lives at the dispatch arms.
     fn cursor_left(&mut self) {
         self.text_cursor = self.text_cursor.saturating_sub(1);
-        self.text_anchor = None;
     }
 
     /// Move the cursor right one char (wrapping across line breaks to
@@ -1477,7 +1533,6 @@ impl EditorState {
             let len = text.chars().count();
             self.text_cursor = (self.text_cursor + 1).min(len);
         }
-        self.text_anchor = None;
     }
 
     /// Move the cursor up one line, preserving the column. Clamps to
@@ -1486,7 +1541,6 @@ impl EditorState {
         if let Some(Annotation::Text { text, .. }) = &self.pending {
             self.text_cursor = cursor_up(text, self.text_cursor);
         }
-        self.text_anchor = None;
     }
 
     /// Move the cursor down one line, preserving the column. Clamps to
@@ -1495,7 +1549,6 @@ impl EditorState {
         if let Some(Annotation::Text { text, .. }) = &self.pending {
             self.text_cursor = cursor_down(text, self.text_cursor);
         }
-        self.text_anchor = None;
     }
 
     /// Move the cursor to the start of the current line.
@@ -1503,7 +1556,6 @@ impl EditorState {
         if let Some(Annotation::Text { text, .. }) = &self.pending {
             self.text_cursor = cursor_line_start(text, self.text_cursor);
         }
-        self.text_anchor = None;
     }
 
     /// Move the cursor to the end of the current line.
@@ -1511,7 +1563,6 @@ impl EditorState {
         if let Some(Annotation::Text { text, .. }) = &self.pending {
             self.text_cursor = cursor_line_end(text, self.text_cursor);
         }
-        self.text_anchor = None;
     }
 
     /// Commit the in-flight text draft to `anns`, or cancel it if empty.
@@ -4183,6 +4234,16 @@ mod tests {
         }
     }
 
+    fn shift_key(k: Key) -> InputEvent {
+        InputEvent::Key {
+            key: k,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        }
+    }
+
     fn pending_text(s: &EditorState) -> &str {
         match &s.pending {
             Some(Annotation::Text { text, .. }) => text,
@@ -4369,6 +4430,145 @@ mod tests {
         s.dispatch_input(&shift_enter());
         assert_eq!(pending_text(&s), "a\n");
         assert_eq!(s.text_cursor, 2);
+    }
+
+    // --- Keyboard selection chords (text-selection-highlight Task 002) ---
+
+    #[test]
+    fn shift_arrows_seed_anchor_then_extend_by_char() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        for _ in 0..3 {
+            s.dispatch_input(&shift_key(Key::ArrowLeft));
+        }
+        assert_eq!(s.text_anchor, Some(5), "first press seeds the anchor");
+        assert_eq!(s.text_cursor, 2);
+        assert_eq!(s.selection_range(), Some(2..5));
+        s.dispatch_input(&shift_key(Key::ArrowRight));
+        assert_eq!(s.text_cursor, 3, "cursor moves, anchor stays");
+        assert_eq!(s.text_anchor, Some(5));
+
+        // Multi-byte: one Shift+Left over an emoji moves one char.
+        let mut s = text_state();
+        type_draft(&mut s, "🙂🙂");
+        s.dispatch_input(&shift_key(Key::ArrowLeft));
+        assert_eq!(s.text_cursor, 1, "emoji is one char wide");
+        assert_eq!(s.text_anchor, Some(2));
+    }
+
+    #[test]
+    fn plain_arrow_with_live_selection_collapses_and_moves() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.dispatch_input(&shift_key(Key::ArrowLeft));
+        s.dispatch_input(&shift_key(Key::ArrowLeft));
+        assert_eq!(s.selection_range(), Some(3..5));
+        s.dispatch_input(&key(Key::ArrowLeft));
+        assert_eq!(s.text_anchor, None, "plain move collapses");
+        assert_eq!(s.text_cursor, 2, "and still moves");
+    }
+
+    #[test]
+    fn shift_up_down_extend_line_wise() {
+        let mut s = text_state();
+        type_draft(&mut s, "ab\ncd");
+        assert_eq!(s.text_cursor, 5, "fixture: cursor at draft end");
+        s.dispatch_input(&shift_key(Key::ArrowUp));
+        assert_eq!(s.text_anchor, Some(5));
+        assert_eq!(s.text_cursor, 2, "column clamps to line 0's length");
+        s.dispatch_input(&shift_key(Key::ArrowDown));
+        assert_eq!(s.text_cursor, 5, "column preserved back");
+        assert_eq!(s.text_anchor, Some(5), "anchor never reseeds mid-chord");
+    }
+
+    #[test]
+    fn shift_home_end_extend_to_line_edges() {
+        let mut s = text_state();
+        type_draft(&mut s, "ab\ncd");
+        s.dispatch_input(&key(Key::ArrowUp));
+        s.dispatch_input(&key(Key::ArrowLeft));
+        assert_eq!(s.text_cursor, 1, "fixture: mid line 0");
+        s.dispatch_input(&shift_key(Key::End));
+        assert_eq!(s.text_anchor, Some(1));
+        assert_eq!(s.text_cursor, 2, "end of line 0, not past the \\n");
+        s.dispatch_input(&shift_key(Key::Home));
+        assert_eq!(s.text_cursor, 0, "start of line 0");
+        assert_eq!(s.text_anchor, Some(1));
+
+        let mut s = text_state();
+        type_draft(&mut s, "ab\ncd");
+        s.dispatch_input(&shift_key(Key::Home));
+        assert_eq!(s.text_anchor, Some(5), "fixture end of line 1 anchors");
+        assert_eq!(s.text_cursor, 3, "line 1 start");
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_and_is_noop_on_empty() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.dispatch_input(&ctrl('a'));
+        assert_eq!(s.text_anchor, Some(0));
+        assert_eq!(s.text_cursor, 5);
+        assert_eq!(s.selection_range(), Some(0..5));
+
+        let mut s = text_state();
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
+        s.dispatch_input(&ctrl('a'));
+        assert_eq!(s.text_anchor, None, "empty draft: no-op");
+        assert_eq!(s.text_cursor, 0);
+    }
+
+    #[test]
+    fn delete_key_deletes_selection_or_forward_char() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_anchor = Some(0);
+        s.dispatch_input(&key(Key::Delete));
+        assert_eq!(pending_text(&s), "");
+        assert_eq!(s.text_cursor, 0);
+        assert_eq!(s.text_anchor, None);
+
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.dispatch_input(&key(Key::ArrowLeft));
+        s.dispatch_input(&key(Key::ArrowLeft));
+        s.dispatch_input(&key(Key::ArrowLeft));
+        s.dispatch_input(&key(Key::ArrowLeft));
+        assert_eq!(s.text_cursor, 1, "fixture: on 'e'");
+        s.dispatch_input(&key(Key::Delete));
+        assert_eq!(pending_text(&s), "hllo", "forward delete at cursor");
+        assert_eq!(s.text_cursor, 1, "cursor unmoved");
+
+        // At the end of the draft, Delete is a no-op.
+        let mut s = text_state();
+        type_draft(&mut s, "hi");
+        s.dispatch_input(&key(Key::Delete));
+        assert_eq!(pending_text(&s), "hi");
+
+        // Multi-byte forward delete removes a whole emoji.
+        let mut s = text_state();
+        type_draft(&mut s, "🙂b");
+        s.dispatch_input(&key(Key::ArrowLeft));
+        s.dispatch_input(&key(Key::ArrowLeft));
+        s.dispatch_input(&key(Key::Delete));
+        assert_eq!(pending_text(&s), "b");
+    }
+
+    #[test]
+    fn commit_chords_behave_exactly_as_before() {
+        // Enter with stray modifiers (no shift) still commits — the
+        // pre-existing arm shape is untouched.
+        let mut s = text_state();
+        type_draft(&mut s, "hi");
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        });
+        assert!(s.pending.is_none(), "Ctrl+Enter commits like plain Enter");
+        assert_eq!(s.anns.len(), 1);
     }
 
     // --- Gesture-bracketed restyle (text-select-edit Task 005) ---
