@@ -66,6 +66,7 @@ mod rail;
 mod settings;
 mod shell;
 mod statusbar;
+mod texthit;
 mod theme;
 mod toast;
 mod topbar;
