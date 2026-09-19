@@ -18,6 +18,14 @@ Categories used below:
 
 ## [Unreleased]
 
+### Changed
+
+- **Sticky tools by default** (ADR-0058, superseding ADR-0040's
+  default): committing an annotation keeps the active tool instead of
+  flipping to Move — rapid multi-draw no longer needs a re-press per
+  commit. The flip cadence remains available via
+  `[ui] flip-to-move = true`; the editor still opens on Move.
+
 ### Added
 
 - **Adjustable Number-bubble size** (spec `docs/specs/number-tool/`):
@@ -96,6 +104,20 @@ Categories used below:
   live editor and the saved/copied PNG alike. The label is now
   measured and drawn at center minus half its size, in the shared
   arm, so both canvases center together (WYSIWYG).
+- Every topbar / overflow / breadcrumb icon is now a painted vector
+  glyph (rail's `Glyph` fn pattern), never font-chain text: the
+  cmap scan proved U+22EF / U+29C9 / U+25B8 / U+2913 / U+21E7 /
+  U+2713 absent from every embedded font, so those icons rendered
+  as tofu boxes. Heroes (Capture's plus-in-ring, Copy's sheets,
+  Open's folder), overflow rows (Save / Upload / Paste / Settings),
+  the About row, and the breadcrumb chevron all paint now, and a
+  tofu-ban scan test fails the build if any banned codepoint
+  re-enters `flintshot-editor-egui`'s source.
+- The topbar Capture hero was a dead control on the Settings route
+  (the enable matrix kept it live; the router's dispatch arm only
+  matched Home). A Capture click on Settings now fires the same
+  bridge request + close choreography, and the settings page
+  restores after the grab resolves.
 - The editor's Copy hero now answers: for ~2 s after a successful
   copy it paints the gold check glyph and reads "Copied", then
   reverts on its own (a repaint lands the revert without input).

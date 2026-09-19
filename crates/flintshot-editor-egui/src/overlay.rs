@@ -39,7 +39,7 @@
 //!
 //! ## Output flows (Task 006, plan decision 6)
 //!
-//! **Enter = Copy** (also the ✓ / Copy chips and `Ctrl+C`, which the
+//! **Enter = Copy** (also the check / Copy chips and `Ctrl+C`, which the
 //! dispatcher recognizes and hands back as a `Copy` outcome): the
 //! region is composed selection-aware onto the clipboard and the
 //! overlay closes, publishing `CopiedToClipboard`. Save (`rfd`
@@ -82,7 +82,7 @@
 //! 4). Row 1 walks the shared tool pods (selection · shapes ·
 //! freehand · labels · redact, no capture `+`) plus a history pod
 //! (undo / redo / delete), each its own island; row 2 reads as two
-//! islands: the ✓ / ✕ pair and the outputs (Save / Upload,
+//! islands: the check / cross pair and the outputs (Save / Upload,
 //! and the forest Copy primary — Copy is Enter-equivalent: the spec
 //! pins Enter = Copy). The toolbar shows only while a usable
 //! selection exists and no fresh region drag runs, and swallows
@@ -163,7 +163,7 @@ pub(crate) enum OverlayClose {
     /// `Esc`: cancel — publish `EditorOutcome::Cancelled`, no side
     /// effects.
     Cancel,
-    /// `Enter` / ✓ / Copy chip / `Ctrl+C`: accept — copy the region
+    /// `Enter` / check chip / Copy chip / `Ctrl+C`: accept — copy the region
     /// to the clipboard, publish `CopiedToClipboard`, close (the
     /// Task 006 Enter=Copy pipeline).
     Accept,
@@ -645,7 +645,7 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
     action
 }
 
-/// The floating toolbar's accept row, read as two islands: the ✓
+/// The floating toolbar's accept row, read as two islands: the check
 /// accept (Enter semantics) / ✕ cancel (Esc semantics) pair, then
 /// the outputs (Save / Upload and the forest Copy primary).
 /// Copy is Enter-equivalent (spec: Enter = Copy); the output
@@ -844,7 +844,7 @@ impl OverlayApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    /// The accept pipeline (Enter / ✓ chip / Copy chip / `Ctrl+C`):
+    /// The accept pipeline (Enter / check chip / Copy chip / `Ctrl+C`):
     /// compose the region selection-aware onto the clipboard,
     /// publish `CopiedToClipboard`, close. A clipboard failure
     /// publishes `Err` and closes — the editor window's copy-failure
@@ -1108,7 +1108,7 @@ impl OverlayApp {
     ///
     /// Layout (plan decision 4: compact rail + accept row, the
     /// editor rail's pod islands): row 1 walks the shared tool pods
-    /// plus a history pod; row 2 reads as two islands — ✓ accept
+    /// plus a history pod; row 2 reads as two islands — check accept
     /// (Enter semantics) / ✕ cancel (Esc semantics), then the
     /// outputs Save / Upload and the forest Copy primary. Copy
     /// is Enter-equivalent (spec: Enter = Copy).
@@ -2584,7 +2584,7 @@ mod tests {
         assert_eq!(
             island_count(&output),
             2,
-            "the accept row paints exactly two islands: ✓/✕ and outputs"
+            "the accept row paints exactly two islands: check/cross and outputs"
         );
         let rect = |id: &str| {
             ctx.read_response(egui::Id::new(id))
@@ -2604,14 +2604,14 @@ mod tests {
             assert!(same_row(w[0], w[1]), "chips share a row");
             assert!(w[0].max.x < w[1].min.x, "chips run left to right");
         }
-        // The ✓/✕ pair is one island; the outputs island starts one
+        // The check/cross pair is one island; the outputs island starts one
         // pod gap later (island pads + POD_GAP make the boundary at
         // least double the intra-island chip spacing).
         let tight = chip_gap(accept, cancel);
         let split = chip_gap(cancel, save);
         assert!(
             split >= 20.0 && split > tight + 4.0,
-            "two islands: ✓→✕ gap {tight} must be tight, ✕→Save gap {split} must be a pod gap"
+            "two islands: check-to-cross gap {tight} must be tight, cross-to-Save gap {split} must be a pod gap"
         );
         assert!(
             chip_gap(upload, copy) <= tight + 2.0,

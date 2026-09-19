@@ -1,5 +1,5 @@
 ---
-status: draft        # draft → active → shipped (flipped by /build and on merge)
+status: active       # draft → active → shipped (flipped by /build and on merge)
 started: 2026-09-18
 ---
 

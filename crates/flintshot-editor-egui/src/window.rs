@@ -69,7 +69,7 @@ pub enum Route {
     /// delivers). Stub until Task 008.
     Loading,
     /// The settings page (Task 010): reached from every route's
-    /// `⋯` overflow; Escape returns to Home.
+    /// dots overflow; Escape returns to Home.
     Settings,
 }
 
@@ -439,13 +439,19 @@ impl WindowApp {
         // the home app's own paths; Loading is fully disabled and
         // Settings stays inert until its route lands.
         match topbar_action {
-            Some(crate::topbar::TopbarAction::Capture) if matches!(self.route, Route::Home) => {
+            // The Capture hero fires on Home and Settings alike —
+            // the enable matrix keeps it live on Settings, and the
+            // settings route is a page over home (the bridge's
+            // capture path + close choreography is route-agnostic).
+            Some(crate::topbar::TopbarAction::Capture)
+                if matches!(self.route, Route::Home | Route::Settings) =>
+            {
                 self.home.start_capture(ui.ctx());
             }
             Some(crate::topbar::TopbarAction::Open) if matches!(self.route, Route::Home) => {
                 self.home.handle_open(ui.ctx());
             }
-            // The ⋯ overflow's Settings entry opens the settings
+            // The dots overflow's Settings entry opens the settings
             // route from every route (spec §Settings route).
             Some(crate::topbar::TopbarAction::Settings) => {
                 self.settings = Some(crate::settings::SettingsApp::new(
@@ -671,6 +677,74 @@ mod tests {
             bridge.captures.get(),
             1,
             "one topbar Capture click = one bridge capture request"
+        );
+    }
+
+    /// The Settings route's Capture hero is no dead control: the
+    /// same click fires the bridge exactly once from Settings too
+    /// (task 005 — the enable matrix kept Capture live there, the
+    /// dispatch guard just never matched).
+    #[test]
+    fn settings_topbar_capture_fires_the_bridge_request() {
+        let bridge = CountingBridge::default();
+        let slot: RouteSlot = Rc::new(RefCell::new(Route::Home));
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let mut app = WindowApp::new(
+            &egui::Context::default(),
+            WindowStart::Home,
+            Box::new(bridge.clone()),
+            Rc::new(RefCell::new(Box::new(StubPageBridge::default()))),
+            Box::new(RecordingHost::default()),
+            "connected".into(),
+            outcome,
+            slot,
+        );
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        app.request_route(&ctx, Route::Settings);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let frame = |ctx: &egui::Context, app: &mut WindowApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        };
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let capture = ctx
+            .read_response(egui::Id::new("topbar-capture"))
+            .expect("the topbar Capture hero registers on Settings")
+            .rect;
+        frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerMoved(capture.center())],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(capture.center()),
+                egui::Event::PointerButton {
+                    pos: capture.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: capture.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(
+            bridge.captures.get(),
+            1,
+            "one topbar Capture click on Settings = one bridge capture request"
         );
     }
 
