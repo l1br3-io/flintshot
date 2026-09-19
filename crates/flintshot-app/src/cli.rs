@@ -1209,19 +1209,29 @@ fn open_settings_from_worker() {
     }
 }
 
-/// The daemon's own `OpenSettings` spawn step (`app --route
-/// settings`), detached — the `NoDaemon` fallback for worker editors
-/// (the broadcast would land on nobody).
+/// The daemon's own `OpenSettings` spawn step (`app --route settings
+/// --standalone`, built by [`crate::worker::app_argv`]), detached —
+/// the `NoDaemon` fallback for worker editors (the broadcast would
+/// land on nobody). The shared builder keeps the fallback child on
+/// the `--standalone` rule: against an app-lock holder it exits
+/// quietly instead of erroring on the stale-process path.
 #[cfg(feature = "egui")]
 fn spawn_settings_app() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| color_eyre::eyre::eyre!("resolving current_exe: {e}"))?;
     std::process::Command::new(exe)
-        .args(["app", "--route", "settings"])
+        .args(settings_app_argv())
         .stdin(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
         .map_err(|e| color_eyre::eyre::eyre!("spawning `flintshot app --route settings`: {e}"))
+}
+
+/// The Settings fallback's argv — the daemon's own spawn step,
+/// `worker::app_argv`'s rule included.
+#[cfg(feature = "egui")]
+fn settings_app_argv() -> Vec<String> {
+    crate::worker::app_argv(crate::worker::AppRoute::Settings)
 }
 
 /// The worker editor's Home delegate (the shell's `with_open_home`
@@ -1243,21 +1253,28 @@ fn open_home_from_worker() {
     }
 }
 
-/// The daemon's own `OpenApp` spawn step (plain `app` — the Home
-/// route elides `--route`), detached — the `NoDaemon` fallback for
-/// worker editors (the broadcast would land on nobody). The spawned
-/// app acquires the lock and auto-starts its own daemon via the
-/// pump, exactly like the Settings fallback.
+/// The daemon's own `OpenApp` spawn step (plain `app
+/// --standalone` — the Home route elides `--route`), detached — the
+/// `NoDaemon` fallback for worker editors (the broadcast would land
+/// on nobody). The spawned app acquires the lock and auto-starts its
+/// own daemon via the pump, exactly like the Settings fallback.
 #[cfg(feature = "egui")]
 fn spawn_home_app() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| color_eyre::eyre::eyre!("resolving current_exe: {e}"))?;
     std::process::Command::new(exe)
-        .args(["app"])
+        .args(home_app_argv())
         .stdin(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
         .map_err(|e| color_eyre::eyre::eyre!("spawning `flintshot app`: {e}"))
+}
+
+/// The Home fallback's argv — the daemon's own spawn step,
+/// `worker::app_argv`'s rule included.
+#[cfg(feature = "egui")]
+fn home_app_argv() -> Vec<String> {
+    crate::worker::app_argv(crate::worker::AppRoute::Home)
 }
 
 /// Which recapture an outcome asks for, if any. Pure so the loop's
@@ -2039,6 +2056,28 @@ mod tests {
         // watch never fires, so no code path short-circuits.
         let watch = SupersedeWatch::inert();
         assert!(!watch.superseded());
+    }
+
+    // ── No-daemon fallback spawn argv (tray-window-lifecycle) ─────
+
+    /// The worker fallbacks' direct spawns must carry `--standalone`
+    /// exactly like the daemon's own spawns (`worker::app_argv`'s
+    /// rule): against an app-lock holder the child exits quietly
+    /// instead of dying on the "stale `flintshot app` process?"
+    /// error.
+    #[cfg(feature = "egui")]
+    #[test]
+    fn fallback_app_spawns_carry_standalone() {
+        assert_eq!(
+            settings_app_argv(),
+            vec!["app", "--route", "settings", "--standalone"],
+            "the Settings fallback mirrors the daemon's spawn argv"
+        );
+        assert_eq!(
+            home_app_argv(),
+            vec!["app", "--standalone"],
+            "the Home fallback mirrors the daemon's spawn argv"
+        );
     }
 
     #[test]
