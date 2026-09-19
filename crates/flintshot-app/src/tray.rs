@@ -1,9 +1,12 @@
 //! System tray menu (`tray-icon` + `muda`), behind the `tray` feature.
 //!
-//! The menu offers one **Capture** item (the single Capture action,
-//! native-capture-ux), *Open app window*, *Open config*, and *Quit*
-//! — plus *Bind shortcuts…* on Wayland sessions (the portal hotkey
-//! path, Phase 6). Since ADR-0042 this icon is
+//! The menu offers *Open app window*, one **Capture** item (the
+//! single Capture action, native-capture-ux), *Settings*, and
+//! *Quit*. The former *Open config* and *Bind shortcuts…* items were
+//! removed with the settings-improvement effort — the settings page
+//! is the single preferences surface now (*Edit config file* /
+//! *Rebind shortcuts…* live there), and their ids are pinned dead by
+//! test. Since ADR-0042 this icon is
 //! built by the **tray helper** process (`flintshot tray`,
 //! [`crate::tray_helper`]), spawned and supervised by the daemon:
 //! the helper's process-exit is the only causal SNI unregistration,
@@ -23,8 +26,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 // short and namespaced so they don't collide with any muda defaults.
 const ID_OPEN_APP: &str = "flintshot.app";
 const ID_CAPTURE: &str = "flintshot.capture";
-const ID_BIND_SHORTCUTS: &str = "flintshot.bind-shortcuts";
-const ID_OPEN_CONFIG: &str = "flintshot.open-config";
+const ID_SETTINGS: &str = "flintshot.settings";
 const ID_QUIT: &str = "flintshot.quit";
 /// Stable `TrayIcon` id. Without it, `TrayIconBuilder::new()` mints a
 /// fresh `{pid}-{counter}` id per build, which becomes the SNI object
@@ -39,39 +41,32 @@ pub(crate) enum TrayAction {
     /// A request the daemon dispatches via the worker table
     /// (capture spawns a worker; quit shuts down).
     Request(Request),
-    /// Open the portal bind dialog (the Wayland portal path; the menu
-    /// item only exists on a Wayland session — see [`build`]).
-    BindShortcuts,
-    /// Open `config.toml` in the user's `$EDITOR`.
-    OpenConfig,
 }
 
 /// Map a menu event to the action it should trigger, or `None` for an
-/// unknown id (e.g. events not from our menu).
+/// unknown id (e.g. events not from our menu — including the retired
+/// *Open config* / *Bind shortcuts…* ids, which are pinned dead by
+/// test and must never be reused).
 #[must_use]
 pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
     match event.id.as_ref() {
         ID_OPEN_APP => Some(TrayAction::Request(Request::OpenApp)),
         ID_CAPTURE => Some(TrayAction::Request(Request::Capture { delay_ms: 0 })),
-        ID_BIND_SHORTCUTS => Some(TrayAction::BindShortcuts),
-        ID_OPEN_CONFIG => Some(TrayAction::OpenConfig),
+        ID_SETTINGS => Some(TrayAction::Request(Request::OpenSettings)),
         ID_QUIT => Some(TrayAction::Request(Request::Quit)),
         _ => None,
     }
 }
 
-/// Build the tray icon with its context menu. `wayland` gates the
-/// *Bind shortcuts…* item: it drives the xdg-desktop-portal bind
-/// dialog, which only exists on Wayland portal sessions — an X11 tray
-/// must not grow a dead item (there hotkeys re-register from
-/// `[hotkeys]` directly). The returned [`TrayIcon`] must be held
-/// alive for the daemon's **whole** lifetime — exactly one
+/// Build the tray icon with its context menu: *Open app window* /
+/// *Capture* / *Settings* / *Quit*. The returned [`TrayIcon`] must
+/// be held alive for the daemon's **whole** lifetime — exactly one
 /// registration per process (a dropped handle never unregisters the
 /// SNI item, and a second build would duplicate it, ADR-0039);
 /// visibility is driven by `set_visible` flips. muda retains the
 /// menu items itself (they're reference-counted), so they can drop
 /// here.
-pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
+pub(crate) fn build() -> eyre::Result<TrayIcon> {
     // libappindicator (tray-icon's Linux backend) touches GTK widgets
     // for the menu, so GTK must be initialized first — on the main
     // thread, which is where the daemon calls us. macOS/Windows use
@@ -84,21 +79,13 @@ pub(crate) fn build(wayland: bool) -> eyre::Result<TrayIcon> {
     let menu = Menu::new();
     let open_app = MenuItem::with_id(ID_OPEN_APP, "Open app window", true, None);
     let capture = MenuItem::with_id(ID_CAPTURE, "Capture", true, None);
-    let bind_shortcuts = MenuItem::with_id(ID_BIND_SHORTCUTS, "Bind shortcuts…", true, None);
-    let open_config = MenuItem::with_id(ID_OPEN_CONFIG, "Open config", true, None);
+    let settings = MenuItem::with_id(ID_SETTINGS, "Settings", true, None);
     let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
 
-    let mut appending = menu
+    if let Err(e) = menu
         .append(&open_app)
         .and_then(|()| menu.append(&capture))
-        .and_then(|()| menu.append(&PredefinedMenuItem::separator()));
-    if wayland {
-        appending = appending
-            .and_then(|()| menu.append(&bind_shortcuts))
-            .and_then(|()| menu.append(&PredefinedMenuItem::separator()));
-    }
-    if let Err(e) = appending
-        .and_then(|()| menu.append(&open_config))
+        .and_then(|()| menu.append(&settings))
         .and_then(|()| menu.append(&PredefinedMenuItem::separator()))
         .and_then(|()| menu.append(&quit))
     {
@@ -183,20 +170,15 @@ mod tests {
         assert_eq!(delay_ms, 0, "the tray's single Capture item");
     }
 
+    /// settings-improvement: the *Settings* item opens (or focuses)
+    /// the app window on its settings page — the `OpenSettings`
+    /// request the daemon broadcasts + spawns for.
     #[test]
-    fn open_config_maps_directly() {
-        assert_eq!(
-            action_for(&event(ID_OPEN_CONFIG)),
-            Some(TrayAction::OpenConfig)
-        );
-    }
-
-    #[test]
-    fn bind_shortcuts_maps_directly() {
-        assert_eq!(
-            action_for(&event(ID_BIND_SHORTCUTS)),
-            Some(TrayAction::BindShortcuts)
-        );
+    fn settings_maps_to_open_settings_request() {
+        assert!(matches!(
+            action_for(&event(ID_SETTINGS)),
+            Some(TrayAction::Request(Request::OpenSettings))
+        ));
     }
 
     #[test]
@@ -225,6 +207,21 @@ mod tests {
             "flintshot.fullscreen-monitor.3",
             "flintshot.fullscreen-monitor.abc",
         ] {
+            assert!(
+                action_for(&event(legacy)).is_none(),
+                "legacy id `{legacy}` must not resolve anymore"
+            );
+        }
+    }
+
+    /// Pinned (settings-improvement): the retired *Open config* and
+    /// *Bind shortcuts…* ids must not resolve to anything — their
+    /// features moved to the settings page, and the ids are dead,
+    /// never to be reused (the `legacy_capture_ids_are_gone`
+    /// precedent).
+    #[test]
+    fn legacy_config_and_bind_ids_are_gone() {
+        for legacy in ["flintshot.open-config", "flintshot.bind-shortcuts"] {
             assert!(
                 action_for(&event(legacy)).is_none(),
                 "legacy id `{legacy}` must not resolve anymore"
