@@ -96,6 +96,10 @@ pub enum WindowStart {
     /// The capture-progress route while a portal delivery is pending
     /// (the grab confirmed; the clipboard write landing).
     Loading,
+    /// The settings page (settings-improvement): a cold start on
+    /// Settings (`app --route settings`) or the reopen after a
+    /// `SettingsFocus` intent while the window was closed.
+    Settings,
 }
 
 /// How one window generation ended — the post-close input the app
@@ -132,6 +136,13 @@ pub trait RouteHost {
     /// quiet grab while the window was open on the Loading route —
     /// nothing is coming to show, and the spinner must not strand).
     fn take_route_home(&mut self) -> bool;
+
+    /// Take a pending "route settings" intent, if one waits (an
+    /// [`Event::SettingsFocus`](flintshot_core::ipc::Event::SettingsFocus)
+    /// arriving while the window was open — tray / applet
+    /// *Settings*). The router swaps the settings page in place, no
+    /// close.
+    fn take_route_settings(&mut self) -> bool;
 }
 
 /// Per-route viewport geometry — the one-time command batch a route
@@ -225,17 +236,31 @@ impl WindowApp {
         let (route, editor) = match start {
             WindowStart::Home => (Route::Home, None),
             WindowStart::Loading => (Route::Loading, None),
+            WindowStart::Settings => (Route::Settings, None),
             WindowStart::Editor(routed) => {
                 let editor = Self::build_editor(&routed, ctx, &page_bridge, &editor_outcome);
                 (Route::Editor(routed), Some(editor))
             }
         };
         *route_slot.borrow_mut() = route.clone();
+        let mut home = HomeApp::new(home_bridge, initial_status);
+        // A Settings start builds its page from the bridge's config
+        // snapshot — the same construction `request_route` performs
+        // on an in-window swap.
+        let settings = if matches!(route, Route::Settings) {
+            Some(crate::settings::SettingsApp::new(
+                home.load_config(),
+                home.display_server(),
+                home.version(),
+            ))
+        } else {
+            None
+        };
         Self {
             route,
-            home: HomeApp::new(home_bridge, initial_status),
-            settings: None,
+            home,
             editor,
+            settings,
             page_bridge,
             host,
             editor_outcome,
@@ -314,11 +339,14 @@ impl WindowApp {
         }
     }
 
-    /// The Loading route's directive poll — no route app is live
-    /// there, so the router owns the queue: `Hide` still closes (the
-    /// not-in-the-shot guarantee holds mid-delivery) and `Show` is
-    /// the focus ping; the status line stays home's.
-    fn poll_loading_directives(&mut self, ctx: &Context) {
+    /// The page-level directive poll for routes without a route app
+    /// that polls them itself (Loading, Settings): the router owns
+    /// the queue there — `Hide` still closes (the not-in-the-shot
+    /// guarantee holds on every route) and `Show` is the focus ping;
+    /// the status line stays home's. Without this poll, a capture
+    /// started while the Settings page was open would leave the
+    /// window on screen — in the shot.
+    fn poll_page_directives(&mut self, ctx: &Context) {
         while let Some(directive) = self.home.poll_directive() {
             match directive {
                 crate::home::HomeDirective::Hide => {
@@ -339,6 +367,16 @@ impl WindowApp {
     fn poll_route_home(&mut self, ctx: &Context) {
         if self.host.take_route_home() && !matches!(self.route, Route::Home) {
             self.request_route(ctx, Route::Home);
+        }
+    }
+
+    /// The route-settings poll (settings-improvement): a
+    /// `SettingsFocus` intent armed while the window was open swaps
+    /// the settings page in place — no close, no viewport churn
+    /// beyond the route-kind batch.
+    fn poll_route_settings(&mut self, ctx: &Context) {
+        if self.host.take_route_settings() && !matches!(self.route, Route::Settings) {
+            self.request_route(ctx, Route::Settings);
         }
     }
 
@@ -386,17 +424,20 @@ impl WindowApp {
             Route::Home => self.home.logic_impl(ctx),
             // Editor: the editor app's own logic handles its input;
             // its directives (Hide → close) stay its own business.
-            Route::Editor(..) | Route::Settings => {
-                // Editor: the editor app's own logic handles its
-                // input; its directives stay its own business.
-                // Settings: Escape + the debounce drain run in
-                // ui_impl, which owns the page borrow.
-            }
+            Route::Editor(..) => {}
             Route::Loading => {
                 // The spinner animates and the delivery polls run on
                 // the heartbeat, not input.
                 ctx.request_repaint_after(LOADING_REPAINT);
-                self.poll_loading_directives(ctx);
+                self.poll_page_directives(ctx);
+            }
+            // Settings: Escape + the debounce drain run in ui_impl,
+            // which owns the page borrow — but the directive queue
+            // still needs a consumer here (a Hide during a capture
+            // must close the window from the settings page too).
+            Route::Settings => {
+                ctx.request_repaint_after(LOADING_REPAINT);
+                self.poll_page_directives(ctx);
             }
         }
         if let Some(editor) = self.editor.as_mut() {
@@ -404,11 +445,13 @@ impl WindowApp {
         }
         // Routing polls run after the active route's logic: an
         // Open/Paste click arms the routed editor here, the editor's
-        // outcome (Esc / error / capture) settles now, and a failed
-        // or quiet grab routes home from under the spinner.
+        // outcome (Esc / error / capture) settles now, a failed or
+        // quiet grab routes home from under the spinner, and a
+        // settings focus intent swaps the settings page in.
         self.poll_routed_editor(ctx);
         self.poll_editor_outcome(ctx);
         self.poll_route_home(ctx);
+        self.poll_route_settings(ctx);
     }
 
     /// Headless-callable core of [`App::ui`].
@@ -885,6 +928,7 @@ mod tests {
         queued: std::collections::VecDeque<RoutedEditor>,
         opened: usize,
         route_home: Option<()>,
+        route_settings: Option<()>,
     }
 
     impl RouteHost for RecordingHost {
@@ -898,6 +942,10 @@ mod tests {
 
         fn take_route_home(&mut self) -> bool {
             self.inner.borrow_mut().route_home.take().is_some()
+        }
+
+        fn take_route_settings(&mut self) -> bool {
+            self.inner.borrow_mut().route_settings.take().is_some()
         }
     }
 
@@ -1292,6 +1340,126 @@ mod tests {
             matches!(app.route, Route::Home) && transition_commands(&full).is_empty(),
             "home stays home with no churn"
         );
+    }
+
+    // --- The Settings start + focus intent (settings-improvement) ---
+
+    /// A Settings start opens the settings route with its page
+    /// constructed from the bridge's config snapshot.
+    #[test]
+    fn settings_start_opens_the_settings_route() {
+        let (app, _bridge, _host) = window_app_start(
+            WindowStart::Settings,
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        assert!(matches!(app.route, Route::Settings));
+        assert!(app.settings.is_some(), "the settings page is live");
+        assert!(app.editor.is_none());
+    }
+
+    /// The focus intent swaps the settings page in place while the
+    /// window is open — no close, the window survives.
+    #[test]
+    fn route_settings_intent_swaps_the_page_in_place() {
+        let host = RecordingHost::default();
+        let (mut app, _bridge, host) =
+            window_app_start(WindowStart::Home, StubPageBridge::default(), host);
+        host.inner.borrow_mut().route_settings = Some(());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Settings),
+            "the intent swapped the route in-place"
+        );
+        assert!(app.settings.is_some(), "the settings page went live");
+        assert!(
+            !transition_commands(&full)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "the swap never closes the window"
+        );
+    }
+
+    /// A settings intent while already on Settings is a no-op (the
+    /// no-swap guard keeps repeat broadcasts from churning the page
+    /// construction).
+    #[test]
+    fn route_settings_intent_is_ignored_on_settings() {
+        let host = RecordingHost::default();
+        let (mut app, _bridge, host) = window_app_start(
+            WindowStart::Settings,
+            StubPageBridge::default(),
+            host.clone(),
+        );
+        host.inner.borrow_mut().route_settings = Some(());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Settings) && transition_commands(&full).is_empty(),
+            "settings stays settings with no churn"
+        );
+    }
+
+    /// The not-in-the-shot guarantee holds from the settings page:
+    /// a Hide directive (an external capture) closes the window
+    /// there too — the pre-existing gap where the Settings route
+    /// consumed no directives.
+    #[test]
+    fn hide_directive_on_settings_closes_the_window() {
+        let mut app = settings_app_with_directives(vec![HomeDirective::Hide]);
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            transition_commands(&full)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "Hide closes the window from the settings page"
+        );
+    }
+
+    /// A Show on the settings route is the focus ping — visible +
+    /// focus, never a close.
+    #[test]
+    fn show_directive_on_settings_focuses_without_closing() {
+        let mut app = settings_app_with_directives(vec![HomeDirective::Show]);
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        let commands = transition_commands(&full);
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "Show focuses; it never closes"
+        );
+        assert!(commands.contains(&egui::ViewportCommand::Focus));
+    }
+
+    /// A settings-route window fed directives (the router owns the
+    /// queue on routes without a polling app).
+    fn settings_app_with_directives(directives: Vec<HomeDirective>) -> WindowApp {
+        let bridge = DirectiveBridge::default();
+        *bridge.pending.borrow_mut() = directives.into();
+        let slot: RouteSlot = Rc::new(RefCell::new(Route::Settings));
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        WindowApp::new(
+            &egui::Context::default(),
+            WindowStart::Settings,
+            Box::new(bridge),
+            Rc::new(RefCell::new(Box::new(StubPageBridge::default()))),
+            Box::new(RecordingHost::default()),
+            "connected".into(),
+            outcome,
+            slot,
+        )
     }
 
     /// The router delegates to the home route on Home and drops the

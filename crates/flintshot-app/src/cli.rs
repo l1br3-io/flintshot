@@ -65,7 +65,7 @@ pub enum Command {
     /// Open the app window (the capture-controls home, in the spirit
     /// of the Windows 11 Snipping Tool). Auto-starts the daemon when
     /// none is running.
-    App,
+    App(AppArgs),
     /// Internal: the tray-helper process, spawned and supervised by
     /// the daemon (ADR-0042). Hidden from `--help`; not for direct
     /// use.
@@ -1761,16 +1761,52 @@ pub fn run_hotkeys(args: &HotkeysArgs) -> Result<()> {
 /// [`crate::app_window`] for the process model (IPC client,
 /// daemon auto-start, hide/restore).
 #[cfg(feature = "egui")]
-pub fn run_app() -> Result<()> {
-    crate::app_window::run()
+pub fn run_app(args: &AppArgs) -> Result<()> {
+    let route = match args.route.as_str() {
+        "settings" => crate::worker::AppRoute::Settings,
+        _ => crate::worker::AppRoute::Home,
+    };
+    crate::app_window::run(route)
 }
 
 /// Headless-build fallback: the app window needs the `egui` feature.
 #[cfg(not(feature = "egui"))]
-pub fn run_app() -> Result<()> {
+pub fn run_app(_args: &AppArgs) -> Result<()> {
     Err(color_eyre::eyre::eyre!(
         "app window not built; this binary was compiled without the `egui` feature"
     ))
+}
+
+/// Arguments for `flintshot app` (settings-improvement): the page
+/// the window opens on.
+#[derive(Debug, Args)]
+pub struct AppArgs {
+    /// Page the window opens on: `home` (default) or `settings`.
+    /// Daemon-spawned settings workers carry `--route settings`
+    /// (the `Request::OpenSettings` dispatch).
+    #[arg(
+        long,
+        value_name = "PAGE",
+        default_value = "home",
+        value_parser = validate_app_route
+    )]
+    pub route: String,
+}
+
+/// Clap `value_parser` for `app --route`: only the two known pages
+/// parse; anything else is a hard CLI error naming the valid set
+/// (the `--after` precedent — a just-typed flag does not tolerate
+/// typos the way a config field does).
+fn validate_app_route(value: &str) -> std::result::Result<String, String> {
+    const VALID: [&str; 2] = ["home", "settings"];
+    if VALID.contains(&value) {
+        Ok(value.to_string())
+    } else {
+        Err(format!(
+            "unknown app route `{value}` (valid: {})",
+            VALID.join(", ")
+        ))
+    }
 }
 
 /// `flintshot tray` — the daemon-supervised tray helper (ADR-0042).
@@ -2438,6 +2474,33 @@ mod tests {
             }
             other => panic!("expected Auth, got {other:?}"),
         }
+    }
+
+    // ── App route flag (settings-improvement Task 004) ───────────
+
+    #[test]
+    fn app_parses_bare_and_with_route_settings() {
+        let cli = Cli::parse_from(["flintshot", "app"]);
+        assert!(
+            matches!(&cli.command, Some(Command::App(args)) if args.route == "home"),
+            "bare app defaults to home"
+        );
+        let cli = Cli::parse_from(["flintshot", "app", "--route", "settings"]);
+        assert!(
+            matches!(&cli.command, Some(Command::App(args)) if args.route == "settings"),
+            "--route settings parses"
+        );
+    }
+
+    #[test]
+    fn app_rejects_an_unknown_route() {
+        let err = Cli::try_parse_from(["flintshot", "app", "--route", "bogus"])
+            .expect_err("unknown route must be a hard CLI error");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("home") && rendered.contains("settings"),
+            "error must name the valid routes: {rendered}"
+        );
     }
 
     // ── Hotkeys bind (Phase 6 Task 001) ──────────────────────────

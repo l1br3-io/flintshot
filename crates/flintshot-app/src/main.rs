@@ -50,7 +50,7 @@ fn main() -> Result<()> {
         Some(Command::Upload(args)) => cli::run_upload(&args),
         Some(Command::Auth(args)) => cli::run_auth(&args),
         Some(Command::Hotkeys(args)) => cli::run_hotkeys(&args),
-        Some(Command::App) => cli::run_app(),
+        Some(Command::App(args)) => cli::run_app(&args),
         #[cfg(feature = "tray")]
         Some(Command::Tray) => cli::run_tray_helper(),
         None => Ok(()),
