@@ -2,7 +2,7 @@
 
 - [x] 001-config-save-dir-and-fields
 - [x] 002-core-output-and-recents-limit
-- [ ] 003-editor-copy-persist
+- [x] 003-editor-copy-persist
 - [ ] 004-capture-copy-persist
 - [ ] 005-bridge-card-actions
 - [ ] 006-rich-recents-cards
