@@ -115,6 +115,7 @@ impl EditorState {
         if self.last_edit_kind != Some(kind) {
             self.undo.push(Snapshot::anns_only(
                 EditKind::Property { kind },
+                self.elapsed(),
                 self.anns.clone(),
                 self.next_number,
             ));

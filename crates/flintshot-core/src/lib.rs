@@ -53,7 +53,7 @@ pub use editor::{
 pub use error::{FlintshotError, Result};
 pub use freehand::{smooth_polyline, MARKER_ALPHA};
 pub use geom::{Color, Key, Point, Rect, Stroke};
-pub use history::EditKind;
+pub use history::{format_elapsed, EditKind};
 pub use image_ops::{blur, crop_region};
 pub use input::{DispatchOutcome, InputEvent, Modifiers};
 pub use inspector::{PropertyEditKind, SelectionCapabilities};

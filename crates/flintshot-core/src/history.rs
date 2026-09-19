@@ -108,6 +108,21 @@ fn property_name(kind: PropertyEditKind) -> &'static str {
     }
 }
 
+/// Render a snapshot's elapsed time as the timeline row's
+/// right-aligned clock: `m:ss` under an hour (`0:07`, `1:03`),
+/// `h:mm:ss` beyond (`1:02:03`). Pure so the format is unit-testable
+/// without a live clock.
+#[must_use]
+pub fn format_elapsed(when: std::time::Duration) -> String {
+    let total = when.as_secs();
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +207,19 @@ mod tests {
             "Number size"
         );
         assert_eq!(EditKind::Generic.to_string(), "Edit");
+    }
+
+    /// `format_elapsed` renders `m:ss` under an hour and
+    /// `h:mm:ss` beyond — the right-aligned row time.
+    #[test]
+    fn format_elapsed_renders_minutes_seconds() {
+        let secs = |s: u64| std::time::Duration::from_secs(s);
+        assert_eq!(format_elapsed(secs(0)), "0:00");
+        assert_eq!(format_elapsed(secs(7)), "0:07");
+        assert_eq!(format_elapsed(secs(63)), "1:03");
+        assert_eq!(format_elapsed(secs(599)), "9:59");
+        assert_eq!(format_elapsed(secs(3599)), "59:59");
+        assert_eq!(format_elapsed(secs(3600)), "1:00:00");
+        assert_eq!(format_elapsed(secs(3723)), "1:02:03");
     }
 }
