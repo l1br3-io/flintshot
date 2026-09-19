@@ -24,6 +24,7 @@
 use crate::editor::{Annotation, BlurKind, EditorState, Snapshot};
 use crate::freehand::MARKER_ALPHA;
 use crate::geom::Color;
+use crate::history::EditKind;
 use crate::text::TextStyle;
 use crate::{NUMBER_MAX_DIAMETER, NUMBER_MIN_DIAMETER};
 
@@ -112,8 +113,12 @@ impl EditorState {
     /// the pre-edit `anns` snapshot only when the burst is new.
     fn begin_property_edit(&mut self, kind: PropertyEditKind) {
         if self.last_edit_kind != Some(kind) {
-            self.undo
-                .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
+            self.undo.push(Snapshot::anns_only(
+                EditKind::Property { kind },
+                self.elapsed(),
+                self.anns.clone(),
+                self.next_number,
+            ));
             self.redo.clear();
             self.last_edit_kind = Some(kind);
         }
@@ -870,6 +875,31 @@ mod tests {
         assert!(
             s.redo.is_empty(),
             "a property edit clears redo like any mutation"
+        );
+    }
+
+    // --- Edit-kind labels (properties-history-tabs spec) ---
+
+    /// A property burst records `EditKind::Property { kind }` with
+    /// the burst's coalescing kind.
+    #[test]
+    fn property_burst_records_property_kind() {
+        let mut s = state_with(vec![rect_ann()]);
+        s.set_selected_color(Color::rgb(1, 1, 1));
+        s.set_selected_color(Color::rgb(2, 2, 2));
+        assert_eq!(
+            s.undo.last().unwrap().kind,
+            EditKind::Property {
+                kind: PropertyEditKind::Color
+            },
+            "the whole colour burst is one Property entry"
+        );
+        s.set_selected_stroke_width(5.0);
+        assert_eq!(
+            s.undo.last().unwrap().kind,
+            EditKind::Property {
+                kind: PropertyEditKind::StrokeWidth
+            }
         );
     }
 }

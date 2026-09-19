@@ -22,6 +22,7 @@ pub mod editor;
 pub mod error;
 pub mod freehand;
 pub mod geom;
+pub mod history;
 pub mod image_ops;
 pub mod input;
 pub mod inspector;
@@ -52,6 +53,7 @@ pub use editor::{
 pub use error::{FlintshotError, Result};
 pub use freehand::{smooth_polyline, MARKER_ALPHA};
 pub use geom::{Color, Key, Point, Rect, Stroke};
+pub use history::{format_elapsed, EditKind};
 pub use image_ops::{blur, crop_region};
 pub use input::{DispatchOutcome, InputEvent, Modifiers};
 pub use inspector::{PropertyEditKind, SelectionCapabilities};

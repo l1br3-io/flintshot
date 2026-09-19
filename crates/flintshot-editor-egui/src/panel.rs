@@ -1,25 +1,20 @@
 //! The docked side panel — the editor's control home.
 //!
-//! Right-docked, grain-textured cream paper, and **collapsible** to
-//! a glyph rail (the `«` toggle in the action row; the rail's `»`
-//! restores it). Top → bottom: the action row (`+` capture chip,
-//! collapse toggle), **one** white cutout card holding the five
-//! semantic tool groups separated by hairlines (one card, not five
-//! floating islands — the disjointed shadowed cards read as clutter,
-//! and the per-pod hover-lift went with them), the contextual
-//! options section (exactly the selected tool's options; the
-//! color/stroke picker bay collapses behind one popover pod button —
-//! see `crate::popover`), and the bottom cluster: history + export
-//! chips in one quiet island with the Copy hero pinned below. The
-//! canvas beside it is never grained or shadowed.
-//!
-//! Layout note (the stretched-island bug this file must not
-//! reintroduce): `egui::Frame` inside a `bottom_up` layout grabs the
-//! full remaining main-direction space — the old bottom actions
-//! stretched their export island to a third of the window. The
-//! bottom cluster therefore allocates **exact** sizes
-//! (`allocate_exact_size` / `allocate_ui_with_layout` with an
-//! explicit desired size), which shrink-wrap by contract.
+//! Right-docked, grain-textured cream paper. The first row is the
+//! `PROPERTIES | HISTORY` tab header (two segmented chips — cutout
+//! at rest, ink-filled when active). The Properties tab is the
+//! contextual options surface: the mode title (`{Tool} ·
+//! Properties`, or `N selected · Properties` when the Select tool's
+//! multi-selection turns the panel into a selection inspector)
+//! followed by exactly that mode's section cards — the
+//! color/stroke picker bay collapses behind one popover pod button
+//! (see `crate::popover`). The History tab is the labeled edit
+//! timeline: past rows oldest-first, the current-state marker, and
+//! dimmed-but-clickable future rows — one click time-travels via
+//! `restore_to`. The tool rail (left), the topbar's Capture / Copy
+//! heroes, and the floating undo / redo clusters are other
+//! surfaces; the canvas beside this panel is never grained or
+//! shadowed.
 //!
 //! Input gating lives in `crate::app`: a press only starts a
 //! canvas gesture when it lands inside the cached `CentralPanel`
@@ -49,10 +44,34 @@ const GRAIN_SEED: u64 = 0x5EED_C0DE;
 /// scale.
 const GRAIN_TILE: u32 = 64;
 
-/// Panel state that persists across frames: the collapse flag and
-/// the (lazily created) grain texture handle.
+/// Which panel tab is active. Per-window state living in
+/// [`PanelState`] like the other live flags — deliberately not
+/// persisted to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum PanelTab {
+    /// Tool defaults / selection inspector (today's panel body).
+    #[default]
+    Properties,
+    /// The edit-history timeline.
+    History,
+}
+
+impl PanelTab {
+    /// The header chip's uppercase label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Properties => "PROPERTIES",
+            Self::History => "HISTORY",
+        }
+    }
+}
+
+/// Panel state that persists across frames: the active tab, the
+/// collapse flag, and the (lazily created) grain texture handle.
 #[derive(Default)]
 pub(crate) struct PanelState {
+    /// The active tab (Properties by default).
+    tab: PanelTab,
     /// The grain tile, created on first use.
     grain: Option<egui::TextureHandle>,
     /// Whether the selection inspector's custom-colour popover ran
@@ -280,7 +299,6 @@ pub(crate) fn show(
     let frame = egui::Frame::new()
         .fill(theme::palette::PAPER)
         .inner_margin(egui::Margin::same(8));
-    let mut action = ToolbarAction::None;
     // End-of-burst bracketing inputs: which continuous popovers ran
     // last frame vs. this frame. A popover that ran last frame but
     // not this one just closed — close its edit burst too.
@@ -290,73 +308,19 @@ pub(crate) fn show(
     panel.text_pop_live = false;
     let inspector = inspector_mode(state);
     let caps = state.selected_capabilities();
+    let mut action = ToolbarAction::None;
     egui::Panel::right("editor_panel")
         .resizable(false)
         .exact_size(PANEL_WIDTH)
         .frame(frame)
         .show(ui, |ui| {
             paint_grain(ui, panel);
-            let title = panel_title(state);
-            let galley = ui.painter().layout_no_wrap(
-                title.to_uppercase(),
-                egui::FontId::proportional(theme::TYPE_SM),
-                theme::palette::INK,
-            );
-            let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
-            ui.painter().galley(rect.min, galley, theme::palette::INK);
-            ui.add_space(theme::SPACE_SCALE[1]);
-            let sections: Vec<Section> = if inspector {
-                selection_sections(caps)
-            } else {
-                sections_for(state.tool).to_vec()
-            };
-            for section in sections {
-                let id = egui::Id::new(("panel-section", section_title(section)));
-                let title = section_title(section);
-                widgets::section(ui, id, title, true, |body| match section {
-                    Section::Stroke if inspector => selection_stroke(body, state, caps, panel),
-                    Section::Stroke => {
-                        swatch_row(body, &mut state.color);
-                        stroke_chips(body, state);
-                    }
-                    Section::Fill if inspector => selection_fill(body, state),
-                    Section::Fill => {
-                        let resp = widgets::switch(
-                            body,
-                            egui::Id::new("fill-switch"),
-                            state.fill_shapes,
-                            false,
-                        );
-                        state.fill_shapes = resp.on;
-                    }
-                    Section::Text if inspector => selection_text(body, state, panel),
-                    Section::Text => {
-                        text_style_row(body, state);
-                        popover::pod_button(body, state, popover::ColorTarget::Text);
-                    }
-                    Section::Number if inspector => selection_number(body, state),
-                    Section::Number => {
-                        number_row(body, state);
-                    }
-                    Section::Effects if inspector => selection_effects(body, state),
-                    Section::Effects => {
-                        blur_bay(body, state);
-                    }
-                    Section::Crop => {
-                        select_bay(body, state);
-                        hint(body, tool_hint(state.tool));
-                    }
-                    Section::Selection => {
-                        let clicked = if inspector {
-                            selection_selection_row(body, state)
-                        } else {
-                            delete_button(body, !state.selected.is_empty(), "🗑 Delete annotation")
-                        };
-                        if clicked {
-                            action = ToolbarAction::Delete;
-                        }
-                    }
-                });
+            tab_header(ui, panel);
+            match panel.tab {
+                PanelTab::Properties => {
+                    action = properties_body(ui, state, panel, inspector, caps);
+                }
+                PanelTab::History => history_body(ui, state),
             }
         });
     if color_pop_was_live && !panel.color_pop_live {
@@ -364,6 +328,195 @@ pub(crate) fn show(
     }
     if text_pop_was_live && !panel.text_pop_live {
         state.end_property_edit();
+    }
+    action
+}
+
+/// The PROPERTIES | HISTORY tab header: two segmented chips in the
+/// panel's first row (cutout at rest, ink-filled when active — the
+/// blur-kind control's idiom).
+fn tab_header(ui: &mut egui::Ui, panel: &mut PanelState) {
+    ui.horizontal(|ui| {
+        for tab in [PanelTab::Properties, PanelTab::History] {
+            if segmented_chip(
+                ui,
+                egui::Id::new(("panel-tab", tab)),
+                tab.label(),
+                panel.tab == tab,
+            ) {
+                panel.tab = tab;
+            }
+        }
+    });
+    ui.add_space(theme::SPACE_SCALE[1]);
+}
+
+/// The History tab's body: the edit timeline. Past rows (`undo`,
+/// oldest first) click to jump back; the current-state marker row
+/// sits at the boundary; dimmed future rows (`redo`, nearest first)
+/// click to jump forward. One `restore_to` per click — the only
+/// mutation path, so the tab can never diverge from chord-stepping.
+fn history_body(ui: &mut egui::Ui, state: &mut EditorState) {
+    if state.undo.is_empty() && state.redo.is_empty() {
+        hint(ui, "No edits yet");
+        return;
+    }
+    // Labels + times collected up front: the interaction loop must
+    // not hold a borrow over the `restore_to` call it feeds.
+    let row =
+        |s: &flintshot_core::Snapshot| (s.kind.to_string(), flintshot_core::format_elapsed(s.when));
+    let past: Vec<(String, String)> = state.undo.iter().map(row).collect();
+    let future: Vec<(String, String)> = state.redo.iter().rev().map(row).collect();
+    let mut jump: Option<usize> = None;
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for (i, (label, time)) in past.iter().enumerate() {
+            if history_row(ui, egui::Id::new(("history-row", i)), label, time, false) {
+                jump = Some(i + 1);
+            }
+        }
+        current_marker(ui);
+        for (j, (label, time)) in future.iter().enumerate() {
+            if history_row(ui, egui::Id::new(("history-future", j)), label, time, true) {
+                jump = Some(past.len() + j + 1);
+            }
+        }
+    });
+    if let Some(target) = jump {
+        state.restore_to(target);
+    }
+}
+
+/// One timeline row: the edit's label left, its elapsed time
+/// right-aligned. Future rows render dimmed (half-alpha ink) but
+/// stay clickable. Returns whether the row was clicked.
+fn history_row(ui: &mut egui::Ui, id: egui::Id, label: &str, time: &str, future: bool) -> bool {
+    let ink = if future {
+        theme::palette::INK_SOFT.gamma_multiply(0.5)
+    } else {
+        theme::palette::INK
+    };
+    let label_galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        ink,
+    );
+    let time_galley = ui.painter().layout_no_wrap(
+        time.to_owned(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        ink,
+    );
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
+    let resp = ui.interact(rect, id, Sense::click());
+    if resp.hovered() {
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(theme::POD_RADIUS),
+            theme::palette::PAPER_DIM,
+            Stroke::NONE,
+            StrokeKind::Middle,
+        );
+    }
+    let label_pos = egui::pos2(
+        rect.left() + 2.0,
+        rect.center().y - label_galley.size().y / 2.0,
+    );
+    ui.painter().galley(label_pos, label_galley, ink);
+    let time_pos = egui::pos2(
+        (rect.right() - 2.0 - time_galley.size().x).max(label_pos.x),
+        rect.center().y - time_galley.size().y / 2.0,
+    );
+    ui.painter().galley(time_pos, time_galley, ink);
+    resp.clicked()
+}
+
+/// The current-state marker row: a selection-ink dot + "Current",
+/// not clickable.
+fn current_marker(ui: &mut egui::Ui) {
+    let galley = ui.painter().layout_no_wrap(
+        "Current".to_owned(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        theme::palette::INK_SOFT,
+    );
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
+    ui.interact(rect, egui::Id::new("history-current"), Sense::hover());
+    ui.painter().circle(
+        egui::pos2(rect.left() + 6.0, rect.center().y),
+        3.0,
+        theme::palette::FOREST_DEEP,
+        Stroke::NONE,
+    );
+    let pos = egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, theme::palette::INK_SOFT);
+}
+
+/// The Properties tab's body: the contextual title plus exactly the
+/// section map. Byte-for-byte today's panel content beneath the
+/// header.
+fn properties_body(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    panel: &mut PanelState,
+    inspector: bool,
+    caps: flintshot_core::SelectionCapabilities,
+) -> ToolbarAction {
+    let title = panel_title(state);
+    let galley = ui.painter().layout_no_wrap(
+        title.to_uppercase(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        theme::palette::INK,
+    );
+    let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+    ui.painter().galley(rect.min, galley, theme::palette::INK);
+    ui.add_space(theme::SPACE_SCALE[1]);
+    let mut action = ToolbarAction::None;
+    let sections: Vec<Section> = if inspector {
+        selection_sections(caps)
+    } else {
+        sections_for(state.tool).to_vec()
+    };
+    for section in sections {
+        let id = egui::Id::new(("panel-section", section_title(section)));
+        let title = section_title(section);
+        widgets::section(ui, id, title, true, |body| match section {
+            Section::Stroke if inspector => selection_stroke(body, state, caps, panel),
+            Section::Stroke => {
+                swatch_row(body, &mut state.color);
+                stroke_chips(body, state);
+            }
+            Section::Fill if inspector => selection_fill(body, state),
+            Section::Fill => {
+                let resp =
+                    widgets::switch(body, egui::Id::new("fill-switch"), state.fill_shapes, false);
+                state.fill_shapes = resp.on;
+            }
+            Section::Text if inspector => selection_text(body, state, panel),
+            Section::Text => {
+                text_style_row(body, state);
+                popover::pod_button(body, state, popover::ColorTarget::Text);
+            }
+            Section::Number if inspector => selection_number(body, state),
+            Section::Number => {
+                number_row(body, state);
+            }
+            Section::Effects if inspector => selection_effects(body, state),
+            Section::Effects => {
+                blur_bay(body, state);
+            }
+            Section::Crop => {
+                select_bay(body, state);
+                hint(body, tool_hint(state.tool));
+            }
+            Section::Selection => {
+                let clicked = if inspector {
+                    selection_selection_row(body, state)
+                } else {
+                    delete_button(body, !state.selected.is_empty(), "🗑 Delete annotation")
+                };
+                if clicked {
+                    action = ToolbarAction::Delete;
+                }
+            }
+        });
     }
     action
 }
@@ -2226,5 +2379,259 @@ mod tests {
         draw(&ctx, &mut state, &mut panel, click_events(at));
         assert_eq!(state.font_size, 17.0, "defaults path still works");
         assert!(state.undo.is_empty(), "defaults writes record no history");
+    }
+
+    // --- Tab header (properties-history-tabs Task 003) ---
+
+    /// The header registers both tab chips; the Properties tab is the
+    /// default and its tool sections render beneath it.
+    #[test]
+    fn tab_header_registers_and_defaults_to_properties() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        state.tool = Tool::Rect;
+        let mut panel = PanelState::default();
+        assert_eq!(panel.tab, PanelTab::Properties, "default tab");
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        for tab in [PanelTab::Properties, PanelTab::History] {
+            assert!(
+                ctx.read_response(egui::Id::new(("panel-tab", tab)))
+                    .is_some(),
+                "{tab:?} chip registers"
+            );
+        }
+        let delete = ctx
+            .read_response(egui::Id::new("panel-delete"))
+            .expect("the Properties body renders the tool sections");
+        let header = ctx
+            .read_response(egui::Id::new(("panel-tab", PanelTab::Properties)))
+            .expect("header chip")
+            .rect;
+        assert!(
+            delete.rect.top() > header.bottom(),
+            "section content renders beneath the header"
+        );
+    }
+
+    /// Clicking HISTORY swaps the body (tool sections gone, the
+    /// placeholder visible), the choice persists across frames, and
+    /// clicking PROPERTIES restores the sections.
+    #[test]
+    fn clicking_history_swaps_body_and_persists() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        state.tool = Tool::Rect;
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let history = chip_center(&ctx, egui::Id::new(("panel-tab", PanelTab::History)));
+        let _ = draw(&ctx, &mut state, &mut panel, click_events(history));
+        assert_eq!(panel.tab, PanelTab::History, "the click selects the tab");
+        // Settle pass: read_response falls back to the previous
+        // pass's widget map, so absence needs one clean redraw.
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        assert_eq!(panel.tab, PanelTab::History);
+        assert!(
+            ctx.read_response(egui::Id::new("panel-delete")).is_none(),
+            "the History body stays up and the tool sections are gone"
+        );
+        // Clicking PROPERTIES restores the sections.
+        let props = chip_center(&ctx, egui::Id::new(("panel-tab", PanelTab::Properties)));
+        let _ = draw(&ctx, &mut state, &mut panel, click_events(props));
+        assert_eq!(panel.tab, PanelTab::Properties);
+        assert!(
+            ctx.read_response(egui::Id::new("panel-delete")).is_some(),
+            "the Properties sections return"
+        );
+    }
+
+    /// The inspector mode's contextual title also renders beneath the
+    /// header (`N selected · Properties` path unchanged).
+    #[test]
+    fn inspector_body_still_renders_beneath_the_header() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = inspector_state(2);
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let header = ctx
+            .read_response(egui::Id::new(("panel-tab", PanelTab::Properties)))
+            .expect("header chip")
+            .rect;
+        let delete = ctx
+            .read_response(egui::Id::new("panel-delete"))
+            .expect("the inspector body renders")
+            .rect;
+        assert!(delete.top() > header.bottom());
+    }
+
+    // --- History timeline (properties-history-tabs Task 004) ---
+
+    /// A scripted mixed session: rect ×2, number, move, delete, crop,
+    /// property edit — seven undo entries.
+    fn scripted_history_state() -> EditorState {
+        use flintshot_core::input::InputEvent as CoreEvent;
+        let mut state = panel_state();
+        for _ in 0..2 {
+            state.pending = Some(rect_ann_fixture());
+            state.commit_annotation();
+        }
+        state.place_number(flintshot_core::Point::new(5.0, 5.0));
+        state.tool = Tool::Select;
+        state.selected = vec![0];
+        state.dispatch_input(&CoreEvent::PointerDown {
+            pos: flintshot_core::Point::new(20.0, 20.0),
+            modifiers: flintshot_core::input::Modifiers::default(),
+        });
+        state.dispatch_input(&CoreEvent::PointerDrag {
+            pos: flintshot_core::Point::new(24.0, 24.0),
+        });
+        state.dispatch_input(&CoreEvent::PointerUp);
+        state.selected = vec![0];
+        state.delete_selected();
+        state.crop(CoreRect::from_xywh(0.0, 0.0, 30.0, 30.0));
+        state.selected = vec![0];
+        state.set_selected_color(Color::rgb(1, 2, 3));
+        state
+    }
+
+    fn history_panel() -> PanelState {
+        PanelState {
+            tab: PanelTab::History,
+            ..PanelState::default()
+        }
+    }
+
+    /// One row per undo entry, oldest first, the current-state marker
+    /// at the boundary, no future rows without redo.
+    #[test]
+    fn timeline_renders_one_row_per_entry_oldest_first() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = scripted_history_state();
+        assert_eq!(state.undo.len(), 7, "fixture: seven gestures");
+        let mut panel = history_panel();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let mut prev_top = 0.0;
+        for i in 0..7usize {
+            let rect = ctx
+                .read_response(egui::Id::new(("history-row", i)))
+                .unwrap_or_else(|| panic!("row {i} registers"))
+                .rect;
+            assert!(
+                rect.top() > prev_top,
+                "row {i} renders below row {} (oldest first)",
+                i.saturating_sub(1)
+            );
+            prev_top = rect.top();
+        }
+        let marker = ctx
+            .read_response(egui::Id::new("history-current"))
+            .expect("the current-state marker registers")
+            .rect;
+        assert!(
+            marker.top() > prev_top,
+            "the marker sits below the last past row"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new(("history-future", 0)))
+                .is_none(),
+            "no future rows without redo"
+        );
+    }
+
+    /// Clicking a past row restores that state in one action; a
+    /// dimmed future row redoes forward; chord-stepping is reflected
+    /// live on the next pass.
+    #[test]
+    fn clicking_rows_time_travels_and_chords_reflect_live() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        state.pending = Some(rect_ann_fixture());
+        state.commit_annotation();
+        state.place_number(flintshot_core::Point::new(5.0, 5.0));
+        state.place_number(flintshot_core::Point::new(6.0, 6.0));
+        let mut panel = history_panel();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        // Jump back to the very first state via row 0.
+        let row0 = chip_center(&ctx, egui::Id::new(("history-row", 0)));
+        let _ = draw(&ctx, &mut state, &mut panel, click_events(row0));
+        assert_eq!(state.undo.len(), 1, "one click = one restore_to");
+        assert_eq!(state.redo.len(), 2);
+        // Settle: the future rows render now.
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let future0 = ctx
+            .read_response(egui::Id::new(("history-future", 0)))
+            .expect("nearest future row registers")
+            .rect
+            .center();
+        let _ = draw(&ctx, &mut state, &mut panel, click_events(future0));
+        assert_eq!(state.undo.len(), 2, "a future click redoes forward one");
+        // A chord step (the floating cluster's Ctrl+Z path) shows on
+        // the next pass: the nearest future row returns.
+        state.undo();
+        assert_eq!(state.undo.len(), 1);
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        assert_eq!(state.undo.len(), 1, "redrawing is inert without clicks");
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new(("history-future", 0)))
+                .is_some(),
+            "the timeline reflects the chord step"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new(("history-row", 2)))
+                .is_none(),
+            "the undone past row is gone from the timeline"
+        );
+    }
+
+    /// Empty stacks: the quiet hint, no rows, no marker.
+    #[test]
+    fn empty_history_renders_hint_only() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        let mut panel = history_panel();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        for id in [
+            egui::Id::new(("history-row", 0)),
+            egui::Id::new("history-current"),
+            egui::Id::new(("history-future", 0)),
+        ] {
+            assert!(ctx.read_response(id).is_none(), "{id:?} must not render");
+        }
+    }
+
+    /// Long histories scroll instead of overflowing: every row still
+    /// registers and the content extends past the panel's bottom.
+    #[test]
+    fn long_history_scrolls_instead_of_overflowing() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        for _ in 0..50 {
+            state.pending = Some(rect_ann_fixture());
+            state.commit_annotation();
+        }
+        let mut panel = history_panel();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let last = ctx
+            .read_response(egui::Id::new(("history-row", 49)))
+            .expect("the 50th row registers inside the scroll area")
+            .rect;
+        assert!(
+            last.top() > 768.0,
+            "content overflows the 768 px viewport (scrolls, not overflows)"
+        );
     }
 }
