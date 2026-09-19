@@ -136,9 +136,7 @@ impl cosmic::Application for App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Menu(menu_msg) => {
-                let req = match menu::action_for(menu_msg) {
-                    menu::Action::Request(req) => req,
-                };
+                let menu::Action::Request(req) = menu::action_for(menu_msg);
                 // A capture is about to freeze the screen: destroy
                 // the popup at the click and let the settle window
                 // cover its unmap + close animation before the

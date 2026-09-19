@@ -1357,6 +1357,26 @@ impl HomeBridge for Bridge {
         env!("CARGO_PKG_VERSION").to_owned()
     }
 
+    fn open_config_file(&mut self) {
+        // Off the UI thread: the spawn (and the template write it
+        // performs first) must never stall a frame — the bind-dialog
+        // threading precedent.
+        let spawned = std::thread::Builder::new()
+            .name("flintshot-config-edit".into())
+            .spawn(|| {
+                if let Err(e) = crate::config_edit::open_config_in_editor() {
+                    tracing::warn!(error = %e, "opening the config file from settings");
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "spawning the config-edit thread");
+        }
+    }
+
+    fn default_config_toml(&mut self) -> String {
+        flintshot_core::default_config_toml().to_owned()
+    }
+
     fn open_image(&mut self, path: std::path::PathBuf) -> bool {
         match decode_image_file(&path) {
             Ok(state) => {

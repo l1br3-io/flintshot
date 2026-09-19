@@ -248,11 +248,7 @@ impl WindowApp {
         // snapshot — the same construction `request_route` performs
         // on an in-window swap.
         let settings = if matches!(route, Route::Settings) {
-            Some(crate::settings::SettingsApp::new(
-                home.load_config(),
-                home.display_server(),
-                home.version(),
-            ))
+            Some(Self::build_settings(&mut home))
         } else {
             None
         };
@@ -285,6 +281,18 @@ impl WindowApp {
         )
     }
 
+    /// Snapshot the settings page from the home bridge (the one
+    /// construction every Settings entry shares: route start, in-window
+    /// swap, and the topbar's Settings action).
+    fn build_settings(home: &mut crate::home::HomeApp) -> crate::settings::SettingsApp {
+        crate::settings::SettingsApp::new(
+            home.load_config(),
+            home.display_server(),
+            home.version(),
+            home.default_config_toml(),
+        )
+    }
+
     /// Swap the route in place: construct / drop the route's app and
     /// issue the one-time geometry batch when the route *kind*
     /// changes. Same-kind swaps (an image swap inside the editor
@@ -313,11 +321,7 @@ impl WindowApp {
             }
             Route::Settings => {
                 self.editor = None;
-                self.settings = Some(crate::settings::SettingsApp::new(
-                    self.home.load_config(),
-                    self.home.display_server(),
-                    self.home.version(),
-                ));
+                self.settings = Some(Self::build_settings(&mut self.home));
             }
         }
         self.route = route.clone();
@@ -497,11 +501,7 @@ impl WindowApp {
             // The dots overflow's Settings entry opens the settings
             // route from every route (spec §Settings route).
             Some(crate::topbar::TopbarAction::Settings) => {
-                self.settings = Some(crate::settings::SettingsApp::new(
-                    self.home.load_config(),
-                    self.home.display_server(),
-                    self.home.version(),
-                ));
+                self.settings = Some(Self::build_settings(&mut self.home));
                 self.request_route(ui.ctx(), Route::Settings);
             }
             // The breadcrumb's Home link: back to the home route
@@ -548,6 +548,15 @@ impl WindowApp {
                             editor.apply_config(config);
                         }
                         self.home.save_config(config);
+                    }
+                    // The page's clicked links: the bridge services
+                    // them (the editor spawn leaves the UI thread).
+                    while let Some(action) = page.drain_action() {
+                        match action {
+                            crate::settings::SettingsAction::EditConfigFile => {
+                                self.home.open_config_file();
+                            }
+                        }
                     }
                     if escape {
                         self.request_route(ui.ctx(), Route::Home);

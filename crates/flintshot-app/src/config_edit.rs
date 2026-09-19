@@ -24,14 +24,11 @@ use color_eyre::eyre;
 /// - The template could not be written (logged, non-fatal — the
 ///   editor may still open whatever exists).
 /// - The editor failed to spawn.
-// The settings page's *Edit config file* link is this fn's next
-// caller (settings-improvement Task 009); the tray *Open config*
-// item that called it is gone as of Task 005, so the fn waits,
-// intentionally unreferenced, for the bridge wiring.
-#[allow(
-    dead_code,
-    reason = "wired by settings-improvement Task 009 (the settings page's Edit config file link)"
-)]
+// The settings page's *Edit config file* link (the app window's
+// bridge, feature `egui`) is this fn's caller since
+// settings-improvement Task 009; without that feature nothing
+// references it.
+#[cfg_attr(not(feature = "egui"), allow(dead_code))]
 pub(crate) fn open_config_in_editor() -> eyre::Result<()> {
     use std::process::Command;
 
