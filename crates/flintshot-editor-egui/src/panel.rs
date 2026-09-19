@@ -3,7 +3,8 @@
 //! Right-docked, grain-textured cream paper, with a
 //! `PROPERTIES | HISTORY` tab header as its first row (segmented
 //! chips; the Properties tab is today's panel body, the History tab
-//! the edit timeline). The panel is **collapsible** to
+//! the labeled edit timeline — click any row to time-travel via
+//! `restore_to`). The panel is **collapsible** to
 //! a glyph rail (the `«` toggle in the action row; the rail's `»`
 //! restores it). Top → bottom: the action row (`+` capture chip,
 //! collapse toggle), **one** white cutout card holding the five
@@ -328,11 +329,7 @@ pub(crate) fn show(
                 PanelTab::Properties => {
                     action = properties_body(ui, state, panel, inspector, caps);
                 }
-                PanelTab::History => {
-                    // Task 004 replaces this placeholder with the
-                    // timeline; the empty-state copy is final.
-                    hint(ui, "No edits yet");
-                }
+                PanelTab::History => history_body(ui, state),
             }
         });
     if color_pop_was_live && !panel.color_pop_live {
@@ -361,6 +358,93 @@ fn tab_header(ui: &mut egui::Ui, panel: &mut PanelState) {
         }
     });
     ui.add_space(theme::SPACE_SCALE[1]);
+}
+
+/// The History tab's body: the edit timeline. Past rows (`undo`,
+/// oldest first) click to jump back; the current-state marker row
+/// sits at the boundary; dimmed future rows (`redo`, nearest first)
+/// click to jump forward. One `restore_to` per click — the only
+/// mutation path, so the tab can never diverge from chord-stepping.
+fn history_body(ui: &mut egui::Ui, state: &mut EditorState) {
+    if state.undo.is_empty() && state.redo.is_empty() {
+        hint(ui, "No edits yet");
+        return;
+    }
+    // Labels collected up front: the interaction loop must not hold
+    // a borrow over the `restore_to` call it feeds.
+    let past: Vec<String> = state.undo.iter().map(|s| s.kind.to_string()).collect();
+    let future: Vec<String> = state
+        .redo
+        .iter()
+        .rev()
+        .map(|s| s.kind.to_string())
+        .collect();
+    let mut jump: Option<usize> = None;
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for (i, label) in past.iter().enumerate() {
+            if history_row(ui, egui::Id::new(("history-row", i)), label, false) {
+                jump = Some(i + 1);
+            }
+        }
+        current_marker(ui);
+        for (j, label) in future.iter().enumerate() {
+            if history_row(ui, egui::Id::new(("history-future", j)), label, true) {
+                jump = Some(past.len() + j + 1);
+            }
+        }
+    });
+    if let Some(target) = jump {
+        state.restore_to(target);
+    }
+}
+
+/// One timeline row. Future rows render dimmed (half-alpha ink) but
+/// stay clickable. Returns whether the row was clicked.
+fn history_row(ui: &mut egui::Ui, id: egui::Id, label: &str, future: bool) -> bool {
+    let ink = if future {
+        theme::palette::INK_SOFT.gamma_multiply(0.5)
+    } else {
+        theme::palette::INK
+    };
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        ink,
+    );
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
+    let resp = ui.interact(rect, id, Sense::click());
+    if resp.hovered() {
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(theme::POD_RADIUS),
+            theme::palette::PAPER_DIM,
+            Stroke::NONE,
+            StrokeKind::Middle,
+        );
+    }
+    let pos = egui::pos2(rect.left() + 2.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, ink);
+    resp.clicked()
+}
+
+/// The current-state marker row: a selection-ink dot + "Current",
+/// not clickable.
+fn current_marker(ui: &mut egui::Ui) {
+    let galley = ui.painter().layout_no_wrap(
+        "Current".to_owned(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        theme::palette::INK_SOFT,
+    );
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
+    ui.interact(rect, egui::Id::new("history-current"), Sense::hover());
+    ui.painter().circle(
+        egui::pos2(rect.left() + 6.0, rect.center().y),
+        3.0,
+        theme::palette::FOREST_DEEP,
+        Stroke::NONE,
+    );
+    let pos = egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, theme::palette::INK_SOFT);
 }
 
 /// The Properties tab's body: the contextual title plus exactly the
@@ -2381,5 +2465,171 @@ mod tests {
             .expect("the inspector body renders")
             .rect;
         assert!(delete.top() > header.bottom());
+    }
+
+    // --- History timeline (properties-history-tabs Task 004) ---
+
+    /// A scripted mixed session: rect ×2, number, move, delete, crop,
+    /// property edit — seven undo entries.
+    fn scripted_history_state() -> EditorState {
+        use flintshot_core::input::InputEvent as CoreEvent;
+        let mut state = panel_state();
+        for _ in 0..2 {
+            state.pending = Some(rect_ann_fixture());
+            state.commit_annotation();
+        }
+        state.place_number(flintshot_core::Point::new(5.0, 5.0));
+        state.tool = Tool::Select;
+        state.selected = vec![0];
+        state.dispatch_input(&CoreEvent::PointerDown {
+            pos: flintshot_core::Point::new(20.0, 20.0),
+            modifiers: flintshot_core::input::Modifiers::default(),
+        });
+        state.dispatch_input(&CoreEvent::PointerDrag {
+            pos: flintshot_core::Point::new(24.0, 24.0),
+        });
+        state.dispatch_input(&CoreEvent::PointerUp);
+        state.selected = vec![0];
+        state.delete_selected();
+        state.crop(CoreRect::from_xywh(0.0, 0.0, 30.0, 30.0));
+        state.selected = vec![0];
+        state.set_selected_color(Color::rgb(1, 2, 3));
+        state
+    }
+
+    fn history_panel() -> PanelState {
+        PanelState {
+            tab: PanelTab::History,
+            ..PanelState::default()
+        }
+    }
+
+    /// One row per undo entry, oldest first, the current-state marker
+    /// at the boundary, no future rows without redo.
+    #[test]
+    fn timeline_renders_one_row_per_entry_oldest_first() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = scripted_history_state();
+        assert_eq!(state.undo.len(), 7, "fixture: seven gestures");
+        let mut panel = history_panel();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let mut prev_top = 0.0;
+        for i in 0..7usize {
+            let rect = ctx
+                .read_response(egui::Id::new(("history-row", i)))
+                .unwrap_or_else(|| panic!("row {i} registers"))
+                .rect;
+            assert!(
+                rect.top() > prev_top,
+                "row {i} renders below row {} (oldest first)",
+                i.saturating_sub(1)
+            );
+            prev_top = rect.top();
+        }
+        let marker = ctx
+            .read_response(egui::Id::new("history-current"))
+            .expect("the current-state marker registers")
+            .rect;
+        assert!(
+            marker.top() > prev_top,
+            "the marker sits below the last past row"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new(("history-future", 0)))
+                .is_none(),
+            "no future rows without redo"
+        );
+    }
+
+    /// Clicking a past row restores that state in one action; a
+    /// dimmed future row redoes forward; chord-stepping is reflected
+    /// live on the next pass.
+    #[test]
+    fn clicking_rows_time_travels_and_chords_reflect_live() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        state.pending = Some(rect_ann_fixture());
+        state.commit_annotation();
+        state.place_number(flintshot_core::Point::new(5.0, 5.0));
+        state.place_number(flintshot_core::Point::new(6.0, 6.0));
+        let mut panel = history_panel();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        // Jump back to the very first state via row 0.
+        let row0 = chip_center(&ctx, egui::Id::new(("history-row", 0)));
+        let _ = draw(&ctx, &mut state, &mut panel, click_events(row0));
+        assert_eq!(state.undo.len(), 1, "one click = one restore_to");
+        assert_eq!(state.redo.len(), 2);
+        // Settle: the future rows render now.
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let future0 = ctx
+            .read_response(egui::Id::new(("history-future", 0)))
+            .expect("nearest future row registers")
+            .rect
+            .center();
+        let _ = draw(&ctx, &mut state, &mut panel, click_events(future0));
+        assert_eq!(state.undo.len(), 2, "a future click redoes forward one");
+        // A chord step (the floating cluster's Ctrl+Z path) shows on
+        // the next pass: the nearest future row returns.
+        state.undo();
+        assert_eq!(state.undo.len(), 1);
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        assert_eq!(state.undo.len(), 1, "redrawing is inert without clicks");
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new(("history-future", 0)))
+                .is_some(),
+            "the timeline reflects the chord step"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new(("history-row", 2)))
+                .is_none(),
+            "the undone past row is gone from the timeline"
+        );
+    }
+
+    /// Empty stacks: the quiet hint, no rows, no marker.
+    #[test]
+    fn empty_history_renders_hint_only() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        let mut panel = history_panel();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        for id in [
+            egui::Id::new(("history-row", 0)),
+            egui::Id::new("history-current"),
+            egui::Id::new(("history-future", 0)),
+        ] {
+            assert!(ctx.read_response(id).is_none(), "{id:?} must not render");
+        }
+    }
+
+    /// Long histories scroll instead of overflowing: every row still
+    /// registers and the content extends past the panel's bottom.
+    #[test]
+    fn long_history_scrolls_instead_of_overflowing() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        for _ in 0..50 {
+            state.pending = Some(rect_ann_fixture());
+            state.commit_annotation();
+        }
+        let mut panel = history_panel();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let last = ctx
+            .read_response(egui::Id::new(("history-row", 49)))
+            .expect("the 50th row registers inside the scroll area")
+            .rect;
+        assert!(
+            last.top() > 768.0,
+            "content overflows the 768 px viewport (scrolls, not overflows)"
+        );
     }
 }
