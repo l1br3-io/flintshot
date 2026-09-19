@@ -31,6 +31,10 @@ pub(crate) enum SettingsAction {
     /// *Edit config file* clicked: open the user's `config.toml` in
     /// their editor (the bridge owns the spawn).
     EditConfigFile,
+    /// *Rebind shortcuts…* clicked: open the portal bind dialog
+    /// through the daemon (the bridge owns the IPC; Wayland-only —
+    /// the row renders iff the session is Wayland).
+    RebindShortcuts,
 }
 
 /// The settings page's state: the working config copy plus the
@@ -44,6 +48,9 @@ pub(crate) struct SettingsApp {
     /// The fully-commented default TOML, snapshotted from the bridge
     /// at construction (the read-only defaults view's content).
     default_toml: String,
+    /// Whether the session is Wayland, snapshotted at construction
+    /// (gates the *Rebind shortcuts…* row, like `display_server`).
+    wayland: bool,
     /// Whether the defaults view is expanded.
     show_defaults: bool,
     /// Clicked actions awaiting the router's drain.
@@ -60,6 +67,7 @@ impl SettingsApp {
         display_server: String,
         version: String,
         default_toml: String,
+        wayland: bool,
     ) -> Self {
         let template_draft = config.output.filename_template.clone();
         Self {
@@ -68,6 +76,7 @@ impl SettingsApp {
             display_server,
             version,
             default_toml,
+            wayland,
             show_defaults: false,
             actions: Vec::new(),
             dirty_since: None,
@@ -333,13 +342,24 @@ fn output_section(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
     });
 }
 
-/// The Shortcuts section: the real binding table, readonly.
+/// The Shortcuts section: the real binding table, readonly — plus
+/// the *Rebind shortcuts…* link on Wayland sessions (the portal
+/// bind dialog only exists there; X11/macOS/Windows hotkeys
+/// re-register from `[hotkeys]` directly, so the row would be a
+/// dead control — the tray item's gate, moved into Settings).
 fn shortcuts_section(ui: &mut egui::Ui, page: &mut SettingsApp) {
     section_card(ui, "Shortcuts", |ui| {
         set_row(ui, "Capture", |ui| {
             let chord = page.config.hotkeys.capture.clone();
             readonly_value(ui, &chord);
         });
+        if page.wayland {
+            set_row(ui, "Rebind shortcuts", |ui| {
+                if link(ui, egui::Id::new("set-rebind"), "Open bind dialog…") {
+                    page.actions.push(SettingsAction::RebindShortcuts);
+                }
+            });
+        }
     });
 }
 
@@ -546,11 +566,18 @@ mod tests {
     use super::*;
 
     fn page() -> SettingsApp {
+        page_gated(false)
+    }
+
+    /// [`page`] with the Wayland gate pinned (the rebind row's
+    /// render gate).
+    fn page_gated(wayland: bool) -> SettingsApp {
         SettingsApp::new(
             Config::default(),
             "X11".into(),
             "9.9.9".into(),
             "# flintshot configuration\n[ui]\ndefault-color = \"#ff0000\"\n".into(),
+            wayland,
         )
     }
 
@@ -860,5 +887,52 @@ mod tests {
             "the card body covers all {lines} monospace lines (got {} px)",
             card.height()
         );
+    }
+
+    // ── Rebind row (settings-improvement Task 010) ───────────────
+
+    /// The row renders iff the session is Wayland — X11 never grows
+    /// a dead control (the tray item's gate, moved into Settings).
+    #[test]
+    fn rebind_row_renders_only_on_wayland() {
+        let mut x11 = page_gated(false);
+        let ctx = frame_with_animations(&mut x11, false);
+        assert!(
+            ctx.read_response(egui::Id::new("set-rebind")).is_none(),
+            "X11: no dead rebind row"
+        );
+
+        let mut wayland = page_gated(true);
+        let ctx = frame_with_animations(&mut wayland, false);
+        assert!(
+            ctx.read_response(egui::Id::new("set-rebind")).is_some(),
+            "Wayland: the rebind row registers"
+        );
+    }
+
+    /// The row reports through the action queue when present.
+    #[test]
+    fn rebind_row_reports_through_the_queue() {
+        let mut page = page_gated(true);
+        let ctx = frame_with_animations(&mut page, false);
+        let row = ctx
+            .read_response(egui::Id::new("set-rebind"))
+            .expect("the rebind row registers on Wayland")
+            .rect;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 900.0),
+                )),
+                events: click(row),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                SettingsPage::show(ui, &mut page, 0.0);
+            },
+        );
+        assert_eq!(page.drain_action(), Some(SettingsAction::RebindShortcuts));
+        assert!(page.drain_action().is_none(), "drained exactly once");
     }
 }
