@@ -96,10 +96,11 @@ pub enum Request {
     ReportCaptured,
     // app-window effort — appended (postcard variant-index rule):
     /// Client → daemon: open the app window. The daemon broadcasts
-    /// [`Event::AppFocus`] (an already-running window shows and
-    /// focuses itself) and spawns the `app` worker (which exits
-    /// promptly when the app instance lock is held — the broadcast
-    /// did the real work). Net effect: one window, focused.
+    /// [`Event::AppFocus`] (an already-running window shows, focuses
+    /// itself, and routes to its home page) and spawns the `app`
+    /// worker (which exits promptly when the app instance lock is
+    /// held — the broadcast did the real work). Net effect: one
+    /// window, focused, on the home page.
     OpenApp,
     // smart-window-hiding effort — appended (postcard variant-index rule):
     /// Worker → daemon, pre-grab: the sender is about to capture the
@@ -246,8 +247,9 @@ pub enum Event {
     SessionEnded,
     /// Someone asked the app window to come forward (tray *Open app*,
     /// a second `flintshot app`, launcher entry). Broadcast on
-    /// [`Request::OpenApp`]; a subscribed app window shows and
-    /// focuses itself.
+    /// [`Request::OpenApp`]; a subscribed app window shows, focuses
+    /// itself, and routes to its home page (an open window on a
+    /// non-home page swaps home in place).
     AppFocus,
     // smart-window-hiding effort — appended (postcard variant-index rule):
     /// A new capture replaced the live capture session (Replace

@@ -139,7 +139,11 @@ pub trait RouteHost {
 
     /// Take a pending "route home" intent, if one waits (a failed or
     /// quiet grab while the window was open on the Loading route —
-    /// nothing is coming to show, and the spinner must not strand).
+    /// nothing is coming to show, and the spinner must not strand —
+    /// or an idle
+    /// [`Event::AppFocus`](flintshot_core::ipc::Event::AppFocus) ping
+    /// (tray / applet *Open app window*): the open window routes
+    /// home from wherever it sat).
     fn take_route_home(&mut self) -> bool;
 
     /// Take a pending "route settings" intent, if one waits (an
@@ -377,7 +381,9 @@ impl WindowApp {
 
     /// The route-home poll: a failed or quiet grab while the window
     /// was open on the Loading route arms the intent — the spinner
-    /// must not strand. Never fires on Home (a no-swap there).
+    /// must not strand. An idle `AppFocus` ping (tray / applet
+    /// *Open app window*) arms it too: the window routes home from
+    /// Settings or an editor. Never fires on Home (a no-swap there).
     fn poll_route_home(&mut self, ctx: &Context) {
         if self.host.take_route_home() && !matches!(self.route, Route::Home) {
             self.request_route(ctx, Route::Home);
@@ -1442,6 +1448,32 @@ mod tests {
         assert!(
             matches!(app.route, Route::Home) && transition_commands(&full).is_empty(),
             "home stays home with no churn"
+        );
+    }
+
+    /// The tray's *Open app window* ping while the window sits on the
+    /// settings page: the route-home intent returns it home in place
+    /// — raise + focus alone would read as "the click did nothing".
+    #[test]
+    fn route_home_intent_returns_the_settings_route_home() {
+        let host = RecordingHost::default();
+        let (mut app, _bridge, host) =
+            window_app_start(WindowStart::Settings, StubPageBridge::default(), host);
+        host.inner.borrow_mut().route_home = Some(());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            matches!(app.route, Route::Home),
+            "the app-focus ping routes the settings page home"
+        );
+        assert!(app.settings.is_none(), "the settings page is dropped");
+        assert!(
+            !transition_commands(&full)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "the route home never closes the window"
         );
     }
 

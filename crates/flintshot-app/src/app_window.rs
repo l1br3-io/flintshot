@@ -201,7 +201,12 @@ struct SharedInner {
     /// route (editor-capture-ux Task 008).
     pending_loading: bool,
     /// A failed or quiet grab while the window was open on the
-    /// Loading route: route home — nothing is coming to show.
+    /// Loading route: route home — nothing is coming to show. Also
+    /// armed by an idle `AppFocus` ping (tray / applet *Open app
+    /// window*): the open window routes home from wherever it sat.
+    /// An open window consumes it through the route host (in-place
+    /// swap); a closed one ignores it (the reopen start is decided
+    /// by the pending editor / settings intent / restore page).
     route_home: bool,
     /// A `SettingsFocus` arrived (tray / applet *Settings*) and the
     /// window was closed: the reopen generation opens on the
@@ -485,7 +490,10 @@ impl HomeCore {
             // but never raise it over a live capture session. The
             // settings ping's routing intent is armed by the pump
             // regardless, so a mid-capture ping still lands on
-            // Settings at the session's end.
+            // Settings at the session's end; the app-focus ping's
+            // home routing is idle-gated instead (armed only when
+            // this Show fires) — rerouting a closed window's
+            // restore home could drop an in-progress editor session.
             IpcEvent::AppFocus | IpcEvent::SettingsFocus => self.app_focus(),
             _ => None,
         }
@@ -1319,7 +1327,22 @@ async fn connected_loop(
                     // the routing intent arms here; `core.on_event`
                     // handles the show/focus directive above.
                     let settings_focus = matches!(event, IpcEvent::SettingsFocus);
+                    // An app focus ping (tray / applet *Open app
+                    // window*, a second `flintshot app`): when idle it
+                    // routes the open window home — the ping's
+                    // destination — wherever the window currently sits
+                    // (the settings ping's mirror).
+                    let app_focus = matches!(event, IpcEvent::AppFocus);
                     if let Some(directive) = core.on_event(&event) {
+                        // Armed only when the ping actually surfaced
+                        // the window (idle): a mid-capture ping stays
+                        // fully suppressed — the capture owns the
+                        // screen, and rerouting a closed window's
+                        // restore home could drop an in-progress
+                        // editor session.
+                        if app_focus {
+                            shared.set_route_home();
+                        }
                         shared.push_directive(directive);
                     }
                     if settings_focus {
@@ -2483,6 +2506,143 @@ mod tests {
             counter.load(Ordering::SeqCst),
             1,
             "the rate limiter must hold respawns to one per window"
+        );
+    }
+
+    // ── AppFocus → route home (tray / applet *Open app window*) ──
+
+    /// A one-connection daemon stand-in: answers Subscribe, writes
+    /// the given events, then returns — dropping the connection, the
+    /// stream end [`connected_loop`] reports as a disconnect. The
+    /// listener arrives pre-bound (created by the test before it
+    /// subscribes, closing the bind race).
+    async fn serve_subscription_events(
+        listener: interprocess::local_socket::tokio::Listener,
+        events: &[IpcEvent],
+    ) {
+        use crate::ipc_server::{encode_msg, read_frame, write_frame};
+        use interprocess::local_socket::traits::tokio::Listener as _;
+
+        let mut conn = listener.accept().await.expect("accept");
+        let _request = read_frame(&mut conn).await.expect("subscribe frame");
+        for event in events {
+            let bytes = encode_msg(event).expect("encode event");
+            write_frame(&mut conn, &bytes).await.expect("send event");
+        }
+    }
+
+    /// Bind a stand-in daemon's listener at `sock` (the test must do
+    /// this before subscribing — `subscribe_to` needs the socket file
+    /// to exist).
+    fn bind_stand_in_listener(
+        sock: &std::path::Path,
+    ) -> interprocess::local_socket::tokio::Listener {
+        let name = crate::ipc_server::socket_name(sock).expect("socket name");
+        interprocess::local_socket::ListenerOptions::new()
+            .name(name)
+            .try_overwrite(true)
+            .create_tokio()
+            .expect("listener")
+    }
+
+    /// The tray's *Open app window* ping against an idle window: the
+    /// pump arms the route-home intent (the open window swaps home
+    /// from wherever it sat — Settings, an editor) on top of the
+    /// show/focus directive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_focus_pings_arm_the_route_home_intent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("flintshot-app-focus-route.sock");
+        let listener = bind_stand_in_listener(&sock);
+        let server = tokio::spawn(serve_subscription_events(listener, &[IpcEvent::AppFocus]));
+
+        let (_cmd_tx, mut cmd_rx) = tokio_mpsc::channel::<PumpCommand>(1);
+        let (_grabs_tx, mut grabs_rx) = tokio_mpsc::channel::<(u64, AppGrabEvent)>(1);
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        let mut router = GrabRouter::default();
+
+        let stream = crate::ipc_client::subscribe_to(Some(&sock))
+            .await
+            .expect("subscribe")
+            .expect("the stand-in daemon answered");
+        let exit = connected_loop(
+            stream,
+            &mut cmd_rx,
+            &mut grabs_rx,
+            &shared,
+            &mut core,
+            &mut router,
+        )
+        .await;
+        server.await.expect("server task");
+
+        assert!(
+            matches!(exit, LoopExit::Disconnected),
+            "the dropped connection ends the loop"
+        );
+        assert!(
+            shared.take_route_home(),
+            "an idle AppFocus ping routes the open window home"
+        );
+        assert!(!shared.take_route_home(), "the intent is consumed once");
+    }
+
+    /// The gate: a focus ping riding a live capture session must not
+    /// route home — the capture owns the screen, and the routing
+    /// would yank a restored editor page (with its work) home.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_focus_pings_do_not_route_home_mid_capture() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("flintshot-app-focus-mid-capture.sock");
+        let listener = bind_stand_in_listener(&sock);
+        let server = tokio::spawn(serve_subscription_events(
+            listener,
+            &[IpcEvent::CaptureStarted, IpcEvent::AppFocus],
+        ));
+
+        let (_cmd_tx, mut cmd_rx) = tokio_mpsc::channel::<PumpCommand>(1);
+        let (_grabs_tx, mut grabs_rx) = tokio_mpsc::channel::<(u64, AppGrabEvent)>(1);
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        let mut router = GrabRouter::default();
+
+        let stream = crate::ipc_client::subscribe_to(Some(&sock))
+            .await
+            .expect("subscribe")
+            .expect("the stand-in daemon answered");
+        let exit = connected_loop(
+            stream,
+            &mut cmd_rx,
+            &mut grabs_rx,
+            &shared,
+            &mut core,
+            &mut router,
+        )
+        .await;
+        server.await.expect("server task");
+
+        assert!(matches!(exit, LoopExit::Disconnected));
+        // The disconnect erases the in-flight count (disconnected()
+        // resets it and its force-show drains the queued Hide), so
+        // the capture's hide is observed through the directive pair:
+        // the Show here is the disconnect's force-show — it only
+        // fires when the window was hidden, i.e. CaptureStarted was
+        // processed. And the gate couples arming to the ping's own
+        // Show: an idle AppFocus would have armed route_home AND left
+        // hidden=false (no disconnect Show). Show present + route_home
+        // unset ⇒ the ping was suppressed mid-capture.
+        let mut directives = Vec::new();
+        while let Some(d) = shared.poll_directive() {
+            directives.push(d);
+        }
+        assert!(
+            directives.contains(&HomeDirective::Show),
+            "the capture hid the window; the disconnect surfaced it: {directives:?}"
+        );
+        assert!(
+            !shared.take_route_home(),
+            "a mid-capture ping stays fully suppressed"
         );
     }
 

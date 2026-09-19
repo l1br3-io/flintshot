@@ -289,10 +289,10 @@ pub fn dispatch(
         Request::Quit => Ok(DispatchOutcome::Shutdown),
         // The app-window opener (app-window effort). Broadcast-first
         // so an already-running window (which holds the app lock)
-        // shows and focuses itself; the spawned worker then exits
-        // promptly on that held lock. With no window running, the
-        // spawn is what creates one (and the broadcast lands on
-        // nobody — harmless).
+        // shows, focuses, and routes itself home; the spawned worker
+        // then exits promptly on that held lock. With no window
+        // running, the spawn is what creates one (and the broadcast
+        // lands on nobody — harmless).
         Request::OpenApp => {
             sink(Event::AppFocus);
             let argv = app_argv(AppRoute::Home);
