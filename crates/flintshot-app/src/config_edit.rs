@@ -24,11 +24,14 @@ use color_eyre::eyre;
 /// - The template could not be written (logged, non-fatal — the
 ///   editor may still open whatever exists).
 /// - The editor failed to spawn.
-// The tray helper (feature `tray`) is the only caller until the
-// settings page's *Edit config file* link wires this
-// (settings-improvement Task 009); without that feature the fn is
-// intentionally alive-but-unreferenced.
-#[cfg_attr(not(feature = "tray"), allow(dead_code))]
+// The settings page's *Edit config file* link is this fn's next
+// caller (settings-improvement Task 009); the tray *Open config*
+// item that called it is gone as of Task 005, so the fn waits,
+// intentionally unreferenced, for the bridge wiring.
+#[allow(
+    dead_code,
+    reason = "wired by settings-improvement Task 009 (the settings page's Edit config file link)"
+)]
 pub(crate) fn open_config_in_editor() -> eyre::Result<()> {
     use std::process::Command;
 

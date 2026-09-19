@@ -49,10 +49,12 @@ pub(crate) fn run() -> eyre::Result<()> {
     #[cfg(all(feature = "tray", target_os = "linux"))]
     let watchdog = crate::sni_watchdog::spawn();
 
-    let wayland = crate::platform::session_is_wayland();
     // Held (underscore-named) for `run`'s remainder: the registration
-    // lives exactly as long as this process — ADR-0039/0042.
-    let _icon = crate::tray::build(wayland)?;
+    // lives exactly as long as this process — ADR-0039/0042. No
+    // session flavor since the settings swap: the menu is identical
+    // on every session (the Wayland-only bind item moved to the
+    // settings page).
+    let _icon = crate::tray::build()?;
 
     // Daemon liveness: a Subscribe connection whose stream end means
     // the daemon is gone → exit so the SNI item follows it.
@@ -88,42 +90,16 @@ fn event_loop(daemon_gone: &AtomicBool) -> eyre::Result<()> {
 
         let rx = MenuEvent::receiver();
         while let Ok(event) = rx.try_recv() {
-            match crate::tray::action_for(&event) {
-                Some(TrayAction::Request(request)) => {
-                    forward(&request);
-                    if exits_after_action(&request) {
-                        // The causal close: this process's exit
-                        // unregisters the item; the panel destroys
-                        // the open popup; the daemon's handshake
-                        // graces cover the chain before the grab.
-                        tracing::info!(?request, "tray helper exiting for action");
-                        return Ok(());
-                    }
+            if let Some(TrayAction::Request(request)) = crate::tray::action_for(&event) {
+                forward(&request);
+                if exits_after_action(&request) {
+                    // The causal close: this process's exit
+                    // unregisters the item; the panel destroys
+                    // the open popup; the daemon's handshake
+                    // graces cover the chain before the grab.
+                    tracing::info!(?request, "tray helper exiting for action");
+                    return Ok(());
                 }
-                Some(TrayAction::BindShortcuts) => {
-                    // Request/reply with a user-facing dialog — thread
-                    // it so the loop keeps pumping GLib while it is
-                    // open.
-                    let _ = std::thread::Builder::new()
-                        .name("flintshot-tray-bind".into())
-                        .spawn(|| match crate::ipc_client::bind_shortcuts_to(None) {
-                            Ok(Some(_event)) => {
-                                tracing::info!("portal bind finished (tray)");
-                            }
-                            Ok(None) => {
-                                tracing::warn!("bind: daemon not running");
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "bind: IPC failure");
-                            }
-                        });
-                }
-                Some(TrayAction::OpenConfig) => {
-                    if let Err(e) = crate::config_edit::open_config_in_editor() {
-                        tracing::warn!(error = %e, "opening config from tray");
-                    }
-                }
-                None => {}
             }
         }
 
