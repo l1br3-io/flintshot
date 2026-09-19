@@ -45,7 +45,7 @@ defaults. Spec: [`spec.md`](spec.md).
 
 ### Phase 1: Core selection foundation
 - [x] Task 1: Selection set + Shift routing + delete-all → `tasks/001-core-selection-set-routing.md`
-- [ ] Task 2: Multi-annotation drag → `tasks/002-core-multi-drag.md`
+- [x] Task 2: Multi-annotation drag → `tasks/002-core-multi-drag.md`
 
 ### Checkpoint: Core behaviors complete
 - [ ] `cargo test --workspace --all-targets` + clippy + fmt green
