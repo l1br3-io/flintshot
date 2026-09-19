@@ -16,18 +16,18 @@ on the first `changed()` while dragging and ends on release.
 
 **Acceptance criteria:**
 
-- [ ] With a Text-tool selection: panel + pod display the selected
+- [x] With a Text-tool selection: panel + pod display the selected
       annotation's values; changes restyle it immediately, sync
       defaults (next placed text inherits), and are undoable one
       entry per gesture (a full DragValue drag = one entry).
-- [ ] Mid-session: panel edits apply live to the draft.
-- [ ] No selection / no session: behavior byte-identical to today
+- [x] Mid-session: panel edits apply live to the draft.
+- [x] No selection / no session: behavior byte-identical to today
       (fresh-draft mid-typing still does *not* live-restyle — spec
       open question default).
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-editor-egui` (source-switch tests
+- [x] `cargo test -p flintshot-editor-egui` (source-switch tests
       per surface)
 - [ ] Manual: select → change size / color / family / align → live
       update + next text inherits; drag the size DragValue → one

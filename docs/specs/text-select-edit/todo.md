@@ -5,6 +5,6 @@
 - [x] 003 Core — DoubleClick + lift-out re-edit session
 - [x] 004 egui — double-click plumbing in both shells
 - [x] 005 Core — restyle API + gesture bracketing
-- [ ] 006 egui — style surfaces retarget (panel + popover)
+- [x] 006 egui — style surfaces retarget (panel + popover)
 - [ ] 007 egui — hover affordance under Text
 - [ ] 008 Closeout — CHANGELOG, TEST_MATRIX, ADR, gates
