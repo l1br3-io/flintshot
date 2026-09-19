@@ -324,6 +324,14 @@ fn run_event_loop(
 /// fresh bus name, so the re-registration cannot duplicate — the
 /// ADR-0039 drop/rebuild leak). Exists in no-tray builds as an inert
 /// placeholder so the loop keeps one signature.
+///
+/// Failures never wedge the tray: failed spawns and consecutive fast
+/// self-exits (the IPC-less-daemon churn — every helper generation
+/// fails its daemon watch and exits) back off exponentially via
+/// [`helper_backoff_delay`], capped, and a helper that stays up past
+/// [`HELPER_STABLE_UPTIME`] resets the counter. Gate-ordered
+/// transitions are never delayed — the backoff only holds respawns
+/// the supervisor owes on its own initiative.
 #[cfg(feature = "tray")]
 struct TraySupervisor {
     /// The live helper, if one is running. Reaped lazily by [`Self::poll`].
@@ -331,19 +339,73 @@ struct TraySupervisor {
     /// We asked for the current child's stop (gate `Hide`); its exit
     /// is expected and must not re-arm the click pre-hide.
     stop_initiated: bool,
+    /// Spawn seam (tests inject fakes); production runs
+    /// [`spawn_helper`].
+    spawn: Box<dyn FnMut() -> std::io::Result<std::process::Child> + Send>,
+    /// When the current/last child was spawned — the fast-exit
+    /// classifier's uptime input.
+    last_spawn: Instant,
+    /// Consecutive fast exits (uptime below `stable_uptime`) and
+    /// spawn failures. 0 = the last helper proved stability.
+    consecutive_failures: u32,
+    /// A held respawn's deadline: `poll` spawns once `now` passes it.
+    /// `None` = no hold.
+    respawn_at: Option<Instant>,
+    /// Uptime that counts as "stable" (test seam; production
+    /// [`HELPER_STABLE_UPTIME`]).
+    stable_uptime: Duration,
+}
+
+/// How long a helper must stay up for its exit to count as stable
+/// (resetting the churn backoff) rather than fast (feeding it).
+#[cfg(feature = "tray")]
+const HELPER_STABLE_UPTIME: Duration = Duration::from_secs(10);
+/// First backoff tier for consecutive helper failures.
+#[cfg(feature = "tray")]
+const HELPER_BACKOFF_BASE: Duration = Duration::from_millis(500);
+/// Backoff ceiling — a churned tray recovers within this even in the
+/// worst case.
+#[cfg(feature = "tray")]
+const HELPER_BACKOFF_CAP: Duration = Duration::from_secs(8);
+
+/// Respawn hold after `consecutive_failures` failures: the first is
+/// free (a fast exit may be a real capture/quit click), then
+/// exponential growth from [`HELPER_BACKOFF_BASE`], capped at
+/// [`HELPER_BACKOFF_CAP`].
+#[cfg(feature = "tray")]
+fn helper_backoff_delay(consecutive_failures: u32) -> Duration {
+    if consecutive_failures == 0 {
+        return Duration::ZERO;
+    }
+    let shift = (consecutive_failures - 1).min(4);
+    HELPER_BACKOFF_BASE
+        .saturating_mul(1 << shift)
+        .min(HELPER_BACKOFF_CAP)
 }
 
 #[cfg(feature = "tray")]
 impl TraySupervisor {
     /// Spawn the first helper. A spawn failure is logged, not fatal —
-    /// the gate's restore cycle retries by construction.
+    /// `poll` retries through the backoff path.
     fn start() -> Self {
-        let mut supervisor = Self {
-            child: None,
-            stop_initiated: false,
-        };
+        let mut supervisor = Self::with_spawner(Box::new(spawn_helper));
         supervisor.apply(TrayAction::Show);
         supervisor
+    }
+
+    /// Test seam: a supervisor whose spawn step is injectable.
+    fn with_spawner(
+        spawn: Box<dyn FnMut() -> std::io::Result<std::process::Child> + Send>,
+    ) -> Self {
+        Self {
+            child: None,
+            stop_initiated: false,
+            spawn,
+            last_spawn: Instant::now(),
+            consecutive_failures: 0,
+            respawn_at: None,
+            stable_uptime: HELPER_STABLE_UPTIME,
+        }
     }
 
     /// Reap an exited helper and teach the gate about exits we did
@@ -351,33 +413,70 @@ impl TraySupervisor {
     /// helper exits to unregister; ADR-0042) or a crash — either way
     /// the item is already gone, so the pre-hide has no side effect
     /// to apply: it only anchors the gate's menu grace here and
-    /// holds a respawn through the handshake window.
+    /// holds a respawn through the handshake window. Fast exits feed
+    /// the churn counter; stable ones reset it.
     fn poll(&mut self, gate: &TrayGate) {
-        let Some(child) = &mut self.child else {
-            return;
-        };
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                self.child = None;
-                if !self.stop_initiated {
-                    tracing::info!(
-                        "tray helper exited on its own (capture/quit click, or a crash)"
-                    );
-                    let _ = gate.pre_hide(
-                        Instant::now(),
-                        true,
-                        crate::tray_gate::PreHideOrigin::TrayMenu,
-                    );
+        let now = Instant::now();
+        if let Some(child) = &mut self.child {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    self.child = None;
+                    let stable = now.duration_since(self.last_spawn) >= self.stable_uptime;
+                    if stable {
+                        self.consecutive_failures = 0;
+                    }
+                    if !self.stop_initiated {
+                        tracing::info!(
+                            "tray helper exited on its own (capture/quit click, or a crash)"
+                        );
+                        let _ = gate.pre_hide(now, true, crate::tray_gate::PreHideOrigin::TrayMenu);
+                        if !stable {
+                            self.consecutive_failures += 1;
+                            // The first fast exit is free (it may be a
+                            // real click); later ones pay the tiers.
+                            self.respawn_at = Some(
+                                now + helper_backoff_delay(
+                                    self.consecutive_failures.saturating_sub(1),
+                                ),
+                            );
+                        }
+                    }
+                    self.stop_initiated = false;
                 }
-                self.stop_initiated = false;
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "polling the tray helper"),
             }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(error = %e, "polling the tray helper"),
+        }
+        // A held respawn's deadline passing is the retry trigger —
+        // spawn failures and churn exits both land here.
+        if self.child.is_none() && self.respawn_at.is_some_and(|at| now >= at) {
+            self.try_spawn(now);
+        }
+    }
+
+    /// Attempt a spawn through the seam; on failure, count it and
+    /// hold the next attempt at the backoff (a spawn failure is
+    /// never "free" — it cannot be a click).
+    fn try_spawn(&mut self, now: Instant) {
+        match (self.spawn)() {
+            Ok(child) => {
+                tracing::debug!("tray helper spawned");
+                self.child = Some(child);
+                self.last_spawn = now;
+                self.respawn_at = None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "spawning the tray helper");
+                self.consecutive_failures += 1;
+                self.respawn_at = Some(now + helper_backoff_delay(self.consecutive_failures));
+            }
         }
     }
 
     /// Apply a gate-decided lifecycle change. Failures are non-fatal
     /// and logged — a wedged helper must never wedge the daemon loop.
+    /// A pending backoff hold deflects the spawn (the hold is the
+    /// churn containment); the ordered stop/kill always proceeds.
     fn apply(&mut self, action: TrayAction) {
         match action {
             TrayAction::Hide => {
@@ -396,26 +495,23 @@ impl TraySupervisor {
                     let _ = old.kill();
                     let _ = old.wait();
                 }
-                match spawn_helper() {
-                    Ok(child) => {
-                        tracing::debug!("tray helper spawned");
-                        self.child = Some(child);
-                    }
-                    Err(e) => tracing::warn!(error = %e, "spawning the tray helper"),
+                let now = Instant::now();
+                if self.respawn_at.is_some_and(|at| now < at) {
+                    // The backoff hold owns this respawn; `poll`
+                    // spawns it when the deadline passes.
+                    return;
                 }
+                self.try_spawn(now);
             }
         }
     }
 
-    /// Whether a tray is supposed to exist — with the feature on,
-    /// always (the supervisor owns the respawn, so "down" is a
-    /// transient state the gate already knows about).
-    #[allow(
-        clippy::unused_self,
-        reason = "mirrors the no-tray arm; a per-instance answer is meaningless"
-    )]
+    /// Whether a tray is supposed to exist right now: the truthful
+    /// live-child state, so the gate can treat a missing tray as a
+    /// vacuous hide (immediate confirm) instead of waiting on a
+    /// grace for pixels that were never there.
     fn is_present(&self) -> bool {
-        true
+        self.child.is_some()
     }
 }
 
@@ -810,15 +906,11 @@ mod tests {
     #[test]
     fn stopped_helper_exit_is_not_treated_as_a_click() {
         let gate = TrayGate::new();
-        let mut supervisor = TraySupervisor {
-            child: Some(
-                std::process::Command::new("sleep")
-                    .arg("30")
-                    .spawn()
-                    .unwrap(),
-            ),
-            stop_initiated: false,
-        };
+        let mut supervisor = TraySupervisor::with_spawner(Box::new(|| {
+            std::process::Command::new("sleep").arg("30").spawn()
+        }));
+        supervisor.apply(TrayAction::Show);
+        assert!(supervisor.child.is_some(), "the helper spawned");
 
         supervisor.apply(TrayAction::Hide);
         // SIGKILL is asynchronous — reap with a bounded spin.
@@ -861,11 +953,19 @@ mod tests {
     #[test]
     fn self_exited_helper_arms_the_click_pre_hide() {
         let gate = TrayGate::new();
-        let mut supervisor = TraySupervisor {
-            // `true` exits immediately.
-            child: Some(std::process::Command::new("true").spawn().unwrap()),
-            stop_initiated: false,
-        };
+        // One real `true` child, then a failing seam: the exit under
+        // test lands exactly once and the supervisor's auto-respawn
+        // cannot blur the gate assertions with a second generation.
+        let mut spawned_once = false;
+        let mut supervisor = TraySupervisor::with_spawner(Box::new(move || {
+            if spawned_once {
+                Err(std::io::Error::other("one-shot seam"))
+            } else {
+                spawned_once = true;
+                std::process::Command::new("true").spawn()
+            }
+        }));
+        supervisor.apply(TrayAction::Show);
 
         // Bounded spin: the exit may not be visible on the first poll.
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -904,5 +1004,215 @@ mod tests {
             gate.confirmed_epoch() > baseline,
             "menu grace elapsed: the ack may leave (the popup is gone)"
         );
+    }
+
+    // ── Helper backoff: churn containment (tray-window-lifecycle) ──
+
+    /// The backoff curve: free first failure, then exponential growth
+    /// from the base, capped.
+    #[cfg(feature = "tray")]
+    #[test]
+    fn helper_backoff_delay_curve() {
+        assert_eq!(helper_backoff_delay(0), Duration::ZERO);
+        assert_eq!(helper_backoff_delay(1), HELPER_BACKOFF_BASE);
+        assert_eq!(
+            helper_backoff_delay(2),
+            HELPER_BACKOFF_BASE.saturating_mul(2)
+        );
+        assert_eq!(
+            helper_backoff_delay(3),
+            HELPER_BACKOFF_BASE.saturating_mul(4)
+        );
+        assert_eq!(
+            helper_backoff_delay(4),
+            HELPER_BACKOFF_BASE.saturating_mul(8)
+        );
+        // The cap holds for every larger count.
+        for n in 5..=64u32 {
+            assert_eq!(
+                helper_backoff_delay(n),
+                HELPER_BACKOFF_CAP,
+                "attempt {n} must sit at the cap"
+            );
+        }
+    }
+
+    /// A spawn seam that always fails must be retried — the tray
+    /// never stays silently gone — with the gaps between attempts
+    /// growing past the base backoff.
+    #[cfg(feature = "tray")]
+    #[test]
+    fn spawn_failures_retry_with_growing_backoff() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Mutex;
+
+        let attempts = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let counter = Arc::new(AtomicU64::new(0));
+        let (attempts_for_fn, counter_for_fn) = (Arc::clone(&attempts), Arc::clone(&counter));
+        let mut supervisor = TraySupervisor::with_spawner(Box::new(move || {
+            attempts_for_fn
+                .lock()
+                .expect("attempts mutex")
+                .push(Instant::now());
+            counter_for_fn.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("injected spawn failure"))
+        }));
+
+        supervisor.apply(TrayAction::Show); // attempt #1, fails
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while counter.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
+            supervisor.poll(&TrayGate::new());
+            thread::sleep(Duration::from_millis(5));
+        }
+        let seen = attempts.lock().expect("attempts mutex").clone();
+        assert!(
+            seen.len() >= 3,
+            "spawn failures must retry ({} attempts seen)",
+            seen.len()
+        );
+        assert!(
+            seen[1].duration_since(seen[0]) >= HELPER_BACKOFF_BASE,
+            "the first retry must wait out the base backoff"
+        );
+        assert!(
+            seen[2].duration_since(seen[1]) >= HELPER_BACKOFF_BASE,
+            "later retries must not collapse to loop cadence"
+        );
+    }
+
+    /// Consecutive fast self-exits (the IPC-less-daemon churn)
+    /// back off: after the first free exit, respawn gaps grow. The
+    /// `true` binary is the canonical instant-exit child.
+    #[cfg(all(feature = "tray", unix))]
+    #[test]
+    fn consecutive_fast_self_exits_back_off() {
+        use std::sync::Mutex;
+
+        let spawns = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let spawns_for_fn = Arc::clone(&spawns);
+        let mut supervisor = TraySupervisor::with_spawner(Box::new(move || {
+            spawns_for_fn
+                .lock()
+                .expect("spawns mutex")
+                .push(Instant::now());
+            std::process::Command::new("true").spawn()
+        }));
+
+        supervisor.apply(TrayAction::Show); // generation 1
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let gate = TrayGate::new();
+        while spawns.lock().expect("spawns mutex").len() < 4 && Instant::now() < deadline {
+            supervisor.poll(&gate);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let seen = spawns.lock().expect("spawns mutex").clone();
+        assert!(
+            seen.len() >= 4,
+            "the churn cycle must produce 4 generations ({} seen)",
+            seen.len()
+        );
+        // gen1→gen2 is free (first fast exit may be a real click);
+        // gen2→gen3 pays the base backoff; gen3→gen4 pays the next
+        // tier. Margins sit under the tier values for timing slack.
+        assert!(
+            seen[2].duration_since(seen[1]) >= HELPER_BACKOFF_BASE,
+            "the second consecutive fast exit must hold a backoff"
+        );
+        assert!(
+            seen[3].duration_since(seen[2]) >= HELPER_BACKOFF_BASE.saturating_mul(2),
+            "the backoff must grow across consecutive fast exits"
+        );
+        // Reap whatever is left so the test leaves nothing behind.
+        supervisor.apply(TrayAction::Hide);
+        if let Some(mut child) = supervisor.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// A helper that stayed up past the stability threshold resets
+    /// the churn counter: the next fast exit is "first" again (free),
+    /// not the fourth tier of an old churn run.
+    #[cfg(all(feature = "tray", unix))]
+    #[test]
+    fn stable_uptime_resets_the_churn_backoff() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Mutex;
+
+        let spawns = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let stable = Arc::new(AtomicBool::new(false));
+        let (spawns_for_fn, stable_for_fn) = (Arc::clone(&spawns), Arc::clone(&stable));
+        let mut supervisor = TraySupervisor::with_spawner(Box::new(move || {
+            spawns_for_fn
+                .lock()
+                .expect("spawns mutex")
+                .push(Instant::now());
+            if stable_for_fn.load(Ordering::SeqCst) {
+                std::process::Command::new("sleep").arg("30").spawn()
+            } else {
+                std::process::Command::new("true").spawn()
+            }
+        }));
+        // Shrink the stability threshold so the test runs in ms, not
+        // the production tens-of-seconds.
+        supervisor.stable_uptime = Duration::from_millis(50);
+
+        let gate = TrayGate::new();
+        // Two fast generations engage the backoff…
+        supervisor.apply(TrayAction::Show);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while spawns.lock().expect("spawns mutex").len() < 2 && Instant::now() < deadline {
+            supervisor.poll(&gate);
+            thread::sleep(Duration::from_millis(5));
+        }
+        // …then a stable generation runs long enough to prove the
+        // environment works, and an ordered stop reaps it (uptime ≥
+        // the threshold → reset).
+        stable.store(true, Ordering::SeqCst);
+        while supervisor.child.is_none() && Instant::now() < deadline {
+            supervisor.poll(&gate);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(supervisor.child.is_some(), "the stable generation spawned");
+        thread::sleep(Duration::from_millis(80));
+        supervisor.apply(TrayAction::Hide);
+        let reap_by = Instant::now() + Duration::from_secs(2);
+        while supervisor.child.is_some() && Instant::now() < reap_by {
+            supervisor.poll(&gate);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(supervisor.child.is_none(), "the stable child was reaped");
+
+        // The gate's own restore (depth-zero Show) spawns the next
+        // generation — a fast one. With the counter reset, its exit
+        // counts as the *first*: the follow-up spawn must arrive
+        // immediately (a stale count of 3 would hold it ~1 s).
+        stable.store(false, Ordering::SeqCst);
+        supervisor.apply(TrayAction::Show);
+        assert!(supervisor.child.is_some(), "a fresh generation spawned");
+        let before = spawns.lock().expect("spawns mutex").clone();
+        let gen_fast = *before.last().expect("the fast generation's spawn");
+        let next_by = Instant::now() + Duration::from_millis(400);
+        while spawns.lock().expect("spawns mutex").len() <= before.len() && Instant::now() < next_by
+        {
+            supervisor.poll(&gate);
+            thread::sleep(Duration::from_millis(5));
+        }
+        let after = spawns.lock().expect("spawns mutex").clone();
+        assert!(
+            after.len() > before.len(),
+            "the exit after a stable generation is free (no old-tier hold)"
+        );
+        let follow_up = *after.last().expect("the follow-up spawn");
+        assert!(
+            follow_up.duration_since(gen_fast) < Duration::from_millis(400),
+            "a stale churn tier would have held the follow-up spawn ~1 s"
+        );
+        // Reap whatever is left so the test leaves nothing behind.
+        supervisor.apply(TrayAction::Hide);
+        if let Some(mut child) = supervisor.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
