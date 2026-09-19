@@ -4,7 +4,7 @@
 - [x] 002-core-output-and-recents-limit
 - [x] 003-editor-copy-persist
 - [x] 004-capture-copy-persist
-- [ ] 005-bridge-card-actions
+- [x] 005-bridge-card-actions
 - [ ] 006-rich-recents-cards
 - [ ] 007-settings-rows
 - [ ] 008-docs-changelog

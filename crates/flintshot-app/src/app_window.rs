@@ -226,6 +226,11 @@ struct SharedInner {
     restore_page: Option<Page>,
     should_open: bool,
     pump_dead: bool,
+    /// The home window's clipboard handle (the recents card's Copy
+    /// chip): parked here for the window's lifetime — the X11
+    /// owner-clipboard rule (same contract as the editor's
+    /// `clipboard` slot). `None` until the first copy-recent.
+    home_clipboard: Option<arboard::Clipboard>,
 }
 
 impl Shared {
@@ -1581,11 +1586,137 @@ impl HomeBridge for Bridge {
     }
 
     fn recent_images(&mut self) -> Vec<std::path::PathBuf> {
+        let limit = crate::capture_flow::recents_limit();
         flintshot_core::recents::Recents::load()
             .paths()
             .into_iter()
+            .take(limit)
             .map(std::path::Path::to_path_buf)
             .collect()
+    }
+
+    fn copy_recent(&mut self, path: &std::path::Path) {
+        let img = match image::open(path) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "decoding a recent for the card Copy chip"
+                );
+                self.shared.push_directive(HomeDirective::SetStatus(format!(
+                    "could not copy {}",
+                    path.display()
+                )));
+                return;
+            }
+        };
+        // GOTCHA (arboard): a fresh handle per copy, then parked in
+        // `Shared` — on X11 the clipboard is owner-based (dropping
+        // the handle clears the selection), and every reader in this
+        // codebase follows the fresh-instance rule for Wayland.
+        let copy = arboard::Clipboard::new().and_then(|mut cb| {
+            cb.set_image(arboard::ImageData {
+                width: img.width() as usize,
+                height: img.height() as usize,
+                bytes: std::borrow::Cow::from(img.into_raw()),
+            })
+            .map(|()| cb)
+        });
+        match copy {
+            Ok(cb) => {
+                self.shared.lock().home_clipboard = Some(cb);
+                tracing::info!(path = %path.display(), "recent copied to the clipboard");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "copying a recent to the clipboard");
+                self.shared
+                    .push_directive(HomeDirective::SetStatus("clipboard copy failed".into()));
+            }
+        }
+    }
+
+    fn reveal_recent(&mut self, path: &std::path::Path) {
+        let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) else {
+            self.shared.push_directive(HomeDirective::SetStatus(format!(
+                "no folder to reveal for {}",
+                path.display()
+            )));
+            return;
+        };
+        match std::process::Command::new(opener_for_reveal())
+            .arg(dir)
+            .spawn()
+        {
+            Ok(child) => {
+                // Reap so the opener never lingers as a zombie (the
+                // upload-worker reaper precedent).
+                let mut child = child;
+                let spawned = std::thread::Builder::new()
+                    .name("flintshot-reveal-reaper".into())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    });
+                if let Err(e) = spawned {
+                    tracing::warn!(error = %e, "spawning the reveal reaper");
+                }
+                tracing::info!(dir = %dir.display(), "revealed a recent's folder");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    opener = opener_for_reveal(),
+                    "opening the file manager; surfacing the raw path instead"
+                );
+                self.shared.push_directive(HomeDirective::SetStatus(format!(
+                    "could not open the folder: {}",
+                    dir.display()
+                )));
+            }
+        }
+    }
+
+    fn delete_recent(&mut self, path: &std::path::Path) {
+        if !delete_recent_file(path) {
+            self.shared.push_directive(HomeDirective::SetStatus(format!(
+                "could not delete {}",
+                path.display()
+            )));
+            return;
+        }
+        let dropped = flintshot_core::recents::remove(path);
+        tracing::info!(
+            path = %path.display(),
+            dropped,
+            "recent deleted (file + index entry)"
+        );
+    }
+}
+
+/// The platform file-manager opener, selected by target OS —
+/// pure seam over the cfg table so the mapping is pinned by test.
+fn opener_for_reveal() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    }
+}
+
+/// The card Delete's filesystem half: remove the file permanently.
+/// A file that is already gone counts as deleted (a dead entry is
+/// exactly what Delete is for); any other failure reports `false`
+/// so the caller keeps the index entry and surfaces a status.
+fn delete_recent_file(path: &std::path::Path) -> bool {
+    match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "deleting a recent capture");
+            false
+        }
     }
 }
 
@@ -2496,6 +2627,49 @@ mod tests {
         };
         bridge.request_capture();
         assert_eq!(shared.take_pending_capture(), Some(PumpCommand::Capture));
+    }
+
+    // ── Recents card actions (recent-captures-v2 Task 005) ────────
+
+    #[test]
+    fn reveal_opener_matches_the_platform() {
+        let expected = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(target_os = "windows") {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(opener_for_reveal(), expected);
+    }
+
+    #[test]
+    fn delete_recent_file_removes_and_tolerates_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot.png");
+        std::fs::write(&shot, b"png").unwrap();
+        assert!(delete_recent_file(&shot), "an existing file deletes");
+        assert!(!shot.exists());
+        assert!(
+            delete_recent_file(&shot),
+            "an already-gone file counts as deleted (a dead entry is the point)"
+        );
+    }
+
+    #[test]
+    fn delete_recent_file_reports_real_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where a file is expected: a real (non-NotFound)
+        // error that must keep the index entry.
+        assert!(!delete_recent_file(dir.path()));
+    }
+
+    /// The X11 owner-rule seam: the home clipboard slot starts empty
+    /// and lives on `Shared` (beyond any single call's scope).
+    #[test]
+    fn shared_home_clipboard_slot_starts_empty() {
+        let shared = Shared::default();
+        assert!(shared.lock().home_clipboard.is_none());
     }
 
     #[test]
