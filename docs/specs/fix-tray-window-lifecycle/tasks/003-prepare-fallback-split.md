@@ -13,16 +13,16 @@ that never began) keeps `Fallback` → legacy tray-only hide. Spec
 AC 5.
 
 **Acceptance criteria:**
-- [ ] RED first: fake-server test — a server that accepts the `PrepareCapture` connection and stays silent past the bound yields `PrepareCaptureOutcome::Registered { acked: false }` AND receives **no second connection** within a bounded observation window (current code sends `HideTrayForCapture` on a fresh connection → RED)
-- [ ] `Prepared` gains the `ArmedSlow` variant; the timeout arm maps to it; the `Err(_)` timeout arm no longer routes through `hide_tray_for_capture_to`
-- [ ] `unsupported` reply still maps to `Fallback` → legacy tray-only hide sent (existing `prepare_capture_falls_back_to_tray_on_unsupported` stays green; un-ignore it if it proves runnable headless, keeping the run instruction otherwise)
-- [ ] Absent-socket `NoDaemon` semantics unchanged (`prepare_capture_absent_socket_reports_no_daemon`)
-- [ ] `Registered { acked: false }` still owes exactly one `ReportCaptured` (document on the variant; no code change — the caller's guard is unchanged)
+- [x] RED first: fake-server test — a server that accepts the `PrepareCapture` connection and stays silent past the bound yields `PrepareCaptureOutcome::Registered { acked: false }` AND receives **no second connection** within a bounded observation window (current code sends `HideTrayForCapture` on a fresh connection → RED)
+- [x] `Prepared` gains the `ArmedSlow` variant; the timeout arm maps to it; the `Err(_)` timeout arm no longer routes through `hide_tray_for_capture_to`
+- [x] `unsupported` reply still maps to `Fallback` → legacy tray-only hide sent (existing `prepare_capture_falls_back_to_tray_on_unsupported` stays green; un-ignore it if it proves runnable headless, keeping the run instruction otherwise)
+- [x] Absent-socket `NoDaemon` semantics unchanged (`prepare_capture_absent_socket_reports_no_daemon`)
+- [x] `Registered { acked: false }` still owes exactly one `ReportCaptured` (document on the variant; no code change — the caller's guard is unchanged)
 
 **Verification:**
-- [ ] New silent-server test green: `cargo test -p flintshot-app -q prepare` (plus `-- --ignored` if the socket tests carry the ignore attr; try headless first — local sockets need no display)
-- [ ] Full gate (four commands, quiet)
-- [ ] Manual check deferred to the manual matrix (slow-prepare tray return within ~1–2 s)
+- [x] New silent-server test green: `cargo test -p flintshot-app -q prepare` (plus `-- --ignored` if the socket tests carry the ignore attr; try headless first — local sockets need no display)
+- [x] Full gate (four commands, quiet)
+- [x] Manual check deferred to the manual matrix (slow-prepare tray return within ~1–2 s)
 
 **Verification note:** mirror the fake-server pattern from
 `prepare_capture_falls_back_to_tray_on_unsupported`
