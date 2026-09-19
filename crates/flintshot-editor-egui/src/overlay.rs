@@ -780,6 +780,12 @@ pub(crate) struct OverlayApp {
     /// synthesized `DoubleClick` right after it. See
     /// `crate::dblclick`.
     dblclick: crate::dblclick::DoubleClickTracker,
+    /// Whether the active drag began as an intercepted in-text press
+    /// (text-selection-highlight): drags then feed
+    /// `text_drag_to_char` instead of dispatching `PointerDrag`;
+    /// cleared on release (the selection persists) and on every
+    /// non-intercepted press.
+    drag_in_pending_text: bool,
     /// Last measured toolbar size, fed to [`toolbar_anchor`] for the
     /// flip/clamp decision. Seeded zero (the anchor fn tolerates it);
     /// one frame behind the layout, which is invisible in practice
@@ -837,6 +843,7 @@ impl OverlayApp {
             move_chrome: None,
             text_hover: None,
             dblclick: crate::dblclick::DoubleClickTracker::default(),
+            drag_in_pending_text: false,
             toolbar_size: egui::Vec2::ZERO,
             clipboard: None,
             clipboard_out,
@@ -1014,8 +1021,17 @@ impl OverlayApp {
                 }
                 None if annotation_press_allowed(self.state.tool, self.state.crop_region, at) => {
                     self.drag_active = true;
-                    pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
-                    self.push_dblclick_if_due(ctx, now, pos, at, &mut pointer_events);
+                    // In-text press interception (text-selection-highlight):
+                    // a hit inside the pending text routes to the
+                    // selection APIs — no `PointerDown`, so the modal
+                    // commit path is bypassed. Gesture precedence is
+                    // already settled: handles / edges won above, and
+                    // the region gate admitted this press.
+                    if !self.intercept_text_press(ctx, now, pos, at, &mut pointer_events) {
+                        self.drag_in_pending_text = false;
+                        pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
+                        self.push_dblclick_if_due(ctx, now, pos, at, &mut pointer_events);
+                    }
                 }
                 // Annotation-tool press outside the region (Task 005):
                 // swallow it whole. `drag_active` stays false, so the
@@ -1026,6 +1042,7 @@ impl OverlayApp {
             }
         } else if primary_released && self.drag_active {
             self.drag_active = false;
+            self.drag_in_pending_text = false;
             if self.gesture.is_none() {
                 pointer_events.push(InputEvent::PointerUp);
             } else {
@@ -1037,7 +1054,22 @@ impl OverlayApp {
             }
         } else if primary_down && self.drag_active {
             match self.gesture {
-                Gesture::None => pointer_events.push(InputEvent::PointerDrag { pos: at }),
+                Gesture::None => {
+                    if self.drag_in_pending_text {
+                        // Edge-clamped resolution: dragging off the
+                        // block extends to its boundary, never cancels.
+                        let view = crate::canvas::CanvasView::over(panel, ppp);
+                        let idx = crate::texthit::pending_text_hit_or_edge(
+                            &self.state,
+                            ctx,
+                            view,
+                            clamped,
+                        );
+                        self.state.text_drag_to_char(idx);
+                    } else {
+                        pointer_events.push(InputEvent::PointerDrag { pos: at });
+                    }
+                }
                 Gesture::Move { offset } => {
                     if let Some(sel) = usable_selection(self.state.crop_region) {
                         self.state.crop_region =
@@ -1058,6 +1090,23 @@ impl OverlayApp {
             let _ = self.state.dispatch_input(&event);
         }
 
+        self.update_pointer_chrome(ctx, panel, pos, at, hit_radius, over_toolbar);
+    }
+
+    /// The per-frame cursor icon and hover chrome following the
+    /// pointer pump: cursor shape reflects the active gesture (or
+    /// hover target), then the move / text hover affordances refresh
+    /// on their press-gated conditions. Split out of
+    /// [`pointer_and_chrome`] to keep each concern readable.
+    fn update_pointer_chrome(
+        &mut self,
+        ctx: &Context,
+        panel: egui::Rect,
+        pos: egui::Pos2,
+        at: Point,
+        hit_radius: f32,
+        over_toolbar: bool,
+    ) {
         // Cursor shape: reflects the active gesture while dragging,
         // otherwise the hover target. Select-only outside gestures —
         // annotation tools keep the default cursor, matching the
@@ -1115,9 +1164,39 @@ impl OverlayApp {
                 o.input_options.max_click_dist,
             )
         });
-        if self.dblclick.on_press(now, pos, max_delay, max_dist) {
-            pointer_events.push(InputEvent::DoubleClick { pos: at });
+        match self.dblclick.on_press(now, pos, max_delay, max_dist) {
+            2 => pointer_events.push(InputEvent::DoubleClick { pos: at }),
+            3 => pointer_events.push(InputEvent::TripleClick { pos: at }),
+            _ => {}
         }
+    }
+
+    /// In-text press interception (text-selection-highlight): resolve
+    /// `at` against the pending text draft and, on a hit, reposition
+    /// the caret via [`EditorState::text_press_at_char`] instead of
+    /// dispatching `PointerDown`. Returns `true` when consumed. The
+    /// tracker is fed on the logical press position so consecutive
+    /// in-text clicks count — count 2 dispatches `DoubleClick`
+    /// (word selection), count 3 `TripleClick` (line selection).
+    fn intercept_text_press(
+        &mut self,
+        ctx: &Context,
+        now: f64,
+        pos: egui::Pos2,
+        at: Point,
+        pointer_events: &mut Vec<InputEvent>,
+    ) -> bool {
+        let Some(panel) = self.overlay_rect else {
+            return false;
+        };
+        let view = crate::canvas::CanvasView::over(panel, ctx.pixels_per_point());
+        let Some(idx) = crate::texthit::pending_text_hit(&self.state, ctx, view, at) else {
+            return false;
+        };
+        self.state.text_press_at_char(idx);
+        self.drag_in_pending_text = true;
+        self.push_dblclick_if_due(ctx, now, pos, at, pointer_events);
+        true
     }
 
     /// Cursor icon for the current hover position when no gesture is
@@ -1317,6 +1396,16 @@ impl OverlayApp {
         // early return.
         if self.state.is_editing_text() {
             dispatch_text_input(&mut self.state, ctx, modifiers);
+            // Pointer stays live mid-edit (text-selection-highlight):
+            // the pump intercepts in-text presses for the selection
+            // APIs and dispatches outside presses into the modal
+            // commit-and-move-on arm — with the region / gesture
+            // gating still applying first (handles and the dimmed
+            // area keep their precedence). Everything else (close
+            // keys, tool keys) stays suppressed by this early return.
+            if let Some(panel) = self.overlay_rect {
+                self.pointer_and_chrome(ctx, panel, modifiers);
+            }
             return;
         }
 
@@ -3597,5 +3686,263 @@ mod tests {
             1,
             "the committed annotation must survive a draft's Backspace"
         );
+    }
+
+    // --- In-text gestures (text-selection-highlight Task 010) ---
+
+    /// Overlay fixture on the Text tool with a usable region: presses
+    /// inside the region flow to annotations, presses outside are
+    /// swallowed (the dimmed-area contract).
+    /// 320×320 overlay with a region that leaves room below for the
+    /// floating toolbar (otherwise the toolbar's fallback anchor
+    /// covers the whole 64×64 screen and swallows every press).
+    /// `OverlayApp::new` forces the Crop tool, so the Text tool is
+    /// set after construction.
+    fn text_gesture_overlay_app() -> (egui::Context, OverlayApp) {
+        let ctx = egui::Context::default();
+        let mut s = blank_state(320, 320);
+        s.crop_region = Some(Rect::from_xywh(10.0, 10.0, 190.0, 190.0));
+        let mut app = OverlayApp::new(
+            s,
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        app.state.tool = Tool::Text;
+        (ctx, app)
+    }
+
+    /// One overlay frame on the gesture fixture's 320×320 screen.
+    fn gesture_frame(ctx: &egui::Context, app: &mut OverlayApp, t: f64, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(320.0, 320.0),
+            )),
+            time: Some(t),
+            events,
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+    }
+
+    fn primary_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// Advance width (canvas-physical px, ppp 1) of `prefix` at the
+    /// session's 16 px annotation font — through the same measurer
+    /// the interception resolves with, so targets can't drift.
+    fn boundary_x(ctx: &egui::Context, app: &OverlayApp, prefix: &str) -> f32 {
+        let panel = app.overlay_rect.expect("fixture: panel rect cached");
+        let view = crate::canvas::CanvasView::over(panel, ctx.pixels_per_point());
+        crate::texthit::egui_measurer(ctx, view, 16.0)(prefix)
+    }
+
+    fn press_at(ctx: &egui::Context, app: &mut OverlayApp, at: (f32, f32), t: f64) {
+        gesture_frame(
+            ctx,
+            app,
+            t,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(at.0, at.1)),
+                primary_button(egui::pos2(at.0, at.1), true),
+            ],
+        );
+    }
+
+    fn drag_to(ctx: &egui::Context, app: &mut OverlayApp, at: (f32, f32), t: f64) {
+        gesture_frame(
+            ctx,
+            app,
+            t,
+            vec![egui::Event::PointerMoved(egui::pos2(at.0, at.1))],
+        );
+    }
+
+    fn release_at(ctx: &egui::Context, app: &mut OverlayApp, at: (f32, f32), t: f64) {
+        gesture_frame(
+            ctx,
+            app,
+            t,
+            vec![primary_button(egui::pos2(at.0, at.1), false)],
+        );
+    }
+
+    /// Open a draft at canvas point `at` through the real pump, type
+    /// `text`, and settle.
+    fn open_draft_via_pump(
+        ctx: &egui::Context,
+        app: &mut OverlayApp,
+        at: (f32, f32),
+        text: &str,
+        t: f64,
+    ) {
+        press_at(ctx, app, at, t);
+        release_at(ctx, app, at, t + 0.05);
+        gesture_frame(ctx, app, t + 0.1, vec![egui::Event::Text(text.to_string())]);
+    }
+
+    fn pending_text_of(app: &OverlayApp) -> String {
+        match &app.state.pending {
+            Some(Annotation::Text { text, .. }) => text.clone(),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overlay_intext_press_moves_caret_without_commit() {
+        let (ctx, mut app) = text_gesture_overlay_app();
+        gesture_frame(&ctx, &mut app, 0.0, vec![]);
+        gesture_frame(&ctx, &mut app, 0.1, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (60.0, 60.0), "hello", 1.0);
+        assert!(app.state.is_editing_text(), "fixture: draft open");
+
+        let bx = 60.0 + boundary_x(&ctx, &app, "hel") + 2.0;
+        press_at(&ctx, &mut app, (bx, 65.0), 2.0);
+        release_at(&ctx, &mut app, (bx, 65.0), 2.05);
+        assert_eq!(
+            app.state.text_cursor, 3,
+            "caret moved to the press boundary"
+        );
+        assert_eq!(app.state.text_anchor, None);
+        assert!(app.state.is_editing_text(), "no commit, no new draft");
+        assert!(app.state.anns.is_empty());
+        assert!(!app.drag_in_pending_text);
+    }
+
+    #[test]
+    fn overlay_intext_drag_selects_and_type_replaces() {
+        let (ctx, mut app) = text_gesture_overlay_app();
+        gesture_frame(&ctx, &mut app, 0.0, vec![]);
+        gesture_frame(&ctx, &mut app, 0.1, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (60.0, 60.0), "hello", 1.0);
+
+        press_at(&ctx, &mut app, (61.0, 65.0), 2.0);
+        assert!(app.drag_in_pending_text);
+        let x4 = 60.0 + boundary_x(&ctx, &app, "hell") + 1.0;
+        drag_to(&ctx, &mut app, (x4, 65.0), 2.1);
+        assert_eq!(app.state.selection_range(), Some(0..4));
+        release_at(&ctx, &mut app, (x4, 65.0), 2.2);
+        assert_eq!(app.state.selection_range(), Some(0..4), "release keeps it");
+        assert!(!app.drag_active, "drag bookkeeping cleared");
+        assert!(app.gesture.is_none(), "no gesture leak");
+
+        pointer_frame(
+            &ctx,
+            &mut app,
+            2.3,
+            vec![egui::Event::Text("X".to_string())],
+        );
+        assert_eq!(pending_text_of(&app), "Xo", "typing replaces the selection");
+    }
+
+    #[test]
+    fn overlay_intext_double_and_triple_click_select_word_then_line() {
+        let (ctx, mut app) = text_gesture_overlay_app();
+        gesture_frame(&ctx, &mut app, 0.0, vec![]);
+        gesture_frame(&ctx, &mut app, 0.1, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (60.0, 60.0), "hello world", 1.0);
+
+        let wx = 60.0 + boundary_x(&ctx, &app, "hello w") + 2.0;
+        press_at(&ctx, &mut app, (wx, 65.0), 1.5);
+        release_at(&ctx, &mut app, (wx, 65.0), 1.55);
+        press_at(&ctx, &mut app, (wx, 65.0), 1.6);
+        assert_eq!(app.state.selection_range(), Some(6..11), "word selected");
+        release_at(&ctx, &mut app, (wx, 65.0), 1.65);
+        press_at(&ctx, &mut app, (wx, 65.0), 1.7);
+        assert_eq!(app.state.selection_range(), Some(0..11), "line selected");
+        release_at(&ctx, &mut app, (wx, 65.0), 1.75);
+    }
+
+    #[test]
+    fn overlay_outside_text_press_commits_and_starts_fresh_caret() {
+        let (ctx, mut app) = text_gesture_overlay_app();
+        gesture_frame(&ctx, &mut app, 0.0, vec![]);
+        gesture_frame(&ctx, &mut app, 0.1, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (60.0, 60.0), "hello", 1.0);
+
+        // Inside the region, outside the text block: dispatched.
+        press_at(&ctx, &mut app, (150.0, 150.0), 2.0);
+        release_at(&ctx, &mut app, (150.0, 150.0), 2.05);
+        assert_eq!(app.state.anns.len(), 1, "draft committed");
+        match &app.state.pending {
+            Some(Annotation::Text { pos, text, .. }) => {
+                assert_eq!(*pos, Point::new(150.0, 150.0), "fresh caret placed");
+                assert!(text.is_empty());
+            }
+            other => panic!("expected fresh pending Text, got {other:?}"),
+        }
+    }
+
+    /// The dimmed-area contract survives the mid-edit pointer lift: a
+    /// press outside the region while editing is swallowed whole — no
+    /// interception, no commit, no fresh action.
+    #[test]
+    fn overlay_press_outside_region_while_editing_is_swallowed() {
+        let (ctx, mut app) = text_gesture_overlay_app();
+        gesture_frame(&ctx, &mut app, 0.0, vec![]);
+        gesture_frame(&ctx, &mut app, 0.1, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (60.0, 60.0), "hello", 1.0);
+
+        // (5, 5) is outside the 10..200 region.
+        press_at(&ctx, &mut app, (5.0, 5.0), 2.0);
+        release_at(&ctx, &mut app, (5.0, 5.0), 2.05);
+        assert!(
+            app.state.is_editing_text(),
+            "the swallow leaves the draft untouched"
+        );
+        assert_eq!(pending_text_of(&app), "hello");
+        assert!(app.state.anns.is_empty());
+        assert!(!app.drag_active, "no drag bookkeeping either");
+    }
+
+    /// Re-edit via double-click still lifts the committed text out in
+    /// the overlay, and the selection gestures work inside the
+    /// session.
+    #[test]
+    fn overlay_reedit_session_supports_drag_select() {
+        let (ctx, mut app) = text_gesture_overlay_app();
+        gesture_frame(&ctx, &mut app, 0.0, vec![]);
+        gesture_frame(&ctx, &mut app, 0.1, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (60.0, 60.0), "hello", 1.0);
+        // Commit via Enter (through gesture_frame: key_frame's 64×64
+        // screen would shrink the cached panel rect under this
+        // fixture's 320×320 layout).
+        gesture_frame(
+            &ctx,
+            &mut app,
+            1.2,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(app.state.anns.len(), 1, "fixture: committed");
+
+        // Rapid double press inside the committed text re-edits it.
+        let px = 60.0 + boundary_x(&ctx, &app, "h") + 1.0;
+        press_at(&ctx, &mut app, (px, 65.0), 2.0);
+        release_at(&ctx, &mut app, (px, 65.0), 2.05);
+        press_at(&ctx, &mut app, (px, 65.0), 2.1);
+        assert!(app.state.text_reedit.is_some(), "session opened");
+
+        // Drag-select inside the session.
+        press_at(&ctx, &mut app, (61.0, 65.0), 3.0);
+        let end_x = 60.0 + boundary_x(&ctx, &app, "hello") - 1.0;
+        drag_to(&ctx, &mut app, (end_x, 65.0), 3.1);
+        release_at(&ctx, &mut app, (end_x, 65.0), 3.2);
+        assert_eq!(app.state.selection_range(), Some(0..5));
     }
 }

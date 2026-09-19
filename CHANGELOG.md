@@ -35,8 +35,34 @@ Categories used below:
   (Pinned by
   `settings_page_never_trips_eguis_duplicate_id_paint`.)
 
+### Added
+
+- **Text selection & highlight while editing** (effort
+  `text-selection-highlight`). In-edit text now behaves like real
+  text in both shells (editor window and fullscreen overlay, fresh
+  drafts and re-edit sessions alike): **Shift+arrows / Home / End**
+  extend a selection char- or line-wise, **Ctrl+Shift+arrows**
+  word-wise, **Ctrl+A** selects all, **dragging** across glyphs
+  selects, **double-click** selects a word, **triple-click** the
+  line. Typing **replaces** the selection in one stroke;
+  **Backspace / Delete** delete the range (and `Delete` is no
+  longer dead mid-edit — without a selection it forward-deletes).
+  Selected glyphs carry a translucent blue highlight; the block
+  caret is retired in favour of the industry **thin bar caret**.
+  Plain caret moves collapse the selection; Enter / Esc /
+  tool-switch commit semantics and the one-undo-per-re-edit-session
+  bracketing are byte-for-byte unchanged. Click-away mid-edit now
+  commits-and-moves-on (previously clicks were ignored while
+  typing).
+
 ### Changed
 
+- **`just` recipes are quiet by default.** All cargo invocations in the
+  justfile now pass `-q` (nextest: `--cargo-quiet`): compile chatter
+  and per-test lines are suppressed on success, while errors, test
+  failures, and remaining warnings still print in full — keeping
+  output (and token cost, when an agent runs these) minimal.
+  `just watch` / `just dev` stay verbose for visible rebuild feedback.
 - **Tool palette remapped to Select / Crop / Hand**
   (ADR-0064). The editor's conflated tools are split along the
   mainstream image-editor lines: **Select** (V) is now the
