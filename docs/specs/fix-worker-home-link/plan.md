@@ -39,7 +39,7 @@ proven `open_settings_from_worker` seam end to end. Spec:
 
 ### Phase 1: The hook path (editor-egui)
 
-- [ ] Task 1: `open_home` hook seam + `NavigateHome` handler fires it → `tasks/001-open-home-hook.md`
+- [x] Task 1: `open_home` hook seam + `NavigateHome` handler fires it → `tasks/001-open-home-hook.md`
 
 ### Phase 2: The real delegate (flintshot-app)
 

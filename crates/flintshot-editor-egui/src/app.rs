@@ -214,6 +214,15 @@ pub(crate) struct EditorApp {
     /// the router handles Settings before forwarding editor actions.
     /// `None` keeps the entry inert (headless tests).
     open_settings: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// Worker-window seam for the breadcrumb's **Home** link: worker
+    /// windows have no home route behind them, so the link
+    /// delegates the daemon's `OpenApp` choreography (focus a
+    /// running app window / spawn one) through this hook and then
+    /// leaves via the Esc contract. Page mode never lands on this —
+    /// the router intercepts `NavigateHome` before forwarding
+    /// editor actions. `None` keeps the link a plain Esc leave
+    /// (headless tests).
+    open_home: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// Whether the stable editor viewport still owes its one-shot
     /// open-time clamp to the monitor (page epochs only; see
     /// [`Self::update_fit`]).
@@ -348,6 +357,7 @@ impl EditorApp {
             open_clamp_pending: page.is_some(),
             page,
             open_settings: None,
+            open_home: None,
             panel: panel::PanelState::default(),
             rail: rail::RailState::default(),
             floating_rects: Vec::new(),
@@ -1634,9 +1644,18 @@ impl EditorApp {
                 }
             }
             // The breadcrumb's Home link: worker windows have no
-            // home route behind them, so leaving the editor is the
-            // Esc contract — publish-if-unset and close.
+            // home route behind them, so the link delegates the
+            // daemon's `OpenApp` choreography (focus-or-spawn the
+            // app window) first — the handoff must be requested
+            // while the worker is still alive to ask — then leaves
+            // via the Esc contract: publish-if-unset and close. The
+            // app-window router intercepts `NavigateHome` before
+            // editor actions flow, so this arm is worker-side; the
+            // page path through here stays defensive.
             TopbarAction::NavigateHome => {
+                if let Some(open) = &self.open_home {
+                    open();
+                }
                 self.publish_outcome_if_unset(Ok(EditorOutcome::Cancelled));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -1648,6 +1667,13 @@ impl EditorApp {
     /// right after [`Self::new`].
     pub(crate) fn set_open_settings(&mut self, f: std::sync::Arc<dyn Fn() + Send + Sync>) {
         self.open_settings = Some(f);
+    }
+
+    /// Install the worker Home link's delegate (see the `open_home`
+    /// field). Called by the shell's app creator right after
+    /// [`Self::new`].
+    pub(crate) fn set_open_home(&mut self, f: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.open_home = Some(f);
     }
 
     /// Live-apply a refreshed config snapshot (the router calls this
@@ -3961,6 +3987,64 @@ mod tests {
         assert!(
             matches!(&*outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
             "the Home link leaves the worker editor like Esc"
+        );
+    }
+
+    /// The breadcrumb's Home link with the shell's open-home
+    /// delegate installed: the hook fires exactly once, then the
+    /// worker still leaves via the Esc contract (publish-if-unset
+    /// Cancelled + viewport close) — the handoff precedes the exit.
+    #[test]
+    fn navigate_home_with_hook_fires_it_then_cancels_and_closes() {
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::clone(&outcome), false);
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&fired);
+        app.set_open_home(std::sync::Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_topbar_action(TopbarAction::NavigateHome, ui.ctx());
+        });
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the Home delegate fired exactly once"
+        );
+        assert!(
+            matches!(&*outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "the worker still leaves via the Esc contract after the handoff"
+        );
+        assert!(
+            close_command_issued(&full),
+            "the worker editor closes behind the handoff"
+        );
+    }
+
+    /// Page mode with the hook installed keeps the same defensive
+    /// contract: the router normally intercepts `NavigateHome`
+    /// before editor actions flow, but the handler arm publishes +
+    /// closes either way.
+    #[test]
+    fn page_navigate_home_with_hook_still_publishes_and_closes() {
+        let mut app = page_app(RecordingPageBridge::default());
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&fired);
+        app.set_open_home(std::sync::Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }));
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_topbar_action(TopbarAction::NavigateHome, ui.ctx());
+        });
+        assert!(
+            matches!(&*app.outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "the defensive arm still publishes the exit signal"
+        );
+        assert!(
+            close_command_issued(&full),
+            "the defensive arm still closes"
         );
     }
 
