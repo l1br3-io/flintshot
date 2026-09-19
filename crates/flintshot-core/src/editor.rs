@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::geom::{Color, Point, Rect, Stroke};
+use crate::history::EditKind;
 
 /// Available annotation tools.
 ///
@@ -186,6 +187,11 @@ pub enum Annotation {
 /// crop sets it to `Some(pre_crop_image)`.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    /// What kind of edit pushed this snapshot; drives the History
+    /// tab's row labels. The kind travels with the entry across the
+    /// `undo` ↔ `redo` swap (the same edit viewed from either side
+    /// keeps its label). See [`crate::history::EditKind`].
+    pub kind: EditKind,
     /// Annotation list at capture time (pre-mutation).
     pub anns: Vec<Annotation>,
     /// Source image at capture time. `None` when the action did not
@@ -205,8 +211,9 @@ impl Snapshot {
     /// [`EditorState::place_number`]. Captures `next_number` so undo
     /// restores the pre-commit counter.
     #[must_use]
-    pub fn anns_only(anns: Vec<Annotation>, next_number: u32) -> Self {
+    pub fn anns_only(kind: EditKind, anns: Vec<Annotation>, next_number: u32) -> Self {
         Self {
+            kind,
             anns,
             image: None,
             next_number,
@@ -216,8 +223,14 @@ impl Snapshot {
     /// Construct a full snapshot capturing image, anns, and counter.
     /// Used by [`EditorState::crop`].
     #[must_use]
-    pub fn full(anns: Vec<Annotation>, image: image::RgbaImage, next_number: u32) -> Self {
+    pub fn full(
+        kind: EditKind,
+        anns: Vec<Annotation>,
+        image: image::RgbaImage,
+        next_number: u32,
+    ) -> Self {
         Self {
+            kind,
             anns,
             image: Some(image),
             next_number,
@@ -640,8 +653,11 @@ impl EditorState {
         // Clone-then-push: snapshot must capture pre-commit `anns`
         // (without the new annotation). `mem::take` here would wipe
         // `self.anns` and lose prior annotations.
-        self.undo
-            .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
+        self.undo.push(Snapshot::anns_only(
+            EditKind::Add { tool: owner },
+            self.anns.clone(),
+            self.next_number,
+        ));
         self.redo.clear();
         self.last_edit_kind = None;
         self.anns.push(ann);
@@ -684,8 +700,11 @@ impl EditorState {
         };
         // Snapshot pre-placement state so undo restores next_number
         // to the pre-increment value. `mem::take` would wipe self.anns.
-        self.undo
-            .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
+        self.undo.push(Snapshot::anns_only(
+            EditKind::AddNumber,
+            self.anns.clone(),
+            self.next_number,
+        ));
         self.redo.clear();
         self.last_edit_kind = None;
         self.anns.push(ann);
@@ -888,8 +907,13 @@ impl EditorState {
             return;
         }
         if !drag.moved {
-            self.undo
-                .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
+            self.undo.push(Snapshot::anns_only(
+                EditKind::Move {
+                    count: self.selected.len(),
+                },
+                self.anns.clone(),
+                self.next_number,
+            ));
             self.redo.clear();
             self.last_edit_kind = None;
         }
@@ -930,8 +954,13 @@ impl EditorState {
         // Capture the doomed indices before `end_move` clears the set.
         let doomed: Vec<usize> = self.selected.clone();
         self.end_move();
-        self.undo
-            .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
+        self.undo.push(Snapshot::anns_only(
+            EditKind::Delete {
+                count: doomed.len(),
+            },
+            self.anns.clone(),
+            self.next_number,
+        ));
         self.redo.clear();
         self.last_edit_kind = None;
         // Remove back-to-front so live indices below each removal
@@ -986,7 +1015,12 @@ impl EditorState {
         // Shell-direct entry (the Crop button): close any live re-edit
         // session first so the crop sees the pre-session anns.
         self.restore_active_reedit();
-        let snapshot = Snapshot::full(self.anns.clone(), self.image.clone(), self.next_number);
+        let snapshot = Snapshot::full(
+            EditKind::Crop,
+            self.anns.clone(),
+            self.image.clone(),
+            self.next_number,
+        );
         self.image = new_image;
         self.anns.retain_mut(|ann| ann.crop_and_translate(n));
         self.pending = None;
@@ -1022,7 +1056,10 @@ impl EditorState {
         // entry captured an image (crop), capture the current image
         // too so redo can restore it; otherwise image is None and
         // redo leaves image untouched (matching commit's snapshot).
+        // The entry keeps the popped entry's kind — the same edit
+        // viewed from the other side keeps its label.
         let current = Snapshot {
+            kind: prev.kind,
             anns: std::mem::take(&mut self.anns),
             image: prev.image.as_ref().map(|_| self.image.clone()),
             next_number: self.next_number,
@@ -1054,6 +1091,7 @@ impl EditorState {
             return;
         };
         let current = Snapshot {
+            kind: next.kind,
             anns: std::mem::take(&mut self.anns),
             image: next.image.as_ref().map(|_| self.image.clone()),
             next_number: self.next_number,
@@ -1782,7 +1820,11 @@ impl EditorState {
         // any style changes made mid-session (lift-out invariant).
         let mut pre = self.anns.clone();
         pre.insert(index.min(pre.len()), session.original);
-        self.undo.push(Snapshot::anns_only(pre, self.next_number));
+        self.undo.push(Snapshot::anns_only(
+            EditKind::EditText,
+            pre,
+            self.next_number,
+        ));
         self.redo.clear();
         if survives {
             if let Some(edited) = edited {
@@ -1852,8 +1894,11 @@ impl EditorState {
         if !text_selected {
             return;
         }
-        self.style_gesture_snapshot =
-            Some(Snapshot::anns_only(self.anns.clone(), self.next_number));
+        self.style_gesture_snapshot = Some(Snapshot::anns_only(
+            EditKind::RestyleText,
+            self.anns.clone(),
+            self.next_number,
+        ));
     }
 
     /// Write `style` onto the restyle target and sync the session
@@ -3232,8 +3277,11 @@ mod tests {
         // Take a snapshot manually so undo has something to pop (the
         // state machine's `commit_annotation` normally does this; we
         // bypass it here to isolate dispatcher behaviour).
-        s.undo
-            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)], 1));
+        s.undo.push(Snapshot::anns_only(
+            EditKind::Generic,
+            vec![rect_ann(0.0, 0.0, 10.0, 10.0)],
+            1,
+        ));
 
         assert_eq!(s.dispatch_input(&ctrl('z')), DispatchOutcome::Continue);
         assert_eq!(s.anns.len(), 1);
@@ -3254,9 +3302,13 @@ mod tests {
     fn dispatch_ctrl_y_redoes() {
         let mut s = EditorState::new(blank_image());
         s.anns.push(rect_ann(0.0, 0.0, 10.0, 10.0));
-        s.undo.push(Snapshot::anns_only(Vec::new(), 1));
-        s.redo
-            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)], 1));
+        s.undo
+            .push(Snapshot::anns_only(EditKind::Generic, Vec::new(), 1));
+        s.redo.push(Snapshot::anns_only(
+            EditKind::Generic,
+            vec![rect_ann(0.0, 0.0, 10.0, 10.0)],
+            1,
+        ));
         s.anns.clear();
 
         assert_eq!(s.dispatch_input(&ctrl('y')), DispatchOutcome::Continue);
@@ -3268,9 +3320,13 @@ mod tests {
     fn dispatch_ctrl_shift_z_redoes() {
         let mut s = EditorState::new(blank_image());
         s.anns.push(rect_ann(0.0, 0.0, 10.0, 10.0));
-        s.undo.push(Snapshot::anns_only(Vec::new(), 1));
-        s.redo
-            .push(Snapshot::anns_only(vec![rect_ann(0.0, 0.0, 10.0, 10.0)], 1));
+        s.undo
+            .push(Snapshot::anns_only(EditKind::Generic, Vec::new(), 1));
+        s.redo.push(Snapshot::anns_only(
+            EditKind::Generic,
+            vec![rect_ann(0.0, 0.0, 10.0, 10.0)],
+            1,
+        ));
         s.anns.clear();
 
         assert_eq!(
@@ -4430,7 +4486,11 @@ mod tests {
             "first",
             crate::text::TextStyle::simple(16.0, Color::RED),
         ));
-        s.undo.push(Snapshot::anns_only(Vec::new(), s.next_number));
+        s.undo.push(Snapshot::anns_only(
+            EditKind::Generic,
+            Vec::new(),
+            s.next_number,
+        ));
         dblclick(&mut s, Point::new(20.0, 15.0));
         s.dispatch_input(&InputEvent::TextInput('!'));
         s.undo();
@@ -6121,7 +6181,8 @@ mod tests {
     fn delete_selected_removes_exactly_it_with_undo_symmetry() {
         let mut s = two_ann_move_state();
         // Pre-populate redo to prove delete clears it (new mutation).
-        s.redo.push(Snapshot::anns_only(Vec::new(), 1));
+        s.redo
+            .push(Snapshot::anns_only(EditKind::Generic, Vec::new(), 1));
         s.dispatch_input(&down(Point::new(75.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.selected, vec![1], "fixture: ann 1 selected");
@@ -6717,5 +6778,122 @@ mod tests {
             before.translate(10.0, 5.0);
             assert_eq!(before, after);
         }
+    }
+
+    // --- Edit-kind labels (properties-history-tabs spec) ---
+
+    /// Every production push site records its specific
+    /// [`EditKind`](crate::history::EditKind) on the snapshot it
+    /// pushes.
+    #[test]
+    fn push_sites_record_their_edit_kind() {
+        // commit_annotation → Add { tool } with the owning tool.
+        let mut s = hundred_state();
+        s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
+        s.commit_annotation();
+        assert_eq!(
+            s.undo.last().unwrap().kind,
+            EditKind::Add { tool: Tool::Rect }
+        );
+
+        // place_number → AddNumber.
+        s.place_number(Point::new(5.0, 5.0));
+        assert_eq!(s.undo.last().unwrap().kind, EditKind::AddNumber);
+
+        // Move gesture (lazy push on first actual movement) →
+        // Move { count: selected.len() }.
+        s.tool = Tool::Select;
+        s.selected = vec![0];
+        s.dispatch_input(&down(Point::new(5.0, 5.0)));
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(8.0, 8.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.undo.last().unwrap().kind, EditKind::Move { count: 1 });
+
+        // delete_selected → Delete { count }.
+        s.selected = vec![0];
+        s.delete_selected();
+        assert_eq!(s.undo.last().unwrap().kind, EditKind::Delete { count: 1 });
+
+        // crop → Crop (the only Snapshot::full site).
+        s.crop(Rect::from_xywh(0.0, 0.0, 50.0, 50.0));
+        assert_eq!(s.undo.last().unwrap().kind, EditKind::Crop);
+    }
+
+    /// A changed re-edit session commits with `EditText`; an
+    /// unchanged one records nothing.
+    #[test]
+    fn reedit_commit_records_edit_text_kind() {
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        s.dispatch_input(&InputEvent::TextInput('!'));
+        s.dispatch_input(&key(Key::Enter));
+        assert_eq!(s.undo.last().unwrap().kind, EditKind::EditText);
+    }
+
+    /// A closed restyle gesture records `RestyleText` on its single
+    /// staged entry.
+    #[test]
+    fn style_gesture_records_restyle_text_kind() {
+        let mut s = reedit_state();
+        s.selected = vec![0];
+        s.begin_style_gesture();
+        s.restyle_selected_text(loud_style());
+        s.end_style_gesture();
+        assert_eq!(s.undo.last().unwrap().kind, EditKind::RestyleText);
+    }
+
+    /// Undo→redo round trip mirrors the kind onto the redo entry —
+    /// the same edit viewed from the other side keeps its label.
+    #[test]
+    fn undo_redo_round_trip_mirrors_kind() {
+        let mut s = hundred_state();
+        s.place_number(Point::new(5.0, 5.0));
+        s.undo();
+        assert_eq!(
+            s.redo.last().unwrap().kind,
+            EditKind::AddNumber,
+            "the redo entry keeps the popped entry's kind"
+        );
+        s.redo();
+        assert_eq!(
+            s.undo.last().unwrap().kind,
+            EditKind::AddNumber,
+            "stepping forward keeps the kind on the undo side"
+        );
+    }
+
+    /// The spec's scripted mixed session: one labeled undo entry per
+    /// gesture, oldest first.
+    #[test]
+    fn mixed_session_one_kind_per_gesture() {
+        let mut s = hundred_state();
+        s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
+        s.commit_annotation();
+        s.place_number(Point::new(5.0, 5.0));
+        s.place_number(Point::new(50.0, 50.0));
+        s.tool = Tool::Select;
+        s.selected = vec![0, 1];
+        s.dispatch_input(&down(Point::new(5.0, 5.0)));
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(7.0, 7.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.selected = vec![0];
+        s.delete_selected();
+        s.crop(Rect::from_xywh(0.0, 0.0, 50.0, 50.0));
+        let kinds: Vec<EditKind> = s.undo.iter().map(|snap| snap.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                EditKind::Add { tool: Tool::Rect },
+                EditKind::AddNumber,
+                EditKind::AddNumber,
+                EditKind::Move { count: 2 },
+                EditKind::Delete { count: 1 },
+                EditKind::Crop,
+            ]
+        );
     }
 }
