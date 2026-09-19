@@ -357,7 +357,17 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::R
             // on light. Picked by Rec. 601 luminance — see
             // `contrast_text_color`.
             let text = TextStyle::simple(*diameter * 0.6, contrast_text_color(*color));
-            canvas.draw_text(*pos, &label, &text);
+            // Centre the digit: `pos` is the bubble's centre, but the
+            // `Canvas` contract anchors a text run's top-left at the
+            // draw position — drawing at `pos` would sit the digit
+            // toward the bubble's bottom-right. Measure the laid-out
+            // label and offset by half its size so the glyph block is
+            // centred in the disc. Fixed here, in the shared path, so
+            // `EguiCanvas` and `ImageCanvas` center together (WYSIWYG),
+            // each by its own font metrics.
+            let m = canvas.measure_text(&label, &text);
+            let anchor = Point::new(pos.x - m.width / 2.0, pos.y - m.height / 2.0);
+            canvas.draw_text(anchor, &label, &text);
         }
     }
 }
@@ -1638,6 +1648,19 @@ mod tests {
     use super::*;
     use crate::editor::{Annotation, EditorState, Tool};
     use crate::geom::{Color, Point, Rect, Stroke};
+    use crate::text::DEFAULT_LINE_SPACING;
+
+    /// Expected `DrawText` anchor for a Number-tool label centred in
+    /// its bubble, under the `MockCanvas` metrics
+    /// (`width = chars · size · 0.6`, `height = size · line_spacing`):
+    /// bubble centre minus half the measured label size. Mirrors the
+    /// mock's evaluation order (`count · size · 0.6`) so the f32 bits
+    /// match exactly and `assert_eq!` is deterministic.
+    fn centered_anchor(pos: Point, char_count: f32, font: f32) -> Point {
+        let width = char_count * font * 0.6;
+        let height = font * DEFAULT_LINE_SPACING;
+        Point::new(pos.x - width / 2.0, pos.y - height / 2.0)
+    }
 
     #[test]
     fn render_blits_background_image_once() {
@@ -3078,7 +3101,78 @@ mod tests {
                 assert_eq!(style.color, Color::rgb(255, 255, 255));
                 // Font size scales with diameter (existing behaviour).
                 assert!((style.size - 28.0 * 0.6).abs() < f32::EPSILON);
-                assert_eq!(*pos, Point::new(50.0, 50.0));
+                // The anchor is the bubble centre minus half the
+                // measured label size — the digit's top-left, so the
+                // glyph block sits centred in the disc. (Font 16.8 →
+                // mock width 10.08, height 20.16 → anchor
+                // (44.96, 39.92).)
+                let font = 28.0 * 0.6;
+                assert_eq!(*pos, centered_anchor(Point::new(50.0, 50.0), 1.0, font));
+            }
+            other => panic!("expected DrawText, got {other:?}"),
+        }
+    }
+
+    /// A two-digit label centres the same way: the anchor shifts left
+    /// by the extra digit's width, half of which is 10.08 − 5.04 =
+    /// 5.04 px here. Pins that centering is measured, not a constant
+    /// offset — the anchor tracks the label's own width.
+    #[test]
+    fn render_ann_number_centers_two_digit_label() {
+        let mut canvas = MockCanvas::default();
+        let source = image::RgbaImage::new(1, 1);
+        let pos = Point::new(50.0, 50.0);
+        render_ann(
+            &mut canvas,
+            &Annotation::Number {
+                pos,
+                n: 12,
+                color: Color::rgb(0, 0, 255),
+                diameter: 28.0,
+            },
+            &source,
+        );
+        match &canvas.calls[1] {
+            DrawCall::DrawText {
+                text, pos: anchor, ..
+            } => {
+                assert_eq!(text, "12", "two-digit label");
+                let font = 28.0 * 0.6;
+                // Mock width for 2 chars: 2 · 16.8 · 0.6 = 20.16 →
+                // anchor x = 50 − 10.08 = 39.92.
+                assert_eq!(*anchor, centered_anchor(pos, 2.0, font));
+            }
+            other => panic!("expected DrawText, got {other:?}"),
+        }
+    }
+
+    /// Centering scales with the diameter: at 64 px the font is 38.4,
+    /// so the mock-measured block is 23.04 × 46.08 and the anchor
+    /// lands at (38.48, 26.96) — not the 28 px-diameter offset. Pins
+    /// that the fix holds at non-default sizes (the size control this
+    /// effort adds to the panel).
+    #[test]
+    fn render_ann_number_centers_at_scaled_diameter() {
+        let mut canvas = MockCanvas::default();
+        let source = image::RgbaImage::new(1, 1);
+        let pos = Point::new(50.0, 50.0);
+        render_ann(
+            &mut canvas,
+            &Annotation::Number {
+                pos,
+                n: 9,
+                color: Color::rgb(255, 0, 0),
+                diameter: 64.0,
+            },
+            &source,
+        );
+        match &canvas.calls[1] {
+            DrawCall::DrawText {
+                text, pos: anchor, ..
+            } => {
+                assert_eq!(text, "9", "digit label");
+                let font = 64.0 * 0.6;
+                assert_eq!(*anchor, centered_anchor(pos, 1.0, font));
             }
             other => panic!("expected DrawText, got {other:?}"),
         }

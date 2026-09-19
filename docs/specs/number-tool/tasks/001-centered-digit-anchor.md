@@ -14,27 +14,27 @@ No canvas trait or implementation changes; the Text tool's top-left
 anchoring is untouched.
 
 **Acceptance criteria:**
-- [ ] The `Annotation::Number` arm computes the label's top-left
+- [x] The `Annotation::Number` arm computes the label's top-left
       anchor as bubble center minus half the measured label size and
       passes that anchor to `draw_text`; bubble disc (ellipse call)
       and digit font size (`diameter * 0.6`) unchanged.
-- [ ] MockCanvas render test: a committed one-digit `Number` issues
+- [x] MockCanvas render test: a committed one-digit `Number` issues
       `DrawText` at `pos − ½·measure("1")` (mock metrics:
       `width = chars · size · 0.6`, `height = size · line_spacing`).
-- [ ] MockCanvas render test: a two-digit label ("12") centers the
+- [x] MockCanvas render test: a two-digit label ("12") centers the
       same way at default diameter 28.
-- [ ] MockCanvas render test: a non-default diameter (e.g. 64) also
+- [x] MockCanvas render test: a non-default diameter (e.g. 64) also
       centers — anchors scale with the measured size, not a constant.
-- [ ] No `EguiCanvas` / `ImageCanvas` / `Canvas` trait changes; no
+- [x] No `EguiCanvas` / `ImageCanvas` / `Canvas` trait changes; no
       behavior change in any other tool's render arm.
 
 **Verification:**
-- [ ] `cargo test -p flintshot-core --quiet` — new tests pass, no
+- [x] `cargo test -p flintshot-core --quiet` — new tests pass, no
       regressions in the existing Task-004 Number render tests
       (bubble-disc assertions unchanged; any that pinned the old
       off-center `DrawText` position are updated to the centered
       anchor).
-- [ ] `cargo clippy -p flintshot-core --all-targets -- -D warnings`
+- [x] `cargo clippy -p flintshot-core --all-targets -- -D warnings`
 - [ ] Manual: `cargo run -- editor` → Number tool → place bubbles
       with 1- and 2-digit labels → digits sit centered in the editor;
       Save → the PNG matches the editor.
