@@ -119,14 +119,14 @@ pub(crate) fn panel_title(state: &EditorState) -> String {
     }
 }
 
-/// Whether the panel renders as the Hand-tool selection inspector.
+/// Whether the panel renders as the Select-tool selection inspector.
 /// The Text tool's singleton selection is a different contract — the
 /// tool-defaults panel stays up and the Text surfaces retarget to
 /// the selection in place (see [`effective_text_style`]); the
 /// inspector (intersection sections, `set_selected_*` mutators) is
-/// the Hand tool's multi-selection surface alone.
+/// the Select tool's multi-selection surface alone.
 fn inspector_mode(state: &EditorState) -> bool {
-    state.tool == Tool::Hand && !state.selected.is_empty()
+    state.tool == Tool::Select && !state.selected.is_empty()
 }
 
 /// The inspector's section map: the intersection sections the
@@ -757,7 +757,7 @@ pub(crate) fn tool_hint(tool: Tool) -> &'static str {
     match tool {
         Tool::Select => "click / marquee / drag-move annotations",
         Tool::Crop => "drag a region · Copy uses it · Enter crops",
-        Tool::Hand => "click selects · Shift+click adds · drag moves all · Del removes",
+        Tool::Hand => "drag pans · wheel zooms",
         Tool::Text => "click to place the caret",
         Tool::Blur => "drag over what to hide",
         Tool::Number => "click to place the next number",
@@ -1753,10 +1753,10 @@ mod tests {
     // --- Selection-inspector mode (multi-select-properties Task 004) ---
 
     /// A committed rect at a known spot, `n` of them selected, tool
-    /// Hand (the only tool a selection survives under).
+    /// Select (the multi-selection owner).
     fn inspector_state(n_usable: usize) -> EditorState {
         let mut state = panel_state();
-        state.tool = Tool::Hand;
+        state.tool = Tool::Select;
         state.anns.push(Annotation::Rect {
             rect: CoreRect::from_xywh(10.0, 10.0, 40.0, 30.0),
             stroke: CoreStroke::new(Color::RED, 3.0),
@@ -1952,7 +1952,7 @@ mod tests {
         // delete button stays reachable.
         let ctx = egui::Context::default();
         let mut state = panel_state();
-        state.tool = Tool::Hand;
+        state.tool = Tool::Select;
         state.anns.push(Annotation::Rect {
             rect: CoreRect::from_xywh(10.0, 10.0, 40.0, 30.0),
             stroke: CoreStroke::new(Color::RED, 3.0),

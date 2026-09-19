@@ -2855,7 +2855,7 @@ mod tests {
         // Untouched baseline: the tool default stays core's choice
         // here — the overlay forces Crop inside `OverlayApp::new`,
         // not in the shared builder.
-        assert_eq!(state.tool, Tool::Hand);
+        assert_eq!(state.tool, Tool::Select);
     }
 
     /// The persisted `[ui] flip-to-move` knob must reach the state

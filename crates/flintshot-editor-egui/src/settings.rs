@@ -228,8 +228,8 @@ fn editor_section(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
     section_card(ui, "Editor", |ui| {
         set_row(ui, "Tool when editor opens", |ui| {
             // Readonly this effort: the engine's landing tool is
-            // Hand; the setting is a seam, not a pref.
-            readonly_value(ui, "Hand");
+            // Select (the default); the setting is a seam, not a pref.
+            readonly_value(ui, "Select");
         });
         set_row(ui, "Show statusbar", |ui| {
             let resp = widgets::switch(

@@ -10,21 +10,22 @@ use crate::geom::{Color, Point, Rect, Stroke};
 
 /// Available annotation tools.
 ///
-/// `Default` is [`Tool::Hand`] — the editor opens on the tool
-/// annotations land on for repositioning; `flintshot-app` overrides
-/// this from config. Tools are sticky across commits by default
+/// `Default` is [`Tool::Select`] — the editor opens on the
+/// object-selection tool; `flintshot-app` overrides this from
+/// config. Tools are sticky across commits by default
 /// (see [`EditorState::flip_to_move`]); flipping to Hand after a
 /// commit is opt-in via `[ui] flip-to-move`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Tool {
     /// Object selection: click / marquee / drag-move annotations.
+    #[default]
     Select,
     /// Region crop: drag a region, then Enter or the Crop button
     /// narrows the image to it.
     Crop,
-    /// Select and move a committed annotation by dragging it.
-    #[default]
+    /// Pan the view (the photo-editor hand). Presses are shell-owned
+    /// and never dispatched; core no-ops them defensively.
     Hand,
     /// Rectangle outline.
     Rect,
@@ -306,6 +307,18 @@ pub struct EditorState {
     /// Crop button. Rendered on top of annotations so the user sees
     /// live feedback during the drag.
     pub crop_region: Option<Rect>,
+    /// In-flight marquee for `Tool::Select` (the rubber band drawn
+    /// over empty space).
+    ///
+    /// GOTCHA: transient by design — release resolves it into
+    /// [`selected`](Self::selected) and clears it; never part of
+    /// saves/history. Not to be confused with
+    /// [`crop_region`](Self::crop_region).
+    pub marquee: Option<Rect>,
+    /// Whether the in-flight marquee merges into the selection set
+    /// (Shift/Ctrl) or replaces it (plain). Captured at press time
+    /// because `PointerUp` carries no modifiers.
+    pub marquee_additive: bool,
     /// Currently-active tool.
     pub tool: Tool,
     /// Policy: committing an eligible annotation flips `tool` to
@@ -423,6 +436,8 @@ impl EditorState {
             redo: Vec::new(),
             pending: None,
             crop_region: None,
+            marquee: None,
+            marquee_additive: false,
             tool: Tool::default(),
             flip_to_move: false,
             fill_shapes: false,
@@ -450,7 +465,7 @@ impl EditorState {
     }
 
     /// Switch the active tool, dropping a persistent selection when
-    /// leaving [`Tool::Hand`] or [`Tool::Text`].
+    /// leaving [`Tool::Select`] or [`Tool::Text`].
     ///
     /// Tool switches bypass the dispatcher (shells write `tool`
     /// directly from rail chips and hotkeys), so this method owns
@@ -458,9 +473,10 @@ impl EditorState {
     /// tool that produced it" invariant: route every switch through
     /// it and the selection lifecycle stays correct no matter where
     /// the switch originated. Staying on (or switching to) the
-    /// selection-owning tool never clears.
+    /// selection-owning tool never clears. Hand is not an owner —
+    /// it is pan-only and produces no selection.
     pub fn set_tool(&mut self, tool: Tool) {
-        if matches!(self.tool, Tool::Hand | Tool::Text) && tool != self.tool {
+        if matches!(self.tool, Tool::Select | Tool::Text) && tool != self.tool {
             self.selected.clear();
         }
         self.tool = tool;
@@ -677,30 +693,38 @@ impl EditorState {
         }
     }
 
-    // --- Annotation move (Tool::Hand) ---
+    // --- Object selection + move (Tool::Select) ---
 
-    /// Route a Hand-tool press: selection first (the set model),
-    /// then the drag grab.
+    /// Route a Select-tool press: the set model first (Shift/Ctrl
+    /// toggles, plain replaces, miss clears), then the drag grab or
+    /// a marquee start on empty space.
     ///
-    /// - hit + Shift on a non-member: toggle in, grab (press-and-hold
-    ///   after adding drags the set).
-    /// - hit + Shift on a member: toggle out, start no drag.
+    /// - hit + Shift/Ctrl on a non-member: toggle in, grab
+    ///   (press-and-hold after adding drags the set).
+    /// - hit + Shift/Ctrl on a member: toggle out, start no drag.
     /// - plain hit on a non-member: replace the set with the hit
     ///   annotation, grab it (last click wins).
     /// - plain hit on a member: **keep the set** and grab — this is
     ///   the group-drag entry (spec exit criterion: drag any selected
     ///   member → all translate together).
-    /// - miss: clear the set, start nothing.
+    /// - miss, plain: clear the set, start a marquee.
+    /// - miss, Shift/Ctrl: keep the set, start a marquee (release
+    ///   merges the marquee hits into it).
     ///
     /// Shared by the normal dispatcher and the text-draft
-    /// commit-then-route path so both stay Shift-aware in lockstep.
-    fn route_move_press(&mut self, pos: Point, shift: bool) {
+    /// commit-then-route path so both stay modifier-aware in
+    /// lockstep.
+    fn route_select_press(&mut self, pos: Point, modifiers: crate::input::Modifiers) {
+        let toggle = modifiers.shift || modifiers.ctrl;
         let Some(index) = self.hit_test(pos) else {
-            self.selected.clear();
+            if !toggle {
+                self.selected.clear();
+            }
+            self.begin_marquee(pos, toggle);
             return;
         };
         let is_member = self.selected.binary_search(&index).is_ok();
-        if shift {
+        if toggle {
             if self.toggle_selected(index) {
                 self.begin_move(index, pos);
             }
@@ -709,6 +733,59 @@ impl EditorState {
         } else {
             self.select_only(index);
             self.begin_move(index, pos);
+        }
+    }
+
+    /// Begin a marquee drag at `anchor`, capturing whether release
+    /// merges (`additive`) or replaces.
+    fn begin_marquee(&mut self, anchor: Point, additive: bool) {
+        self.marquee = Some(Rect::new(anchor, anchor));
+        self.marquee_additive = additive;
+    }
+
+    /// Extend the in-flight marquee's far corner to `at`. No-op when
+    /// no marquee is active.
+    fn update_marquee(&mut self, at: Point) {
+        if let Some(m) = &mut self.marquee {
+            m.max = at;
+        }
+    }
+
+    /// Resolve the marquee on release: every annotation whose
+    /// bounding box intersects the normalized marquee enters the
+    /// selection set — replacing it (plain) or merging (Shift/Ctrl).
+    /// A degenerate marquee (< 1 px, a click-without-drag) selects
+    /// nothing; the press already handled plain-miss clearing.
+    /// The set's sorted-deduped invariant holds either way.
+    fn finish_marquee(&mut self) {
+        let Some(m) = self.marquee.take() else {
+            return;
+        };
+        let n = m.normalized();
+        if n.width().abs() < 1.0 || n.height().abs() < 1.0 {
+            return;
+        }
+        let hits: Vec<usize> = self
+            .anns
+            .iter()
+            .enumerate()
+            .filter(|(_, ann)| ann.bounding_box().is_some_and(|b| b.intersect(n).is_some()))
+            .map(|(index, _)| index)
+            .collect();
+        if self.marquee_additive {
+            for index in hits {
+                self.add_selected(index);
+            }
+        } else {
+            self.selected = hits;
+        }
+    }
+
+    /// Insert `index` into the selection set if absent (union),
+    /// preserving the sorted-deduped invariant.
+    fn add_selected(&mut self, index: usize) {
+        if let Err(slot) = self.selected.binary_search(&index) {
+            self.selected.insert(slot, index);
         }
     }
 
@@ -1077,13 +1154,14 @@ impl EditorState {
                     // over it (annotation moves belong to the
                     // selection tools).
                     self.begin_crop_region(*pos);
-                } else if self.tool == Tool::Hand {
+                } else if self.tool == Tool::Select {
                     // A press routes through the selection set first
-                    // (Shift toggles, plain replaces, miss clears),
-                    // then grabs the hit annotation for a drag. See
-                    // `route_move_press` for the arm details and the
+                    // (Shift/Ctrl toggles, plain replaces, miss clears
+                    // or merges), then grabs the hit annotation for a
+                    // drag or starts a marquee. See
+                    // `route_select_press` for the arm details and the
                     // degenerate-bbox no-grab path.
-                    self.route_move_press(*pos, modifiers.shift);
+                    self.route_select_press(*pos, *modifiers);
                 } else if self.tool == Tool::Number {
                     // Number is click-to-place: a single PointerDown
                     // commits the bubble immediately (no pending, no
@@ -1104,8 +1182,17 @@ impl EditorState {
             InputEvent::PointerDrag { pos } => {
                 if self.tool == Tool::Crop {
                     self.update_crop_region(*pos);
-                } else if self.tool == Tool::Hand {
+                } else if self.tool == Tool::Select {
+                    // Exactly one of these is live: a grab drags the
+                    // set, otherwise the marquee extends. Both
+                    // self-guard on their Option state.
                     self.update_move(*pos);
+                    self.update_marquee(*pos);
+                } else if self.tool == Tool::Hand {
+                    // Pan-only contract: the shell owns panning and
+                    // never dispatches Hand drags; core no-ops them
+                    // defensively so synthetic state can't mutate
+                    // annotations.
                 } else {
                     self.update_annotation(*pos);
                 }
@@ -1114,12 +1201,16 @@ impl EditorState {
             InputEvent::PointerUp => {
                 if self.tool == Tool::Crop {
                     self.finish_crop_region();
-                } else if self.tool == Tool::Hand {
+                } else if self.tool == Tool::Select {
                     // Release ends the drag but keeps the selection —
                     // the press selected the annotation (persistent
                     // selection); Del / a miss press / tool switch own
-                    // deselecting.
+                    // deselecting. A live marquee resolves into the
+                    // set.
                     self.moving = None;
+                    self.finish_marquee();
+                } else if self.tool == Tool::Hand {
+                    // Pan-only contract (see PointerDrag).
                 } else {
                     self.finish_pointer_up();
                 }
@@ -1255,8 +1346,8 @@ impl EditorState {
                 self.commit_text_draft();
                 if self.tool == Tool::Crop {
                     self.begin_crop_region(*pos);
-                } else if self.tool == Tool::Hand {
-                    self.route_move_press(*pos, modifiers.shift);
+                } else if self.tool == Tool::Select {
+                    self.route_select_press(*pos, *modifiers);
                 } else if self.tool == Tool::Number {
                     self.place_number(*pos);
                 } else if self.tool == Tool::Text {
@@ -2152,7 +2243,9 @@ mod tests {
         assert_eq!(s.next_number, 1);
         assert!(s.selected.is_empty());
         assert!(s.crop_region.is_none(), "crop region starts None");
-        assert_eq!(s.tool, Tool::Hand, "Hand is the default tool");
+        assert!(s.marquee.is_none(), "marquee starts None");
+        assert!(!s.marquee_additive, "marquee additivity starts plain");
+        assert_eq!(s.tool, Tool::Select, "Select is the default tool");
         assert!(!s.flip_to_move, "flip policy defaults off (sticky tools)");
     }
 
@@ -2164,7 +2257,7 @@ mod tests {
 
     #[test]
     fn tool_default_is_move() {
-        assert_eq!(Tool::default(), Tool::Hand);
+        assert_eq!(Tool::default(), Tool::Select);
     }
 
     #[test]
@@ -2645,6 +2738,128 @@ mod tests {
                 ..Modifiers::default()
             },
         }
+    }
+
+    fn ctrl_down(pos: Point) -> InputEvent {
+        InputEvent::PointerDown {
+            pos,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        }
+    }
+
+    /// Drag a marquee from `from` to `to` under Select and release.
+    fn marquee(s: &mut EditorState, from: Point, to: Point) {
+        s.dispatch_input(&down(from));
+        s.dispatch_input(&InputEvent::PointerDrag { pos: to });
+        s.dispatch_input(&InputEvent::PointerUp);
+    }
+
+    #[test]
+    fn marquee_release_replaces_set_with_intersections() {
+        let mut s = three_ann_move_state();
+        // Pre-select ann 2 (outside the band the marquee will cover).
+        s.dispatch_input(&down(Point::new(85.0, 60.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![2], "fixture: ann 2 selected");
+        // Marquee over the left band: intersects ann 0 only.
+        marquee(&mut s, Point::new(5.0, 45.0), Point::new(30.0, 75.0));
+        assert_eq!(s.selected, vec![0], "plain marquee replaces the set");
+        // Wide marquee: every bbox intersects.
+        marquee(&mut s, Point::new(0.0, 40.0), Point::new(100.0, 80.0));
+        assert_eq!(s.selected, vec![0, 1, 2], "wide marquee selects all");
+    }
+
+    #[test]
+    fn marquee_release_merges_with_shift_or_ctrl() {
+        let mut s = three_ann_move_state();
+        // Shift marquee over the left band: hits ann 0.
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(5.0, 45.0),
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(30.0, 75.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0], "shift marquee selects ann 0");
+        // Ctrl marquee over the right band: merges anns 1 + 2 in.
+        s.dispatch_input(&ctrl_down(Point::new(55.0, 45.0)));
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(100.0, 75.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(
+            s.selected,
+            vec![0, 1, 2],
+            "ctrl marquee merges into the existing set (union, not toggle)"
+        );
+        // Re-marqueeing the same band under Ctrl keeps the set
+        // stable — merge is idempotent per member.
+        s.dispatch_input(&ctrl_down(Point::new(55.0, 45.0)));
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(100.0, 75.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0, 1, 2], "merge never toggles members out");
+    }
+
+    #[test]
+    fn degenerate_marquee_selects_nothing() {
+        let mut s = two_ann_move_state();
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0], "fixture: one member");
+        // A sub-pixel drag over empty space: the press cleared the
+        // set (plain), the degenerate release adds nothing.
+        marquee(&mut s, Point::new(70.0, 70.0), Point::new(70.5, 70.0));
+        assert!(s.selected.is_empty(), "degenerate marquee selects nothing");
+        assert!(s.marquee.is_none(), "the marquee never survives release");
+    }
+
+    /// Ctrl+click toggles membership exactly like Shift+click:
+    /// toggle-in grabs for a drag, toggle-out starts nothing.
+    #[test]
+    fn ctrl_click_toggles_membership_in_and_out() {
+        let mut s = two_ann_move_state();
+        s.dispatch_input(&ctrl_down(Point::new(30.0, 25.0)));
+        assert!(s.moving.is_some(), "ctrl toggle-in grabs the annotation");
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&ctrl_down(Point::new(75.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0, 1], "ctrl-click adds to the set");
+        s.dispatch_input(&ctrl_down(Point::new(75.0, 25.0)));
+        assert!(s.moving.is_none(), "ctrl toggle-out starts no drag");
+        assert_eq!(s.selected, vec![0], "ctrl-click on a member removes it");
+    }
+
+    /// Hand is pan-only at the core too: presses, drags, and releases
+    /// under Hand never mutate annotation or selection state — the
+    /// shell owns panning and must be free to (defensively) route
+    /// stray synthetic events here without side effects.
+    #[test]
+    fn hand_events_never_touch_annotations_or_selection() {
+        let mut s = move_state();
+        s.tool = Tool::Hand;
+        s.selected = vec![0];
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(60.0, 45.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.moving.is_none(), "Hand press starts no drag");
+        assert!(s.marquee.is_none(), "Hand press starts no marquee");
+        assert_eq!(s.selected, vec![0], "Hand press keeps the set (no clear)");
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
+            other => panic!("expected Rect, got {other:?}"),
+        }
+        assert!(s.undo.is_empty(), "Hand gesture records no history");
     }
 
     #[test]
@@ -4592,41 +4807,41 @@ mod tests {
         }
     }
 
-    // --- Annotation move (Tool::Hand) tests ---
+    // --- Object selection + move (Tool::Select) tests ---
 
-    /// Helper: Hand-tool state over 100×100 with one committed rect
-    /// annotation at (10,10)–(50,40).
+    /// Helper: Select-tool state over 100×100 with one committed
+    /// rect annotation at (10,10)–(50,40).
     fn move_state() -> EditorState {
         let mut s = hundred_state();
-        s.tool = Tool::Hand;
+        s.tool = Tool::Select;
         s.anns.push(rect_ann(10.0, 10.0, 50.0, 40.0));
         s
     }
 
-    /// Helper: Hand-tool state with two non-overlapping committed
+    /// Helper: Select-tool state with two non-overlapping committed
     /// rects — ann 0 at (10,10)–(50,40), ann 1 at (60,10)–(90,40).
     fn two_ann_move_state() -> EditorState {
         let mut s = hundred_state();
-        s.tool = Tool::Hand;
+        s.tool = Tool::Select;
         s.anns.push(rect_ann(10.0, 10.0, 50.0, 40.0));
         s.anns.push(rect_ann(60.0, 10.0, 90.0, 40.0));
         s
     }
 
-    /// Helper: Hand-tool state with three non-overlapping committed
+    /// Helper: Select-tool state with three non-overlapping committed
     /// rects, in a lower band so fixtures compose: ann 0 at
     /// (0,50)–(20,70), ann 1 at (60,50)–(80,70), ann 2 at
     /// (80,50)–(95,70).
     fn three_ann_move_state() -> EditorState {
         let mut s = hundred_state();
-        s.tool = Tool::Hand;
+        s.tool = Tool::Select;
         s.anns.push(rect_ann(0.0, 50.0, 20.0, 70.0));
         s.anns.push(rect_ann(60.0, 50.0, 80.0, 70.0));
         s.anns.push(rect_ann(80.0, 50.0, 95.0, 70.0));
         s
     }
 
-    /// Hand press on a committed annotation grabs it for a move;
+    /// Select press on a committed annotation grabs it for a move;
     /// the drag translates it with the grab point tracking the
     /// cursor; release clears the drag state.
     #[test]
@@ -4787,7 +5002,7 @@ mod tests {
     #[test]
     fn move_press_on_line_moves_endpoints() {
         let mut s = hundred_state();
-        s.tool = Tool::Hand;
+        s.tool = Tool::Select;
         s.anns.push(Annotation::Line {
             a: Point::new(10.0, 10.0),
             b: Point::new(90.0, 10.0),
@@ -4809,12 +5024,12 @@ mod tests {
         }
     }
 
-    /// A Hand-tool press on a degenerate annotation (empty polyline)
-    /// is a no-op — no move, no selection, nothing starts.
+    /// A Select-tool press on a degenerate annotation (empty
+    /// polyline) is a no-op — no move, no grab, nothing starts.
     #[test]
     fn move_press_on_degenerate_annotation_is_noop() {
         let mut s = hundred_state();
-        s.tool = Tool::Hand;
+        s.tool = Tool::Select;
         s.anns.push(Annotation::Pencil {
             points: Vec::new(),
             color: Color::RED,
@@ -4826,10 +5041,11 @@ mod tests {
         assert!(s.crop_region.is_none(), "Hand never starts a crop region");
     }
 
-    /// A Hand-tool press that misses every annotation is a no-op —
-    /// the tool only repositions, it never selects or draws.
+    /// A Select-tool press that misses every annotation starts a
+    /// marquee (resolved by its own test below); the press itself
+    /// grabs nothing and records no history.
     #[test]
-    fn move_press_on_empty_space_is_noop() {
+    fn move_press_on_empty_space_grabs_nothing() {
         let mut s = move_state();
         s.dispatch_input(&down(Point::new(70.0, 70.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
@@ -4948,7 +5164,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&down(Point::new(30.0, 10.0)));
         assert_eq!(s.next_number, 3);
-        s.set_tool(Tool::Hand);
+        s.set_tool(Tool::Select);
         // Click bubble 1's centre to select it, then delete.
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerUp);
@@ -5087,14 +5303,18 @@ mod tests {
         assert_eq!(s.selected, vec![0], "fixture: selected");
         s.set_tool(Tool::Rect);
         assert_eq!(s.tool, Tool::Rect);
-        assert!(s.selected.is_empty(), "leaving Hand deselects");
-        // Switching back, then Hand→Hand, must never clear.
-        s.set_tool(Tool::Hand);
+        assert!(s.selected.is_empty(), "leaving Select deselects");
+        // Switching back, then Select→Select, must never clear.
+        s.set_tool(Tool::Select);
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.selected, vec![0], "fixture: reselected");
-        s.set_tool(Tool::Hand);
-        assert_eq!(s.selected, vec![0], "Hand→Hand switch keeps the selection");
+        s.set_tool(Tool::Select);
+        assert_eq!(
+            s.selected,
+            vec![0],
+            "Select→Select switch keeps the selection"
+        );
     }
 
     #[test]
@@ -5118,13 +5338,13 @@ mod tests {
     #[test]
     fn text_flush_move_miss_press_clears_selection() {
         // Toolbar tool switch while a draft is open: the draft
-        // commits, and the follow-up Hand press that misses every
+        // commits, and the follow-up Select press that misses every
         // annotation must still clear a stale selection (the
         // text-mode press branch mirrors the normal one).
         let mut s = text_state();
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('x'));
-        s.tool = Tool::Hand;
+        s.tool = Tool::Select;
         s.selected = vec![0];
         s.dispatch_input(&down(Point::new(70.0, 70.0)));
         assert_eq!(s.anns.len(), 1, "the draft committed");
@@ -5201,20 +5421,28 @@ mod tests {
         assert_eq!(s3.selected, vec![2], "non-member press collapses the set");
     }
 
-    /// A miss press clears the whole set, shift or not.
+    /// A plain miss press clears the whole set; a Shift miss press
+    /// keeps it (the additive marquee contract — release may merge
+    /// hits back in; a degenerate release selects nothing).
     #[test]
-    fn miss_press_clears_whole_set() {
+    fn miss_press_clears_whole_set_plain_only() {
         let mut s = two_ann_move_state();
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         s.dispatch_input(&down(Point::new(70.0, 70.0)));
-        assert!(s.selected.is_empty(), "miss press clears the set");
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.selected.is_empty(), "plain miss press clears the set");
         s.dispatch_input(&shift_down(Point::new(30.0, 25.0)));
         assert_eq!(s.selected, vec![0], "fixture: rebuilt one member");
         s.dispatch_input(&shift_down(Point::new(70.0, 70.0)));
-        assert!(s.selected.is_empty(), "shift miss also clears");
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(
+            s.selected,
+            vec![0],
+            "shift miss press keeps the set; degenerate marquee adds nothing"
+        );
     }
 
     /// The set is maintained sorted ascending regardless of the order
@@ -5259,14 +5487,14 @@ mod tests {
     }
 
     /// The text-draft commit-then-route press mirrors the normal
-    /// Hand routing, Shift included: a shift hit toggles, a shift
+    /// Select routing, Shift included: a shift hit toggles, a shift
     /// miss clears.
     #[test]
     fn text_flush_shift_press_routes_selection() {
         let mut s = text_state();
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('x'));
-        s.tool = Tool::Hand;
+        s.tool = Tool::Select;
         // Text "x" at (10,10), size 16: coarse bbox (10,10)-(18,26).
         s.dispatch_input(&shift_down(Point::new(12.0, 18.0)));
         assert_eq!(s.anns.len(), 1, "the draft committed");
@@ -5277,7 +5505,12 @@ mod tests {
         );
         s.dispatch_input(&InputEvent::PointerUp);
         s.dispatch_input(&shift_down(Point::new(70.0, 70.0)));
-        assert!(s.selected.is_empty(), "shift miss clears the set");
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(
+            s.selected,
+            vec![0],
+            "shift miss keeps the set; degenerate marquee adds nothing"
+        );
     }
 
     // --- Multi-annotation drag (multi-select-properties Task 002) ---
