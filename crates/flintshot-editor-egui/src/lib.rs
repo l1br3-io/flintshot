@@ -37,6 +37,8 @@
 //!   collapsible sections per the binding map) drawn by `app`.
 //! - `popover` (private) — the color / stroke picker bay that
 //!   opens as a popover from a single pod button.
+//! - `toast` (private) — the transient notice pill over any routed
+//!   surface (the already-open Settings ping is its first consumer).
 //!
 //! Phase 1 Task 4 filled in the background-blit path (canvas module);
 //! Task 5 added the eframe shell (app + shell modules) with the
@@ -65,6 +67,7 @@ mod settings;
 mod shell;
 mod statusbar;
 mod theme;
+mod toast;
 mod topbar;
 // The shared cutout widgets ship ahead of their first consumers
 // (statusbar / rail / topbar / panel / settings land in tasks 003+).

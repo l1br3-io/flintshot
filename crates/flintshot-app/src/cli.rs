@@ -1803,7 +1803,7 @@ pub fn run_app(args: &AppArgs) -> Result<()> {
         "settings" => crate::worker::AppRoute::Settings,
         _ => crate::worker::AppRoute::Home,
     };
-    crate::app_window::run(route)
+    crate::app_window::run(route, args.standalone)
 }
 
 /// Headless-build fallback: the app window needs the `egui` feature.
@@ -1828,6 +1828,15 @@ pub struct AppArgs {
         value_parser = validate_app_route
     )]
     pub route: String,
+    /// Daemon-spawned workers only (the `app_argv` rule): when the
+    /// app lock is held, exit quietly — the daemon broadcast the
+    /// focus/route event *before* spawning, so a lock-held child must
+    /// not re-delegate `OpenApp` (that would spawn the next child,
+    /// which delegates again: the delegation loop `--standalone`
+    /// breaks for capture/open workers). A user-run `flintshot app`
+    /// keeps the focus ping.
+    #[arg(long)]
+    pub standalone: bool,
 }
 
 /// Clap `value_parser` for `app --route`: only the two known pages
