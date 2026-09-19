@@ -1,0 +1,107 @@
+# flintshot configuration — this file mirrors the Settings page.
+#
+# Every value below is a default; the Settings window edits this
+# file for you (comments and formatting are preserved on every
+# save). Edit by hand if you prefer: unknown fields are ignored,
+# missing fields fall back to the values you see here, and a
+# restart (or a Settings re-save) applies changes.
+
+[ui]
+# Default annotation color for shapes (arrows, rects, freehand),
+# as #rrggbb or #rrggbbaa hex.
+default-color = "#ff0000"
+
+# Default color for the text tool, decoupled from default-color so
+# e.g. red arrows and white labels can coexist.
+default-text-color = "#ff0000"
+
+# Default stroke width for outlined shapes, in physical pixels.
+default-stroke-width = 3.0
+
+# Default font size for the text tool, in physical pixels.
+default-font-size = 16.0
+
+# Modifier key (held) that reveals the pixel-zoom magnifier inset
+# in the editor. Any egui key name; unknown values fall back to
+# Space with a warning.
+magnifier-modifier = "Space"
+
+# When true, the magnifier inset is always shown — no modifier
+# hold required. Useful for pixel-precise drawing.
+magnifier-always-on = false
+
+# How a fresh capture is presented: "editor" (separate editor
+# window) or "overlay" (fullscreen frozen-capture overlay).
+# Unknown values fall back to "editor" with a warning.
+interaction-mode = "editor"
+
+# false (default): tools are sticky — committing an annotation
+# keeps the active tool for rapid multi-draw. true: flip to Move
+# after every eligible commit.
+flip-to-move = false
+
+# Whether the editor shows its 30 px statusbar (cursor position,
+# selection size, byte estimate).
+show-statusbar = true
+
+# How the statusbar estimates the image's byte size: "heuristic"
+# (w x h x 4) or "exact-png" (a real PNG encode — exact on-disk
+# bytes, at some CPU cost while editing).
+statusbar-size-mode = "heuristic"
+
+# Whether UI microinteractions (spring pop, section unfold, switch
+# knob) animate; false jumps every transition to its end state.
+animations = true
+
+[capture]
+# Include the mouse cursor in captured images.
+include-cursor = true
+
+# Delay before capturing, in milliseconds.
+default-delay-ms = 0
+
+# Capture backend: "auto" (session-kind detection with xcap as the
+# terminal fallback), or a registered id ("xcap", "portal" on
+# Linux). Unknown ids warn at selection time and resolve like
+# "auto".
+backend = "auto"
+
+# Post-grab action on the native capture path: "editor" (the grab
+# opens in the editor), "clipboard" (image copied, no windows), or
+# "upload" (default upload backend; URL copied). The fallback
+# (xcap) path always routes into the editor.
+after-grab = "editor"
+
+# What the single Capture action grabs by default: "region"
+# (interactive selection), "fullscreen", or "window". Unknown
+# values resolve "region" with a warning.
+default-mode = "region"
+
+[hotkeys]
+# Chord that fires the single Capture action, in global-hotkey
+# accelerator format (modifier names case-insensitive, "+"
+# joined). On Wayland this is the *suggested* binding — the actual
+# binding is chosen in the portal's bind dialog (Settings ->
+# Shortcuts -> Rebind shortcuts...).
+capture = "Ctrl+Shift+PrintScreen"
+
+[upload]
+# Backend used when no --backend is given: "imgur", "0x0", ...
+default-backend = "imgur"
+
+[output]
+# Saved-image format: "png" (lossless) or "jpeg" (lossy, at
+# jpeg-quality). Unknown values resolve "png" with a warning.
+format = "png"
+
+# JPEG quality, 1-100. Ignored for PNG.
+jpeg-quality = 90
+
+# Direct-save filename template, e.g. "{app}-{date}-{time}".
+# Empty (default) = no direct save; the Save action shows its file
+# dialog instead.
+filename-template = ""
+
+# Direct-save directory. Empty (default) = your platform's
+# pictures directory.
+save-dir = ""

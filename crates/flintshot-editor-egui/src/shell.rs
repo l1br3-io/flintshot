@@ -312,6 +312,7 @@ fn start_route(start: &WindowStart) -> Route {
         WindowStart::Home => Route::Home,
         WindowStart::Editor(routed) => Route::Editor(Box::new((**routed).clone())),
         WindowStart::Loading => Route::Loading,
+        WindowStart::Settings => Route::Settings,
     }
 }
 

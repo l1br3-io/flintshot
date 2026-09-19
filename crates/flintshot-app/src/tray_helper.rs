@@ -49,10 +49,12 @@ pub(crate) fn run() -> eyre::Result<()> {
     #[cfg(all(feature = "tray", target_os = "linux"))]
     let watchdog = crate::sni_watchdog::spawn();
 
-    let wayland = crate::platform::session_is_wayland();
     // Held (underscore-named) for `run`'s remainder: the registration
-    // lives exactly as long as this process — ADR-0039/0042.
-    let _icon = crate::tray::build(wayland)?;
+    // lives exactly as long as this process — ADR-0039/0042. No
+    // session flavor since the settings swap: the menu is identical
+    // on every session (the Wayland-only bind item moved to the
+    // settings page).
+    let _icon = crate::tray::build()?;
 
     // Daemon liveness: a Subscribe connection whose stream end means
     // the daemon is gone → exit so the SNI item follows it.
@@ -88,42 +90,16 @@ fn event_loop(daemon_gone: &AtomicBool) -> eyre::Result<()> {
 
         let rx = MenuEvent::receiver();
         while let Ok(event) = rx.try_recv() {
-            match crate::tray::action_for(&event) {
-                Some(TrayAction::Request(request)) => {
-                    forward(&request);
-                    if exits_after_action(&request) {
-                        // The causal close: this process's exit
-                        // unregisters the item; the panel destroys
-                        // the open popup; the daemon's handshake
-                        // graces cover the chain before the grab.
-                        tracing::info!(?request, "tray helper exiting for action");
-                        return Ok(());
-                    }
+            if let Some(TrayAction::Request(request)) = crate::tray::action_for(&event) {
+                forward(&request);
+                if exits_after_action(&request) {
+                    // The causal close: this process's exit
+                    // unregisters the item; the panel destroys
+                    // the open popup; the daemon's handshake
+                    // graces cover the chain before the grab.
+                    tracing::info!(?request, "tray helper exiting for action");
+                    return Ok(());
                 }
-                Some(TrayAction::BindShortcuts) => {
-                    // Request/reply with a user-facing dialog — thread
-                    // it so the loop keeps pumping GLib while it is
-                    // open.
-                    let _ = std::thread::Builder::new()
-                        .name("flintshot-tray-bind".into())
-                        .spawn(|| match crate::ipc_client::bind_shortcuts_to(None) {
-                            Ok(Some(_event)) => {
-                                tracing::info!("portal bind finished (tray)");
-                            }
-                            Ok(None) => {
-                                tracing::warn!("bind: daemon not running");
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "bind: IPC failure");
-                            }
-                        });
-                }
-                Some(TrayAction::OpenConfig) => {
-                    if let Err(e) = open_config_file() {
-                        tracing::warn!(error = %e, "opening config from tray");
-                    }
-                }
-                None => {}
             }
         }
 
@@ -246,48 +222,6 @@ fn pump_glib_context() {
 #[cfg(target_os = "linux")]
 const MAX_GLIB_PUMP_ITERATIONS: usize = 64;
 
-/// Open `config.toml` in `$EDITOR` (fallback `$VISUAL`); print the path
-/// if neither is set. Moved from the daemon with ADR-0042 — the tray's
-/// *Open config* click now runs in this process.
-fn open_config_file() -> eyre::Result<()> {
-    use std::process::Command;
-
-    let path = flintshot_core::config_path()
-        .ok_or_else(|| eyre::eyre!("no platform config_dir available"))?;
-    if let Some(editor) = std::env::var_os("EDITOR").or_else(|| std::env::var_os("VISUAL")) {
-        let argv = editor_argv(&editor);
-        if argv.is_empty() {
-            println!("{}", path.display());
-            tracing::info!(path = %path.display(), "$EDITOR/$VISUAL is blank; printed config path");
-            return Ok(());
-        }
-        Command::new(&argv[0])
-            .args(&argv[1..])
-            .arg(&path)
-            .spawn()
-            .map_err(|e| eyre::eyre!("launching {editor:?} on {}: {e}", path.display()))?;
-        tracing::info!(editor = ?editor, path = %path.display(), "opened config");
-    } else {
-        println!("{}", path.display());
-        tracing::info!(path = %path.display(), "no $EDITOR/$VISUAL; printed config path");
-    }
-    Ok(())
-}
-
-/// Split an `$EDITOR`/`$VISUAL` value into program + leading args.
-/// Values like `code --wait` are common (and conventionally unquoted —
-/// shells do not expand the variable into words, but every editor
-/// launcher tolerates whitespace splitting); treating the whole value
-/// as one binary name makes `Command::new` look for a file literally
-/// named `code --wait` and the tray *Open config* click silently fail.
-fn editor_argv(value: &std::ffi::OsStr) -> Vec<std::ffi::OsString> {
-    value
-        .to_string_lossy()
-        .split_whitespace()
-        .map(std::ffi::OsString::from)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,42 +240,23 @@ mod tests {
     #[test]
     fn other_clicks_keep_the_helper_alive() {
         // Open/upload still stream status through the daemon; the
-        // bind dialog runs in its own thread. Nothing here needs the
-        // item unregistered.
+        // settings window opens through the daemon's broadcast +
+        // spawn. Nothing here needs the item unregistered.
         let staying = [
             Request::OpenLast,
             Request::UploadLast {
                 backend: "imgur".into(),
             },
             Request::BindShortcuts,
+            // settings-improvement: the Settings click is the OpenApp
+            // choreography — the helper stays alive (pinned like
+            // `OpenApp`'s implicit case).
+            Request::OpenApp,
+            Request::OpenSettings,
         ];
         for request in &staying {
             assert!(!exits_after_action(request), "{request:?} must stay");
         }
-    }
-
-    // ── $EDITOR splitting (moved from the daemon) ────────────────
-
-    #[test]
-    fn editor_value_with_args_splits_into_program_and_args() {
-        use std::ffi::OsStr;
-        let argv = editor_argv(OsStr::new("code --wait"));
-        assert_eq!(argv, ["code", "--wait"].map(std::ffi::OsString::from));
-    }
-
-    #[test]
-    fn plain_editor_value_is_a_single_word() {
-        use std::ffi::OsStr;
-        assert_eq!(
-            editor_argv(OsStr::new("vim")),
-            ["vim"].map(std::ffi::OsString::from)
-        );
-    }
-
-    #[test]
-    fn blank_editor_value_is_empty() {
-        use std::ffi::OsStr;
-        assert!(editor_argv(OsStr::new("   ")).is_empty());
     }
 
     /// [`super::pump_glib_context`] tests. The default `GLib` context is

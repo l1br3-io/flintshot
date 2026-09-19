@@ -775,6 +775,61 @@ pub fn config_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("flintshot").join("config.toml"))
 }
 
+/// The fully-commented default config asset (the `VSCode` *Default
+/// Settings* analogue), embedded at compile time. Rendered read-only
+/// by the settings page's *View default config*, and written
+/// verbatim as the template when [`ensure_user_config_at`]
+/// materializes a missing user file. Pinned equal (field-by-field)
+/// to [`Config::default`] by test, so the asset can never drift
+/// from the code defaults.
+#[must_use]
+pub fn default_config_toml() -> &'static str {
+    include_str!("config.default.toml")
+}
+
+/// Materialize the user's `config.toml` from the default asset when
+/// — and only when — it does not exist yet, so the file on disk
+/// always mirrors what Settings shows before the first *Edit config
+/// file* click opens it. The asset's own header comment doubles as
+/// the template's header. An existing file is a strict no-op: user
+/// edits are never clobbered (pinned by test).
+///
+/// Returns whether the file was created.
+///
+/// # Errors
+/// - [`FlintshotError::Io`] if the parent directory cannot be
+///   created or the write fails.
+/// - [`FlintshotError::Io`] for metadata failures other than
+///   not-found.
+pub fn ensure_user_config_at(path: &Path) -> Result<bool> {
+    match std::fs::metadata(path) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(FlintshotError::Io)?;
+            }
+            std::fs::write(path, default_config_toml()).map_err(FlintshotError::Io)?;
+            Ok(true)
+        }
+        Err(e) => Err(FlintshotError::Io(e)),
+    }
+}
+
+/// Platform-path wrapper over [`ensure_user_config_at`]: ensures the
+/// user's `config.toml` exists (creating it from the template when
+/// missing) and returns its path — `None` only when the platform
+/// offers no config dir.
+///
+/// # Errors
+/// See [`ensure_user_config_at`].
+pub fn ensure_user_config() -> Result<Option<PathBuf>> {
+    let Some(path) = config_path() else {
+        return Ok(None);
+    };
+    ensure_user_config_at(&path)?;
+    Ok(Some(path))
+}
+
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
@@ -1486,5 +1541,103 @@ backend = \"portal\"
             back.capture.backend, "portal",
             "user value must survive re-save"
         );
+    }
+
+    // ── Default-config asset (settings-improvement Task 001) ─────
+
+    /// The asset deserializes to exactly the code defaults, field
+    /// by field — the asset can never drift from `Config::default()`
+    /// without this failing.
+    #[test]
+    fn default_config_asset_matches_code_defaults_field_by_field() {
+        let from_asset = toml::from_str::<Config>(default_config_toml())
+            .expect("the default asset must parse as a Config");
+        let d = Config::default();
+
+        assert_eq!(from_asset.ui.default_color, d.ui.default_color);
+        assert_eq!(from_asset.ui.default_text_color, d.ui.default_text_color);
+        assert_eq!(
+            from_asset.ui.default_stroke_width,
+            d.ui.default_stroke_width
+        );
+        assert_eq!(from_asset.ui.default_font_size, d.ui.default_font_size);
+        assert_eq!(from_asset.ui.magnifier_modifier, d.ui.magnifier_modifier);
+        assert_eq!(from_asset.ui.magnifier_always_on, d.ui.magnifier_always_on);
+        assert_eq!(from_asset.ui.interaction_mode, d.ui.interaction_mode);
+        assert_eq!(from_asset.ui.flip_to_move, d.ui.flip_to_move);
+        assert_eq!(from_asset.ui.show_statusbar, d.ui.show_statusbar);
+        assert_eq!(from_asset.ui.statusbar_size_mode, d.ui.statusbar_size_mode);
+        assert_eq!(from_asset.ui.animations, d.ui.animations);
+
+        assert_eq!(from_asset.capture.include_cursor, d.capture.include_cursor);
+        assert_eq!(
+            from_asset.capture.default_delay_ms,
+            d.capture.default_delay_ms
+        );
+        assert_eq!(from_asset.capture.backend, d.capture.backend);
+        assert_eq!(from_asset.capture.after_grab, d.capture.after_grab);
+        assert_eq!(from_asset.capture.default_mode, d.capture.default_mode);
+
+        assert_eq!(from_asset.hotkeys.capture, d.hotkeys.capture);
+        assert_eq!(from_asset.upload.default_backend, d.upload.default_backend);
+
+        assert_eq!(from_asset.output.format, d.output.format);
+        assert_eq!(from_asset.output.jpeg_quality, d.output.jpeg_quality);
+        assert_eq!(
+            from_asset.output.filename_template,
+            d.output.filename_template
+        );
+        assert_eq!(from_asset.output.save_dir, d.output.save_dir);
+    }
+
+    /// The asset carries a user-facing header: the materialized file
+    /// names itself, so a user opening it cold knows what they hold.
+    #[test]
+    fn default_config_asset_opens_with_a_header_comment() {
+        let first_line = default_config_toml().lines().next().unwrap_or_default();
+        assert!(
+            first_line.starts_with("# flintshot configuration"),
+            "asset must open with a header comment, got: {first_line:?}"
+        );
+    }
+
+    /// `ensure_user_config_at` on a missing file: creates it (parents
+    /// included), header first, body that parses as a `Config`.
+    #[test]
+    fn ensure_user_config_at_creates_missing_file_with_header() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+
+        let created = ensure_user_config_at(&path).expect("creating the missing config");
+        assert!(created, "a missing file must be created");
+        assert!(path.exists(), "parents created too");
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.starts_with("# flintshot configuration"),
+            "the file opens with the asset's header:\n{written}"
+        );
+        assert_eq!(
+            written,
+            default_config_toml(),
+            "the materialized file is the asset verbatim"
+        );
+        toml::from_str::<Config>(&written).expect("the written body parses");
+    }
+
+    /// `ensure_user_config_at` on an existing file: a strict no-op —
+    /// user edits (even a hand-written sentinel) are never clobbered.
+    #[test]
+    fn ensure_user_config_at_never_clobbers_an_existing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let sentinel = "# my precious config\n[ui]\ndefault-color = \"#00ff00\"\n";
+        fs::write(&path, sentinel).unwrap();
+
+        let created = ensure_user_config_at(&path).expect("checking the existing config");
+        assert!(!created, "an existing file must not be rewritten");
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert_eq!(after, sentinel, "byte-identical after the call");
     }
 }
