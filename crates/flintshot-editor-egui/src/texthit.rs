@@ -174,6 +174,61 @@ pub(crate) fn egui_measurer(
     }
 }
 
+/// Resolve a canvas-physical press against the editor's pending text
+/// draft — the shared press-interception step both pumps run before
+/// dispatching `PointerDown`. `Some(char_idx)` when `at` lands inside
+/// the laid-out block; `None` when no Text draft is pending or the
+/// press is outside it (the pump then dispatches normally).
+pub(crate) fn pending_text_hit(
+    state: &flintshot_core::EditorState,
+    ctx: &egui::Context,
+    view: crate::canvas::CanvasView,
+    at: Point,
+) -> Option<usize> {
+    let ann = state.pending.as_ref()?;
+    let flintshot_core::Annotation::Text { pos, text, .. } = ann else {
+        return None;
+    };
+    let style = ann.text_style();
+    let line_h = style.size * style.line_spacing;
+    char_at_hit(
+        text,
+        &style,
+        *pos,
+        at,
+        line_h,
+        egui_measurer(ctx, view, style.size),
+    )
+}
+
+/// The drag counterpart of [`pending_text_hit`]: edge-clamped, so a
+/// drag off the block extends the selection to its boundary instead
+/// of cancelling. Returns 0 when no Text draft is pending (the
+/// caller's `text_drag_to_char` no-ops in that case anyway).
+pub(crate) fn pending_text_hit_or_edge(
+    state: &flintshot_core::EditorState,
+    ctx: &egui::Context,
+    view: crate::canvas::CanvasView,
+    at: Point,
+) -> usize {
+    let Some(ann) = state.pending.as_ref() else {
+        return 0;
+    };
+    let flintshot_core::Annotation::Text { pos, text, .. } = ann else {
+        return 0;
+    };
+    let style = ann.text_style();
+    let line_h = style.size * style.line_spacing;
+    char_at_hit_or_edge(
+        text,
+        &style,
+        *pos,
+        at,
+        line_h,
+        egui_measurer(ctx, view, style.size),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
