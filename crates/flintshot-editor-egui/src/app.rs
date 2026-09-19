@@ -21,9 +21,9 @@ use eframe::App;
 use egui::Context;
 use flintshot_core::{
     compose_final, compose_final_region, parse_default_mode, parse_output_format, parse_size_mode,
-    render::render, render_filename_template, Annotation, BlurCache, Config, DefaultMode,
-    DispatchOutcome, EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers,
-    NewCaptureMode, OutputFormat, Rect, SizeMode, Tool,
+    render::render, render_filename_template, BlurCache, Config, DefaultMode, DispatchOutcome,
+    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode,
+    OutputFormat, Rect, SizeMode, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -1127,23 +1127,7 @@ impl EditorApp {
         at: flintshot_core::Point,
         pointer_events: &mut Vec<InputEvent>,
     ) -> bool {
-        let Some(ann) = self.state.pending.as_ref() else {
-            return false;
-        };
-        let Annotation::Text { pos, text, .. } = ann else {
-            return false;
-        };
-        let style = ann.text_style();
-        let line_h = style.size * style.line_spacing;
-        let idx = crate::texthit::char_at_hit(
-            text,
-            &style,
-            *pos,
-            at,
-            line_h,
-            crate::texthit::egui_measurer(ctx, view, style.size),
-        );
-        let Some(idx) = idx else {
+        let Some(idx) = crate::texthit::pending_text_hit(&self.state, ctx, view, at) else {
             return false;
         };
         self.state.text_press_at_char(idx);
@@ -1174,22 +1158,7 @@ impl EditorApp {
         view: crate::canvas::CanvasView,
         at: flintshot_core::Point,
     ) {
-        let Some(ann) = self.state.pending.as_ref() else {
-            return;
-        };
-        let Annotation::Text { pos, text, .. } = ann else {
-            return;
-        };
-        let style = ann.text_style();
-        let line_h = style.size * style.line_spacing;
-        let idx = crate::texthit::char_at_hit_or_edge(
-            text,
-            &style,
-            *pos,
-            at,
-            line_h,
-            crate::texthit::egui_measurer(ctx, view, style.size),
-        );
+        let idx = crate::texthit::pending_text_hit_or_edge(&self.state, ctx, view, at);
         self.state.text_drag_to_char(idx);
     }
 
