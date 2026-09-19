@@ -405,6 +405,15 @@ pub struct EditorState {
     /// / Home / End keys. The renderer reads this to place the block
     /// caret on the correct line and column.
     pub text_cursor: usize,
+    /// Char index of the text-selection anchor; `None` = collapsed
+    /// (no selection). The selection is
+    /// `min(anchor, cursor)..max(anchor, cursor)`, char-index based
+    /// like [`text_cursor`](Self::text_cursor) and only meaningful
+    /// while a Text draft is pending. Plain caret moves and every
+    /// edit stroke clear it; only selection gestures (Shift chords,
+    /// mouse drags) set it. Session boundaries (commit / cancel /
+    /// re-edit open) leave it `None`.
+    pub text_anchor: Option<usize>,
     /// Kind of the most recent inspector property edit, for undo
     /// coalescing — see
     /// [`end_property_edit`](Self::end_property_edit). `None` when no
@@ -459,6 +468,7 @@ impl EditorState {
             moving: None,
             selected: Vec::new(),
             text_cursor: 0,
+            text_anchor: None,
             last_edit_kind: None,
             text_reedit: None,
             style_gesture_snapshot: None,
@@ -571,6 +581,7 @@ impl EditorState {
         };
         if self.tool == Tool::Text {
             self.text_cursor = 0;
+            self.text_anchor = None;
         }
         self.pending = Some(ann);
     }
@@ -614,6 +625,7 @@ impl EditorState {
         let Some(mut ann) = self.pending.take() else {
             return;
         };
+        self.text_anchor = None;
         normalize_rects(&mut ann);
         let owner = owning_tool(&ann);
         // Clone-then-push: snapshot must capture pre-commit `anns`
@@ -637,6 +649,7 @@ impl EditorState {
     /// Drop the in-flight annotation without committing.
     pub fn cancel_annotation(&mut self) {
         self.pending = None;
+        self.text_anchor = None;
     }
 
     /// Place a numbered bubble at `pos` and increment `next_number`.
@@ -968,6 +981,7 @@ impl EditorState {
         self.image = new_image;
         self.anns.retain_mut(|ann| ann.crop_and_translate(n));
         self.pending = None;
+        self.text_anchor = None;
         self.end_move();
         self.undo.push(snapshot);
         self.redo.clear();
@@ -987,6 +1001,7 @@ impl EditorState {
     /// pushed onto `redo` before the swap. No-op when `undo` is empty.
     pub fn undo(&mut self) {
         self.pending = None;
+        self.text_anchor = None;
         // Shell-direct undo mid-session must not splice against the
         // session's vacant slot — restore the original first.
         self.restore_active_reedit();
@@ -1025,6 +1040,7 @@ impl EditorState {
         // Same mid-session guard as `undo`: restore before swapping.
         self.restore_active_reedit();
         self.end_move();
+        self.text_anchor = None;
         let Some(next) = self.redo.pop() else {
             return;
         };
@@ -1365,12 +1381,46 @@ impl EditorState {
         }
     }
 
+    /// The selected char range of the pending Text draft, normalized
+    /// so `start <= end`. `None` when no Text draft is pending, the
+    /// anchor is unset, or the selection is collapsed
+    /// (`anchor == cursor`).
+    #[must_use]
+    pub fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        if !matches!(self.pending, Some(Annotation::Text { .. })) {
+            return None;
+        }
+        let anchor = self.text_anchor?;
+        let (a, b) = (anchor.min(self.text_cursor), anchor.max(self.text_cursor));
+        (a != b).then_some(a..b)
+    }
+
+    /// Delete the selected range (if any), park the cursor at the
+    /// range start, and clear the anchor — the shared "edit ops
+    /// consume the selection" step. A collapsed or absent selection
+    /// leaves state untouched, so the plain-caret path is
+    /// byte-for-byte what it was before selections existed.
+    fn delete_selection(&mut self) {
+        let Some(range) = self.selection_range() else {
+            return;
+        };
+        if let Some(Annotation::Text { text, .. }) = &mut self.pending {
+            let start = char_to_byte(text, range.start);
+            let end = char_to_byte(text, range.end);
+            text.replace_range(start..end, "");
+        }
+        self.text_cursor = range.start;
+        self.text_anchor = None;
+    }
+
     /// Append a typed character to the in-flight text draft **at the
-    /// cursor**, then advance the cursor past it.
+    /// cursor**, then advance the cursor past it. A non-empty
+    /// selection is replaced by the stroke.
     ///
     /// No-op when no text draft is active (`is_editing_text()` is
     /// false). Called by the dispatcher's text-editing branch.
     fn type_char(&mut self, ch: char) {
+        self.delete_selection();
         if let Some(Annotation::Text { text, .. }) = &mut self.pending {
             let byte = char_to_byte(text, self.text_cursor);
             text.insert(byte, ch);
@@ -1379,10 +1429,12 @@ impl EditorState {
     }
 
     /// Insert a line break at the cursor (Shift+Enter), then advance
-    /// the cursor onto the new line. The `\n` is stored verbatim; both
-    /// renderers split on it to lay out subsequent lines. No-op when no
-    /// text draft is active.
+    /// the cursor onto the new line. A non-empty selection is replaced
+    /// by the stroke. The `\n` is stored verbatim; both renderers
+    /// split on it to lay out subsequent lines. No-op when no text
+    /// draft is active.
     fn insert_newline(&mut self) {
+        self.delete_selection();
         if let Some(Annotation::Text { text, .. }) = &mut self.pending {
             let byte = char_to_byte(text, self.text_cursor);
             text.insert(byte, '\n');
@@ -1391,9 +1443,15 @@ impl EditorState {
     }
 
     /// Delete the character immediately before the cursor and retreat
-    /// the cursor. No-op when the cursor is at the start of the draft
-    /// (column 0 of line 0) or when no draft is active.
+    /// the cursor; a non-empty selection deletes the whole range
+    /// instead. No-op when the selection is collapsed and the cursor
+    /// is at the start of the draft (column 0 of line 0) or when no
+    /// draft is active.
     fn backspace_text(&mut self) {
+        if self.selection_range().is_some() {
+            self.delete_selection();
+            return;
+        }
         if let Some(Annotation::Text { text, .. }) = &mut self.pending {
             if self.text_cursor > 0 {
                 let prev = char_to_byte(text, self.text_cursor - 1);
@@ -1405,9 +1463,11 @@ impl EditorState {
     }
 
     /// Move the cursor left one char (wrapping across line breaks to
-    /// the end of the previous line). Clamps at 0.
+    /// the end of the previous line). Clamps at 0. Plain moves
+    /// collapse the selection (Shift chords are the exception).
     fn cursor_left(&mut self) {
         self.text_cursor = self.text_cursor.saturating_sub(1);
+        self.text_anchor = None;
     }
 
     /// Move the cursor right one char (wrapping across line breaks to
@@ -1417,6 +1477,7 @@ impl EditorState {
             let len = text.chars().count();
             self.text_cursor = (self.text_cursor + 1).min(len);
         }
+        self.text_anchor = None;
     }
 
     /// Move the cursor up one line, preserving the column. Clamps to
@@ -1425,6 +1486,7 @@ impl EditorState {
         if let Some(Annotation::Text { text, .. }) = &self.pending {
             self.text_cursor = cursor_up(text, self.text_cursor);
         }
+        self.text_anchor = None;
     }
 
     /// Move the cursor down one line, preserving the column. Clamps to
@@ -1433,6 +1495,7 @@ impl EditorState {
         if let Some(Annotation::Text { text, .. }) = &self.pending {
             self.text_cursor = cursor_down(text, self.text_cursor);
         }
+        self.text_anchor = None;
     }
 
     /// Move the cursor to the start of the current line.
@@ -1440,6 +1503,7 @@ impl EditorState {
         if let Some(Annotation::Text { text, .. }) = &self.pending {
             self.text_cursor = cursor_line_start(text, self.text_cursor);
         }
+        self.text_anchor = None;
     }
 
     /// Move the cursor to the end of the current line.
@@ -1447,6 +1511,7 @@ impl EditorState {
         if let Some(Annotation::Text { text, .. }) = &self.pending {
             self.text_cursor = cursor_line_end(text, self.text_cursor);
         }
+        self.text_anchor = None;
     }
 
     /// Commit the in-flight text draft to `anns`, or cancel it if empty.
@@ -1501,6 +1566,7 @@ impl EditorState {
         });
         self.pending = Some(original);
         self.text_cursor = char_count;
+        self.text_anchor = None;
         self.selected.clear();
     }
 
@@ -1516,6 +1582,7 @@ impl EditorState {
     ///   single snapshot; nothing spliced back).
     fn finish_text_reedit(&mut self, session: TextReeditSession) {
         let edited = self.pending.take();
+        self.text_anchor = None;
         let unchanged = edited.as_ref().is_none_or(|ann| *ann == session.original);
         let survives = matches!(&edited, Some(Annotation::Text { text, .. }) if !text.is_empty());
         let index = session.index;
@@ -1549,6 +1616,7 @@ impl EditorState {
     /// not a mutation of it.
     fn revert_text_reedit(&mut self, session: TextReeditSession) {
         self.pending = None;
+        self.text_anchor = None;
         let index = session.index.min(self.anns.len());
         self.anns.insert(index, session.original);
         self.select_only(index);
@@ -4092,6 +4160,215 @@ mod tests {
             Annotation::Text { text, .. } => assert_eq!(text, "first"),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    // --- Text selection model (text-selection-highlight spec) ---
+
+    /// Open a fresh text draft at (10, 10) and type `text` into it,
+    /// leaving the cursor at the end.
+    fn type_draft(s: &mut EditorState, text: &str) {
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
+        for ch in text.chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+    }
+
+    fn shift_enter() -> InputEvent {
+        InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        }
+    }
+
+    fn pending_text(s: &EditorState) -> &str {
+        match &s.pending {
+            Some(Annotation::Text { text, .. }) => text,
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_anchor_defaults_none_and_session_boundaries_clear_it() {
+        let mut s = text_state();
+        assert_eq!(s.text_anchor, None, "anchor starts None");
+        type_draft(&mut s, "hi");
+        assert_eq!(s.text_anchor, None, "plain typing keeps the anchor None");
+
+        s.text_anchor = Some(0);
+        s.dispatch_input(&key(Key::Enter));
+        assert_eq!(s.text_anchor, None, "fresh-draft commit clears the anchor");
+
+        let mut s = text_state();
+        type_draft(&mut s, "hi");
+        s.text_anchor = Some(0);
+        s.dispatch_input(&key(Key::Escape));
+        assert_eq!(s.text_anchor, None, "cancel clears the anchor");
+
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        assert_eq!(s.text_anchor, None, "re-edit opens collapsed");
+        s.text_anchor = Some(0);
+        s.dispatch_input(&key(Key::Enter));
+        assert_eq!(s.text_anchor, None, "re-edit commit clears the anchor");
+
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        s.text_anchor = Some(0);
+        s.dispatch_input(&key(Key::Escape));
+        assert_eq!(s.text_anchor, None, "re-edit revert clears the anchor");
+    }
+
+    #[test]
+    fn selection_range_only_when_nonempty_text_selection_exists() {
+        let mut s = text_state();
+        assert_eq!(s.selection_range(), None, "no draft -> no range");
+        type_draft(&mut s, "hello");
+        assert_eq!(s.selection_range(), None, "anchor None -> collapsed");
+        s.text_anchor = Some(5);
+        assert_eq!(s.selection_range(), None, "anchor == cursor -> collapsed");
+        s.text_anchor = Some(1);
+        assert_eq!(s.selection_range(), Some(1..5));
+        s.text_cursor = 0;
+        s.text_anchor = Some(5);
+        assert_eq!(
+            s.selection_range(),
+            Some(0..5),
+            "cursor before anchor normalizes"
+        );
+        // A forged anchor over a non-Text pending is meaningless.
+        s.pending = Some(rect_ann(0.0, 0.0, 5.0, 5.0));
+        s.text_anchor = Some(0);
+        assert_eq!(s.selection_range(), None, "range requires a Text draft");
+    }
+
+    #[test]
+    fn plain_caret_moves_collapse_the_selection() {
+        let mut s = text_state();
+        type_draft(&mut s, "ab\ncd");
+        for k in [
+            Key::ArrowLeft,
+            Key::ArrowRight,
+            Key::ArrowUp,
+            Key::ArrowDown,
+            Key::Home,
+            Key::End,
+        ] {
+            s.text_anchor = Some(0);
+            s.dispatch_input(&key(k));
+            assert_eq!(s.text_anchor, None, "{k:?} collapses the selection");
+        }
+    }
+
+    #[test]
+    fn typing_replaces_the_selection_in_one_stroke() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_anchor = Some(0);
+        s.dispatch_input(&InputEvent::TextInput('X'));
+        assert_eq!(pending_text(&s), "X");
+        assert_eq!(s.text_cursor, 1, "cursor lands just past the insertion");
+        assert_eq!(s.text_anchor, None, "the stroke consumed the selection");
+
+        let mut s = text_state();
+        type_draft(&mut s, "hello world");
+        s.text_anchor = Some(6); // "world" selected, cursor 11
+        s.dispatch_input(&InputEvent::TextInput('!'));
+        assert_eq!(pending_text(&s), "hello !");
+        assert_eq!(s.text_cursor, 7);
+    }
+
+    #[test]
+    fn newline_replaces_the_selection() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_anchor = Some(0);
+        s.dispatch_input(&shift_enter());
+        assert_eq!(pending_text(&s), "\n");
+        assert_eq!(s.text_cursor, 1);
+        assert_eq!(s.text_anchor, None);
+    }
+
+    #[test]
+    fn backspace_deletes_the_selection_range() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_anchor = Some(0);
+        s.dispatch_input(&key(Key::Backspace));
+        assert_eq!(pending_text(&s), "");
+        assert_eq!(s.text_cursor, 0);
+        assert_eq!(s.text_anchor, None);
+
+        // Partial range, cursor after anchor.
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_cursor = 4;
+        s.text_anchor = Some(1); // "ell" selected
+        s.dispatch_input(&key(Key::Backspace));
+        assert_eq!(pending_text(&s), "ho");
+        assert_eq!(s.text_cursor, 1, "cursor parks at the range start");
+
+        // Drag direction reversed: anchor after cursor.
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_anchor = Some(4);
+        s.text_cursor = 1; // "ell" selected, anchored from the right
+        s.dispatch_input(&key(Key::Backspace));
+        assert_eq!(pending_text(&s), "ho");
+        assert_eq!(s.text_cursor, 1);
+        assert_eq!(s.text_anchor, None);
+    }
+
+    #[test]
+    fn backspace_collapsed_anchor_behaves_exactly_as_today() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_cursor = 2;
+        s.text_anchor = Some(2); // == cursor: collapsed
+        s.dispatch_input(&key(Key::Backspace));
+        assert_eq!(
+            pending_text(&s),
+            "hllo",
+            "deletes the char before the caret"
+        );
+
+        // Column 0 stays a no-op even with a (collapsed) anchor set.
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_cursor = 0;
+        s.text_anchor = Some(0);
+        s.dispatch_input(&key(Key::Backspace));
+        assert_eq!(pending_text(&s), "hello");
+        assert_eq!(s.text_cursor, 0);
+    }
+
+    #[test]
+    fn selection_ops_on_multibyte_chars_never_split() {
+        let mut s = text_state();
+        type_draft(&mut s, "🙂🙂");
+        s.text_cursor = 1; // select the first emoji
+        s.text_anchor = Some(0);
+        s.dispatch_input(&key(Key::Backspace));
+        assert_eq!(pending_text(&s), "🙂");
+        assert_eq!(s.text_cursor, 0);
+
+        let mut s = text_state();
+        type_draft(&mut s, "a🙂b");
+        s.text_anchor = Some(1);
+        s.text_cursor = 2; // just the emoji
+        s.dispatch_input(&InputEvent::TextInput('x'));
+        assert_eq!(pending_text(&s), "axb");
+        assert_eq!(s.text_cursor, 2);
+
+        let mut s = text_state();
+        type_draft(&mut s, "a🙂b");
+        s.text_anchor = Some(1);
+        s.text_cursor = 3; // "🙂b"
+        s.dispatch_input(&shift_enter());
+        assert_eq!(pending_text(&s), "a\n");
+        assert_eq!(s.text_cursor, 2);
     }
 
     // --- Gesture-bracketed restyle (text-select-edit Task 005) ---
