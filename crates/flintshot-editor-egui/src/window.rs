@@ -49,6 +49,11 @@ use flintshot_core::{EditorOutcome, EditorState};
 /// The loading route's status line (spec copy).
 const LOADING_STATUS: &str = "retrieving capture…";
 
+/// The toast a settings focus ping raises while Settings is already
+/// the live route — the "nothing to swap to" branch stays audible
+/// instead of silently consuming the intent.
+const SETTINGS_ALREADY_OPEN: &str = "Settings is already open";
+
 /// The loading route's repaint heartbeat: the spinner animates and
 /// the delivery polls (routed editor / route home) must run without
 /// input. Short enough that the post-delivery swap lands well inside
@@ -200,6 +205,9 @@ pub(crate) struct WindowApp {
     /// The settings page, when the Settings route is active. Built
     /// on route entry from the bridge's config snapshot.
     settings: Option<crate::settings::SettingsApp>,
+    /// The live toast, if one is up (the already-open Settings ping
+    /// is the first raiser).
+    toast: Option<crate::toast::Toast>,
     /// The page bridge shared with every editor construction.
     page_bridge: PageBridgeSlot,
     /// The app crate's routing state (routed-editor events).
@@ -257,6 +265,7 @@ impl WindowApp {
             home,
             editor,
             settings,
+            toast: None,
             page_bridge,
             host,
             editor_outcome,
@@ -378,10 +387,17 @@ impl WindowApp {
     /// The route-settings poll (settings-improvement): a
     /// `SettingsFocus` intent armed while the window was open swaps
     /// the settings page in place — no close, no viewport churn
-    /// beyond the route-kind batch.
+    /// beyond the route-kind batch. A ping landing while Settings is
+    /// *already* the live route has nothing to swap to: it raises the
+    /// already-open toast instead of being silently consumed.
     fn poll_route_settings(&mut self, ctx: &Context) {
-        if self.host.take_route_settings() && !matches!(self.route, Route::Settings) {
-            self.request_route(ctx, Route::Settings);
+        if self.host.take_route_settings() {
+            if matches!(self.route, Route::Settings) {
+                let now = ctx.input(|i| i.time);
+                self.toast = Some(crate::toast::Toast::new(SETTINGS_ALREADY_OPEN, now));
+            } else {
+                self.request_route(ctx, Route::Settings);
+            }
         }
     }
 
@@ -571,6 +587,7 @@ impl WindowApp {
         if let Some(editor) = self.editor.as_mut() {
             editor.ui_impl(ui);
         }
+        crate::toast::show(ui, &mut self.toast);
     }
 }
 
@@ -1469,9 +1486,9 @@ mod tests {
         );
     }
 
-    /// A settings intent while already on Settings is a no-op (the
-    /// no-swap guard keeps repeat broadcasts from churning the page
-    /// construction).
+    /// A settings intent while already on Settings raises the
+    /// already-open toast (the ping is audible) with no churn — the
+    /// no-swap guard keeps repeat broadcasts from rebuilding the page.
     #[test]
     fn route_settings_intent_is_ignored_on_settings() {
         let host = RecordingHost::default();
@@ -1482,13 +1499,59 @@ mod tests {
         );
         host.inner.borrow_mut().route_settings = Some(());
         let ctx = egui::Context::default();
-        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
-            app.logic_impl(ui.ctx());
-        });
+        crate::theme::apply(&ctx);
+        let full = ctx.run_ui(
+            egui::RawInput {
+                time: Some(100.0),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            },
+        );
         assert!(
             matches!(app.route, Route::Settings) && transition_commands(&full).is_empty(),
             "settings stays settings with no churn"
         );
+        let toast = app.toast.expect("the already-open ping raised a toast");
+        assert!(
+            !toast.expired(100.0),
+            "a fresh toast outlives its raise frame"
+        );
+    }
+
+    /// The already-open toast is transient: past its lifetime it is
+    /// gone — expired by the draw pass, never stuck on screen.
+    #[test]
+    fn settings_already_open_toast_expires_after_its_lifetime() {
+        let host = RecordingHost::default();
+        let (mut app, _bridge, host) = window_app_start(
+            WindowStart::Settings,
+            StubPageBridge::default(),
+            host.clone(),
+        );
+        host.inner.borrow_mut().route_settings = Some(());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let frame_at = |ctx: &egui::Context, app: &mut WindowApp, time: f64| {
+            ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    app.logic_impl(ui.ctx());
+                    app.ui_impl(ui);
+                },
+            )
+        };
+        frame_at(&ctx, &mut app, 100.0);
+        assert!(app.toast.is_some(), "fixture: the toast is up");
+        frame_at(&ctx, &mut app, 100.0 + 2.0);
+        assert!(app.toast.is_some(), "still inside its lifetime");
+        frame_at(&ctx, &mut app, 100.0 + 3.0);
+        assert!(app.toast.is_none(), "expired toasts leave the screen");
     }
 
     /// The not-in-the-shot guarantee holds from the settings page:

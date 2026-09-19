@@ -393,16 +393,22 @@ pub enum AppRoute {
     Settings,
 }
 
-/// Build the `flintshot app [--route settings]` argv for
-/// [`Request::OpenApp`] / [`Request::OpenSettings`]. No
-/// `--standalone` flavor exists here: the worker takes the app lock
-/// and exits fast when a window is already running (the broadcast
-/// focused it); only a lock-free spawn becomes the window.
+/// Build the `flintshot app [--route settings] --standalone` argv for
+/// [`Request::OpenApp`] / [`Request::OpenSettings`]. The trailing
+/// `--standalone` breaks the delegation loop (the `capture_argv` /
+/// `open_argv` rule): the daemon always broadcasts the focus event
+/// *before* spawning, so a child that finds the app lock held — a
+/// window is already running — must exit quietly. Without the flag
+/// the child would re-delegate `OpenApp`, the daemon would spawn the
+/// next child, and the chain would never end (the tray Settings /
+/// Open-app spawn storm). Only a lock-free spawn becomes the window.
 fn app_argv(route: AppRoute) -> Vec<String> {
-    match route {
+    let mut argv = match route {
         AppRoute::Home => vec!["app".to_string()],
         AppRoute::Settings => vec!["app".to_string(), "--route".into(), "settings".into()],
-    }
+    };
+    argv.push("--standalone".into());
+    argv
 }
 
 /// Built-in default backend id. When `Request::UploadLast`'s `backend`
@@ -1047,7 +1053,11 @@ mod tests {
             vec![Event::AppFocus],
             "the broadcast is what focuses an existing window"
         );
-        assert_eq!(spawner.snapshot(), vec![vec!["app".to_string()]]);
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["app".to_string(), "--standalone".into()]],
+            "the spawn is lock-fallback only and standalone"
+        );
     }
 
     /// settings-improvement Task 003: the `OpenSettings` dispatch is
@@ -1074,9 +1084,35 @@ mod tests {
         );
         assert_eq!(
             spawner.snapshot(),
-            vec![vec!["app".to_string(), "--route".into(), "settings".into()]],
-            "the spawn carries the destination route"
+            vec![vec![
+                "app".to_string(),
+                "--route".into(),
+                "settings".into(),
+                "--standalone".into()
+            ]],
+            "the spawn carries the destination route and is standalone"
         );
+    }
+
+    /// The app worker's delegation-loop breaker (the `--standalone`
+    /// capture/open rule): the daemon broadcasts the focus/route event
+    /// before spawning, so every app argv it spawns must carry the
+    /// flag that makes a lock-held child exit quietly. Without it the
+    /// child re-delegates `OpenApp`, the daemon spawns the next
+    /// child, and the chain runs forever (the tray Settings / Open-app
+    /// spawn storm).
+    #[test]
+    fn app_workers_spawn_standalone_to_break_delegation_loop() {
+        let spawner = RecordingSpawner::new();
+        for request in [Request::OpenApp, Request::OpenSettings] {
+            dispatch(&request, &spawner, &DispatchState::new(), &mut |_| {}).unwrap();
+        }
+        for argv in spawner.snapshot() {
+            assert!(
+                argv.contains(&"--standalone".to_string()),
+                "app worker argv must carry --standalone: {argv:?}"
+            );
+        }
     }
 
     /// The routed app worker is still an app worker: the session

@@ -86,6 +86,23 @@ Categories used below:
 
 ### Fixed
 
+- **Tray *Settings* (and *Open app window*) no longer spawn an
+  endless chain of app processes when the window is already open**
+  (ADR-0063). The lock-held `flintshot app` child delegated
+  `OpenApp` back to the daemon, whose dispatch spawns the next
+  child — which delegated again — so one tray click kept forking
+  workers and re-raising the window forever, and closing the window
+  let the next child in the chain pop a new one open.
+  Daemon-spawned app workers now carry `--standalone` (the capture /
+  open loop-breaker rule) and exit quietly: the focus/route
+  broadcast the daemon sends *before* spawning already did the work.
+  A user-run `flintshot app` keeps the focus ping.
+- **A tray *Settings* click while the settings page is already open
+  now answers with a toast.** The ping used to be silently consumed;
+  the window still focuses/raises, and an in-window toast
+  ("Settings is already open") confirms it for ~2.5 s. On any other
+  page the click still routes to Settings in place; with the window
+  closed it still opens directly on Settings.
 - **The settings page's scrolling.** Its `ScrollArea` drew without
   a `CentralPanel`: no panel containment for the body and no desk
   background. The body now lives in a cream `CentralPanel` with a
