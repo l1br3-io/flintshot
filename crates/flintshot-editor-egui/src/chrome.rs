@@ -81,14 +81,17 @@ pub(crate) fn paint_move_chrome(painter: &egui::Painter, rect: egui::Rect, kind:
 /// The persistent-selection chrome (annotation-delete spec): the
 /// selected annotation's bounding box in canvas-physical px.
 ///
-/// `None` when the tool is not Move, nothing is selected, the index
-/// is stale, or the annotation's bbox is degenerate (nothing to
-/// outline). Read-only like the rest of this module — the shells own
-/// any deselect that follows a `None` (a degenerate selection must
-/// not survive to the next frame).
+/// Rendered under the selection-owning tools — Move (grab-to-select)
+/// and Text (click-to-select over committed text, text-select-edit
+/// spec); both paint the same dashed outline. `None` when the tool
+/// owns no selection, nothing is selected, the index is stale, or
+/// the annotation's bbox is degenerate (nothing to outline).
+/// Read-only like the rest of this module — the shells own any
+/// deselect that follows a `None` (a degenerate selection must not
+/// survive to the next frame).
 #[must_use]
 pub(crate) fn selected_chrome(state: &EditorState) -> Option<Rect> {
-    if state.tool != Tool::Move {
+    if !matches!(state.tool, Tool::Move | Tool::Text) {
         return None;
     }
     let index = state.selected_index?;
@@ -310,12 +313,41 @@ mod tests {
     }
 
     #[test]
-    fn selected_chrome_requires_move_tool() {
+    fn selected_chrome_requires_selection_owning_tool() {
         let mut s = state_with(Tool::Rect, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
         s.selected_index = Some(0);
         assert!(
             selected_chrome(&s).is_none(),
-            "non-Move tools get no selection chrome"
+            "non-selection-owning tools get no selection chrome"
+        );
+        s.tool = Tool::Pencil;
+        assert!(
+            selected_chrome(&s).is_none(),
+            "Pencil gets no selection chrome either"
+        );
+    }
+
+    #[test]
+    fn selected_chrome_returns_selected_bbox_under_text() {
+        // text-select-edit: the Text tool owns a persistent selection
+        // too (click-to-select over committed text); its chrome is
+        // the same dashed outline Move renders.
+        let mut s = state_with(
+            Tool::Text,
+            &[Annotation::text(
+                Point::new(10.0, 10.0),
+                "hello",
+                flintshot_core::text::TextStyle::simple(16.0, flintshot_core::Color::RED),
+            )],
+        );
+        s.selected_index = Some(0);
+        let rect =
+            selected_chrome(&s).expect("a selected Text under the Text tool must yield its bbox");
+        assert_eq!(rect.min, Point::new(10.0, 10.0));
+        assert_eq!(
+            rect.max,
+            Point::new(10.0 + 16.0 * 0.5 * 5.0, 10.0 + 16.0 * 1.2),
+            "coarse bbox: half-em advance per char, one line at line-spacing height"
         );
     }
 

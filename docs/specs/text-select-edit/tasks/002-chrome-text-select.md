@@ -12,7 +12,7 @@ Check the shells' paint call sites for any duplicated
 
 **Acceptance criteria:**
 
-- [ ] `selected_chrome` returns the selected annotation's bbox when
+- [x] `selected_chrome` returns the selected annotation's bbox when
       `tool == Tool::Text` and a selection exists; `None` for every
       other tool; Move behavior unchanged.
 - [ ] Dashed selection outline renders in both shells (editor
@@ -21,7 +21,7 @@ Check the shells' paint call sites for any duplicated
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-editor-egui` (chrome gating tests)
+- [x] `cargo test -p flintshot-editor-egui` (chrome gating tests)
 - [ ] Manual: `cargo run -- capture` → place text → Enter → click
       it with Text tool → dashed outline; Del deletes; Esc
       deselects, editor stays open — both editor window and overlay
