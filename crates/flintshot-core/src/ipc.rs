@@ -160,6 +160,16 @@ pub enum Request {
         /// Filesystem path of the image to open.
         path: PathBuf,
     },
+    // settings-improvement effort — appended (postcard variant-index
+    // rule):
+    /// Client → daemon: open the app window on its settings page.
+    /// Mirrors [`Request::OpenApp`] (broadcast + app-worker spawn)
+    /// but carries the destination route: the daemon broadcasts
+    /// [`Event::SettingsFocus`] (an already-running window shows,
+    /// focuses, and routes itself to Settings) and spawns the `app`
+    /// worker with `--route settings` (which exits promptly when the
+    /// app instance lock is held — the broadcast did the real work).
+    OpenSettings,
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -274,6 +284,14 @@ pub enum Event {
         /// Filesystem path of the image to open.
         path: PathBuf,
     },
+    // settings-improvement effort — appended (postcard variant-index
+    // rule):
+    /// Someone asked for the settings page (tray / applet
+    /// *Settings*). Broadcast on [`Request::OpenSettings`]; a
+    /// subscribed app window shows, focuses, and routes itself to
+    /// its settings page — the Settings analogue of
+    /// [`Event::AppFocus`].
+    SettingsFocus,
 }
 
 /// One entry of an [`Event::ShortcutsBound`] reply: a bound shortcut's
@@ -383,6 +401,8 @@ mod tests {
             Request::OpenImage {
                 path: PathBuf::from("/tmp/my shots/screen 1.png"),
             },
+            // settings-improvement — appended (postcard variant-index rule)
+            Request::OpenSettings,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");
@@ -431,6 +451,8 @@ mod tests {
             Event::OpenRequested {
                 path: PathBuf::from("/tmp/my shots/screen 1.png"),
             },
+            // settings-improvement — appended (postcard variant-index rule)
+            Event::SettingsFocus,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode event");
