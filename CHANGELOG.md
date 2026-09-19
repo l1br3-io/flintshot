@@ -18,8 +18,40 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- **Settings is the single preferences surface** (settings-improvement).
+  The tray and the COSMIC applet offer a *Settings* item that opens
+  (or focuses) the app window directly on its settings page — the
+  same open-or-focus flow as *Open app window*, carrying the
+  destination route over the new `OpenSettings` / `SettingsFocus`
+  IPC pair (appended; wire-compatible). `flintshot app --route
+  settings` cold-starts there too.
+- **Config-file links on the settings page**, the `VSCode`
+  *User Settings* / *Default Settings* pair: *Edit config file*
+  opens `config.toml` in `$EDITOR` (fallback `$VISUAL`; the path is
+  printed when neither is set), materializing the file from a
+  commented template first when missing — never clobbering an
+  existing one. *View default config* expands the embedded,
+  fully-commented default TOML read-only in-app; a test pins the
+  asset field-by-field equal to the code defaults.
+- **Rebind shortcuts… in Settings** on Wayland sessions — the same
+  portal bind dialog the tray item drove (`flintshot hotkeys bind`
+  unchanged).
+
 ### Fixed
 
+- **The settings page's scrolling.** Its `ScrollArea` drew without
+  a `CentralPanel`: no panel containment for the body and no desk
+  background. The body now lives in a cream `CentralPanel` with a
+  properly-constrained `ScrollArea`, and a machine-checked
+  regression test pins that scrolled content never renders under
+  the 44 px topbar.
+- **The app window now closes for captures started while the
+  settings page is open.** The Settings route consumed no hide
+  directives, so an external capture's close request stranded the
+  window on screen — in the shot. The router owns the directive
+  poll there now.
 - **Sticky tools now reach every editor entry, not just captures.**
   The app window's Open / recent-captures / Paste paths built their
   `EditorState` without the `[ui]` session config, so they silently
@@ -30,6 +62,13 @@ Categories used below:
   the same read-once config. Note for configs predating ADR-0058: a
   settings re-save may have materialized `flip-to-move = true` (the
   old default) — set it to `false` to get sticky tools.
+
+### Removed
+
+- **The tray's *Open config* and *Bind shortcuts…* items** (and the
+  applet's *Open config*): their features live in Settings now, and
+  their menu ids (`flintshot.open-config`,
+  `flintshot.bind-shortcuts`) are pinned dead — never reused.
 
 ### Changed
 
