@@ -622,7 +622,7 @@ impl GrabRouter {
 /// ADR-0058 read-once rule): the persisted file, or built-in
 /// defaults (warned) when loading fails. Every editor-page entry —
 /// grab routing, open, paste — goes through this so `[ui]` session
-/// defaults (color / stroke / flip-to-move) land identically no
+/// defaults (color / stroke / flip-to-select) land identically no
 /// matter which door the image arrived through.
 fn editor_session_config() -> Config {
     match Config::load() {
