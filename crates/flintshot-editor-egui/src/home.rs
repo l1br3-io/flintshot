@@ -137,6 +137,35 @@ pub trait HomeBridge {
     fn version(&mut self) -> String {
         "dev".to_owned()
     }
+
+    /// Open the user's config file in their editor
+    /// (`$EDITOR`/`$VISUAL`, template-materialized first when the
+    /// file is missing). The *Edit config file* link's action;
+    /// errors are the implementation's to log — the page never
+    /// blocks on it. Default: no-op.
+    fn open_config_file(&mut self) {}
+
+    /// The fully-commented default config TOML, rendered read-only
+    /// by the *View default config* link. Default: the embedded
+    /// asset.
+    fn default_config_toml(&mut self) -> String {
+        flintshot_core::default_config_toml().to_owned()
+    }
+
+    /// Whether the session is Wayland — gates the settings page's
+    /// *Rebind shortcuts…* row (the portal bind dialog is
+    /// Wayland-only; X11/macOS/Windows re-register hotkeys from
+    /// `[hotkeys]` directly and need no bind step). Default:
+    /// `false`.
+    fn session_is_wayland(&mut self) -> bool {
+        false
+    }
+
+    /// Open the xdg-desktop-portal `GlobalShortcuts` bind dialog
+    /// through the running daemon (the *Rebind shortcuts…* row's
+    /// action). The implementation owns the IPC + outcome logging.
+    /// Default: no-op.
+    fn request_rebind(&mut self) {}
 }
 
 /// Recents per grid row — the mockup's 4-column layout.
@@ -250,6 +279,22 @@ impl HomeApp {
 
     pub(crate) fn version(&mut self) -> String {
         self.bridge.version()
+    }
+
+    pub(crate) fn open_config_file(&mut self) {
+        self.bridge.open_config_file();
+    }
+
+    pub(crate) fn default_config_toml(&mut self) -> String {
+        self.bridge.default_config_toml()
+    }
+
+    pub(crate) fn session_is_wayland(&mut self) -> bool {
+        self.bridge.session_is_wayland()
+    }
+
+    pub(crate) fn request_rebind(&mut self) {
+        self.bridge.request_rebind();
     }
 
     /// The status line's current text (the header's overflow menu

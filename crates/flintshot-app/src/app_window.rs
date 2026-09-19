@@ -74,6 +74,10 @@ enum Page {
     /// its image buffer inline, and the unit variants need not pay
     /// for it).
     Editor(Box<PendingEditor>),
+    /// The settings page — the same-page restore target when an
+    /// external capture closes the window while Settings is open
+    /// (plan decision 8's principle applied to the new route).
+    Settings,
 }
 
 /// An editor page waiting to run: the image's editor state plus the
@@ -147,6 +151,11 @@ struct SharedInner {
     /// A failed or quiet grab while the window was open on the
     /// Loading route: route home — nothing is coming to show.
     route_home: bool,
+    /// A `SettingsFocus` arrived (tray / applet *Settings*) and the
+    /// window was closed: the reopen generation opens on the
+    /// settings page. An open window consumes it through the route
+    /// host instead (in-place swap).
+    route_settings: bool,
     /// The window closed for a hide directive (not a user quit): the
     /// outer loop must wait for the reopen instead of exiting.
     hide_requested: bool,
@@ -250,6 +259,18 @@ impl Shared {
     /// Take the route-home intent, if one waits.
     fn take_route_home(&self) -> bool {
         std::mem::take(&mut self.lock().route_home)
+    }
+
+    /// Arm the route-settings intent (a `SettingsFocus` while the
+    /// window was closed — the reopen opens on Settings).
+    fn set_route_settings(&self) {
+        self.lock().route_settings = true;
+        self.changed.notify_all();
+    }
+
+    /// Take the route-settings intent, if one waits.
+    fn take_route_settings(&self) -> bool {
+        std::mem::take(&mut self.lock().route_settings)
     }
 
     /// Whether a window generation is currently running.
@@ -408,7 +429,12 @@ impl HomeCore {
                 self.in_flight = self.in_flight.saturating_sub(1);
                 self.maybe_show()
             }
-            IpcEvent::AppFocus => self.app_focus(),
+            // The focus pings share one guard: surface the window,
+            // but never raise it over a live capture session. The
+            // settings ping's routing intent is armed by the pump
+            // regardless, so a mid-capture ping still lands on
+            // Settings at the session's end.
+            IpcEvent::AppFocus | IpcEvent::SettingsFocus => self.app_focus(),
             _ => None,
         }
     }
@@ -698,8 +724,10 @@ fn start_grab_with(router: &mut GrabRouter, shared: &Shared, delay_ms: u32) {
 
 /// `flintshot app` entry point: acquire the app lock (focus-ping and
 /// exit if held), start the pump, then the page-router loop — one
-/// eframe epoch per page lifetime (ADR-0047).
-pub(crate) fn run() -> eyre::Result<()> {
+/// eframe epoch per page lifetime (ADR-0047). `initial` is the
+/// cold-start route (`app --route settings` opens on the settings
+/// page; Home is the default).
+pub(crate) fn run(initial: crate::worker::AppRoute) -> eyre::Result<()> {
     let Some(_lock) = crate::single::acquire_app_lock()? else {
         return focus_existing();
     };
@@ -718,7 +746,10 @@ pub(crate) fn run() -> eyre::Result<()> {
         .map_err(|e| eyre::eyre!("spawning the app pump thread: {e}"))?;
 
     let mut result = Ok(());
-    let mut start = GenerationStart::Home;
+    let mut start = match initial {
+        crate::worker::AppRoute::Home => GenerationStart::Home,
+        crate::worker::AppRoute::Settings => GenerationStart::Settings,
+    };
 
     // One iteration = one window **generation** (one eframe
     // lifetime; pages route inside it). Only captures and user quit
@@ -830,9 +861,11 @@ fn handle_open_requested(shared: &Arc<Shared>, path: std::path::PathBuf) {
 
 /// The post-reopen generation start: a routed image (a grab's
 /// capture or a forwarded open — whichever armed the editor page)
-/// wins; else the route that was open (the same-page restore); else
-/// home.
+/// wins; else the settings intent (a `SettingsFocus` that arrived
+/// while closed); else the route that was open (the same-page
+/// restore); else home.
 fn next_start_after_reopen(shared: &Shared) -> GenerationStart {
+    let route_settings = shared.take_route_settings();
     let start = match shared.take_pending_editor() {
         // A landed image (the fast read-back raced the open) opens
         // the editor directly — no spinner flash.
@@ -840,9 +873,13 @@ fn next_start_after_reopen(shared: &Shared) -> GenerationStart {
         // The confirmed grab's write is still landing: open on the
         // progress route.
         None if shared.take_pending_loading() => GenerationStart::Loading,
+        // A SettingsFocus armed while the window was closed: the
+        // reopen opens on the settings page.
+        None if route_settings => GenerationStart::Settings,
         None => match shared.take_restore_page().unwrap_or(Page::Home) {
             Page::Home => GenerationStart::Home,
             Page::Editor(pending) => GenerationStart::Editor(pending),
+            Page::Settings => GenerationStart::Settings,
         },
     };
     // Whichever won, drain the other flag — a stale loading mark
@@ -863,6 +900,10 @@ enum GenerationStart {
     /// The capture-progress route while a delivery is pending (a
     /// confirmed grab whose clipboard write is landing).
     Loading,
+    /// The settings page (settings-improvement): a cold start on
+    /// `app --route settings`, a `SettingsFocus` reopen, or the
+    /// same-page restore.
+    Settings,
 }
 
 /// Run one window generation to its close through the window router:
@@ -892,6 +933,7 @@ fn run_generation(
             flintshot_editor_egui::WindowStart::Editor(Box::new(to_routed(&pending)))
         }
         GenerationStart::Loading => flintshot_editor_egui::WindowStart::Loading,
+        GenerationStart::Settings => flintshot_editor_egui::WindowStart::Settings,
     };
     shared.set_window_open();
     let ran = crate::ambient::with_ambient_runtime(|| {
@@ -931,9 +973,11 @@ fn route_to_page(route: &flintshot_editor_egui::Route) -> Page {
             state: routed.state.clone(),
             selection_first: routed.selection_first,
         })),
+        // The settings page restores itself (the same-page principle);
         // Loading restores home — a reopen after a capture carries
         // the delivered image through the pending editor, never a
         // spinner — and future route kinds restore the empty state.
+        flintshot_editor_egui::Route::Settings => Page::Settings,
         _ => Page::Home,
     }
 }
@@ -1180,8 +1224,18 @@ async fn connected_loop(
                         IpcEvent::OpenRequested { path } => Some(path.clone()),
                         _ => None,
                     };
+                    // A settings focus ping (settings-improvement):
+                    // the routing intent arms here; `core.on_event`
+                    // handles the show/focus directive above.
+                    let settings_focus = matches!(event, IpcEvent::SettingsFocus);
                     if let Some(directive) = core.on_event(&event) {
                         shared.push_directive(directive);
+                    }
+                    if settings_focus {
+                        // An open window consumes this through the
+                        // route host (in-place swap); a closed one
+                        // through `next_start_after_reopen`.
+                        shared.set_route_settings();
                     }
                     if let Some(delay_ms) = triggered {
                         start_grab_with(router, shared, delay_ms);
@@ -1301,6 +1355,52 @@ impl HomeBridge for Bridge {
 
     fn version(&mut self) -> String {
         env!("CARGO_PKG_VERSION").to_owned()
+    }
+
+    fn open_config_file(&mut self) {
+        // Off the UI thread: the spawn (and the template write it
+        // performs first) must never stall a frame — the bind-dialog
+        // threading precedent.
+        let spawned = std::thread::Builder::new()
+            .name("flintshot-config-edit".into())
+            .spawn(|| {
+                if let Err(e) = crate::config_edit::open_config_in_editor() {
+                    tracing::warn!(error = %e, "opening the config file from settings");
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "spawning the config-edit thread");
+        }
+    }
+
+    fn default_config_toml(&mut self) -> String {
+        flintshot_core::default_config_toml().to_owned()
+    }
+
+    fn session_is_wayland(&mut self) -> bool {
+        crate::platform::session_is_wayland()
+    }
+
+    fn request_rebind(&mut self) {
+        // The portal bind dialog is a user-facing request/reply —
+        // thread it so the UI keeps painting while it is open (the
+        // tray helper's old arm, verbatim).
+        let spawned = std::thread::Builder::new()
+            .name("flintshot-settings-bind".into())
+            .spawn(|| match crate::ipc_client::bind_shortcuts_to(None) {
+                Ok(Some(_event)) => {
+                    tracing::info!("portal bind finished (settings)");
+                }
+                Ok(None) => {
+                    tracing::warn!("bind: daemon not running");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "bind: IPC failure");
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "spawning the settings bind thread");
+        }
     }
 
     fn open_image(&mut self, path: std::path::PathBuf) -> bool {
@@ -1498,6 +1598,10 @@ impl flintshot_editor_egui::RouteHost for RouteHostBridge {
     fn take_route_home(&mut self) -> bool {
         self.shared.take_route_home()
     }
+
+    fn take_route_settings(&mut self) -> bool {
+        self.shared.take_route_settings()
+    }
 }
 
 #[cfg(test)]
@@ -1632,7 +1736,7 @@ mod tests {
                 );
                 assert_eq!(pending.state.image.dimensions(), (5, 4));
             }
-            GenerationStart::Home | GenerationStart::Loading => {
+            GenerationStart::Home | GenerationStart::Loading | GenerationStart::Settings => {
                 panic!("a routed image must win over the stash")
             }
         }
@@ -1947,6 +2051,85 @@ mod tests {
             core.on_event(&IpcEvent::AppFocus),
             Some(HomeDirective::Show)
         );
+    }
+
+    // ── SettingsFocus (settings-improvement Task 004) ────────────
+
+    #[test]
+    fn settings_focus_surfaces_an_idle_window_like_app_focus() {
+        let mut core = HomeCore::default();
+        assert_eq!(
+            core.on_event(&IpcEvent::SettingsFocus),
+            Some(HomeDirective::Show),
+            "an idle window shows + focuses for the settings ping"
+        );
+    }
+
+    #[test]
+    fn settings_focus_is_held_mid_capture() {
+        // Never raise the window over a live capture session — the
+        // routing intent (armed by the pump) still lands at the
+        // session's end.
+        let mut core = HomeCore::default();
+        core.on_event(&IpcEvent::CaptureStarted);
+        assert_eq!(core.on_event(&IpcEvent::SettingsFocus), None);
+    }
+
+    #[test]
+    fn route_settings_intent_round_trips_once() {
+        let shared = Shared::default();
+        shared.set_route_settings();
+        assert!(shared.take_route_settings());
+        assert!(
+            !shared.take_route_settings(),
+            "the intent is consumed exactly once"
+        );
+    }
+
+    #[test]
+    fn settings_intent_reopens_on_the_settings_page() {
+        // A SettingsFocus that arrived while the window was closed:
+        // the reopen generation opens on Settings.
+        let shared = Shared::default();
+        shared.set_restore_page(Page::Home);
+        shared.set_route_settings();
+        assert!(matches!(
+            next_start_after_reopen(&shared),
+            GenerationStart::Settings
+        ));
+    }
+
+    #[test]
+    fn a_routed_image_beats_the_settings_intent() {
+        // A grab that landed wins over the stashed settings route —
+        // the freshest content owns the reopen.
+        let shared = Shared::default();
+        shared.set_route_settings();
+        shared.set_pending_editor(pending_over((2, 2), false));
+        assert!(matches!(
+            next_start_after_reopen(&shared),
+            GenerationStart::Editor(_)
+        ));
+        assert!(
+            !shared.take_route_settings(),
+            "the losing intent drained with the race"
+        );
+    }
+
+    #[test]
+    fn settings_route_at_close_restores_the_settings_page() {
+        // The same-page restore: an external capture closing the
+        // settings page reopens it.
+        assert!(matches!(
+            route_to_page(&flintshot_editor_egui::Route::Settings),
+            Page::Settings
+        ));
+        let shared = Shared::default();
+        shared.set_restore_page(Page::Settings);
+        assert!(matches!(
+            next_start_after_reopen(&shared),
+            GenerationStart::Settings
+        ));
     }
 
     #[test]

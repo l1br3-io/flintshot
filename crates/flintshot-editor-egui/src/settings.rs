@@ -24,6 +24,19 @@ use crate::widgets;
 /// coalesced by this timer, and the final write always lands.
 const SAVE_DEBOUNCE: f64 = 1.0;
 
+/// An action the page collected that the window router must service
+/// through the bridge (the page stays pure data + this queue).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsAction {
+    /// *Edit config file* clicked: open the user's `config.toml` in
+    /// their editor (the bridge owns the spawn).
+    EditConfigFile,
+    /// *Rebind shortcuts…* clicked: open the portal bind dialog
+    /// through the daemon (the bridge owns the IPC; Wayland-only —
+    /// the row renders iff the session is Wayland).
+    RebindShortcuts,
+}
+
 /// The settings page's state: the working config copy plus the
 /// draft of the filename-template text field (validated before it
 /// reaches the config).
@@ -32,6 +45,16 @@ pub(crate) struct SettingsApp {
     template_draft: String,
     display_server: String,
     version: String,
+    /// The fully-commented default TOML, snapshotted from the bridge
+    /// at construction (the read-only defaults view's content).
+    default_toml: String,
+    /// Whether the session is Wayland, snapshotted at construction
+    /// (gates the *Rebind shortcuts…* row, like `display_server`).
+    wayland: bool,
+    /// Whether the defaults view is expanded.
+    show_defaults: bool,
+    /// Clicked actions awaiting the router's drain.
+    actions: Vec<SettingsAction>,
     /// When the first unsaved edit landed (the debounce clock's
     /// start). `None` when everything is persisted.
     dirty_since: Option<f64>,
@@ -39,14 +62,34 @@ pub(crate) struct SettingsApp {
 
 impl SettingsApp {
     /// Snapshot the page from the bridge.
-    pub(crate) fn new(config: Config, display_server: String, version: String) -> Self {
+    pub(crate) fn new(
+        config: Config,
+        display_server: String,
+        version: String,
+        default_toml: String,
+        wayland: bool,
+    ) -> Self {
         let template_draft = config.output.filename_template.clone();
         Self {
             config,
             template_draft,
             display_server,
             version,
+            default_toml,
+            wayland,
+            show_defaults: false,
+            actions: Vec::new(),
             dirty_since: None,
+        }
+    }
+
+    /// Take the oldest clicked action, if one waits (the router
+    /// services it through the bridge).
+    pub(crate) fn drain_action(&mut self) -> Option<SettingsAction> {
+        if self.actions.is_empty() {
+            None
+        } else {
+            Some(self.actions.remove(0))
         }
     }
 
@@ -102,19 +145,27 @@ impl SettingsPage {
     pub(crate) fn show(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) -> bool {
         let escape = crate::settings::SettingsApp::escape_pressed(ui.ctx());
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let column = 640.0_f32.min(ui.available_width());
-            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                ui.set_min_width(column);
-                ui.add_space(theme::SPACE_SCALE[3]);
-                capture_section(ui, page, now);
-                editor_section(ui, page, now);
-                output_section(ui, page, now);
-                shortcuts_section(ui, page);
-                system_section(ui, page);
-                ui.add_space(theme::SPACE_SCALE[3]);
+        // `auto_shrink([false, true])`: the area takes the panel's
+        // full height (the scrollbar engages) and shrinks only
+        // horizontally (the centered column). The default
+        // `[true; 2]` never scrolls — the content just overflows
+        // the window bottom.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let column = 640.0_f32.min(ui.available_width());
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    ui.set_min_width(column);
+                    ui.add_space(theme::SPACE_SCALE[3]);
+                    capture_section(ui, page, now);
+                    editor_section(ui, page, now);
+                    output_section(ui, page, now);
+                    config_file_section(ui, page);
+                    shortcuts_section(ui, page);
+                    system_section(ui, page);
+                    ui.add_space(theme::SPACE_SCALE[3]);
+                });
             });
-        });
 
         escape
     }
@@ -291,14 +342,147 @@ fn output_section(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
     });
 }
 
-/// The Shortcuts section: the real binding table, readonly.
+/// The Shortcuts section: the real binding table, readonly — plus
+/// the *Rebind shortcuts…* link on Wayland sessions (the portal
+/// bind dialog only exists there; X11/macOS/Windows hotkeys
+/// re-register from `[hotkeys]` directly, so the row would be a
+/// dead control — the tray item's gate, moved into Settings).
 fn shortcuts_section(ui: &mut egui::Ui, page: &mut SettingsApp) {
     section_card(ui, "Shortcuts", |ui| {
         set_row(ui, "Capture", |ui| {
             let chord = page.config.hotkeys.capture.clone();
             readonly_value(ui, &chord);
         });
+        if page.wayland {
+            set_row(ui, "Rebind shortcuts", |ui| {
+                if link(ui, egui::Id::new("set-rebind"), "Open bind dialog…") {
+                    page.actions.push(SettingsAction::RebindShortcuts);
+                }
+            });
+        }
     });
+}
+
+/// The Config file section (settings-improvement): the `VSCode`
+/// *User Settings* / *Default Settings* pair — a link that opens
+/// the user's `config.toml` in their editor, and a link that
+/// expands the embedded, fully-commented defaults read-only.
+fn config_file_section(ui: &mut egui::Ui, page: &mut SettingsApp) {
+    section_card(ui, "Config file", |ui| {
+        set_row(ui, "Edit config file", |ui| {
+            if link(ui, egui::Id::new("set-edit-config"), "Open in editor") {
+                page.actions.push(SettingsAction::EditConfigFile);
+            }
+        });
+        set_row(ui, "View default config", |ui| {
+            let label = if page.show_defaults {
+                "Hide defaults"
+            } else {
+                "Show defaults"
+            };
+            if link(ui, egui::Id::new("set-view-defaults"), label) {
+                page.show_defaults = !page.show_defaults;
+            }
+        });
+        if page.show_defaults {
+            defaults_card(ui, &page.default_toml);
+        }
+    });
+}
+
+/// The read-only defaults view: the embedded TOML in a monospace
+/// card on the dim paper — dashed-locked kin to the readonly wells,
+/// never an editable widget (the card is hover-sensed only; pinned
+/// by test).
+fn defaults_card(ui: &mut egui::Ui, toml_text: &str) {
+    use crate::theme::palette as p;
+    ui.add_space(theme::SPACE_SCALE[1]);
+    egui::Frame::new()
+        .fill(p::PAPER_DIM)
+        .corner_radius(egui::CornerRadius::same(theme::POD_RADIUS))
+        .inner_margin(egui::Margin::same(12))
+        .stroke(theme::HAIRLINE_STROKE)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            let top = ui.cursor().top();
+            // Galley-painted lines (no widgets): the card can never
+            // register an editable control.
+            for line in toml_text.lines() {
+                let galley = ui.painter().layout_no_wrap(
+                    if line.is_empty() {
+                        " ".to_owned()
+                    } else {
+                        line.to_owned()
+                    },
+                    egui::FontId::monospace(theme::TYPE_XS),
+                    p::INK_SOFT,
+                );
+                let size = egui::vec2(ui.available_width(), galley.size().y.max(12.0));
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                ui.painter().galley(
+                    egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+                    galley,
+                    p::INK_SOFT,
+                );
+            }
+            // One stable hover target over the painted body (tests,
+            // tooltips later).
+            let body = egui::Rect::from_min_max(
+                egui::pos2(ui.max_rect().left(), top),
+                ui.cursor().left_top(),
+            );
+            let _ = ui.interact(
+                body,
+                egui::Id::new("set-defaults-card"),
+                egui::Sense::hover(),
+            );
+        });
+}
+
+/// A gold text link — the settings page's tertiary affordance
+/// (navigate out or reveal; the row controls edit). Painted like
+/// the breadcrumb's links: gold-deep ink, forest + underline on
+/// hover, pointer cursor.
+fn link(ui: &mut egui::Ui, id: egui::Id, label: &str) -> bool {
+    use crate::theme::palette as p;
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        p::GOLD_DEEP,
+    );
+    let size = egui::vec2(galley.size().x + 6.0, 26.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    // The id-ed interact is the link's one true hit target (the
+    // allocation above senses hover only, so it cannot steal the
+    // click).
+    eprintln!("LINK id={id:?} rect={rect:?} clip={:?}", ui.clip_rect());
+    let resp = ui
+        .interact(rect, id, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let color = if resp.hovered() {
+        p::FOREST
+    } else {
+        p::GOLD_DEEP
+    };
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        color,
+    );
+    let pos = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+    let galley_size = galley.size();
+    ui.painter().galley(pos, galley, color);
+    if resp.hovered() {
+        let underline = egui::Stroke::new(1.0, color);
+        ui.painter().line_segment(
+            [
+                egui::pos2(pos.x, pos.y + galley_size.y + 1.0),
+                egui::pos2(pos.x + galley_size.x, pos.y + galley_size.y + 1.0),
+            ],
+            underline,
+        );
+    }
+    resp.clicked()
 }
 
 /// The System section: detected display server + version, readonly.
@@ -382,11 +566,33 @@ mod tests {
     use super::*;
 
     fn page() -> SettingsApp {
-        SettingsApp::new(Config::default(), "X11".into(), "9.9.9".into())
+        page_gated(false)
+    }
+
+    /// [`page`] with the Wayland gate pinned (the rebind row's
+    /// render gate).
+    fn page_gated(wayland: bool) -> SettingsApp {
+        SettingsApp::new(
+            Config::default(),
+            "X11".into(),
+            "9.9.9".into(),
+            "# flintshot configuration\n[ui]\ndefault-color = \"#ff0000\"\n".into(),
+            wayland,
+        )
     }
 
     fn frame(page: &mut SettingsApp) -> egui::Context {
+        frame_with_animations(page, true)
+    }
+
+    /// [`frame`] with the spring gate pinned — off settles every
+    /// section's unfold in one frame (the body clip covers all rows
+    /// immediately; with the spring on, a single headless frame
+    /// catches the cards mid-unfold and the lower rows' widgets are
+    /// clip-dead).
+    fn frame_with_animations(page: &mut SettingsApp, animations: bool) -> egui::Context {
         let ctx = egui::Context::default();
+        widgets::set_animations(&ctx, animations);
         theme::apply(&ctx);
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -541,5 +747,192 @@ mod tests {
         assert!(page.save_due(2.0), "past the window the save is due");
         assert!(page.drain_save(2.0).is_some(), "take drains the save");
         assert!(!page.save_due(2.1), "drained: no further saves");
+    }
+
+    // ── Config-file links (settings-improvement Task 009) ────────
+
+    /// A click at `resp`'s center (the settings tests' event shape).
+    fn click(at: egui::Rect) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at.center()),
+            egui::Event::PointerButton {
+                pos: at.center(),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: at.center(),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    /// Both links render, and the edit link reports through the
+    /// action queue exactly once per click.
+    #[test]
+    fn config_links_render_and_report() {
+        let mut page = page();
+        let ctx = frame_with_animations(&mut page, false);
+        let edit = ctx
+            .read_response(egui::Id::new("set-edit-config"))
+            .expect("the edit link registers")
+            .rect;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 900.0),
+                )),
+                events: click(edit),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                SettingsPage::show(ui, &mut page, 0.0);
+            },
+        );
+        assert_eq!(
+            page.drain_action(),
+            Some(SettingsAction::EditConfigFile),
+            "one click = one queued action"
+        );
+        assert!(page.drain_action().is_none(), "drained exactly once");
+    }
+
+    /// The defaults view: collapsed by default, expands on the link
+    /// click (the card registers, hover-sensed only), collapses
+    /// again on the second click.
+    #[test]
+    fn defaults_view_toggles_and_is_readonly() {
+        let mut page = page();
+        let ctx = frame_with_animations(&mut page, false);
+        assert!(
+            ctx.read_response(egui::Id::new("set-defaults-card"))
+                .is_none(),
+            "collapsed by default — no card registers"
+        );
+
+        let toggle = ctx
+            .read_response(egui::Id::new("set-view-defaults"))
+            .expect("the view-defaults link registers")
+            .rect;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 900.0),
+                )),
+                events: click(toggle),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                SettingsPage::show(ui, &mut page, 0.0);
+            },
+        );
+        assert!(page.show_defaults, "the link expanded the view");
+        let card = ctx
+            .read_response(egui::Id::new("set-defaults-card"))
+            .expect("the expanded card registers");
+        assert!(
+            !card.clicked_by(egui::PointerButton::Primary),
+            "hover-sensed only — the card can never click"
+        );
+        assert!(
+            page.drain_action().is_none(),
+            "revealing defaults queues no action"
+        );
+
+        // Second click collapses.
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 900.0),
+                )),
+                events: click(toggle),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                SettingsPage::show(ui, &mut page, 0.0);
+            },
+        );
+        assert!(!page.show_defaults, "the second click collapsed it");
+    }
+
+    /// The expanded card renders the TOML text itself (the galley is
+    /// painted, so pin through the monospace galley the painter
+    /// lays out — one painted line per source line, first line the
+    /// header).
+    #[test]
+    fn defaults_card_renders_the_embedded_toml_lines() {
+        let mut page = page();
+        page.show_defaults = true;
+        let ctx = frame_with_animations(&mut page, false);
+        assert!(
+            ctx.read_response(egui::Id::new("set-defaults-card"))
+                .is_some(),
+            "the card is live"
+        );
+        // The fixture asset's line count is the layout budget: the
+        // card grew the page by at least that many lines of height.
+        let lines = f32::from(u16::try_from(page.default_toml.lines().count()).unwrap_or(u16::MAX));
+        let card = ctx
+            .read_response(egui::Id::new("set-defaults-card"))
+            .expect("card")
+            .rect;
+        assert!(
+            card.height() >= lines * 10.0,
+            "the card body covers all {lines} monospace lines (got {} px)",
+            card.height()
+        );
+    }
+
+    // ── Rebind row (settings-improvement Task 010) ───────────────
+
+    /// The row renders iff the session is Wayland — X11 never grows
+    /// a dead control (the tray item's gate, moved into Settings).
+    #[test]
+    fn rebind_row_renders_only_on_wayland() {
+        let mut x11 = page_gated(false);
+        let ctx = frame_with_animations(&mut x11, false);
+        assert!(
+            ctx.read_response(egui::Id::new("set-rebind")).is_none(),
+            "X11: no dead rebind row"
+        );
+
+        let mut wayland = page_gated(true);
+        let ctx = frame_with_animations(&mut wayland, false);
+        assert!(
+            ctx.read_response(egui::Id::new("set-rebind")).is_some(),
+            "Wayland: the rebind row registers"
+        );
+    }
+
+    /// The row reports through the action queue when present.
+    #[test]
+    fn rebind_row_reports_through_the_queue() {
+        let mut page = page_gated(true);
+        let ctx = frame_with_animations(&mut page, false);
+        let row = ctx
+            .read_response(egui::Id::new("set-rebind"))
+            .expect("the rebind row registers on Wayland")
+            .rect;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 900.0),
+                )),
+                events: click(row),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                SettingsPage::show(ui, &mut page, 0.0);
+            },
+        );
+        assert_eq!(page.drain_action(), Some(SettingsAction::RebindShortcuts));
+        assert!(page.drain_action().is_none(), "drained exactly once");
     }
 }
