@@ -270,19 +270,15 @@ fn g_hand(p: &egui::Painter, r: egui::Rect, c: Color32) {
     seg(p, r, (4.0, 2.5), (6.5, 1.0), c, 2.0);
 }
 
-/// Four corner brackets — the crop / viewfinder idiom. Reads as
-/// "frame this region", distinct from the dashed marquee at a
-/// glance.
+/// Two overlapping right angles — the classic crop idiom. Reads as
+/// "cut this region" and, unlike the old viewfinder brackets, can't
+/// be mistaken for the dashed marquee at a glance.
 fn g_crop(p: &egui::Painter, r: egui::Rect, c: Color32) {
     for (a, b) in [
-        ((-6.0, -6.0), (-2.0, -6.0)),
-        ((-6.0, -6.0), (-6.0, -2.0)),
-        ((6.0, -6.0), (2.0, -6.0)),
-        ((6.0, -6.0), (6.0, -2.0)),
-        ((-6.0, 6.0), (-2.0, 6.0)),
-        ((-6.0, 6.0), (-6.0, 2.0)),
-        ((6.0, 6.0), (2.0, 6.0)),
-        ((6.0, 6.0), (6.0, 2.0)),
+        ((-3.0, -6.0), (-3.0, 3.0)),
+        ((-3.0, 3.0), (6.0, 3.0)),
+        ((3.0, 6.0), (3.0, -3.0)),
+        ((3.0, -3.0), (-6.0, -3.0)),
     ] {
         seg(p, r, a, b, c, 2.0);
     }

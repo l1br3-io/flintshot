@@ -22,7 +22,8 @@ excluded.
 **Consequences.**
 
 - Every crate's tests and lints run on every gate invocation; local
-  results match CI byte-for-byte.
+  results match CI. (The justfile later added `-q` to quiet local
+  output — raw logs now differ cosmetically, results do not.)
 - `flintshot-cosmic` (opt-in, heavy system deps) is built and linted in
   CI's dedicated `cosmic-build` job, not the default local gate.
 - Any new library crate must be added to the `--doc` package selector

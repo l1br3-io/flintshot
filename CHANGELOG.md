@@ -57,6 +57,12 @@ Categories used below:
 
 ### Changed
 
+- **New Crop tool glyph.** The rail and overlay chips for Crop swap
+  the four corner brackets — visually a cousin of Select's dashed
+  marquee — for the classic overlapping-right-angles crop idiom, so
+  the two selection-region tools are unmistakable at chip size.
+  (Same `ToolSpec`/`TOOL_PODS` vocabulary; no behaviour change.)
+
 - **`just` recipes are quiet by default.** All cargo invocations in the
   justfile now pass `-q` (nextest: `--cargo-quiet`): compile chatter
   and per-test lines are suppressed on success, while errors, test
