@@ -48,7 +48,7 @@ defaults. Spec: [`spec.md`](spec.md).
 - [x] Task 2: Multi-annotation drag → `tasks/002-core-multi-drag.md`
 
 ### Checkpoint: Core behaviors complete
-- [ ] `cargo test --workspace --all-targets` + clippy + fmt green
+- [x] `cargo test --workspace --all-targets` + clippy + fmt green
 - [ ] Manual: shift-click builds a set, drag moves it, one Ctrl+Z, Del clears all — via `cargo run -- app`
 - [ ] Review with human before proceeding
 
@@ -62,10 +62,10 @@ defaults. Spec: [`spec.md`](spec.md).
 
 ### Phase 3: Chrome + closeout
 - [x] Task 5: Plural selection chrome in both shells → `tasks/005-chrome-shells.md`
-- [ ] Task 6: Closeout (CHANGELOG, TEST_MATRIX, ADR, full gates) → `tasks/006-closeout.md`
+- [x] Task 6: Closeout (CHANGELOG, TEST_MATRIX, ADR, full gates) → `tasks/006-closeout.md`
 
 ### Checkpoint: Complete
-- [ ] All spec exit criteria met; standing gates green; ready for PR
+- [x] All spec exit criteria met; standing gates green; ready for PR
 
 Note: Task 5 depends only on Tasks 1–2 and may run parallel to
 Tasks 3–4 if agents are available.
