@@ -45,7 +45,7 @@ undo/redo chips and key chords are untouched. Spec:
 - [x] No UI behavior change (kinds are inert metadata)
 
 ### Phase 2: Shell tabs
-- [ ] Task 3: `PROPERTIES | HISTORY` tab header → `tasks/003-shell-tab-header.md`
+- [x] Task 3: `PROPERTIES | HISTORY` tab header → `tasks/003-shell-tab-header.md`
 - [ ] Task 4: History timeline + click-to-jump → `tasks/004-shell-timeline.md`
 
 ### Checkpoint: Shell
