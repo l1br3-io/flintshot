@@ -11,6 +11,7 @@ mod ambient;
 mod app_window;
 mod capture_flow;
 mod cli;
+mod config_edit;
 mod config_watcher;
 mod daemon;
 mod hotkeys;
