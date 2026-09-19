@@ -4,7 +4,7 @@
 - [x] 002 Core — keyboard selection chords (Shift+arrows, Shift+Home/End, Ctrl+A, Delete)
 - [x] 003 Core — bar caret replaces block caret
 - [x] 004 Core — selection highlight rendering
-- [ ] 005 Core — word-boundary helpers + Ctrl+Shift word-wise chords
+- [x] 005 Core — word-boundary helpers + Ctrl+Shift word-wise chords
 - [ ] 006 Core — mouse selection state APIs (char-index)
 - [ ] 007 Core+egui — TripleClick event + tracker counts + click gesture arms
 - [ ] 008 egui — shared pos→char hit resolver
