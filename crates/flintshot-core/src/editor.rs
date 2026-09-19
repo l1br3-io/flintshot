@@ -224,19 +224,24 @@ impl Snapshot {
 /// An in-flight annotation move started by a Move-tool press on a
 /// committed annotation (see [`EditorState::moving`]).
 ///
-/// The grab offset keeps the grabbed point under the cursor for the
-/// whole drag: every `update_move` positions the annotation's
-/// bounding-box `min` at `cursor - grab_offset`, so the annotation
-/// never snaps to the cursor.
+/// The drag translates the whole selection set by the incremental
+/// pointer delta — each `update_move` applies `at - last_pos` to
+/// every member — so the pressed annotation's grab point tracks the
+/// cursor without snapping (for the single-member set this is
+/// byte-identical to the old absolute `bbox.min = at - grab_offset`
+/// positioning) and every other member rides along by the same
+/// delta.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnnotationDrag {
-    /// Index into [`EditorState::anns`] of the grabbed annotation.
-    /// Stable for the whole drag — moving never reorders `anns`.
+    /// Index into [`EditorState::anns`] of the *pressed* annotation.
+    /// Chrome-only today (the grab outline keys off it); the
+    /// translation itself iterates the selection set. Stable for the
+    /// whole drag — moving never reorders `anns`.
     pub index: usize,
-    /// Press position minus the annotation's bounding-box `min`,
-    /// physical px. Preserved from the grab so the grab point tracks
-    /// the cursor.
-    pub grab_offset: Point,
+    /// Pointer position at the previous event (press or last drag),
+    /// physical px. Each drag event translates the set by
+    /// `at - last_pos`, then records `at` here.
+    pub last_pos: Point,
     /// Whether the drag has produced actual movement yet. The undo
     /// snapshot is pushed lazily on the first movement, so a
     /// click-without-drag leaves history untouched.
@@ -619,11 +624,14 @@ impl EditorState {
     /// Route a Move-tool press: selection first (the set model),
     /// then the drag grab.
     ///
-    /// - hit + Shift: toggle membership. A toggle-*in* also grabs
-    ///   the pressed annotation for a drag (press-and-hold after
-    ///   adding moves it); a toggle-*out* starts no drag.
-    /// - hit, no Shift: replace the set with the hit annotation and
-    ///   grab it.
+    /// - hit + Shift on a non-member: toggle in, grab (press-and-hold
+    ///   after adding drags the set).
+    /// - hit + Shift on a member: toggle out, start no drag.
+    /// - plain hit on a non-member: replace the set with the hit
+    ///   annotation, grab it (last click wins).
+    /// - plain hit on a member: **keep the set** and grab — this is
+    ///   the group-drag entry (spec exit criterion: drag any selected
+    ///   member → all translate together).
     /// - miss: clear the set, start nothing.
     ///
     /// Shared by the normal dispatcher and the text-draft
@@ -633,10 +641,13 @@ impl EditorState {
             self.selected.clear();
             return;
         };
+        let is_member = self.selected.binary_search(&index).is_ok();
         if shift {
             if self.toggle_selected(index) {
                 self.begin_move(index, pos);
             }
+        } else if is_member {
+            self.begin_move(index, pos);
         } else {
             self.select_only(index);
             self.begin_move(index, pos);
@@ -675,39 +686,46 @@ impl EditorState {
     /// bounding box (e.g. an empty polyline) and thus nothing to
     /// grab or move by.
     fn begin_move(&mut self, index: usize, at: Point) -> bool {
-        let Some(grab_offset) = self.anns.get(index).and_then(|ann| {
-            ann.bounding_box()
-                .map(|bbox| Point::new(at.x - bbox.min.x, at.y - bbox.min.y))
-        }) else {
+        if !self
+            .anns
+            .get(index)
+            .and_then(Annotation::bounding_box)
+            .is_some()
+        {
             return false;
-        };
+        }
         self.moving = Some(AnnotationDrag {
             index,
-            grab_offset,
+            last_pos: at,
             moved: false,
         });
         true
     }
 
-    /// Translate the annotation being moved so its bounding-box
-    /// `min` sits at `at - grab_offset`.
+    /// Translate every selected annotation by the incremental
+    /// pointer delta (`at` minus the previous pointer position).
+    ///
+    /// GOTCHA: the delta is incremental, not absolute. The old
+    /// single-annotation drag positioned `bbox.min = at -
+    /// grab_offset` each event; that formula has no plural form (each
+    /// member has its own bbox), while per-event deltas compose to
+    /// the identical result for the single case and generalize to
+    /// the set for free. Incremental also survives `anns` mutations
+    /// that preserve indices without re-deriving any anchor.
     ///
     /// Pushes the undo snapshot lazily: the first drag event with
     /// actual movement snapshots the pre-move `anns` and clears
-    /// `redo`, so one move gesture is exactly one undo entry and a
-    /// click-without-drag records nothing.
+    /// `redo`, so one move gesture — any set size, any event count —
+    /// is exactly one undo entry and a click-without-drag records
+    /// nothing. Members without a bounding box (degenerate
+    /// polylines) are skipped, matching `begin_move`'s grab rule;
+    /// stale indices are skipped rather than fatal.
     fn update_move(&mut self, at: Point) {
         let Some(drag) = self.moving else {
             return;
         };
-        let Some(bbox) = self.anns.get(drag.index).and_then(Annotation::bounding_box) else {
-            // The annotation vanished (crop raced the drag) or lost
-            // its bbox; the drag is over either way.
-            self.end_move();
-            return;
-        };
-        let dx = at.x - drag.grab_offset.x - bbox.min.x;
-        let dy = at.y - drag.grab_offset.y - bbox.min.y;
+        let dx = at.x - drag.last_pos.x;
+        let dy = at.y - drag.last_pos.y;
         if dx == 0.0 && dy == 0.0 {
             return;
         }
@@ -715,12 +733,20 @@ impl EditorState {
             self.undo
                 .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
             self.redo.clear();
-            self.moving = Some(AnnotationDrag {
-                moved: true,
-                ..drag
-            });
         }
-        self.anns[drag.index].translate(dx, dy);
+        self.moving = Some(AnnotationDrag {
+            last_pos: at,
+            moved: true,
+            ..drag
+        });
+        let members: Vec<usize> = self.selected.clone();
+        for index in members {
+            if let Some(ann) = self.anns.get_mut(index) {
+                if ann.bounding_box().is_some() {
+                    ann.translate(dx, dy);
+                }
+            }
+        }
     }
 
     /// Drop the in-flight move state (`moving` + the selection set)
@@ -3550,6 +3576,19 @@ mod tests {
         s
     }
 
+    /// Helper: Move-tool state with three non-overlapping committed
+    /// rects, in a lower band so fixtures compose: ann 0 at
+    /// (0,50)–(20,70), ann 1 at (60,50)–(80,70), ann 2 at
+    /// (80,50)–(95,70).
+    fn three_ann_move_state() -> EditorState {
+        let mut s = hundred_state();
+        s.tool = Tool::Move;
+        s.anns.push(rect_ann(0.0, 50.0, 20.0, 70.0));
+        s.anns.push(rect_ann(60.0, 50.0, 80.0, 70.0));
+        s.anns.push(rect_ann(80.0, 50.0, 95.0, 70.0));
+        s
+    }
+
     /// Move press on a committed annotation grabs it for a move;
     /// the drag translates it with the grab point tracking the
     /// cursor; release clears the drag state.
@@ -4091,19 +4130,32 @@ mod tests {
         assert!(s.undo.is_empty(), "no gesture, no snapshot");
     }
 
-    /// A plain click on a hit annotation replaces the whole set with
-    /// that single member — last click wins, set semantics.
+    /// Plain-click routing splits on membership: a press on a
+    /// non-member replaces the set (last click wins); a press on a
+    /// member keeps the set — that press is the group-drag entry.
     #[test]
-    fn plain_click_replaces_whole_set() {
+    fn plain_click_replaces_set_with_non_member_only() {
         let mut s = two_ann_move_state();
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.selected, vec![0, 1], "fixture: two members");
+        // Plain press on a member: set survives, drag grabs the group.
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        assert_eq!(s.selected, vec![0, 1], "member press keeps the set");
+        assert!(s.moving.is_some(), "member press still grabs");
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected, vec![0], "plain click collapses the set");
+        // Plain press on a non-member replaces the set.
+        let mut s3 = three_ann_move_state();
+        s3.dispatch_input(&shift_down(Point::new(5.0, 50.0)));
+        s3.dispatch_input(&InputEvent::PointerUp);
+        s3.dispatch_input(&shift_down(Point::new(65.0, 50.0)));
+        s3.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s3.selected, vec![0, 1], "fixture: two of three");
+        s3.dispatch_input(&down(Point::new(85.0, 50.0)));
+        s3.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s3.selected, vec![2], "non-member press collapses the set");
     }
 
     /// A miss press clears the whole set, shift or not.
@@ -4183,6 +4235,109 @@ mod tests {
         s.dispatch_input(&InputEvent::PointerUp);
         s.dispatch_input(&shift_down(Point::new(70.0, 70.0)));
         assert!(s.selected.is_empty(), "shift miss clears the set");
+    }
+
+    // --- Multi-annotation drag (multi-select-properties Task 002) ---
+
+    /// A drag on one selected member translates the whole set by the
+    /// same incremental pointer delta — group move, sizes preserved.
+    #[test]
+    fn multi_drag_translates_whole_set_together() {
+        let mut s = two_ann_move_state();
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0, 1], "fixture: both selected");
+        // Press on ann 0 and drag by (+20, +10) across two events.
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(40.0, 25.0),
+        });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(50.0, 35.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        for (i, expected_min) in [(0, Point::new(30.0, 20.0)), (1, Point::new(80.0, 20.0))] {
+            match &s.anns[i] {
+                Annotation::Rect { rect, .. } => {
+                    assert_eq!(
+                        rect.min, expected_min,
+                        "ann {i} translated by the group delta"
+                    );
+                }
+                other => panic!("expected Rect, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            match &s.anns[0] {
+                Annotation::Rect { rect, .. } => rect.max,
+                other => panic!("expected Rect, got {other:?}"),
+            },
+            Point::new(70.0, 50.0),
+            "size preserved through the group move"
+        );
+    }
+
+    /// One multi-drag gesture is exactly one undo entry no matter
+    /// the set size or event count; undo restores every member.
+    #[test]
+    fn multi_drag_is_one_undo_entry_regardless_of_set_size() {
+        let mut s = two_ann_move_state();
+        s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&shift_down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        for x in [35.0, 45.0, 55.0] {
+            s.dispatch_input(&InputEvent::PointerDrag {
+                pos: Point::new(x, 25.0),
+            });
+        }
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.undo.len(), 1, "one group gesture = one snapshot");
+        s.undo();
+        assert_eq!(
+            s.anns,
+            vec![
+                rect_ann(10.0, 10.0, 50.0, 40.0),
+                rect_ann(60.0, 10.0, 90.0, 40.0)
+            ],
+            "one undo restores every member's pre-drag position"
+        );
+    }
+
+    /// Members without a bounding box are skipped by the drag, not
+    /// fatal: the healthy members still move.
+    #[test]
+    fn multi_drag_skips_degenerate_bbox_members() {
+        let mut s = two_ann_move_state();
+        s.anns.push(Annotation::Pencil {
+            points: vec![],
+            color: Color::RED,
+            width: 3.0,
+        });
+        // A miss can't select the empty polyline (nothing to hit);
+        // seed it into the set directly to exercise the skip.
+        s.selected = vec![0, 1, 2];
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(50.0, 35.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.anns.len(), 3, "degenerate member survived untouched");
+        for (i, expected_min) in [(0, Point::new(30.0, 20.0)), (1, Point::new(80.0, 20.0))] {
+            match &s.anns[i] {
+                Annotation::Rect { rect, .. } => {
+                    assert_eq!(rect.min, expected_min, "healthy member {i} still moved");
+                }
+                other => panic!("expected Rect, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(&s.anns[2], Annotation::Pencil { points, .. } if points.is_empty()),
+            "the degenerate member is untouched"
+        );
     }
 
     /// `translate` shifts every variant's geometry verbatim.
