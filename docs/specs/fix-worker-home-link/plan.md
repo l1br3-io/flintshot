@@ -56,7 +56,7 @@ proven `open_settings_from_worker` seam end to end. Spec:
 
 ### Phase 3: Record
 
-- [ ] Task 3: CHANGELOG `[Unreleased]` + ADR-0065 (worker-navigation stance) → `tasks/003-changelog-adr.md`
+- [x] Task 3: CHANGELOG `[Unreleased]` + ADR-0065 (worker-navigation stance) → `tasks/003-changelog-adr.md`
 
 ### Checkpoint: Complete
 

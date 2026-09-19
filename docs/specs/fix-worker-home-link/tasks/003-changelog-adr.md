@@ -9,13 +9,13 @@ close in navigation clothing); ADR-0065 captures the decision
 non-obvious technical choice" rule.
 
 **Acceptance criteria:**
-- [ ] `CHANGELOG.md` `## [Unreleased]` gains a **Fixed** entry: worker editor's Home link navigates (app window focus/spawn via the daemon) instead of immediately closing the window; references ADR-0065
-- [ ] `docs/adrs/ADR-0065-worker-home-delegates-to-app-window.md` exists with the repo's Context · Decision · Consequences shape, cross-referencing the single-window spec and the `open_settings_from_worker` precedent
-- [ ] ADR notes the deliberate edges: a running app window focuses on its *current* route (no force-route); the delegate runs on the UI thread (Settings precedent); hook-absent fallback keeps the Esc contract
+- [x] `CHANGELOG.md` `## [Unreleased]` gains a **Fixed** entry: worker editor's Home link navigates (app window focus/spawn via the daemon) instead of immediately closing the window; references ADR-0065
+- [x] `docs/adrs/ADR-0065-worker-home-delegates-to-app-window.md` exists with the repo's Context · Decision · Consequences shape, cross-referencing the single-window spec and the `open_settings_from_worker` precedent
+- [x] ADR notes the deliberate edges: a running app window focuses on its *current* route (no force-route); the delegate runs on the UI thread (Settings precedent); hook-absent fallback keeps the Esc contract
 
 **Verification:**
-- [ ] `python3 .opencode/harness/scripts/check-refs.py` (if it covers docs refs) or manual link check: referenced files/ADR numbers exist
-- [ ] Full CI gate one last time: fmt, clippy, workspace tests, doc tests
+- [x] `python3 .opencode/harness/scripts/check-refs.py` (if it covers docs refs) or manual link check: referenced files/ADR numbers exist
+- [x] Full CI gate one last time: fmt, clippy, workspace tests, doc tests
 
 **Dependencies:** Tasks 001 + 002 (the record must describe the shipped behavior)
 
