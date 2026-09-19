@@ -54,6 +54,10 @@ statusbar-size-mode = "heuristic"
 # knob) animate; false jumps every transition to its end state.
 animations = true
 
+# How many recent captures the home grid keeps (and the recents
+# index truncates to). Clamped to 1-200 at use.
+recent-captures-limit = 50
+
 [capture]
 # Include the mouse cursor in captured images.
 include-cursor = true
@@ -104,5 +108,12 @@ jpeg-quality = 90
 filename-template = ""
 
 # Direct-save directory. Empty (default) = your platform's
-# pictures directory.
+# pictures directory + "Flintshot" (e.g. ~/Pictures/Flintshot);
+# set a path to redirect all automatic saves.
 save-dir = ""
+
+# Whether flintshot's own copy-to-clipboard actions (the editor's
+# Copy button, "clipboard" after-grab) also save the image to the
+# save location so the copy lands in recents. A save failure never
+# fails the copy.
+save-clipboard-copies = true
