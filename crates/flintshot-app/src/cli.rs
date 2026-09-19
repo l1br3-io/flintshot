@@ -1175,10 +1175,12 @@ fn run_editor_session(
                 .with_selection_first()
                 .with_close_handle(close.clone())
                 .with_open_settings(open_settings_from_worker)
+                .with_open_home(open_home_from_worker)
         } else {
             flintshot_editor_egui::EguiShell::new()
                 .with_close_handle(close.clone())
                 .with_open_settings(open_settings_from_worker)
+                .with_open_home(open_home_from_worker)
         };
         shell.run_editor(state)
     })
@@ -1220,6 +1222,42 @@ fn spawn_settings_app() -> Result<()> {
         .spawn()
         .map(|_| ())
         .map_err(|e| color_eyre::eyre::eyre!("spawning `flintshot app --route settings`: {e}"))
+}
+
+/// The worker editor's Home delegate (the shell's `with_open_home`
+/// hook): the daemon's `OpenApp` choreography from a worker process
+/// — an already-running app window focuses itself (the broadcast; a
+/// running window keeps its current route); otherwise the daemon
+/// spawns one on Home. With no daemon at all, the worker performs
+/// the spawn step itself.
+#[cfg(feature = "egui")]
+fn open_home_from_worker() {
+    match crate::ipc_client::try_delegate(&Request::OpenApp) {
+        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {}
+        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {
+            if let Err(e) = spawn_home_app() {
+                tracing::warn!(error = %e, "editor Home: no daemon and the direct spawn failed");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "editor Home: delegating to the daemon"),
+    }
+}
+
+/// The daemon's own `OpenApp` spawn step (plain `app` — the Home
+/// route elides `--route`), detached — the `NoDaemon` fallback for
+/// worker editors (the broadcast would land on nobody). The spawned
+/// app acquires the lock and auto-starts its own daemon via the
+/// pump, exactly like the Settings fallback.
+#[cfg(feature = "egui")]
+fn spawn_home_app() -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| color_eyre::eyre::eyre!("resolving current_exe: {e}"))?;
+    std::process::Command::new(exe)
+        .args(["app"])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| color_eyre::eyre::eyre!("spawning `flintshot app`: {e}"))
 }
 
 /// Which recapture an outcome asks for, if any. Pure so the loop's
