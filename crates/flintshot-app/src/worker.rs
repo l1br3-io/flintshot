@@ -295,7 +295,20 @@ pub fn dispatch(
         // nobody — harmless).
         Request::OpenApp => {
             sink(Event::AppFocus);
-            let argv = app_argv();
+            let argv = app_argv(AppRoute::Home);
+            spawn_argv(spawner, &argv)?;
+            Ok(DispatchOutcome::Continue)
+        }
+        // The settings-window opener (settings-improvement): the
+        // OpenApp choreography with the destination route carried.
+        // Broadcast-first so an already-running window shows, focuses
+        // and routes itself to Settings; the spawned worker exits
+        // promptly on the held lock (the broadcast did the real
+        // work). No window running → the spawn creates one, opened
+        // directly on Settings.
+        Request::OpenSettings => {
+            sink(Event::SettingsFocus);
+            let argv = app_argv(AppRoute::Settings);
             spawn_argv(spawner, &argv)?;
             Ok(DispatchOutcome::Continue)
         }
@@ -369,12 +382,27 @@ fn push_backend_flag(argv: &mut Vec<String>, backend: &str) {
     }
 }
 
-/// Build the `flintshot app` argv for [`Request::OpenApp`]. No
+/// Which page a spawned app worker opens on — the `app --route`
+/// flag's vocabulary. `Home` elides the flag (the subcommand's
+/// default); `Settings` opens the settings page directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppRoute {
+    /// The three-button home (no `--route` flag).
+    Home,
+    /// The settings page (`--route settings`).
+    Settings,
+}
+
+/// Build the `flintshot app [--route settings]` argv for
+/// [`Request::OpenApp`] / [`Request::OpenSettings`]. No
 /// `--standalone` flavor exists here: the worker takes the app lock
 /// and exits fast when a window is already running (the broadcast
 /// focused it); only a lock-free spawn becomes the window.
-fn app_argv() -> Vec<String> {
-    vec!["app".to_string()]
+fn app_argv(route: AppRoute) -> Vec<String> {
+    match route {
+        AppRoute::Home => vec!["app".to_string()],
+        AppRoute::Settings => vec!["app".to_string(), "--route".into(), "settings".into()],
+    }
 }
 
 /// Built-in default backend id. When `Request::UploadLast`'s `backend`
@@ -434,6 +462,7 @@ fn variant_name(request: &Request) -> &'static str {
         Request::HideTrayForCapture => "hide-tray-for-capture",
         Request::ReportCaptured => "report-captured",
         Request::OpenApp => "open-app",
+        Request::OpenSettings => "open-settings",
         Request::PrepareCapture => "prepare-capture",
         Request::ReportAppHidden => "report-app-hidden",
         Request::ReportEditorWindowOpened => "report-editor-window-opened",
@@ -1021,6 +1050,45 @@ mod tests {
         assert_eq!(spawner.snapshot(), vec![vec!["app".to_string()]]);
     }
 
+    /// settings-improvement Task 003: the OpenSettings dispatch is
+    /// the OpenApp arm with the route carried — broadcast-first (a
+    /// running window shows + routes itself), then the spawn with
+    /// the route flag (a lock-held worker exits promptly; the
+    /// broadcast did the real work).
+    #[test]
+    fn open_settings_broadcasts_settings_focus_and_spawns_routed_worker() {
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        let outcome = dispatch(
+            &Request::OpenSettings,
+            &spawner,
+            &DispatchState::new(),
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert_eq!(
+            events,
+            vec![Event::SettingsFocus],
+            "the broadcast is what routes an existing window"
+        );
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["app".to_string(), "--route".into(), "settings".into()]],
+            "the spawn carries the destination route"
+        );
+    }
+
+    /// The routed app worker is still an app worker: the session
+    /// registry's argv classification must keep counting it (the
+    /// pre-grab handshake's presence oracle depends on it).
+    #[test]
+    fn routed_app_argv_classifies_as_app_and_not_capture() {
+        let argv = vec!["app", "--route", "settings"];
+        assert!(is_app_argv(&argv), "still the app worker");
+        assert!(!is_capture_argv(&argv), "never a capture worker");
+    }
+
     #[test]
     fn capture_argv_classification_matches_capture_requests() {
         // The argv-side twin of `spawns_capture_worker`: every argv
@@ -1206,6 +1274,9 @@ mod tests {
             },
             Request::HideTrayForCapture,
             Request::ReportCaptured,
+            // settings-improvement: opening a window never grabs the
+            // screen — the icon must not vanish for it.
+            Request::OpenSettings,
         ];
         for request in &others {
             assert!(
@@ -1445,6 +1516,7 @@ mod tests {
             (Request::HideTrayForCapture, "hide-tray-for-capture"),
             (Request::ReportCaptured, "report-captured"),
             (Request::OpenApp, "open-app"),
+            (Request::OpenSettings, "open-settings"),
             (Request::PrepareCapture, "prepare-capture"),
             (Request::ReportAppHidden, "report-app-hidden"),
             (
