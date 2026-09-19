@@ -45,10 +45,13 @@
 //! [`HomeCore`] counts `CaptureStarted` (+) against `SessionEnded`
 //! (−, saturating — the daemon's reaper emits it when a capture
 //! worker exits, so a crashed worker still restores the window). A
-//! daemon disconnect force-shows with an error status rather than
-//! leaving the process windowless; the pump then stays in a
-//! degraded cmd-only loop (no auto-reconnect in this effort).
+//! daemon disconnect force-shows with a reconnecting status; the
+//! pump then holds the fort as the **liveness anchor** — answering
+//! commands + in-process grabs while probing for the daemon on a
+//! capped backoff curve, respawning it rate-limited, and
+//! re-announcing presence on reconnect (ADR-0066).
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -110,24 +113,15 @@ const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// First-tier delay for the liveness anchor's reconnect attempts
 /// (after a subscription loss). Grows exponentially per attempt.
-// Transitional: the pump's reconnect loop (the next slice) consumes
-// this; remove the allow with it.
-#[allow(dead_code)]
 const RECONNECT_BASE: Duration = Duration::from_millis(250);
 
 /// Ceiling for the reconnect delay: however often the daemon is
 /// gone, the anchor never waits longer than this between probes.
-// Transitional: the pump's reconnect loop (the next slice) consumes
-// this; remove the allow with it.
-#[allow(dead_code)]
 const RECONNECT_CAP: Duration = Duration::from_secs(5);
 
 /// Reconnect delay for attempt `n` (0-based): exponential from
 /// [`RECONNECT_BASE`], capped at [`RECONNECT_CAP`]. Pure so the
 /// curve is unit-pinned — the pump loop only sequences it.
-// Transitional: the pump's reconnect loop (the next slice) consumes
-// this; remove the allow with it.
-#[allow(dead_code)]
 fn reconnect_delay(attempt: u32) -> Duration {
     // 250 ms · 2^4 = 4 s < cap ≤ 2^5 tier; shift 5 covers the cap.
     let shift = attempt.min(5);
@@ -137,26 +131,17 @@ fn reconnect_delay(attempt: u32) -> Duration {
 /// Minimum spacing between daemon respawns the anchor may request
 /// (the rate limit that keeps a crash-looping daemon from storming
 /// process spawns — spec AC 8).
-// Transitional: the pump's reconnect loop (the next slice) consumes
-// this; remove the allow with it.
-#[allow(dead_code)]
 const DAEMON_RESPAWN_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Rate limiter for daemon respawns: grants at most one spawn per
 /// [`DAEMON_RESPAWN_MIN_INTERVAL`]. Pure-in-time (the caller supplies
 /// `now`) so the window semantics are unit-pinned.
-// Transitional: the pump's reconnect loop (the next slice) consumes
-// this; remove the allow with it.
-#[allow(dead_code)]
 #[derive(Debug)]
 struct DaemonSpawnLimiter {
     /// When the last granted spawn happened; `None` = never.
     last_spawn: Option<std::time::Instant>,
 }
 
-// Transitional: the pump's reconnect loop (the next slice) consumes
-// this; remove the allow with it.
-#[allow(dead_code)]
 impl DaemonSpawnLimiter {
     fn new() -> Self {
         Self { last_spawn: None }
@@ -1210,15 +1195,21 @@ fn pump_main(mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>, shared: &Arc<Shared>
 }
 
 /// Subscribe with daemon auto-start. `None` when the daemon never
-/// answered within [`DAEMON_START_TIMEOUT`] (status already sent).
-async fn ensure_subscribed(shared: &Shared) -> Option<crate::ipc_server::Stream> {
+/// answered within [`DAEMON_START_TIMEOUT`] (status already sent);
+/// the anchor's reconnect loop takes it from there. The auto-start
+/// flows through the shared [`DaemonSpawnLimiter`] so the reconnect
+/// phase cannot double-spawn inside the rate window.
+async fn ensure_subscribed(
+    shared: &Shared,
+    limiter: &mut DaemonSpawnLimiter,
+) -> Option<crate::ipc_server::Stream> {
     let deadline = tokio::time::Instant::now() + DAEMON_START_TIMEOUT;
     let mut spawned = false;
     loop {
         match crate::ipc_client::subscribe_to(None).await {
             Ok(Some(stream)) => return Some(stream),
             Ok(None) => {
-                if !spawned {
+                if !spawned && limiter.try_spawn(std::time::Instant::now()) {
                     spawned = true;
                     shared.push_directive(HomeDirective::SetStatus("starting daemon…".to_string()));
                     if let Err(e) = spawn_daemon() {
@@ -1375,23 +1366,67 @@ async fn connected_loop(
     }
 }
 
-/// No subscription (start failure or disconnect): keep answering
-/// commands — the in-process grab needs no daemon (the prepare
-/// handshake degrades to the vacuous `NoDaemon` guard, exactly like
-/// a standalone worker), so a click can never strand the process
-/// windowless.
-async fn degraded_loop(
-    mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>,
-    mut grabs_rx: tokio_mpsc::Receiver<(u64, AppGrabEvent)>,
+/// Why [`reconnecting_loop`] returned.
+#[derive(Debug)]
+enum AnchorExit {
+    /// The window closed (command sender dropped) — the pump exits.
+    WindowClosed,
+    /// A daemon answered again; the caller re-enters
+    /// [`connected_loop`] with the fresh stream.
+    Reconnected(crate::ipc_server::Stream),
+}
+
+/// The liveness anchor: no subscription (start failure or daemon
+/// death), so the pump holds the fort — commands still start
+/// in-process grabs (the grab needs no daemon; the prepare handshake
+/// degrades to the vacuous `NoDaemon` guard, exactly like a
+/// standalone worker) while the daemon is probed on the
+/// [`reconnect_delay`] curve, respawning it through the rate limiter
+/// when nothing answers. Every wait is bounded; the loop itself runs
+/// until the window closes or a daemon returns.
+///
+/// `respawn` is the daemon-spawn seam (production: [`spawn_daemon`];
+/// tests record calls) and `override_path` routes the subscribe probe
+/// at an explicit socket (production: the default; tests: a local
+/// listener).
+#[allow(clippy::too_many_arguments)]
+async fn reconnecting_loop<R>(
+    cmd_rx: &mut tokio_mpsc::Receiver<PumpCommand>,
+    grabs_rx: &mut tokio_mpsc::Receiver<(u64, AppGrabEvent)>,
     shared: &Shared,
     core: &mut HomeCore,
     router: &mut GrabRouter,
-) {
+    override_path: Option<&Path>,
+    limiter: &mut DaemonSpawnLimiter,
+    respawn: &mut R,
+) -> AnchorExit
+where
+    R: FnMut() -> eyre::Result<()> + Send,
+{
+    let mut attempt: u32 = 0;
     loop {
+        match crate::ipc_client::subscribe_to(override_path).await {
+            Ok(Some(stream)) => return AnchorExit::Reconnected(stream),
+            Ok(None) => {
+                // Nothing answered: respawn, but only inside the
+                // limiter's window — a crash-looping daemon must not
+                // storm process spawns.
+                if limiter.try_spawn(std::time::Instant::now()) {
+                    tracing::info!("no daemon answered; respawning `flintshot daemon`");
+                    if let Err(e) = respawn() {
+                        tracing::warn!(error = %e, "respawning the daemon");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "subscribing to the daemon"),
+        }
+        let delay = reconnect_delay(attempt);
+        attempt = attempt.saturating_add(1);
         tokio::select! {
+            () = tokio::time::sleep(delay) => {}
             command = cmd_rx.recv() => {
                 match command {
-                    None => return,
+                    None => return AnchorExit::WindowClosed,
                     Some(command) => {
                         core.capture_requested();
                         let _ = command;
@@ -2329,6 +2364,125 @@ mod tests {
         assert!(
             !status.to_lowercase().contains("restart"),
             "the terminal banner is gone: {status:?}"
+        );
+    }
+
+    /// [`super::reconnecting_loop`] against real local sockets
+    /// (headless-safe). A daemon whose listener appears mid-backoff
+    /// is reconnected to: the loop returns the fresh stream and the
+    /// cycle can resume — daemon death self-heals, no user action.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconnecting_loop_reconnects_when_the_daemon_returns() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("flintshot-anchor-return.sock");
+        let path = sock.clone();
+
+        // The daemon's listener appears after the first failed probe
+        // (inside the first backoff tier).
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let name = crate::ipc_server::socket_name(&path).expect("socket name");
+            let _listener = interprocess::local_socket::ListenerOptions::new()
+                .name(name)
+                .try_overwrite(true)
+                .create_tokio()
+                .expect("listener");
+            // Park: holds the socket open (the subscribe probe only
+            // needs the connect to succeed).
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let (cmd_tx, mut cmd_rx) = tokio_mpsc::channel::<PumpCommand>(1);
+        let (_grabs_tx, mut grabs_rx) = tokio_mpsc::channel::<(u64, AppGrabEvent)>(1);
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        let mut router = GrabRouter::default();
+        let mut limiter = DaemonSpawnLimiter::new();
+        let respawns = Arc::new(AtomicUsize::new(0));
+        let mut respawn = move || {
+            respawns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+
+        let exit = tokio::time::timeout(
+            Duration::from_secs(5),
+            reconnecting_loop(
+                &mut cmd_rx,
+                &mut grabs_rx,
+                &shared,
+                &mut core,
+                &mut router,
+                Some(&sock),
+                &mut limiter,
+                &mut respawn,
+            ),
+        )
+        .await
+        .expect("bounded reconnect");
+
+        assert!(
+            matches!(exit, AnchorExit::Reconnected(_)),
+            "the returning daemon must be reconnected to"
+        );
+        drop(cmd_tx);
+    }
+
+    /// With no daemon ever answering: respawns flow through the rate
+    /// limiter (one spawn per window — a crash-looping daemon cannot
+    /// storm spawns), and the window closing ends the loop promptly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconnecting_loop_rate_limits_respawns_and_exits_on_close() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let never = dir.path().join("flintshot-anchor-never.sock");
+
+        let (cmd_tx, mut cmd_rx) = tokio_mpsc::channel::<PumpCommand>(1);
+        let (_grabs_tx, mut grabs_rx) = tokio_mpsc::channel::<(u64, AppGrabEvent)>(1);
+        let shared = Arc::new(Shared::default());
+        let mut core = HomeCore::default();
+        let mut router = GrabRouter::default();
+        let mut limiter = DaemonSpawnLimiter::new();
+        let respawns = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&respawns);
+        let mut respawn = move || {
+            respawns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+
+        let anchor = tokio::spawn(async move {
+            reconnecting_loop(
+                &mut cmd_rx,
+                &mut grabs_rx,
+                &shared,
+                &mut core,
+                &mut router,
+                Some(&never),
+                &mut limiter,
+                &mut respawn,
+            )
+            .await
+        });
+
+        // Let the loop churn through a few backoff tiers (250 ms +
+        // 500 ms + …), then close the window.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        drop(cmd_tx);
+        let exit = tokio::time::timeout(Duration::from_secs(2), anchor)
+            .await
+            .expect("bounded close")
+            .expect("anchor task");
+
+        assert!(
+            matches!(exit, AnchorExit::WindowClosed),
+            "the window closing must end the anchor loop"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "the rate limiter must hold respawns to one per window"
         );
     }
 
