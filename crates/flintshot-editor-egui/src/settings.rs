@@ -455,7 +455,6 @@ fn link(ui: &mut egui::Ui, id: egui::Id, label: &str) -> bool {
     // The id-ed interact is the link's one true hit target (the
     // allocation above senses hover only, so it cannot steal the
     // click).
-    eprintln!("LINK id={id:?} rect={rect:?} clip={:?}", ui.clip_rect());
     let resp = ui
         .interact(rect, id, egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
