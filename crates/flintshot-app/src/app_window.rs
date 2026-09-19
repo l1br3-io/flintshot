@@ -541,8 +541,10 @@ impl HomeCore {
         }
     }
 
-    /// The subscription died: nothing more can be learned, so the
-    /// window must come back and say so.
+    /// The subscription died: nothing more can be learned from the
+    /// old connection, so the window must come back and say what is
+    /// happening — but the anchor is already working the problem, so
+    /// the status is a *reconnecting* one, never a terminal banner.
     fn disconnected(&mut self) -> Vec<HomeDirective> {
         self.in_flight = 0;
         let mut out = self
@@ -550,7 +552,7 @@ impl HomeCore {
             .into_iter()
             .collect::<Vec<HomeDirective>>();
         out.push(HomeDirective::SetStatus(
-            "daemon connection lost — restart `flintshot app`".to_string(),
+            "daemon connection lost — reconnecting…".to_string(),
         ));
         out
     }
@@ -1145,40 +1147,63 @@ fn pump_main(mut cmd_rx: tokio_mpsc::Receiver<PumpCommand>, shared: &Arc<Shared>
     // and the post-block `mark_pump_dead` still owns it.
     runtime.block_on(async {
         let mut core = HomeCore::default();
-        if let Some(stream) = ensure_subscribed(shared).await {
-            // The presence connection: tells the daemon this app
-            // window exists so its pre-grab handshake waits for our
-            // hide-ack (the session registry only tracks
-            // daemon-spawned windows). Parked for the pump's whole
-            // connected life; daemon death ends it, and no reconnect
-            // happens in this effort (same stance as the
-            // subscription). Best-effort: a failure degrades the
-            // handshake to grace-only, never the window.
-            tokio::spawn(async {
-                if let Err(e) = crate::ipc_client::announce_app_window(None).await {
-                    tracing::warn!(
-                        error = %e,
-                        "app window presence connection failed; the pre-grab \
-                         handshake degrades to grace-only"
-                    );
+        // The liveness anchor's respawn rate limit: the initial
+        // auto-start and every later reconnect share one window, so a
+        // crash-looping daemon cannot storm spawns.
+        let mut limiter = DaemonSpawnLimiter::new();
+        let mut stream = ensure_subscribed(shared, &mut limiter).await;
+        loop {
+            if let Some(s) = stream.take() {
+                // The presence connection: tells the daemon this app
+                // window exists so its pre-grab handshake waits for
+                // our hide-ack (the session registry only tracks
+                // daemon-spawned windows). Parked for the connected
+                // life; daemon death ends it and the reconnect cycle
+                // re-announces with the next connection. Best-effort:
+                // a failure degrades the handshake to grace-only,
+                // never the window.
+                tokio::spawn(async {
+                    if let Err(e) = crate::ipc_client::announce_app_window(None).await {
+                        tracing::warn!(
+                            error = %e,
+                            "app window presence connection failed; the pre-grab \
+                             handshake degrades to grace-only"
+                        );
+                    }
+                });
+                shared.push_directive(HomeDirective::SetStatus("connected".to_string()));
+                if connected_loop(
+                    s,
+                    &mut cmd_rx,
+                    &mut grabs_rx,
+                    shared,
+                    &mut core,
+                    &mut router,
+                )
+                .await
+                    == LoopExit::WindowClosed
+                {
+                    break;
                 }
-            });
-            shared.push_directive(HomeDirective::SetStatus("connected".to_string()));
-            if connected_loop(
-                stream,
+            }
+            // Daemon death (or initial connect failure): the anchor
+            // holds the fort — keeps answering commands + grabs while
+            // reconnecting forever, bounded waits only.
+            match reconnecting_loop(
                 &mut cmd_rx,
                 &mut grabs_rx,
                 shared,
                 &mut core,
                 &mut router,
+                None,
+                &mut limiter,
+                &mut spawn_daemon,
             )
             .await
-                == LoopExit::Disconnected
             {
-                degraded_loop(cmd_rx, grabs_rx, shared, &mut core, &mut router).await;
+                AnchorExit::WindowClosed => break,
+                AnchorExit::Reconnected(s) => stream = Some(s),
             }
-        } else {
-            degraded_loop(cmd_rx, grabs_rx, shared, &mut core, &mut router).await;
         }
     });
     shared.mark_pump_dead();
@@ -2280,6 +2305,31 @@ mod tests {
         ));
         assert_eq!(core.in_flight, 0);
         assert!(!core.hidden);
+    }
+
+    /// The liveness anchor's contract: a disconnect surfaces a
+    /// *reconnecting* status, never the old terminal banner — the
+    /// window recovers on its own, so the user must not be told to
+    /// restart anything.
+    #[test]
+    fn disconnect_status_says_reconnecting_not_terminal() {
+        let mut core = HomeCore::default();
+        let directives = core.disconnected();
+        let status = directives
+            .iter()
+            .find_map(|d| match d {
+                HomeDirective::SetStatus(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("a disconnect must set a status");
+        assert!(
+            status.to_lowercase().contains("reconnect"),
+            "status must say reconnecting, got {status:?}"
+        );
+        assert!(
+            !status.to_lowercase().contains("restart"),
+            "the terminal banner is gone: {status:?}"
+        );
     }
 
     #[test]
