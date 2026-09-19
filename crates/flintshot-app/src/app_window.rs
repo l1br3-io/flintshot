@@ -726,9 +726,17 @@ fn start_grab_with(router: &mut GrabRouter, shared: &Shared, delay_ms: u32) {
 /// exit if held), start the pump, then the page-router loop — one
 /// eframe epoch per page lifetime (ADR-0047). `initial` is the
 /// cold-start route (`app --route settings` opens on the settings
-/// page; Home is the default).
-pub(crate) fn run(initial: crate::worker::AppRoute) -> eyre::Result<()> {
+/// page; Home is the default). `standalone` marks a daemon-spawned
+/// worker: the daemon already broadcast the focus/route event before
+/// spawning, so a held lock exits quietly — re-delegating `OpenApp`
+/// would spawn the next child and never end (the spawn storm;
+/// `worker::app_argv`).
+pub(crate) fn run(initial: crate::worker::AppRoute, standalone: bool) -> eyre::Result<()> {
     let Some(_lock) = crate::single::acquire_app_lock()? else {
+        if standalone {
+            tracing::info!("app window already running; the broadcast did the work");
+            return Ok(());
+        }
         return focus_existing();
     };
 
