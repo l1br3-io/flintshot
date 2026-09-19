@@ -6,5 +6,5 @@
 - [x] 004-capture-copy-persist
 - [x] 005-bridge-card-actions
 - [x] 006-rich-recents-cards
-- [ ] 007-settings-rows
+- [x] 007-settings-rows
 - [ ] 008-docs-changelog
