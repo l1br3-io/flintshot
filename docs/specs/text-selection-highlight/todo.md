@@ -9,5 +9,5 @@
 - [x] 007 Core+egui — TripleClick event + tracker counts + click gesture arms
 - [x] 008 egui — shared pos→char hit resolver
 - [x] 009 egui — app-window pump wiring (press/drag/dblclick/triple)
-- [ ] 010 egui — overlay pump wiring (press/drag/dblclick/triple)
+- [x] 010 egui — overlay pump wiring (press/drag/dblclick/triple)
 - [ ] 011 Closeout — CHANGELOG, TEST_MATRIX, spec sync, gates
