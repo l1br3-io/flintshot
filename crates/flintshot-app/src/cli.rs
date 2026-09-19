@@ -20,7 +20,8 @@ use flintshot_core::{BackendReport, Config, ImageMime, SessionKind, UploadContex
 use image::ImageFormat;
 
 use crate::capture_flow::{
-    capture_prepared, copy_image_to_clipboard, native_grab_prepared, resolve_capture_backend,
+    capture_prepared, copy_image_to_clipboard, native_grab_prepared, persist_clipboard_capture,
+    resolve_capture_backend,
 };
 
 /// Cross-platform screenshot capture and annotation.
@@ -529,6 +530,14 @@ fn native_capture_and_dispatch(
             copy_image_to_clipboard(&img)?;
             fire_capture_notification("Capture copied to clipboard");
             tracing::info!("native capture copied to clipboard");
+            // The copy is history too when save-clipboard-copies is
+            // on (default): persist to the resolved save dir and
+            // record into recents — best-effort by the helper's
+            // contract, never a capture failure.
+            if let Some(path) = persist_clipboard_capture(&img, &cfg_for_post_grab()) {
+                tracing::info!(path = %path.display(), "clipboard capture persisted");
+                flintshot_core::recents::record(&path, crate::capture_flow::recents_limit());
+            }
             // Then the editor, mirroring the Editor arm: every
             // backend lands in the editor after a grab.
             if watch.superseded() {
