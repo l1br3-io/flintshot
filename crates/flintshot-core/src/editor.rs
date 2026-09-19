@@ -361,6 +361,13 @@ pub struct EditorState {
     /// / Home / End keys. The renderer reads this to place the block
     /// caret on the correct line and column.
     pub text_cursor: usize,
+    /// Kind of the most recent inspector property edit, for undo
+    /// coalescing — see
+    /// [`end_property_edit`](Self::end_property_edit). `None` when no
+    /// burst is open; the property mutators (in
+    /// [`inspector`](crate::inspector)) own every write. Crate-private
+    /// so shells can't forge a burst, only close one.
+    pub(crate) last_edit_kind: Option<crate::inspector::PropertyEditKind>,
 }
 
 impl EditorState {
@@ -394,6 +401,7 @@ impl EditorState {
             moving: None,
             selected: Vec::new(),
             text_cursor: 0,
+            last_edit_kind: None,
         }
     }
 
@@ -550,6 +558,7 @@ impl EditorState {
         self.undo
             .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
         self.redo.clear();
+        self.last_edit_kind = None;
         self.anns.push(ann);
         // Ownership guard: flip only when the committing tool still
         // owns the pending annotation. A Text draft flushed because
@@ -592,6 +601,7 @@ impl EditorState {
         self.undo
             .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
         self.redo.clear();
+        self.last_edit_kind = None;
         self.anns.push(ann);
         self.next_number = self.next_number.saturating_add(1);
     }
@@ -733,6 +743,7 @@ impl EditorState {
             self.undo
                 .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
             self.redo.clear();
+            self.last_edit_kind = None;
         }
         self.moving = Some(AnnotationDrag {
             last_pos: at,
@@ -774,6 +785,7 @@ impl EditorState {
         self.undo
             .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
         self.redo.clear();
+        self.last_edit_kind = None;
         // Remove back-to-front so live indices below each removal
         // stay valid (the set is sorted ascending). The bounds guard
         // makes a stale index a skip, not a panic.
@@ -830,6 +842,7 @@ impl EditorState {
         self.end_move();
         self.undo.push(snapshot);
         self.redo.clear();
+        self.last_edit_kind = None;
     }
 
     /// Pop the last committed state from `undo` and swap it into `anns`.
@@ -859,6 +872,7 @@ impl EditorState {
             next_number: self.next_number,
         };
         self.redo.push(current);
+        self.last_edit_kind = None;
         self.anns = prev.anns;
         self.next_number = prev.next_number;
         if let Some(img) = prev.image {
@@ -886,6 +900,7 @@ impl EditorState {
             next_number: self.next_number,
         };
         self.undo.push(current);
+        self.last_edit_kind = None;
         self.anns = next.anns;
         self.next_number = next.next_number;
         if let Some(img) = next.image {
