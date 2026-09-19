@@ -2,20 +2,17 @@
 //!
 //! This module is the headless-testable mirror of the tray's
 //! `action_for` (`flintshot-app::tray`): it maps a popup-menu click to
-//! either a daemon [`Request`] (sent via [`crate::ipc::send_request`])
-//! or a local "open config" side-effect. Keeping the mapping pure lets
-//! the acceptance tests exercise every menu item without a display
-//! or a running daemon; the libcosmic wiring in [`crate::app`] just
-//! feeds button presses in and performs the resulting actions.
+//! a daemon [`Request`] sent via [`crate::ipc::send_request`]. Keeping
+//! the mapping pure lets the acceptance tests exercise every menu
+//! item without a display or a running daemon; the libcosmic wiring
+//! in [`crate::app`] just feeds button presses in and performs the
+//! resulting actions.
 //!
-//! Mirrors the tray menu set (native-capture-ux): one **Capture**
-//! action, *Open last*, *Open config*, *Quit*. See ADR-0005 (applet
-//! is a pure IPC client) and the Phase 3 plan's "applet shells out to
-//! `$EDITOR`" decision."
-
-use std::ffi::OsString;
-use std::path::Path;
-use std::process::Command;
+//! Mirrors the tray menu set (settings-improvement): one **Capture**
+//! action, *Open last*, *Settings*, *Quit*. The former local
+//! *Open config* item is gone — the settings page is the single
+//! preferences surface, reached through the daemon. See ADR-0005
+//! (applet is a pure IPC client).
 
 use flintshot_core::ipc::Request;
 
@@ -30,21 +27,21 @@ pub enum MenuMessage {
     Capture,
     /// *Open last* — re-open the most recently saved capture.
     OpenLast,
-    /// *Open config* — edit `config.toml` in `$EDITOR`.
-    OpenConfig,
+    /// *Settings* — open (or focus) the app window on its settings
+    /// page.
+    Settings,
     /// *Quit* — tell the daemon to stop.
     Quit,
 }
 
-/// What a [`MenuMessage`] should trigger: send a [`Request`] to the
-/// daemon over IPC, or perform a local side-effect.
+/// What a [`MenuMessage`] should trigger: a [`Request`] for the
+/// daemon over IPC. Every menu item resolves to one — the local
+/// open-config side-effect is gone with the settings swap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Action {
     /// Send this request via [`crate::ipc::send_request`].
     Request(Request),
-    /// Open `config.toml` in `$EDITOR` (see [`open_config`]).
-    OpenConfig,
 }
 
 /// Map a popup-menu click to the action it triggers. Mirrors
@@ -57,8 +54,8 @@ pub fn action_for(message: MenuMessage) -> Action {
     let request = match message {
         MenuMessage::Capture => Request::Capture { delay_ms: 0 },
         MenuMessage::OpenLast => Request::OpenLast,
+        MenuMessage::Settings => Request::OpenSettings,
         MenuMessage::Quit => Request::Quit,
-        MenuMessage::OpenConfig => return Action::OpenConfig,
     };
     Action::Request(request)
 }
@@ -76,50 +73,9 @@ pub fn request_spawns_capture(request: &Request) -> bool {
     matches!(request, Request::Capture { .. })
 }
 
-/// Build the `$EDITOR <path>` command for opening the config file.
-/// Returns `None` when `editor` is empty (no `EDITOR`/`VISUAL` set);
-/// the caller prints the path instead. Factored out of [`open_config`]
-/// so the command shape is unit-testable without spawning a process.
-#[must_use]
-pub fn editor_command(path: &Path, editor: OsString) -> Option<Command> {
-    if editor.is_empty() {
-        return None;
-    }
-    let mut cmd = Command::new(editor);
-    cmd.arg(path);
-    Some(cmd)
-}
-
-/// Open `config.toml` in `$EDITOR` (fallback `$VISUAL`); print the path
-/// if neither is set. Mirrors `flintshot-app::daemon::open_config_file`
-/// (`daemon.rs:254`) ~10 LOC — the applet is a pure IPC client and
-/// intentionally does *not* add an IPC variant for this (see plan §Q5).
-///
-/// # Errors
-/// - `dirs::config_dir()` returns `None` on this platform.
-/// - `$EDITOR`/`$VISUAL` is set but the editor fails to spawn.
-pub fn open_config() -> color_eyre::eyre::Result<()> {
-    let path = flintshot_core::config_path()
-        .ok_or_else(|| color_eyre::eyre::eyre!("no platform config_dir available"))?;
-    let editor = std::env::var_os("EDITOR").or_else(|| std::env::var_os("VISUAL"));
-    if let Some(mut cmd) = editor_command(&path, editor.unwrap_or_default()) {
-        let program = cmd.get_program().to_os_string();
-        cmd.spawn().map_err(|e| {
-            color_eyre::eyre::eyre!("launching {program:?} on {}: {e}", path.display())
-        })?;
-        tracing::info!(path = %path.display(), "opened config via $EDITOR");
-    } else {
-        println!("{}", path.display());
-        tracing::info!(path = %path.display(), "no $EDITOR/$VISUAL; printed config path");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
-    use std::path::PathBuf;
 
     // ── action_for: the menu-item → Action mapping ──────────────────
 
@@ -139,9 +95,15 @@ mod tests {
         );
     }
 
+    /// settings-improvement: the *Settings* item sends the same
+    /// `OpenSettings` request the tray sends — the daemon's
+    /// broadcast + spawn opens (or focuses) the window on Settings.
     #[test]
-    fn open_config_maps_directly() {
-        assert_eq!(action_for(MenuMessage::OpenConfig), Action::OpenConfig);
+    fn settings_maps_to_open_settings_request() {
+        assert_eq!(
+            action_for(MenuMessage::Settings),
+            Action::Request(Request::OpenSettings)
+        );
     }
 
     #[test]
@@ -164,30 +126,17 @@ mod tests {
                 "{request:?} freezes the screen: the popup must close first"
             );
         }
-        let others = [Request::OpenLast, Request::Quit];
+        let others = [
+            Request::OpenLast,
+            Request::Quit,
+            // Opening a window never grabs the screen.
+            Request::OpenSettings,
+        ];
         for request in &others {
             assert!(
                 !request_spawns_capture(request),
                 "{request:?} never grabs the screen: the popup stays for its status line"
             );
         }
-    }
-
-    // ── editor_command: pure command builder ────────────────────────
-
-    #[test]
-    fn editor_command_builds_editor_with_path_arg() {
-        let path = PathBuf::from("/home/u/.config/flintshot/config.toml");
-        let cmd =
-            editor_command(&path, OsString::from("nano")).expect("editor set → Some(Command)");
-        assert_eq!(cmd.get_program(), OsString::from("nano"));
-        let args: Vec<OsString> = cmd.get_args().map(OsString::from).collect();
-        assert_eq!(args, [OsString::from(path.as_os_str())]);
-    }
-
-    #[test]
-    fn editor_command_returns_none_for_empty_editor() {
-        let path = PathBuf::from("/x/config.toml");
-        assert!(editor_command(&path, OsString::new()).is_none());
     }
 }

@@ -1,13 +1,12 @@
 //! COSMIC panel applet: panel button + popup menu.
 //!
 //! It builds a [`cosmic::Application`] that shows a panel button;
-//! clicking it opens a popup mirroring the tray menu (native-capture-ux
-//! collapse) — one **Capture** action, *Open last*, *Open config*,
-//! *Quit*. Menu clicks are resolved
+//! clicking it opens a popup mirroring the tray menu
+//! (settings-improvement swap) — one **Capture** action, *Open
+//! last*, *Settings*, *Quit*. Menu clicks are resolved
 //! by the pure [`crate::menu`] dispatch (unit-tested headless) and
 //! performed here as side-effects: daemon [`Request`]s go out via
-//! [`crate::ipc::send_request`], and *Open config* shells out to
-//! `$EDITOR`.
+//! [`crate::ipc::send_request`].
 //!
 //! Task 8 layers the live feedback: a persistent [`subscribe`]
 //! connection reads the daemon's [`Event`] stream and updates a status
@@ -136,48 +135,44 @@ impl cosmic::Application for App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Menu(menu_msg) => match menu::action_for(menu_msg) {
-                menu::Action::Request(req) => {
-                    // A capture is about to freeze the screen: destroy
-                    // the popup at the click and let the settle window
-                    // cover its unmap + close animation before the
-                    // request even reaches the daemon — otherwise the
-                    // applet's own popup lands in the grabbed frame
-                    // (ADR-0041). Other requests keep the popup open:
-                    // its live status line is the feedback for
-                    // open/quit.
-                    let close = if menu::request_spawns_capture(&req) {
-                        self.popup
-                            .take()
-                            .map(|id| cosmic::task::message(Message::Surface(destroy_popup(id))))
-                    } else {
-                        None
-                    };
-                    let settle = close.is_some();
-                    let send = cosmic::task::future(async move {
-                        if settle {
-                            tokio::time::sleep(POPUP_CLOSE_SETTLE).await;
-                        }
-                        // Fire-and-forget: clone the Request, send it on
-                        // the runtime, log failures, yield a no-op when
-                        // done. The socket-path override is None →
-                        // platform default.
-                        if let Err(e) = crate::ipc::send_request(None, &req).await {
-                            tracing::warn!(error = %e, "applet: sending IPC request");
-                        }
-                        Message::Sent
-                    });
-                    return match close {
-                        Some(close) => cosmic::task::batch([close, send]),
-                        None => send,
-                    };
-                }
-                menu::Action::OpenConfig => {
-                    if let Err(e) = menu::open_config() {
-                        tracing::warn!(error = %e, "applet: opening config");
+            Message::Menu(menu_msg) => {
+                let req = match menu::action_for(menu_msg) {
+                    menu::Action::Request(req) => req,
+                };
+                // A capture is about to freeze the screen: destroy
+                // the popup at the click and let the settle window
+                // cover its unmap + close animation before the
+                // request even reaches the daemon — otherwise the
+                // applet's own popup lands in the grabbed frame
+                // (ADR-0041). Other requests keep the popup open:
+                // its live status line is the feedback for
+                // open/settings/quit.
+                let close = if menu::request_spawns_capture(&req) {
+                    self.popup
+                        .take()
+                        .map(|id| cosmic::task::message(Message::Surface(destroy_popup(id))))
+                } else {
+                    None
+                };
+                let settle = close.is_some();
+                let send = cosmic::task::future(async move {
+                    if settle {
+                        tokio::time::sleep(POPUP_CLOSE_SETTLE).await;
                     }
+                    // Fire-and-forget: clone the Request, send it on
+                    // the runtime, log failures, yield a no-op when
+                    // done. The socket-path override is None →
+                    // platform default.
+                    if let Err(e) = crate::ipc::send_request(None, &req).await {
+                        tracing::warn!(error = %e, "applet: sending IPC request");
+                    }
+                    Message::Sent
+                });
+                match close {
+                    Some(close) => return cosmic::task::batch([close, send]),
+                    None => return send,
                 }
-            },
+            }
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
@@ -262,13 +257,14 @@ impl App {
     /// Build the popup body: a status line at the top, then a column of
     /// menu buttons with dividers between the capture / system groups.
     /// Mirrors the tray's menu structure item-for-item (the
-    /// native-capture-ux single-Capture collapse); each button emits a
+    /// settings-improvement swap); each button emits a
     /// [`MenuMessage`] that [`menu::action_for`] resolves.
     ///
     /// When the daemon is absent (`daemon_up == false`), the status line
     /// is replaced with a *"daemon not running"* message and all
-    /// daemon-dependent buttons are rendered without `on_press`
-    /// (disabled). *Open config* stays enabled — it's a local action.
+    /// buttons render without `on_press` (disabled) — every item needs
+    /// the daemon now (the local open-config action is gone with the
+    /// settings swap).
     fn popup_content(&self) -> Element<'_, Message> {
         let up = self.daemon_up;
 
@@ -278,8 +274,7 @@ impl App {
             .push(action_btn("Capture", MenuMessage::Capture, up))
             .push(divider::horizontal::default())
             .push(action_btn("Open last", MenuMessage::OpenLast, up))
-            .push(divider::horizontal::default())
-            .push(action_btn("Open config", MenuMessage::OpenConfig, true))
+            .push(action_btn("Settings", MenuMessage::Settings, up))
             .push(action_btn("Quit", MenuMessage::Quit, up))
             .width(Length::Fill);
 
