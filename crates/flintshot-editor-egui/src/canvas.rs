@@ -145,6 +145,61 @@ pub(crate) fn fit_scale(img: (f32, f32), viewport: (f32, f32)) -> Option<f32> {
     Some((vw / w).min(vh / h).min(1.0))
 }
 
+/// Pure pan clamp (view-pan spec): keep the image intersecting the
+/// viewport on both axes — never let it leave entirely — and hold
+/// pan at zero whenever the image is fully visible on an axis (no
+/// pointless letterbox sliding). Per-axis: a smaller-or-equal image
+/// pins 0; a larger image clamps into `[viewport − image, 0]`.
+#[must_use]
+pub(crate) fn clamp_pan(pan: egui::Vec2, image: egui::Vec2, viewport: egui::Vec2) -> egui::Vec2 {
+    let axis = |pan: f32, image: f32, viewport: f32| {
+        if image <= viewport {
+            0.0
+        } else {
+            pan.clamp(viewport - image, 0.0)
+        }
+    };
+    egui::Vec2::new(
+        axis(pan.x, image.x, viewport.x),
+        axis(pan.y, image.y, viewport.y),
+    )
+}
+
+/// Pure letterbox math (the fit path's offset, extracted so the
+/// wheel-zoom anchor can predict it): center `content` inside
+/// `viewport` minus twice `pad`, clamping the slack at zero when
+/// the content overflows, then add `inset`. The fit pass passes
+/// `pad = CANVAS_PAD/ppp` and `inset = ring + pad` (the ring box
+/// centers with pad air; the image sits a ring inside it).
+/// Returns the content's top-left offset.
+#[must_use]
+pub(crate) fn letterbox_offset(
+    viewport: egui::Vec2,
+    content: egui::Vec2,
+    pad: f32,
+    inset: f32,
+) -> egui::Vec2 {
+    egui::Vec2::new(
+        ((viewport.x - 2.0 * pad - content.x) / 2.0).max(0.0) + inset,
+        ((viewport.y - 2.0 * pad - content.y) / 2.0).max(0.0) + inset,
+    )
+}
+
+/// Pure zoom-to-cursor anchor: the image point under `cursor` stays
+/// under `cursor` when the logical scale steps from `scale_before`
+/// to `scale_after`. Returns the image's new top-left offset (the
+/// same space `topleft` came from). `scale_before` must be > 0.
+#[must_use]
+pub(crate) fn zoom_anchored_topleft(
+    cursor: egui::Vec2,
+    topleft: egui::Vec2,
+    scale_before: f32,
+    scale_after: f32,
+) -> egui::Vec2 {
+    let under_cursor = (cursor - topleft) / scale_before;
+    cursor - under_cursor * scale_after
+}
+
 /// egui implementation of the [`Canvas`] trait.
 ///
 /// Holds the [`egui::Context`] (captured at construction time, stable
@@ -657,6 +712,86 @@ mod tests {
         assert_eq!(fit_scale((1000.0, 2000.0), (500.0, 1000.0)), Some(0.5));
         // Both axes shrink: the smaller ratio wins.
         assert_eq!(fit_scale((2000.0, 2000.0), (500.0, 1000.0)), Some(0.25));
+    }
+
+    // --- View pan + wheel zoom (select-crop-hand Task 005) ---
+
+    /// A zoomed-in image (larger than the viewport) may slide while
+    /// it stays intersecting; a fully-visible image pins pan at
+    /// zero; the axes clamp independently.
+    #[test]
+    fn clamp_pan_keeps_image_intersecting_and_pins_zero_when_fully_visible() {
+        let vp = egui::vec2(100.0, 100.0);
+        // Image larger on both axes: pan range is [vp-img, 0].
+        let img = egui::vec2(300.0, 250.0);
+        assert_eq!(clamp_pan(egui::vec2(0.0, 0.0), img, vp), egui::Vec2::ZERO);
+        assert_eq!(
+            clamp_pan(egui::vec2(-50.0, -30.0), img, vp),
+            egui::vec2(-50.0, -30.0),
+            "in-range pan passes through"
+        );
+        assert_eq!(
+            clamp_pan(egui::vec2(-400.0, -10.0), img, vp),
+            egui::vec2(-200.0, -10.0),
+            "x clamps at vp-img (image edge still touches), y passes"
+        );
+        assert_eq!(
+            clamp_pan(egui::vec2(20.0, -999.0), img, vp),
+            egui::vec2(0.0, -150.0),
+            "pan toward positive clamps at 0, y clamps at vp-img"
+        );
+        // Fully visible on an axis: that axis pins 0.
+        let small = egui::vec2(80.0, 250.0);
+        assert_eq!(
+            clamp_pan(egui::vec2(-40.0, -40.0), small, vp),
+            egui::vec2(0.0, -40.0),
+            "x fully visible pins 0; y still clamps"
+        );
+        // Fully visible on both: zero, whatever came in.
+        assert_eq!(
+            clamp_pan(egui::vec2(-70.0, 12.0), egui::vec2(80.0, 60.0), vp),
+            egui::Vec2::ZERO
+        );
+    }
+
+    /// The fit pass's offset math, extracted: centered letterbox
+    /// with room, inset-anchored when the content overflows.
+    #[test]
+    fn letterbox_offset_centers_and_anchors_at_inset() {
+        let vp = egui::vec2(200.0, 100.0);
+        // Smaller content: centered in the padded viewport, inset
+        // added (here inset = 2 × pad for readability).
+        assert_eq!(
+            letterbox_offset(vp, egui::vec2(100.0, 40.0), 10.0, 20.0),
+            egui::vec2(60.0, 40.0)
+        );
+        // Exactly viewport-sized content: slack 0, offset = inset.
+        assert_eq!(
+            letterbox_offset(vp, egui::vec2(200.0, 100.0), 10.0, 20.0),
+            egui::vec2(20.0, 20.0)
+        );
+        // Overflow on one axis: that axis anchors at the inset, the
+        // other still centers.
+        assert_eq!(
+            letterbox_offset(vp, egui::vec2(240.0, 40.0), 10.0, 20.0),
+            egui::vec2(20.0, 40.0)
+        );
+    }
+
+    /// The zoom anchor keeps the image point under the cursor fixed:
+    /// for concrete numbers, the point at cursor stays put across
+    /// the scale change.
+    #[test]
+    fn zoom_anchor_keeps_cursor_point_fixed() {
+        let topleft = egui::vec2(20.0, 10.0);
+        let cursor = egui::vec2(70.0, 40.0);
+        let after = zoom_anchored_topleft(cursor, topleft, 1.0, 1.25);
+        // Image point under cursor before: (50, 30) at scale 1.
+        // After: it must still map to (70, 40) → topleft + p * 1.25.
+        assert_eq!(after, egui::vec2(70.0 - 50.0 * 1.25, 40.0 - 30.0 * 1.25));
+        // Zooming back must restore the original top-left.
+        let back = zoom_anchored_topleft(cursor, after, 1.25, 1.0);
+        assert!((back.x - topleft.x).abs() < 1e-4 && (back.y - topleft.y).abs() < 1e-4);
     }
 
     #[test]
