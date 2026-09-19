@@ -1542,7 +1542,7 @@ impl HomeBridge for Bridge {
         match decode_image_file(&path) {
             Ok(state) => {
                 tracing::info!(path = %path.display(), "image routed to the editor page");
-                flintshot_core::recents::record(&path);
+                flintshot_core::recents::record(&path, crate::capture_flow::recents_limit());
                 self.shared.set_pending_editor(PendingEditor {
                     state,
                     selection_first: false,
@@ -1648,7 +1648,7 @@ impl EditorPageBridge for PageBridge {
         // uploads report through their own paths (the upload worker
         // self-reports; a copy has nothing to track).
         if let EditorOutcome::Saved(path) = outcome {
-            flintshot_core::recents::record(path);
+            flintshot_core::recents::record(path, crate::capture_flow::recents_limit());
             match crate::ipc_client::delegate_to(None, &Request::ReportSaved { path: path.clone() })
             {
                 Ok(_) => tracing::debug!(path = %path.display(), "reported the page's save"),
@@ -1675,7 +1675,7 @@ impl EditorPageBridge for PageBridge {
         match decode_image_file(&path) {
             Ok(state) => {
                 tracing::info!(path = %path.display(), "editor chrome open routed");
-                flintshot_core::recents::record(&path);
+                flintshot_core::recents::record(&path, crate::capture_flow::recents_limit());
                 self.shared.set_pending_editor(PendingEditor {
                     state,
                     selection_first: false,
