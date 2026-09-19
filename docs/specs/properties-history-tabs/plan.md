@@ -38,11 +38,11 @@ undo/redo chips and key chords are untouched. Spec:
 
 ### Phase 1: Core history model
 - [x] Task 1: `EditKind` + labeled snapshots at every push site → `tasks/001-core-edit-kind.md`
-- [ ] Task 2: `restore_to` time-travel mutation → `tasks/002-core-restore-to.md`
+- [x] Task 2: `restore_to` time-travel mutation → `tasks/002-core-restore-to.md`
 
 ### Checkpoint: Core
-- [ ] `cargo test --workspace --all-targets` + doc tests pass
-- [ ] No UI behavior change (kinds are inert metadata)
+- [x] `cargo test --workspace --all-targets` + doc tests pass
+- [x] No UI behavior change (kinds are inert metadata)
 
 ### Phase 2: Shell tabs
 - [ ] Task 3: `PROPERTIES | HISTORY` tab header → `tasks/003-shell-tab-header.md`

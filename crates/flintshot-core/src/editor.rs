@@ -1105,6 +1105,26 @@ impl EditorState {
         }
     }
 
+    /// Jump the undo/redo boundary to `target_undo_len` entries
+    /// remaining on `undo`.
+    ///
+    /// Implemented as a loop over the [`undo`](Self::undo) /
+    /// [`redo`](Self::redo) swaps rather than raw stack surgery, so
+    /// time-travel and chord-stepping share one code path — the
+    /// mid-session guards (`restore_active_reedit`, `end_move`,
+    /// pending-drop, label mirroring) apply identically and the two
+    /// can never diverge. Targets beyond `undo.len() + redo.len()`
+    /// clamp; the current position is a no-op.
+    pub fn restore_to(&mut self, target_undo_len: usize) {
+        let target = target_undo_len.min(self.undo.len() + self.redo.len());
+        while self.undo.len() > target {
+            self.undo();
+        }
+        while self.undo.len() < target {
+            self.redo();
+        }
+    }
+
     /// Return the index of the topmost annotation containing `point`,
     /// or `None` if no annotation is hit.
     ///
@@ -6895,5 +6915,114 @@ mod tests {
                 EditKind::Crop,
             ]
         );
+    }
+
+    // --- restore_to time travel (properties-history-tabs spec) ---
+
+    /// Helper: a scripted session with three undo entries over a
+    /// 100×100 image — rect commit, number placement, crop.
+    fn timetravel_state() -> EditorState {
+        let mut s = hundred_state();
+        s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
+        s.commit_annotation();
+        s.place_number(Point::new(5.0, 5.0));
+        s.crop(Rect::from_xywh(0.0, 0.0, 50.0, 50.0));
+        s
+    }
+
+    /// Jump back N entries in one call; jump forward M through the
+    /// redo side; the round trip reproduces the pre-jump state
+    /// exactly.
+    #[test]
+    fn restore_to_jumps_back_and_forward_round_trip() {
+        let mut s = timetravel_state();
+        let pre_anns = s.anns.clone();
+        let pre_image = s.image.clone();
+        let pre_number = s.next_number;
+
+        s.restore_to(1);
+        assert_eq!(s.undo.len(), 1, "boundary moved back in one call");
+        assert_eq!(s.redo.len(), 2, "popped entries moved to redo");
+        assert_eq!(
+            s.redo[0].kind,
+            EditKind::Crop,
+            "labels mirror across the swap"
+        );
+
+        s.restore_to(3);
+        assert_eq!(s.undo.len(), 3);
+        assert!(s.redo.is_empty());
+        assert_eq!(s.anns, pre_anns, "forward jump restores anns exactly");
+        assert_eq!(s.image.dimensions(), pre_image.dimensions());
+        assert_eq!(s.image.as_raw(), pre_image.as_raw(), "image bytes match");
+        assert_eq!(s.next_number, pre_number);
+    }
+
+    /// Out-of-range targets clamp in both directions; the current
+    /// position is a no-op.
+    #[test]
+    fn restore_to_clamps_and_noops() {
+        let mut s = timetravel_state();
+        s.restore_to(0);
+        assert_eq!(s.undo.len(), 0);
+        assert_eq!(s.redo.len(), 3);
+        s.restore_to(999);
+        assert_eq!(s.undo.len(), 3, "oversized target clamps to the end");
+        assert!(s.redo.is_empty());
+        let before = s.anns.clone();
+        s.restore_to(3);
+        assert_eq!(s.anns, before, "equal target is a no-op");
+    }
+
+    /// Empty stacks: any target is a safe no-op.
+    #[test]
+    fn restore_to_empty_stacks_is_safe() {
+        let mut s = hundred_state();
+        s.restore_to(0);
+        s.restore_to(5);
+        assert!(s.undo.is_empty() && s.redo.is_empty());
+        assert!(s.anns.is_empty());
+    }
+
+    /// Jumping mid-gesture restores exactly what the equivalent
+    /// number of chord presses would (same guard path).
+    #[test]
+    fn restore_to_mid_gesture_matches_chord_stepping() {
+        // In-flight move drag.
+        let chord = |s: &mut EditorState, n: usize| {
+            for _ in 0..n {
+                s.undo();
+            }
+        };
+        let mut jumped = timetravel_state();
+        jumped.tool = Tool::Select;
+        jumped.selected = vec![0];
+        jumped.dispatch_input(&down(Point::new(5.0, 5.0)));
+        jumped.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(8.0, 8.0),
+        });
+        // The drag's lazy push means the live history depth isn't 3 —
+        // chord-step the exact entry count restore_to will pop.
+        let mut stepped = jumped.clone();
+        let n = stepped.undo.len();
+        jumped.restore_to(0);
+        chord(&mut stepped, n);
+        assert_eq!(jumped.anns, stepped.anns);
+        assert_eq!(jumped.next_number, stepped.next_number);
+        assert_eq!(jumped.image.dimensions(), stepped.image.dimensions());
+        assert!(jumped.moving.is_none() && stepped.moving.is_none());
+
+        // Live text re-edit session.
+        let mut jumped = reedit_state();
+        jumped.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
+        jumped.commit_annotation();
+        dblclick(&mut jumped, Point::new(20.0, 15.0));
+        jumped.dispatch_input(&InputEvent::TextInput('!'));
+        let mut stepped = jumped.clone();
+        jumped.restore_to(0);
+        stepped.undo();
+        assert_eq!(jumped.anns, stepped.anns);
+        assert!(jumped.text_reedit.is_none() && stepped.text_reedit.is_none());
+        assert_eq!(jumped.undo.len(), stepped.undo.len());
     }
 }
