@@ -91,7 +91,10 @@ pub(crate) enum Section {
 )]
 pub(crate) fn sections_for(tool: Tool) -> &'static [Section] {
     match tool {
-        Tool::Hand | Tool::Select => &[Section::Selection],
+        // Hand is pan-only: no sections (it never selects, so the
+        // Selection inspector would render a dead empty state).
+        Tool::Hand => &[],
+        Tool::Select => &[Section::Selection],
         Tool::Crop => &[Section::Crop],
         Tool::Rect | Tool::Ellipse | Tool::Pencil => {
             &[Section::Stroke, Section::Fill, Section::Selection]
@@ -755,7 +758,9 @@ pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
 /// Per-tool hint copy. Kept pure for testing.
 pub(crate) fn tool_hint(tool: Tool) -> &'static str {
     match tool {
-        Tool::Select => "click / marquee / drag-move annotations",
+        Tool::Select => {
+            "click selects · Shift/Ctrl+click toggles · drag marquees · drag on selection moves · Del removes"
+        }
         Tool::Crop => "drag a region · Copy uses it · Enter crops",
         Tool::Hand => "drag pans · wheel zooms",
         Tool::Text => "click to place the caret",
@@ -1769,6 +1774,33 @@ mod tests {
         });
         state.selected = (0..n_usable).collect();
         state
+    }
+
+    /// The remapped section layout: Select owns the Selection
+    /// inspector, Crop the region bay, Hand nothing (pan-only — no
+    /// dead empty states).
+    #[test]
+    fn sections_map_follows_the_tool_remap() {
+        assert_eq!(sections_for(Tool::Select), &[Section::Selection]);
+        assert_eq!(sections_for(Tool::Crop), &[Section::Crop]);
+        assert!(
+            sections_for(Tool::Hand).is_empty(),
+            "Hand renders no sections (pan-only)"
+        );
+        // The annotation tools are untouched by the remap.
+        assert_eq!(
+            sections_for(Tool::Rect),
+            &[Section::Stroke, Section::Fill, Section::Selection]
+        );
+    }
+
+    /// The per-tool hints speak the remapped semantics.
+    #[test]
+    fn tool_hints_match_the_tool_remap() {
+        assert!(tool_hint(Tool::Select).contains("click selects"));
+        assert!(tool_hint(Tool::Select).contains("marquee"));
+        assert!(tool_hint(Tool::Crop).contains("Enter crops"));
+        assert_eq!(tool_hint(Tool::Hand), "drag pans · wheel zooms");
     }
 
     #[test]
