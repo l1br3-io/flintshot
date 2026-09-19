@@ -72,3 +72,5 @@ Format: **Context · Decision · Consequences**.
 | ADR-0060 | [A worker Copy lingers on Linux — process exit wipes the selection](ADR-0060-worker-copy-lingers-on-linux.md) |
 | ADR-0061 | [Property-edit undo coalescing by edit kind](ADR-0061-property-edit-undo-coalescing.md) |
 | ADR-0062 | [Committed-annotation write-through via lift-out sessions](ADR-0062-text-write-through.md) |
+| ADR-0063 | [App workers carry `--standalone`](ADR-0063-app-workers-carry-standalone.md) |
+| ADR-0064 | [The Select / Crop / Hand tool remap](ADR-0064-select-crop-hand-tool-remap.md) |

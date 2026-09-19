@@ -1035,7 +1035,7 @@ fn run_editor_for_capture(img: image::RgbaImage, mode: &str) -> Result<()> {
 
 /// [`run_editor_for_capture`] over an already-loaded config (the
 /// interaction-mode resolution path loads config once and shares it).
-/// `selection_first` opens the region landing phase (Select
+/// `selection_first` opens the region landing phase (Crop
 /// pre-armed, dim mask, hint line) — see [`selection_first_for`]; the
 /// `open` path always passes `false`.
 ///
