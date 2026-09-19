@@ -43,7 +43,7 @@ proven `open_settings_from_worker` seam end to end. Spec:
 
 ### Phase 2: The real delegate (flintshot-app)
 
-- [ ] Task 2: Worker-side `open_home_from_worker` delegate + shell wiring → `tasks/002-worker-delegate.md`
+- [x] Task 2: Worker-side `open_home_from_worker` delegate + shell wiring → `tasks/002-worker-delegate.md`
 
 ### Checkpoint: Code complete
 
