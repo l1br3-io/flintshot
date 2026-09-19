@@ -50,6 +50,11 @@ pub(crate) enum TopbarAction {
     Upload,
     /// The overflow's Paste item.
     Paste,
+    /// The overflow's Resize item (editor surface only). Opens the
+    /// resize popover (see [`resize_popover`]); the shell owns the
+    /// open/closed state and applies through
+    /// [`EditorState::resize`](flintshot_core::EditorState::resize).
+    Resize,
     /// The overflow's Settings entry.
     Settings,
     /// The breadcrumb's Home link — leave the current stage for
@@ -108,13 +113,15 @@ pub(crate) fn enable_for(surface: Surface) -> Enable {
 /// Draw the topbar across the top of `ui` and report what fired.
 /// `copied` arms the Copy hero's "Copied" state (check glyph, gold
 /// label) — the caller owns the ~2 s window (see `EditorApp`'s
-/// `copied_visible`).
+/// `copied_visible`). `resize_live` dims the overflow's Resize item
+/// when the image can't shrink (≤ 1 px wide).
 pub(crate) fn show(
     ui: &mut egui::Ui,
     surface: Surface,
     status: Option<&str>,
     enable: Enable,
     copied: bool,
+    resize_live: bool,
 ) -> Option<TopbarAction> {
     use crate::theme::palette as p;
     let mut fired = None;
@@ -131,7 +138,7 @@ pub(crate) fn show(
             ui.horizontal_centered(|ui| {
                 brand(ui, surface, &mut fired);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    overflow(ui, surface, status, enable, &mut fired);
+                    overflow(ui, surface, status, enable, resize_live, &mut fired);
                     ui.add_space(theme::SPACE_SCALE[1]);
                     hero(
                         ui,
@@ -399,6 +406,17 @@ fn g_about(p: &egui::Painter, r: egui::Rect, c: Color32) {
     crate::rail::seg(p, r, (0.0, -1.5), (0.0, 6.0), c, 2.0);
 }
 
+/// Resize: a double-headed diagonal arrow (top-left ↔ bottom-right)
+/// — the universal "scale this" mark.
+fn g_resize(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    crate::rail::seg(p, r, (-5.0, -5.0), (5.0, 5.0), c, 2.0);
+    // Arrowheads: a small V at each end, pointing outward.
+    crate::rail::seg(p, r, (-5.0, -5.0), (-5.0, -1.0), c, 2.0);
+    crate::rail::seg(p, r, (-5.0, -5.0), (-1.0, -5.0), c, 2.0);
+    crate::rail::seg(p, r, (5.0, 5.0), (5.0, 1.0), c, 2.0);
+    crate::rail::seg(p, r, (5.0, 5.0), (1.0, 5.0), c, 2.0);
+}
+
 /// Settings: a cog — center ring with four radial ticks.
 fn g_settings(p: &egui::Painter, r: egui::Rect, c: Color32) {
     p.circle_stroke(crate::rail::pt(r, 0.0, 0.0), 3.0, egui::Stroke::new(2.0, c));
@@ -431,6 +449,7 @@ fn overflow(
     surface: Surface,
     status: Option<&str>,
     enable: Enable,
+    resize_live: bool,
     fired: &mut Option<TopbarAction>,
 ) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
@@ -473,6 +492,9 @@ fn overflow(
                 if om_row(ui, "topbar-paste", g_paste, "Paste", Some("Ctrl+V")) {
                     *fired = Some(TopbarAction::Paste);
                 }
+                if om_row_enabled(ui, "topbar-resize", g_resize, "Resize", None, resize_live) {
+                    *fired = Some(TopbarAction::Resize);
+                }
                 om_separator(ui);
             }
             // The about row: informational, hover-only.
@@ -486,6 +508,220 @@ fn overflow(
         });
 }
 
+// --- Resize popover (editor-resize-image) ---
+
+/// Cross-frame state for the resize popover, owned by the shell
+/// (mirrors the app-side `copied_visible` pattern: the menu row is
+/// transient, but the field contents must survive frames).
+#[derive(Debug, Default)]
+pub(crate) struct ResizeMenu {
+    /// Whether the popover is open.
+    pub(crate) open: bool,
+    /// The custom-width field's raw contents (digits only, validated
+    /// at apply — `open_for` seeds it with the current width).
+    pub(crate) width_text: String,
+}
+
+impl ResizeMenu {
+    /// Open the popover, seeding the field with the current width so
+    /// editing starts from a meaningful number.
+    pub(crate) fn open_for(&mut self, w: u32) {
+        self.open = true;
+        self.width_text = w.to_string();
+    }
+}
+
+/// The preset percents offered (spec: 25 / 50 / 75 — never upscale).
+pub(crate) const RESIZE_PRESETS: [u32; 3] = [25, 50, 75];
+
+/// Percent → target width: `(w · pct / 100)` rounded, min 1, clamped
+/// to `w` (never upscale).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "percent math rounds before the u32 cast; dims ≤ 2^24"
+)]
+pub(crate) fn preset_width(w: u32, pct: u32) -> u32 {
+    (((w as f32) * (pct as f32) / 100.0).round().max(1.0) as u32).min(w)
+}
+
+/// Aspect-locked height for `new_w`: `(h · new_w / w)` rounded,
+/// min 1. The label beside the custom field — never an input.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "aspect math rounds before the u32 cast; dims ≤ 2^24"
+)]
+pub(crate) fn derived_height(w: u32, h: u32, new_w: u32) -> u32 {
+    (((h as f32) * (new_w as f32) / (w as f32)).round().max(1.0) as u32).min(h)
+}
+
+/// Draw the resize popover: preset chips (25 / 50 / 75 %, hover shows
+/// the resulting `WxH`) plus a custom-width row whose `× H` label
+/// derives live. Returns `Some(target_w)` when a resize should apply
+/// — a preset click or Enter on a valid shrink target — and closes
+/// the menu on apply or Esc.
+///
+/// Mechanism note: the overflow menu row fires
+/// [`TopbarAction::Resize`]; the shell opens `menu` and answers with
+/// this standalone [`egui::Popup`] anchored under the overflow chip
+/// (a popup hung off the menu row's response would close with the
+/// menu itself).
+pub(crate) fn resize_popover(
+    ctx: &egui::Context,
+    menu: &mut ResizeMenu,
+    dims: (u32, u32),
+) -> Option<u32> {
+    if !menu.open {
+        return None;
+    }
+    let (w, h) = dims;
+    if w <= 1 {
+        menu.open = false;
+        return None;
+    }
+    let mut apply = None;
+    let popup = egui::Popup::new(
+        egui::Id::new("resize-popover"),
+        ctx.clone(),
+        overflow_chip_rect(ctx),
+        egui::LayerId::background(),
+    )
+    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+    .show(|ui| {
+        egui::Frame::new()
+            .fill(theme::palette::PAPER_CREAM)
+            .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
+            .inner_margin(egui::Margin::same(theme::POD_PAD))
+            .stroke(theme::HAIRLINE_STROKE)
+            .show(ui, |ui| {
+                ui.set_min_width(216.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Resize image")
+                            .color(theme::palette::INK)
+                            .size(theme::TYPE_MD),
+                    );
+                    ui.add_space(theme::SPACE_SCALE[0]);
+                    ui.horizontal(|ui| {
+                        for (i, pct) in RESIZE_PRESETS.iter().enumerate() {
+                            if let Some(target) = preset_chip(ui, i, *pct, w, h) {
+                                apply = Some(target);
+                            }
+                        }
+                    });
+                    ui.add_space(theme::SPACE_SCALE[0]);
+                    if let Some(target) = custom_width_row(ui, menu, w, h) {
+                        apply = Some(target);
+                    }
+                });
+            });
+    });
+    if apply.is_some()
+        || ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        || popup.is_some_and(|p| p.response.should_close())
+    {
+        menu.open = false;
+    }
+    apply
+}
+
+/// The overflow chip's rect (top-right, 30×30 inside the topbar) —
+/// the anchor the popover hangs below like a submenu. Built from the
+/// screen rect because the menu row's painted response dies with the
+/// closed menu.
+fn overflow_chip_rect(ctx: &egui::Context) -> egui::Rect {
+    let screen = ctx.viewport_rect();
+    egui::Rect::from_min_size(
+        egui::pos2(screen.right() - 44.0, 7.0),
+        egui::vec2(30.0, 30.0),
+    )
+}
+
+/// One preset chip: painted pod whose hover shows the resulting
+/// `WxH`; a click reports the computed target width.
+fn preset_chip(ui: &mut egui::Ui, i: usize, pct: u32, w: u32, h: u32) -> Option<u32> {
+    let target = preset_width(w, pct);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 26.0), egui::Sense::hover());
+    let resp = ui.interact(
+        rect,
+        egui::Id::new(("resize-preset", i)),
+        egui::Sense::click(),
+    );
+    let fill = if resp.hovered() {
+        theme::palette::PAPER_DIM
+    } else {
+        theme::palette::PAPER_CREAM
+    };
+    ui.painter().rect(
+        rect,
+        egui::CornerRadius::same(theme::POD_RADIUS),
+        fill,
+        theme::HAIRLINE_STROKE,
+        egui::StrokeKind::Middle,
+    );
+    let galley = ui.painter().layout_no_wrap(
+        format!("{pct}%"),
+        egui::FontId::proportional(theme::TYPE_SM),
+        theme::palette::INK,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        theme::palette::INK,
+    );
+    let clicked = resp.clicked();
+    resp.on_hover_text(format!("→ {target} × {}", derived_height(w, h, target)));
+    clicked.then_some(target)
+}
+
+/// The custom-width row: integer field + live `× H` label. Enter
+/// applies a valid shrink target (1 ≤ v < w — no upscale); ≥ w never
+/// applies.
+fn custom_width_row(ui: &mut egui::Ui, menu: &mut ResizeMenu, w: u32, h: u32) -> Option<u32> {
+    let mut target = None;
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Width")
+                .color(theme::palette::INK)
+                .size(theme::TYPE_SM),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut menu.width_text)
+                .hint_text("px")
+                .desired_width(64.0)
+                .id(egui::Id::new("resize-width-field")),
+        );
+        menu.width_text.retain(|ch| ch.is_ascii_digit());
+        let parsed = menu
+            .width_text
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|v| *v >= 1 && *v < w);
+        let height_label = parsed.map_or_else(
+            || "× —".to_owned(),
+            |v| format!("× {}", derived_height(w, h, v)),
+        );
+        ui.label(
+            egui::RichText::new(height_label)
+                .color(theme::palette::INK_SOFT)
+                .size(theme::TYPE_SM),
+        );
+        // The popover is modal over shortcuts (the shell's Esc gate),
+        // so Enter anywhere in it applies a valid target.
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            target = parsed;
+        }
+    });
+    target
+}
+
 /// One clickable overflow row: painted glyph + label + optional
 /// kbd chip, paper-cream with a dim hover.
 fn om_row(
@@ -495,11 +731,30 @@ fn om_row(
     label: &str,
     kbd: Option<&str>,
 ) -> bool {
+    om_row_enabled(ui, id, glyph, label, kbd, true)
+}
+
+/// [`om_row`] with a live/dead switch: a dead row paints dim and
+/// never fires (nothing to shrink), but still registers so callers
+/// can position / assert it.
+fn om_row_enabled(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    glyph: crate::rail::Glyph,
+    label: &str,
+    kbd: Option<&str>,
+    enabled: bool,
+) -> bool {
     use crate::theme::palette as p;
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
-    let resp = ui.interact(rect, egui::Id::new(id), egui::Sense::click());
-    let fill = if resp.hovered() {
+    let resp = if enabled {
+        ui.interact(rect, egui::Id::new(id), egui::Sense::click())
+    } else {
+        ui.interact(rect, egui::Id::new(id), egui::Sense::hover())
+    };
+    let ink = if enabled { p::INK } else { p::INK_SOFT };
+    let fill = if enabled && resp.hovered() {
         p::PAPER_DIM
     } else {
         Color32::TRANSPARENT
@@ -515,13 +770,13 @@ fn om_row(
         egui::pos2(rect.left() + 17.0, rect.center().y),
         egui::vec2(14.0, 14.0),
     );
-    glyph(ui.painter(), glyph_rect, p::INK);
+    glyph(ui.painter(), glyph_rect, ink);
     ui.painter().text(
         egui::pos2(rect.left() + 32.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(theme::TYPE_SM),
-        p::INK,
+        ink,
     );
     if let Some(kbd) = kbd {
         ui.painter().text(
@@ -529,10 +784,10 @@ fn om_row(
             egui::Align2::RIGHT_CENTER,
             kbd,
             egui::FontId::proportional(theme::TYPE_XS),
-            p::INK_SOFT,
+            if enabled { p::INK_SOFT } else { ink },
         );
     }
-    resp.clicked()
+    enabled && resp.clicked()
 }
 
 /// The about row — informational (the About "action" is the note
@@ -675,6 +930,7 @@ mod tests {
             ("save", crate::panel::g_save),
             ("upload", crate::panel::g_upload),
             ("paste", g_paste),
+            ("resize", g_resize),
             ("about", g_about),
             ("settings", g_settings),
             ("check", crate::panel::g_check),
@@ -765,7 +1021,7 @@ mod tests {
         theme::apply(&ctx);
         let central_top = std::cell::Cell::new(0.0_f32);
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            let _ = show(ui, Surface::Editor, None, Enable::ALL, false);
+            let _ = show(ui, Surface::Editor, None, Enable::ALL, false, true);
             let central = egui::CentralPanel::default().show(ui, |ui| {
                 ui.allocate_space(egui::vec2(1.0, 1.0));
             });
@@ -787,7 +1043,7 @@ mod tests {
             let ctx = egui::Context::default();
             theme::apply(&ctx);
             let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-                show(ui, surface, None, Enable::ALL, false);
+                show(ui, surface, None, Enable::ALL, false, true);
             });
             for id in [
                 "topbar-capture",
@@ -816,7 +1072,7 @@ mod tests {
         theme::apply(&ctx);
         // Locate the Capture hero.
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, None, Enable::ALL, false);
+            show(ui, Surface::Editor, None, Enable::ALL, false, true);
         });
         let capture = ctx
             .read_response(egui::Id::new("topbar-capture"))
@@ -824,7 +1080,7 @@ mod tests {
             .rect;
         let fired = std::cell::Cell::new(None);
         let _ = ctx.run_ui(screen(0.016, click_events(capture.center())), |ui| {
-            let f = show(ui, Surface::Editor, None, Enable::ALL, false);
+            let f = show(ui, Surface::Editor, None, Enable::ALL, false, true);
             fired.set(f);
         });
         assert_eq!(fired.get(), Some(TopbarAction::Capture));
@@ -835,7 +1091,7 @@ mod tests {
             .expect("open hero")
             .rect;
         let _ = ctx.run_ui(screen(0.032, click_events(open.center())), |ui| {
-            let f = show(ui, Surface::Editor, None, Enable::WORKER, false);
+            let f = show(ui, Surface::Editor, None, Enable::WORKER, false, true);
             fired.set(f);
         });
         assert_eq!(fired.get(), None, "a disabled hero swallows clicks");
@@ -850,7 +1106,7 @@ mod tests {
             let ctx = egui::Context::default();
             theme::apply(&ctx);
             let full = ctx.run_ui(screen(0.0, vec![]), |ui| {
-                let _ = show(ui, Surface::Editor, None, Enable::ALL, copied);
+                let _ = show(ui, Surface::Editor, None, Enable::ALL, copied, true);
             });
             let texts = full
                 .shapes
@@ -891,7 +1147,14 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
+            show(
+                ui,
+                Surface::Editor,
+                Some("connected"),
+                Enable::ALL,
+                false,
+                true,
+            );
         });
         let ovf = ctx
             .read_response(egui::Id::new("topbar-overflow"))
@@ -899,16 +1162,37 @@ mod tests {
             .rect;
         // Open the menu.
         let _ = ctx.run_ui(screen(0.016, click_events(ovf.center())), |ui| {
-            show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
+            show(
+                ui,
+                Surface::Editor,
+                Some("connected"),
+                Enable::ALL,
+                false,
+                true,
+            );
         });
         // Settle passes: the popup anchors at the screen centre on
         // its open pass and re-anchors below the chip one pass later
         // (the same quirk the `+` popup tests document).
         let _ = ctx.run_ui(screen(0.024, vec![]), |ui| {
-            show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
+            show(
+                ui,
+                Surface::Editor,
+                Some("connected"),
+                Enable::ALL,
+                false,
+                true,
+            );
         });
         let _ = ctx.run_ui(screen(0.028, vec![]), |ui| {
-            show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
+            show(
+                ui,
+                Surface::Editor,
+                Some("connected"),
+                Enable::ALL,
+                false,
+                true,
+            );
         });
         // The items render.
         assert!(
@@ -935,7 +1219,14 @@ mod tests {
             .rect;
         let fired = std::cell::Cell::new(None);
         let _ = ctx.run_ui(screen(0.032, click_events(save.center())), |ui| {
-            let f = show(ui, Surface::Editor, Some("connected"), Enable::ALL, false);
+            let f = show(
+                ui,
+                Surface::Editor,
+                Some("connected"),
+                Enable::ALL,
+                false,
+                true,
+            );
             fired.set(f);
         });
         assert_eq!(fired.get(), Some(TopbarAction::Save));
@@ -948,17 +1239,35 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Home, Some("connected"), Enable::NONE, false);
+            show(
+                ui,
+                Surface::Home,
+                Some("connected"),
+                Enable::NONE,
+                false,
+                false,
+            );
         });
         let ovf = ctx
             .read_response(egui::Id::new("topbar-overflow"))
             .expect("overflow")
             .rect;
         let _ = ctx.run_ui(screen(0.016, click_events(ovf.center())), |ui| {
-            show(ui, Surface::Home, Some("connected"), Enable::NONE, false);
+            show(
+                ui,
+                Surface::Home,
+                Some("connected"),
+                Enable::NONE,
+                false,
+                false,
+            );
         });
         assert!(ctx.read_response(egui::Id::new("topbar-save")).is_none());
         assert!(ctx.read_response(egui::Id::new("topbar-paste")).is_none());
+        assert!(
+            ctx.read_response(egui::Id::new("topbar-resize")).is_none(),
+            "no Resize entry off the editor surface"
+        );
         assert!(
             ctx.read_response(egui::Id::new("topbar-settings"))
                 .is_some(),
@@ -1000,7 +1309,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let out = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, None, Enable::ALL, false);
+            show(ui, Surface::Editor, None, Enable::ALL, false, true);
         });
         let gold_editor = out.shapes.iter().any(|cs| {
             matches!(
@@ -1025,7 +1334,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let out = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, None, Enable::ALL, false);
+            show(ui, Surface::Editor, None, Enable::ALL, false, true);
         });
         let texts = out
             .shapes
@@ -1057,7 +1366,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Editor, None, Enable::ALL, false);
+            show(ui, Surface::Editor, None, Enable::ALL, false, true);
         });
         assert!(
             ctx.read_response(egui::Id::new(("topbar-crumb", 0)))
@@ -1075,7 +1384,7 @@ mod tests {
             .rect;
         let fired = std::cell::Cell::new(None);
         let _ = ctx.run_ui(screen(0.016, click_events(crumb.center())), |ui| {
-            fired.set(show(ui, Surface::Editor, None, Enable::ALL, false));
+            fired.set(show(ui, Surface::Editor, None, Enable::ALL, false, true));
         });
         assert_eq!(fired.get(), Some(TopbarAction::NavigateHome));
     }
@@ -1087,7 +1396,7 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let out = ctx.run_ui(screen(0.0, vec![]), |ui| {
-            show(ui, Surface::Loading, None, Enable::NONE, false);
+            show(ui, Surface::Loading, None, Enable::NONE, false, false);
         });
         assert!(
             ctx.read_response(egui::Id::new(("topbar-crumb", 0)))
@@ -1099,5 +1408,209 @@ mod tests {
             .iter()
             .any(|cs| matches!(&cs.shape, egui::Shape::Text(t) if t.galley.job.text == "Loading"));
         assert!(has_loading, "the stage still paints");
+    }
+
+    // --- Resize entry + popover (editor-resize-image) ---
+
+    /// Percent → target width: round, min 1, never above the source.
+    #[test]
+    fn preset_width_rounds_and_clamps() {
+        assert_eq!(preset_width(100, 25), 25);
+        assert_eq!(preset_width(100, 50), 50);
+        assert_eq!(preset_width(100, 75), 75);
+        assert_eq!(preset_width(101, 50), 51, "101 @ 50% rounds to 51");
+        assert_eq!(preset_width(101, 25), 25, "101 @ 25% rounds to 25");
+        assert_eq!(preset_width(3, 25), 1, "sub-px targets clamp to 1");
+        assert_eq!(preset_width(1, 75), 1, "nothing above the source");
+    }
+
+    /// Aspect-derived height: round, min 1.
+    #[test]
+    fn derived_height_rounds_min_one() {
+        assert_eq!(derived_height(100, 80, 50), 40);
+        assert_eq!(derived_height(101, 51, 51), 26);
+        assert_eq!(derived_height(100, 80, 1), 1, "sub-px heights clamp to 1");
+        assert_eq!(derived_height(100, 3, 1), 1);
+    }
+
+    /// The editor overflow carries a live Resize item that fires
+    /// [`TopbarAction::Resize`].
+    #[test]
+    fn overflow_shows_and_fires_resize_on_editor_surface() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL, false, true);
+        });
+        let ovf = ctx
+            .read_response(egui::Id::new("topbar-overflow"))
+            .expect("overflow")
+            .rect;
+        let _ = ctx.run_ui(screen(0.016, click_events(ovf.center())), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL, false, true);
+        });
+        let _ = ctx.run_ui(screen(0.024, vec![]), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL, false, true);
+        });
+        let _ = ctx.run_ui(screen(0.028, vec![]), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL, false, true);
+        });
+        let item = ctx
+            .read_response(egui::Id::new("topbar-resize"))
+            .expect("Resize item renders under EDITOR_ITEMS");
+        let fired = std::cell::Cell::new(None);
+        let _ = ctx.run_ui(screen(0.032, click_events(item.rect.center())), |ui| {
+            fired.set(show(ui, Surface::Editor, None, Enable::ALL, false, true));
+        });
+        assert_eq!(fired.get(), Some(TopbarAction::Resize));
+    }
+
+    /// The Resize item paints dim and fires nothing when the image
+    /// can't shrink (≤ 1 px wide).
+    #[test]
+    fn overflow_resize_item_inert_when_image_too_small() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL, false, false);
+        });
+        let ovf = ctx
+            .read_response(egui::Id::new("topbar-overflow"))
+            .expect("overflow")
+            .rect;
+        let _ = ctx.run_ui(screen(0.016, click_events(ovf.center())), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL, false, false);
+        });
+        let _ = ctx.run_ui(screen(0.024, vec![]), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL, false, false);
+        });
+        let _ = ctx.run_ui(screen(0.028, vec![]), |ui| {
+            show(ui, Surface::Editor, None, Enable::ALL, false, false);
+        });
+        let item = ctx
+            .read_response(egui::Id::new("topbar-resize"))
+            .expect("the row still paints (dim)");
+        let fired = std::cell::Cell::new(None);
+        let _ = ctx.run_ui(screen(0.032, click_events(item.rect.center())), |ui| {
+            fired.set(show(ui, Surface::Editor, None, Enable::ALL, false, false));
+        });
+        assert!(fired.get().is_none(), "a dead entry never fires");
+    }
+
+    /// The open popover offers the three preset chips plus the custom
+    /// width field with its derived-height label.
+    #[test]
+    fn resize_popover_offers_presets_and_custom_field() {
+        let (ctx, _menu) = opened_resize_popover((100, 80));
+        for i in 0..RESIZE_PRESETS.len() {
+            assert!(
+                ctx.read_response(egui::Id::new(("resize-preset", i)))
+                    .is_some(),
+                "preset chip {i} renders"
+            );
+        }
+        assert!(
+            ctx.read_response(egui::Id::new("resize-width-field"))
+                .is_some(),
+            "the custom width field renders"
+        );
+    }
+
+    /// A preset click reports its computed width and closes.
+    #[test]
+    fn resize_popover_preset_click_applies_and_closes() {
+        let (ctx, mut menu) = settled_resize_popover((100, 80));
+        let chip = ctx
+            .read_response(egui::Id::new(("resize-preset", 1)))
+            .expect("50% chip")
+            .rect
+            .center();
+        let fired = std::cell::Cell::new(None);
+        let _ = ctx.run_ui(screen(0.032, click_events(chip)), |ui| {
+            fired.set(resize_popover(ui.ctx(), &mut menu, (100, 80)));
+        });
+        assert_eq!(fired.get(), Some(50));
+        assert!(!menu.open, "apply closes the popover");
+    }
+
+    /// Enter in the custom field applies the typed width.
+    #[test]
+    fn resize_popover_custom_enter_applies() {
+        let (ctx, mut menu) = settled_resize_popover((100, 80));
+        menu.width_text = "80".into();
+        let fired = std::cell::Cell::new(None);
+        let _ = ctx.run_ui(screen(0.032, vec![enter_key()]), |ui| {
+            fired.set(resize_popover(ui.ctx(), &mut menu, (100, 80)));
+        });
+        assert_eq!(fired.get(), Some(80));
+        assert!(!menu.open, "apply closes the popover");
+    }
+
+    /// Enter at or above the current width applies nothing — the
+    /// no-upscale guarantee is enforced at the UI layer too.
+    #[test]
+    fn resize_popover_refuses_upscale_targets() {
+        let (ctx, mut menu) = settled_resize_popover((100, 80));
+        menu.width_text = "100".into();
+        let fired = std::cell::Cell::new(None);
+        let _ = ctx.run_ui(screen(0.032, vec![enter_key()]), |ui| {
+            fired.set(resize_popover(ui.ctx(), &mut menu, (100, 80)));
+        });
+        assert!(fired.get().is_none(), "current width never applies");
+        assert!(menu.open, "the popover stays for a valid target");
+    }
+
+    /// Esc closes the popover without applying.
+    #[test]
+    fn resize_popover_escape_closes() {
+        let (ctx, mut menu) = settled_resize_popover((100, 80));
+        let esc = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = ctx.run_ui(screen(0.032, vec![esc]), |ui| {
+            let _ = resize_popover(ui.ctx(), &mut menu, (100, 80));
+        });
+        assert!(!menu.open, "Esc closes");
+    }
+
+    fn enter_key() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Lay the popover out once (open), mirroring the popover.rs
+    /// harness: interactions drive the next pass.
+    fn opened_resize_popover(dims: (u32, u32)) -> (egui::Context, ResizeMenu) {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut menu = ResizeMenu::default();
+        menu.open_for(dims.0);
+        let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            let _ = resize_popover(ui.ctx(), &mut menu, dims);
+        });
+        (ctx, menu)
+    }
+
+    /// [`opened_resize_popover`] plus two settle passes so the
+    /// popover's widgets are real: pass 1 sizes invisibly and
+    /// `read_response` lags one pass — the same quirk the overflow
+    /// menu tests document.
+    fn settled_resize_popover(dims: (u32, u32)) -> (egui::Context, ResizeMenu) {
+        let (ctx, mut menu) = opened_resize_popover(dims);
+        for t in [0.016, 0.024] {
+            let _ = ctx.run_ui(screen(t, vec![]), |ui| {
+                let _ = resize_popover(ui.ctx(), &mut menu, dims);
+            });
+        }
+        (ctx, menu)
     }
 }

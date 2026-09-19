@@ -43,11 +43,11 @@ Spec: [`spec.md`](spec.md).
 
 - [x] All four gate commands pass (`fmt --check`, `clippy -D warnings`, both test cmds)
 - [x] Resize fully drivable from a unit test: dims shrink, anns scale, undo restores bit-for-bit
-- [ ] Review with human before UI work
+- [x] Review with human before UI work
 
 ### Phase 2: Surface
 
-- [ ] Task 4: Topbar overflow entry + presets/custom popover → `tasks/004-topbar-resize-popover.md`
+- [x] Task 4: Topbar overflow entry + presets/custom popover → `tasks/004-topbar-resize-popover.md`
 
 ### Checkpoint: Surface complete
 
