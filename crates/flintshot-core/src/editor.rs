@@ -1245,8 +1245,11 @@ impl EditorState {
             // Stray text input outside text-editing mode: drop it.
             // (The shell shouldn't send these, but the dispatcher must
             // be robust against a TextInput arriving when no draft is
-            // active — e.g. a race between placement and the next frame.)
-            InputEvent::TextInput(_) => DispatchOutcome::Continue,
+            // active — e.g. a race between placement and the next
+            // frame.) Triple-click outside editing is likewise a
+            // documented no-op — line selection is a text-editing
+            // affordance only (see `dispatch_text_event`).
+            InputEvent::TextInput(_) | InputEvent::TripleClick { .. } => DispatchOutcome::Continue,
             // Double-click owns exactly one behavior: re-edit. Only
             // the Text tool reacts, and only when the accompanying
             // second PointerDown didn't just start / continue a draft
@@ -1370,6 +1373,18 @@ impl EditorState {
                 } else {
                     self.begin_annotation(*pos);
                 }
+                DispatchOutcome::Continue
+            }
+            // Click-count gestures while editing: double-click selects
+            // the word, triple-click the line, both around the cursor
+            // (the intercepted press collapsed it onto the click
+            // point). Empty drafts no-op — there is nothing to select.
+            InputEvent::DoubleClick { .. } => {
+                self.text_select_word();
+                DispatchOutcome::Continue
+            }
+            InputEvent::TripleClick { .. } => {
+                self.text_select_line();
                 DispatchOutcome::Continue
             }
             // Any other key / pointer event is ignored while editing
@@ -4995,6 +5010,71 @@ mod tests {
         assert!(s.redo.is_empty());
         assert!(s.selected.is_empty(), "ann selection untouched");
         assert_eq!(s.anns.len(), 0, "committed anns untouched (lifted)");
+    }
+
+    // --- Click-count gesture arms (text-selection-highlight Task 007) ---
+
+    #[test]
+    fn doubleclick_while_editing_selects_word_around_cursor() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello world");
+        // The pump's intercepted press collapses the cursor onto the
+        // click point before the DoubleClick arrives.
+        s.text_press_at_char(7);
+        s.dispatch_input(&InputEvent::DoubleClick {
+            pos: Point::new(11.0, 11.0),
+        });
+        assert_eq!(s.text_anchor, Some(6));
+        assert_eq!(s.text_cursor, 11);
+        assert_eq!(s.selection_range(), Some(6..11));
+    }
+
+    #[test]
+    fn doubleclick_on_empty_draft_is_a_noop() {
+        let mut s = text_state();
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
+        s.dispatch_input(&InputEvent::DoubleClick {
+            pos: Point::new(10.0, 10.0),
+        });
+        assert_eq!(s.text_anchor, None, "nothing to select");
+        assert_eq!(s.text_cursor, 0);
+        assert!(s.is_editing_text(), "draft stays open");
+    }
+
+    #[test]
+    fn tripleclick_while_editing_selects_line() {
+        let mut s = text_state();
+        type_draft(&mut s, "ab\ncd");
+        s.text_press_at_char(4);
+        s.dispatch_input(&InputEvent::TripleClick {
+            pos: Point::new(11.0, 11.0),
+        });
+        assert_eq!(s.text_anchor, Some(3));
+        assert_eq!(s.text_cursor, 5);
+        // Single-line text: the line *is* the whole draft.
+        let mut s = text_state();
+        type_draft(&mut s, "hello");
+        s.text_press_at_char(2);
+        s.dispatch_input(&InputEvent::TripleClick {
+            pos: Point::new(11.0, 11.0),
+        });
+        assert_eq!(s.selection_range(), Some(0..5));
+    }
+
+    #[test]
+    fn tripleclick_outside_editing_is_a_documented_noop() {
+        let mut s = reedit_state();
+        assert_eq!(
+            s.dispatch_input(&InputEvent::TripleClick {
+                pos: Point::new(20.0, 15.0)
+            }),
+            DispatchOutcome::Continue
+        );
+        assert!(s.pending.is_none(), "no session opened");
+        assert_eq!(s.anns.len(), 1, "annotations untouched");
+        // Re-edit via double-click still works right after.
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        assert!(s.is_editing_text(), "re-edit flow intact");
     }
 
     // --- Gesture-bracketed restyle (text-select-edit Task 005) ---

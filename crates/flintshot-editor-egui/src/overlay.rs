@@ -1115,8 +1115,10 @@ impl OverlayApp {
                 o.input_options.max_click_dist,
             )
         });
-        if self.dblclick.on_press(now, pos, max_delay, max_dist) {
-            pointer_events.push(InputEvent::DoubleClick { pos: at });
+        match self.dblclick.on_press(now, pos, max_delay, max_dist) {
+            2 => pointer_events.push(InputEvent::DoubleClick { pos: at }),
+            3 => pointer_events.push(InputEvent::TripleClick { pos: at }),
+            _ => {}
         }
     }
 
