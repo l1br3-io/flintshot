@@ -526,7 +526,16 @@ impl WindowApp {
             Route::Settings => {
                 if let Some(page) = self.settings.as_mut() {
                     let now = ui.ctx().input(|i| i.time);
-                    let escape = crate::settings::SettingsPage::show(ui, page, now);
+                    // The body lives in a CentralPanel: without one,
+                    // the page's ScrollArea drew directly on the
+                    // window's root region and painted under the
+                    // 44 px topbar (settings-improvement's layout
+                    // bug — pinned by
+                    // `settings_body_never_paints_under_the_topbar`).
+                    let panel = egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(crate::theme::palette::PAPER_CREAM))
+                        .show(ui, |ui| crate::settings::SettingsPage::show(ui, page, now));
+                    let escape = panel.inner;
                     // Debounce drain: persist once the window has
                     // passed. GOTCHA: the config watcher reloads the
                     // app's config on every write — the page's
@@ -1460,6 +1469,86 @@ mod tests {
             outcome,
             slot,
         )
+    }
+
+    #[test]
+    fn settings_body_never_paints_under_the_topbar() {
+        let mut app = settings_app_with_directives(Vec::new());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 480.0));
+        let mut frame = |events: Vec<egui::Event>| {
+            let full = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..egui::RawInput::default()
+                },
+                |ui| app.ui_impl(ui),
+            );
+            // What actually lands on screen: each shape's bounds
+            // intersected with its clip rect. (The topbar's own
+            // bottom edge is a centered 2 px stroke that straddles
+            // y=44 by construction but is clip-limited to the bar —
+            // the intersect keeps it out of the offender set.)
+            full.shapes
+                .iter()
+                .filter_map(|c| {
+                    let eff = c.clip_rect.intersect(c.shape.visual_bounding_rect());
+                    eff.is_positive().then_some(eff)
+                })
+                .map(|r| {
+                    egui::Rect::from_min_max(
+                        egui::pos2(r.min.x, r.min.y),
+                        egui::pos2(
+                            (r.max.x * 10.0).round() / 10.0,
+                            (r.max.y * 10.0).round() / 10.0,
+                        ),
+                    )
+                })
+                .collect::<Vec<egui::Rect>>()
+        };
+        let settled = frame(vec![]);
+        let scrolled = frame(vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        }]);
+
+        let bar = crate::topbar::TOPBAR_HEIGHT;
+        let above = |rects: &[egui::Rect]| -> Vec<egui::Rect> {
+            rects.iter().copied().filter(|r| r.min.y < bar).collect()
+        };
+        // (a) The scroll never slides content under the topbar: the
+        // set of shapes painted above the bar's edge is exactly the
+        // bar's own, unchanged by scrolling.
+        assert_eq!(
+            above(&settled),
+            above(&scrolled),
+            "scrolled content joined the topbar's region"
+        );
+
+        // (b) The scrollbar engages: content taller than the
+        // viewport is reachable (the wheel moves the page — the
+        // original bug's default auto-shrink never scrolled at all).
+        let below_digest =
+            |rects: &[egui::Rect]| -> Vec<f32> { rects.iter().map(|r| r.max.y).collect() };
+        assert_ne!(
+            below_digest(&settled),
+            below_digest(&scrolled),
+            "the wheel did not move the page — the ScrollArea never scrolls"
+        );
+
+        // (c) The body sits on the paper desk: the CentralPanel's
+        // cream fill spans from the bar's edge to the screen bottom.
+        let desk = scrolled
+            .iter()
+            .any(|r| r.min.y <= bar + 0.5 && r.max.y >= 480.0 - 0.5 && r.width() > 700.0);
+        assert!(
+            desk,
+            "no paper-cream body panel below the topbar (missing CentralPanel)"
+        );
     }
 
     /// The router delegates to the home route on Home and drops the

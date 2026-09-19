@@ -102,19 +102,26 @@ impl SettingsPage {
     pub(crate) fn show(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) -> bool {
         let escape = crate::settings::SettingsApp::escape_pressed(ui.ctx());
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let column = 640.0_f32.min(ui.available_width());
-            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                ui.set_min_width(column);
-                ui.add_space(theme::SPACE_SCALE[3]);
-                capture_section(ui, page, now);
-                editor_section(ui, page, now);
-                output_section(ui, page, now);
-                shortcuts_section(ui, page);
-                system_section(ui, page);
-                ui.add_space(theme::SPACE_SCALE[3]);
+        // `auto_shrink([false, true])`: the area takes the panel's
+        // full height (the scrollbar engages) and shrinks only
+        // horizontally (the centered column). The default
+        // `[true; 2]` never scrolls — the content just overflows
+        // the window bottom.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let column = 640.0_f32.min(ui.available_width());
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    ui.set_min_width(column);
+                    ui.add_space(theme::SPACE_SCALE[3]);
+                    capture_section(ui, page, now);
+                    editor_section(ui, page, now);
+                    output_section(ui, page, now);
+                    shortcuts_section(ui, page);
+                    system_section(ui, page);
+                    ui.add_space(theme::SPACE_SCALE[3]);
+                });
             });
-        });
 
         escape
     }
