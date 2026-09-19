@@ -997,6 +997,43 @@ before.
 
 ---
 
+## Multi-select annotations + selection inspector
+
+Effort: `multi-select-properties`. Both shells (editor window +
+capture overlay) inherit the selection set, group move/delete, and
+the inspector from `flintshot-core`; core policy is covered by unit
+tests (`editor.rs`, `inspector.rs`), the panel by `panel.rs` run_ui
+tests, chrome by `chrome.rs` / shell tests. The rows below cover
+the cross-shell manual pass.
+
+### Test setup
+
+```sh
+cargo run -- app        # editor window path
+cargo run -- capture    # overlay path (OS selection UI on Wayland)
+```
+
+Draw 2 rects + 1 arrow first (spec §Exit criteria fixture).
+
+### Matrix
+
+| Behavior | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 |
+| -------- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| Shift+click builds a set (three dashed outlines); plain click replaces; miss clears | | | | | | | | | |
+| Panel title `3 selected · Properties` with Stroke + Stroke width sections only (rect+arrow intersection) | | | | | | | | | |
+| Swatch recolour applies to all three immediately; one `Ctrl+Z` restores; the Stroke default follows | | | | | | | | | |
+| Drag any selected member → the whole set translates; one undo entry | | | | | | | | | |
+| `Del` removes every member; one `Ctrl+Z` restores all, selection empty | | | | | | | | | |
+| Mixed rect+text set hides Fill/width, keeps Stroke (colour); text-only set shows the Text popover with working edits | | | | | | | | | |
+| Marker colour edit keeps its translucency (MARKER_ALPHA) | | | | | | | | | |
+| Continuous widgets (size DragValue, custom colour popover) cost one undo entry per gesture | | | | | | | | | |
+| Esc clears the set first (before Cancel) in both shells; tool switch away from Move clears it | | | | | | | | | |
+| Multi-drag paints the solid grab outline on every member in both shells | | | | | | | | | |
+| No selection → panel identical to the pre-effort tool-defaults mode (byte-for-byte) | | | | | | | | | |
+| Overlay region-selection (`Tool::Select`) semantics untouched (regression) | | | | | | | | | |
+
+---
+
 ## Launcher desktop entry — app-menu integration
 
 Effort: `launcher-desktop-entry`. Linux-only by design (XDG desktop
