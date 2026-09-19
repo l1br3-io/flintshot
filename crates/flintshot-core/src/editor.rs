@@ -997,6 +997,57 @@ impl EditorState {
         self.last_edit_kind = None;
     }
 
+    /// Resize the image to `target_w` px wide, deriving the height
+    /// from the aspect ratio (`h * new_w / w`, rounded, min 1), and
+    /// scale every annotation by the applied factor so the rendered
+    /// composition is unchanged, just smaller.
+    ///
+    /// Mirrors [`crop`](Self::crop)'s exact sequence: close any live
+    /// re-edit session, push a [`Snapshot::full`] (pre-resize image +
+    /// anns), swap in the resized image via
+    /// [`crate::image_ops::resize`], scale the anns, clear `pending` /
+    /// text session / move, then clear `redo`. Never upscales:
+    /// `target_w` clamps to `[1, width]`; at the current width it is a
+    /// no-op (no snapshot pushed). Indices are stable (nothing is
+    /// dropped), but the selection still clears via `end_move`, like
+    /// crop — a stale in-flight move drag must not survive the
+    /// coordinate change.
+    ///
+    /// Interaction with the app-shell selection-phase latch (which
+    /// keys off image-carrying undo snapshots) is safe: the latch is
+    /// one-way by design, so a resize mid-phase behaves exactly like a
+    /// crop mid-phase.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "aspect-derived height is rounded and min-clamped before the u32 cast; factor uses the clamped target; dims ≤ 2^24"
+    )]
+    pub fn resize(&mut self, target_w: u32) {
+        let (w, h) = self.image.dimensions();
+        if w == 0 || h == 0 {
+            return;
+        }
+        let new_w = target_w.clamp(1, w);
+        if new_w == w {
+            return;
+        }
+        let new_h = ((h as f32) * (new_w as f32) / (w as f32)).round().max(1.0) as u32;
+        let factor = (new_w as f32) / (w as f32);
+        self.restore_active_reedit();
+        let snapshot = Snapshot::full(self.anns.clone(), self.image.clone(), self.next_number);
+        self.image = crate::image_ops::resize(&self.image, (new_w, new_h));
+        for ann in &mut self.anns {
+            ann.scale(factor);
+        }
+        self.pending = None;
+        self.text_anchor = None;
+        self.end_move();
+        self.undo.push(snapshot);
+        self.redo.clear();
+        self.last_edit_kind = None;
+    }
+
     /// Pop the last committed state from `undo` and swap it into `anns`.
     ///
     /// Also clears `pending` (Ctrl+Z mid-drag cancels the in-flight
@@ -5561,6 +5612,150 @@ mod tests {
         assert_eq!(s.image.dimensions(), dims_before, "image untouched");
         assert_eq!(s.anns.len(), 1, "anns untouched");
         assert!(s.undo.is_empty(), "no snapshot pushed");
+    }
+
+    // --- Resize tests ---
+
+    /// Helper: 100×80 state with a Rect (stroke 4) at (20,10)–(80,70)
+    /// and a Text (font 16) at (10, 20).
+    fn resize_state() -> EditorState {
+        let mut s = EditorState::new(image::RgbaImage::new(100, 80));
+        s.anns.push(Annotation::Rect {
+            rect: Rect::new(Point::new(20.0, 10.0), Point::new(80.0, 70.0)),
+            stroke: Stroke::new(Color::RED, 4.0),
+            fill: None,
+        });
+        s.anns.push(Annotation::Text {
+            pos: Point::new(10.0, 20.0),
+            text: "hi".into(),
+            font_size: 16.0,
+            color: Color::RED,
+            family: crate::text::FontFamily::default(),
+            weight: crate::text::FontWeight::default(),
+            style: crate::text::FontStyle::default(),
+            align: crate::text::TextAlign::default(),
+            line_spacing: crate::text::DEFAULT_LINE_SPACING,
+            outline: None,
+            background: None,
+        });
+        s
+    }
+
+    /// Resize halves the image and scales every annotation — geometry
+    /// and magnitudes — by the exact applied factor.
+    #[test]
+    fn resize_scales_image_and_annotations() {
+        let mut s = resize_state();
+        s.resize(50);
+        assert_eq!(s.image.dimensions(), (50, 40), "aspect-derived height");
+        match &s.anns[0] {
+            Annotation::Rect { rect, stroke, .. } => {
+                assert_eq!(rect.min, Point::new(10.0, 5.0));
+                assert_eq!(rect.max, Point::new(40.0, 35.0));
+                assert_eq!(stroke.width, 2.0, "stroke scales by factor");
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+        match &s.anns[1] {
+            Annotation::Text { pos, font_size, .. } => {
+                assert_eq!(*pos, Point::new(5.0, 10.0));
+                assert_eq!(*font_size, 8.0, "font size scales by factor");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// Undo restores the original pixels and annotation values
+    /// bit-for-bit; redo replays the resize.
+    #[test]
+    fn resize_is_undoable_and_redoable() {
+        let mut s = resize_state();
+        let original_image = s.image.clone();
+        let original_anns = s.anns.clone();
+        s.resize(50);
+        assert_eq!(s.undo.len(), 1, "one full snapshot pushed");
+        s.undo();
+        assert_eq!(s.image.dimensions(), (100, 80), "dims restored");
+        assert_eq!(
+            s.image.as_raw(),
+            original_image.as_raw(),
+            "pixels bit-for-bit"
+        );
+        assert_eq!(s.anns, original_anns, "annotation values bit-for-bit");
+        s.redo();
+        assert_eq!(s.image.dimensions(), (50, 40), "redo replays the resize");
+        match &s.anns[0] {
+            Annotation::Rect { stroke, .. } => assert_eq!(stroke.width, 2.0),
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// Targets at or above the current width are no-ops: no snapshot,
+    /// no mutation.
+    #[test]
+    fn resize_at_or_above_width_is_noop() {
+        let mut s = resize_state();
+        let before = s.clone();
+        s.resize(100);
+        assert_eq!(s.undo.len(), 0, "current width: no snapshot");
+        s.resize(150);
+        assert_eq!(s.undo.len(), 0, "wider than image: no snapshot");
+        assert_eq!(s.image.dimensions(), before.image.dimensions());
+        assert_eq!(s.anns, before.anns);
+    }
+
+    /// A zero target clamps to 1 px wide; anns scale by 1/w.
+    #[test]
+    fn resize_zero_width_clamps_to_one() {
+        let mut s = resize_state();
+        s.resize(0);
+        assert_eq!(s.image.dimensions(), (1, 1), "1 px wide, derived height");
+        let factor = 1.0_f32 / 100.0;
+        match &s.anns[0] {
+            Annotation::Rect { rect, stroke, .. } => {
+                assert!((rect.min.x - 20.0 * factor).abs() < 1e-6, "scaled by 1/w");
+                assert!((rect.min.y - 10.0 * factor).abs() < 1e-6);
+                assert!((stroke.width - 4.0 * factor).abs() < 1e-6);
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// In-flight pending annotation, selection, and move drag are
+    /// cleared — same guarantees as crop.
+    #[test]
+    fn resize_clears_pending_selection_and_move() {
+        let mut s = move_state(); // committed rect at (10,10)–(50,40)
+        s.tool = Tool::Rect;
+        s.begin_annotation(Point::new(5.0, 5.0)); // pending draft
+        s.tool = Tool::Select;
+        s.dispatch_input(&down(Point::new(30.0, 25.0))); // select the rect
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(35.0, 30.0),
+        }); // in-flight move
+        assert!(s.pending.is_some());
+        assert!(!s.selected.is_empty());
+        s.resize(50);
+        assert!(s.pending.is_none(), "pending cleared");
+        assert!(s.selected.is_empty(), "selection cleared");
+        assert!(s.moving.is_none(), "move ended");
+        assert_eq!(s.image.dimensions(), (50, 50));
+    }
+
+    /// Two successive resizes followed by two undos returns the
+    /// original image and annotations.
+    #[test]
+    fn resize_twice_then_undo_twice_restores_original() {
+        let mut s = resize_state();
+        let original_image = s.image.clone();
+        let original_anns = s.anns.clone();
+        s.resize(50);
+        s.resize(25);
+        assert_eq!(s.image.dimensions(), (25, 20));
+        s.undo();
+        s.undo();
+        assert_eq!(s.image.as_raw(), original_image.as_raw());
+        assert_eq!(s.anns, original_anns);
     }
 
     /// Crop tool: `PointerDown` starts a region; `PointerDrag` extends it.

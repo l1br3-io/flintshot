@@ -37,12 +37,12 @@ Spec: [`spec.md`](spec.md).
 
 - [x] Task 1: `image_ops::resize` — clamped Triangle downscale → `tasks/001-image-ops-resize.md`
 - [x] Task 2: `Annotation::scale` — per-variant transform → `tasks/002-annotation-scale.md`
-- [ ] Task 3: `EditorState::resize` — state transition + undo/redo → `tasks/003-editor-state-resize.md`
+- [x] Task 3: `EditorState::resize` — state transition + undo/redo → `tasks/003-editor-state-resize.md`
 
 ### Checkpoint: Core complete
 
-- [ ] All four gate commands pass (`fmt --check`, `clippy -D warnings`, both test cmds)
-- [ ] Resize fully drivable from a unit test: dims shrink, anns scale, undo restores bit-for-bit
+- [x] All four gate commands pass (`fmt --check`, `clippy -D warnings`, both test cmds)
+- [x] Resize fully drivable from a unit test: dims shrink, anns scale, undo restores bit-for-bit
 - [ ] Review with human before UI work
 
 ### Phase 2: Surface
