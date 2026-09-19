@@ -61,7 +61,7 @@ defaults. Spec: [`spec.md`](spec.md).
 - [ ] Human review of the panel UX before chrome polish
 
 ### Phase 3: Chrome + closeout
-- [ ] Task 5: Plural selection chrome in both shells → `tasks/005-chrome-shells.md`
+- [x] Task 5: Plural selection chrome in both shells → `tasks/005-chrome-shells.md`
 - [ ] Task 6: Closeout (CHANGELOG, TEST_MATRIX, ADR, full gates) → `tasks/006-closeout.md`
 
 ### Checkpoint: Complete
