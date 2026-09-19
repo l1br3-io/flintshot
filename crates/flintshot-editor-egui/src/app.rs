@@ -1732,11 +1732,17 @@ impl EditorApp {
             // itself to Settings; otherwise one is spawned on the
             // Settings route). Page mode never reaches this arm —
             // the router swaps routes before forwarding editor
-            // actions — so the hook cannot double-open.
+            // actions — so the hook cannot double-open. The worker
+            // then leaves via the Esc contract (the ADR-0065
+            // NavigateHome choreography, mirrored): the handoff is
+            // requested while the worker is still alive to ask, and
+            // the editor never lingers beside the window it opened.
             TopbarAction::Settings => {
                 if let Some(open) = &self.open_settings {
                     open();
                 }
+                self.publish_outcome_if_unset(Ok(EditorOutcome::Cancelled));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             // The breadcrumb's Home link: worker windows have no
             // home route behind them, so the link delegates the
@@ -4149,6 +4155,90 @@ mod tests {
             .values()
             .flat_map(|v| v.commands.iter())
             .any(|c| matches!(c, egui::ViewportCommand::Close))
+    }
+
+    /// The worker Settings entry without the shell's delegate: the
+    /// arm keeps the Esc contract (publish-if-unset Cancelled +
+    /// close) — never a dead click, never a lingering second window.
+    #[test]
+    fn settings_publishes_cancelled_on_worker_windows() {
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::clone(&outcome), false);
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_topbar_action(TopbarAction::Settings, ui.ctx());
+        });
+        assert!(
+            matches!(&*outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "the Settings entry leaves the worker editor like Esc"
+        );
+        assert!(
+            close_command_issued(&full),
+            "the worker editor closes behind the Settings handoff"
+        );
+    }
+
+    /// The worker Settings entry with the shell's open-settings
+    /// delegate installed (the ADR-0065 `NavigateHome` twin): the hook
+    /// fires exactly once, then the worker leaves via the Esc
+    /// contract — the handoff precedes the exit, and the editor never
+    /// lingers beside the window it just asked for.
+    #[test]
+    fn settings_with_hook_fires_it_then_cancels_and_closes() {
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::clone(&outcome), false);
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&fired);
+        app.set_open_settings(std::sync::Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_topbar_action(TopbarAction::Settings, ui.ctx());
+        });
+        assert_eq!(
+            fired.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the Settings delegate fired exactly once"
+        );
+        assert!(
+            matches!(&*outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "the worker still leaves via the Esc contract after the handoff"
+        );
+        assert!(
+            close_command_issued(&full),
+            "the worker editor closes behind the Settings handoff"
+        );
+    }
+
+    /// Page mode with the hook installed keeps the same defensive
+    /// contract: the router normally intercepts `Settings` before
+    /// editor actions flow (routing in place), but the handler arm
+    /// publishes + closes either way.
+    #[test]
+    fn page_settings_with_hook_still_publishes_and_closes() {
+        let mut app = page_app(RecordingPageBridge::default());
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&fired);
+        app.set_open_settings(std::sync::Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }));
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.handle_topbar_action(TopbarAction::Settings, ui.ctx());
+        });
+        assert!(
+            fired.load(std::sync::atomic::Ordering::Relaxed),
+            "the defensive arm still requests the handoff"
+        );
+        assert!(
+            matches!(&*app.outcome.borrow(), Some(Ok(EditorOutcome::Cancelled))),
+            "the defensive arm still publishes the exit signal"
+        );
+        assert!(
+            close_command_issued(&full),
+            "the defensive arm still closes"
+        );
     }
 
     #[test]
