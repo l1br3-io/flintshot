@@ -5,6 +5,6 @@
 - [x] 003 — `Prepared` fallback split: timeout ≠ old-daemon `unsupported`
 - [x] 004 — Tray helper daemon-watch bounded connect retry
 - [x] 005 — TraySupervisor: spawn retry, churn backoff, truthful `is_present`
-- [ ] 006 — Reconnect policy + daemon-spawn rate limiter (pure fns)
+- [x] 006 — Reconnect policy + daemon-spawn rate limiter (pure fns)
 - [ ] 007 — Pump reconnect loop: reconnecting status, respawn, re-announce
 - [ ] 008 — CHANGELOG `[Unreleased]` + ADR-0066

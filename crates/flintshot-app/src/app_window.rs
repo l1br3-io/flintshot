@@ -108,6 +108,73 @@ const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(10);
 /// Retry cadence while waiting for the daemon's socket to answer.
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
+/// First-tier delay for the liveness anchor's reconnect attempts
+/// (after a subscription loss). Grows exponentially per attempt.
+// Transitional: the pump's reconnect loop (the next slice) consumes
+// this; remove the allow with it.
+#[allow(dead_code)]
+const RECONNECT_BASE: Duration = Duration::from_millis(250);
+
+/// Ceiling for the reconnect delay: however often the daemon is
+/// gone, the anchor never waits longer than this between probes.
+// Transitional: the pump's reconnect loop (the next slice) consumes
+// this; remove the allow with it.
+#[allow(dead_code)]
+const RECONNECT_CAP: Duration = Duration::from_secs(5);
+
+/// Reconnect delay for attempt `n` (0-based): exponential from
+/// [`RECONNECT_BASE`], capped at [`RECONNECT_CAP`]. Pure so the
+/// curve is unit-pinned — the pump loop only sequences it.
+// Transitional: the pump's reconnect loop (the next slice) consumes
+// this; remove the allow with it.
+#[allow(dead_code)]
+fn reconnect_delay(attempt: u32) -> Duration {
+    // 250 ms · 2^4 = 4 s < cap ≤ 2^5 tier; shift 5 covers the cap.
+    let shift = attempt.min(5);
+    RECONNECT_BASE.saturating_mul(1 << shift).min(RECONNECT_CAP)
+}
+
+/// Minimum spacing between daemon respawns the anchor may request
+/// (the rate limit that keeps a crash-looping daemon from storming
+/// process spawns — spec AC 8).
+// Transitional: the pump's reconnect loop (the next slice) consumes
+// this; remove the allow with it.
+#[allow(dead_code)]
+const DAEMON_RESPAWN_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Rate limiter for daemon respawns: grants at most one spawn per
+/// [`DAEMON_RESPAWN_MIN_INTERVAL`]. Pure-in-time (the caller supplies
+/// `now`) so the window semantics are unit-pinned.
+// Transitional: the pump's reconnect loop (the next slice) consumes
+// this; remove the allow with it.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct DaemonSpawnLimiter {
+    /// When the last granted spawn happened; `None` = never.
+    last_spawn: Option<std::time::Instant>,
+}
+
+// Transitional: the pump's reconnect loop (the next slice) consumes
+// this; remove the allow with it.
+#[allow(dead_code)]
+impl DaemonSpawnLimiter {
+    fn new() -> Self {
+        Self { last_spawn: None }
+    }
+
+    /// May the anchor spawn a daemon at `now`? A grant records it —
+    /// callers must only spawn when this returns `true`.
+    fn try_spawn(&mut self, now: std::time::Instant) -> bool {
+        match self.last_spawn {
+            Some(t) if now.duration_since(t) < DAEMON_RESPAWN_MIN_INTERVAL => false,
+            _ => {
+                self.last_spawn = Some(now);
+                true
+            }
+        }
+    }
+}
+
 /// How long the pump waits for the window to die after a
 /// `HideForCapture` before skipping the ack: the daemon's handshake
 /// bound dwarfs this, so a wedged UI costs the ack, not the capture.
@@ -1663,6 +1730,66 @@ mod tests {
             Some(HomeDirective::SetStatus("daemon connection lost".into()))
         );
         assert_eq!(shared.poll_directive(), None);
+    }
+
+    // ── Reconnect policy + respawn rate limit (liveness anchor) ──
+
+    /// The reconnect curve starts at the base, grows monotonically,
+    /// and never exceeds the cap — every retry is bounded, the backoff
+    /// is capped (spec boundary: no unbounded waits, no uncapped
+    /// retries).
+    #[test]
+    fn reconnect_delay_grows_from_the_base_and_caps() {
+        assert_eq!(reconnect_delay(0), RECONNECT_BASE);
+        let mut previous = Duration::ZERO;
+        for attempt in 0..24u32 {
+            let delay = reconnect_delay(attempt);
+            assert!(
+                delay >= previous,
+                "attempt {attempt} must not shrink the delay ({delay:?} < {previous:?})"
+            );
+            assert!(
+                delay <= RECONNECT_CAP,
+                "attempt {attempt} must respect the cap ({delay:?})"
+            );
+            previous = delay;
+        }
+        assert_eq!(
+            reconnect_delay(u32::MAX),
+            RECONNECT_CAP,
+            "even absurd attempt counts sit at the cap"
+        );
+    }
+
+    /// A crash-looping daemon must not storm process spawns: the
+    /// limiter grants the first spawn, denies repeats inside the
+    /// min-interval window, and grants again only once the window
+    /// has passed (spec AC 8).
+    #[test]
+    fn daemon_spawn_limiter_rate_limits_respawns() {
+        let t0 = std::time::Instant::now();
+        let mut limiter = DaemonSpawnLimiter::new();
+        assert!(limiter.try_spawn(t0), "the first respawn is granted");
+        assert!(
+            !limiter.try_spawn(t0 + DAEMON_RESPAWN_MIN_INTERVAL / 2),
+            "a respawn inside the window is denied"
+        );
+        assert!(
+            !limiter.try_spawn(
+                t0 + DAEMON_RESPAWN_MIN_INTERVAL
+                    .checked_sub(Duration::from_millis(1))
+                    .expect("const window > 1ms")
+            ),
+            "the denial holds to the window's edge"
+        );
+        assert!(
+            limiter.try_spawn(t0 + DAEMON_RESPAWN_MIN_INTERVAL),
+            "the window passing grants the next respawn"
+        );
+        assert!(
+            !limiter.try_spawn(t0 + DAEMON_RESPAWN_MIN_INTERVAL + Duration::from_secs(1)),
+            "each grant re-arms the window"
+        );
     }
 
     #[test]
