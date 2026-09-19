@@ -128,13 +128,62 @@ fn exits_after_action(request: &Request) -> bool {
     crate::worker::spawns_capture_worker(request) || matches!(request, Request::Quit)
 }
 
+/// How long the daemon watch retries its connect before declaring
+/// the daemon gone. Covers the daemon's own startup race: the
+/// supervisor may spawn this helper before the daemon's IPC socket is
+/// bound — and an IPC-less daemon ("continuing without it") never
+/// binds one at all. A one-shot connect turned both into helper
+/// respawn churn; a bounded window plus the supervisor's backoff
+/// (see `daemon.rs`) contains it.
+const WATCH_CONNECT_WINDOW: Duration = Duration::from_secs(2);
+/// Retry cadence inside [`WATCH_CONNECT_WINDOW`].
+const WATCH_CONNECT_INTERVAL: Duration = Duration::from_millis(250);
+
 /// Watch the daemon's event stream; set `daemon_gone` when it ends.
 /// A subscribe connection is the daemon's death signal by
 /// construction: the socket EOFs the moment the daemon process exits
-/// (or its IPC accept loop drops). Best-effort — a failure to even
-/// connect also flags `gone`, and the supervisor's respawn cycle
-/// recovers (the daemon may simply not be listening *yet* during its
-/// own startup).
+/// (or its IPC accept loop drops). Connects retry inside
+/// [`WATCH_CONNECT_WINDOW`] (the startup race); once connected, any
+/// stream end marks gone immediately — daemon death stays prompt.
+async fn watch_daemon(path: &std::path::Path, gone: Arc<AtomicBool>) {
+    use crate::ipc_server::{encode_msg, read_frame, socket_name, write_frame, Stream};
+    use interprocess::local_socket::traits::tokio::Stream as _;
+
+    let mark_gone = || gone.store(true, Ordering::Release);
+    let deadline = tokio::time::Instant::now() + WATCH_CONNECT_WINDOW;
+    loop {
+        if path.exists() {
+            if let Ok(name) = socket_name(path) {
+                if let Ok(mut stream) = Stream::connect(name).await {
+                    let Ok(bytes) = encode_msg(&Request::Subscribe) else {
+                        mark_gone();
+                        return;
+                    };
+                    if write_frame(&mut stream, &bytes).await.is_err() {
+                        mark_gone();
+                        return;
+                    }
+                    // Events themselves are ignored — only the
+                    // stream's end matters.
+                    while read_frame(&mut stream).await.is_ok() {}
+                    mark_gone();
+                    return;
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            mark_gone();
+            return;
+        }
+        tokio::time::sleep(WATCH_CONNECT_INTERVAL).await;
+    }
+}
+
+/// Watch the daemon's event stream; set `daemon_gone` when it ends.
+/// Best-effort — a failure to even connect also flags `gone` after
+/// the bounded [`WATCH_CONNECT_WINDOW`] retry, and the supervisor's
+/// respawn cycle recovers (the daemon may simply not be listening
+/// *yet* during its own startup).
 fn spawn_daemon_watch(daemon_gone: &Arc<AtomicBool>) {
     let gone = Arc::clone(daemon_gone);
     let _ = std::thread::Builder::new()
@@ -151,48 +200,8 @@ fn spawn_daemon_watch(daemon_gone: &Arc<AtomicBool>) {
                     return;
                 }
             };
-            runtime.block_on(async move {
-                use crate::ipc_server::{encode_msg, read_frame, socket_name, write_frame, Stream};
-                use interprocess::local_socket::traits::tokio::Stream as _;
-
-                let mark_gone = || gone.store(true, Ordering::Release);
-                let path = flintshot_core::ipc::socket_path(None);
-                if !path.exists() {
-                    mark_gone();
-                    return;
-                }
-                let name = match socket_name(&path) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "tray watch socket name; assuming gone");
-                        mark_gone();
-                        return;
-                    }
-                };
-                let Ok(mut stream) = Stream::connect(name).await else {
-                    // Daemon not listening yet (startup race) or
-                    // gone — either way this helper's job is over;
-                    // the supervisor retries with a fresh one.
-                    mark_gone();
-                    return;
-                };
-                let Ok(bytes) = encode_msg(&Request::Subscribe) else {
-                    mark_gone();
-                    return;
-                };
-                if write_frame(&mut stream, &bytes).await.is_err() {
-                    mark_gone();
-                    return;
-                }
-                // Events themselves are ignored — only the stream's
-                // end matters.
-                loop {
-                    if read_frame(&mut stream).await.is_err() {
-                        mark_gone();
-                        break;
-                    }
-                }
-            });
+            let path = flintshot_core::ipc::socket_path(None);
+            runtime.block_on(watch_daemon(&path, gone));
         });
 }
 
@@ -237,6 +246,10 @@ mod tests {
         }
     }
 
+    /// Other clicks keep the helper alive: Open/upload still stream
+    /// status through the daemon; the settings window opens through
+    /// the daemon's broadcast + spawn. Nothing here needs the item
+    /// unregistered.
     #[test]
     fn other_clicks_keep_the_helper_alive() {
         // Open/upload still stream status through the daemon; the
@@ -256,6 +269,90 @@ mod tests {
         ];
         for request in &staying {
             assert!(!exits_after_action(request), "{request:?} must stay");
+        }
+    }
+
+    /// [`super::watch_daemon`] — the daemon-watch core against real
+    /// local sockets (headless-safe; local sockets need no display).
+    mod watch {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use super::super::{watch_daemon, WATCH_CONNECT_INTERVAL, WATCH_CONNECT_WINDOW};
+
+        /// A listener appearing mid-window (the daemon-startup race:
+        /// the supervisor may spawn this helper before the daemon's
+        /// IPC socket is bound) is accepted — the watch stays alive
+        /// through the failed attempts and marks gone only once the
+        /// connected stream actually ends.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn late_listener_is_accepted_within_the_window() {
+            use interprocess::local_socket::traits::tokio::Listener as _;
+
+            let dir = tempfile::tempdir().unwrap();
+            let sock = dir.path().join("flintshot-watch-late.sock");
+            let gone = Arc::new(AtomicBool::new(false));
+
+            let watch_gone = Arc::clone(&gone);
+            let watch_path: PathBuf = sock.clone();
+            let watch = tokio::spawn(async move {
+                watch_daemon(&watch_path, watch_gone).await;
+            });
+
+            // A few failed connect attempts pass (no socket yet),
+            // then the daemon's listener appears — inside the window.
+            tokio::time::sleep(WATCH_CONNECT_INTERVAL * 2).await;
+            let name = crate::ipc_server::socket_name(&sock).unwrap();
+            let listener = interprocess::local_socket::ListenerOptions::new()
+                .name(name)
+                .try_overwrite(true)
+                .create_tokio()
+                .unwrap();
+            let conn = listener.accept().await.unwrap();
+
+            // The watch connected and parked on its read: gone must
+            // not be set even though the first attempts failed.
+            tokio::time::sleep(WATCH_CONNECT_INTERVAL * 2).await;
+            assert!(
+                !gone.load(Ordering::SeqCst),
+                "the watch accepted the late-appearing daemon"
+            );
+
+            // Stream end (the daemon dying) marks gone promptly.
+            drop(conn);
+            drop(listener);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !gone.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                gone.load(Ordering::SeqCst),
+                "stream end after a connected life marks the daemon gone"
+            );
+            let _ = watch.await;
+        }
+
+        /// A daemon that never answers within the window is declared
+        /// gone — bounded, no unbounded retry.
+        #[tokio::test]
+        async fn absent_daemon_marks_gone_after_the_window() {
+            let dir = tempfile::tempdir().unwrap();
+            let sock = dir.path().join("flintshot-watch-absent.sock");
+            let gone = Arc::new(AtomicBool::new(false));
+            let started = std::time::Instant::now();
+            watch_daemon(&sock, Arc::clone(&gone)).await;
+            assert!(gone.load(Ordering::SeqCst), "no daemon → gone");
+            assert!(
+                started.elapsed() >= WATCH_CONNECT_WINDOW,
+                "the window bounded the retry ({} attempts' worth)",
+                started.elapsed().as_millis()
+            );
+            assert!(
+                started.elapsed() < WATCH_CONNECT_WINDOW + Duration::from_secs(2),
+                "the watch must give up shortly past the window"
+            );
         }
     }
 
