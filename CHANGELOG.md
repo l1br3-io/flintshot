@@ -18,6 +18,19 @@ Categories used below:
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sticky tools now reach every editor entry, not just captures.**
+  The app window's Open / recent-captures / Paste paths built their
+  `EditorState` without the `[ui]` session config, so they silently
+  diverged from the capture paths (which read it): a config with
+  `flip-to-move = true` flipped to Move after commits on captures but
+  not on opened images — and every other `[ui]` default (color,
+  stroke, font) was skipped on those paths too. All entries now apply
+  the same read-once config. Note for configs predating ADR-0058: a
+  settings re-save may have materialized `flip-to-move = true` (the
+  old default) — set it to `false` to get sticky tools.
+
 ### Changed
 
 - **Sticky tools by default** (ADR-0058, superseding ADR-0040's

@@ -592,6 +592,22 @@ impl GrabRouter {
     }
 }
 
+/// The config a fresh editor session reads once at its start (the
+/// ADR-0058 read-once rule): the persisted file, or built-in
+/// defaults (warned) when loading fails. Every editor-page entry —
+/// grab routing, open, paste — goes through this so `[ui]` session
+/// defaults (color / stroke / flip-to-move) land identically no
+/// matter which door the image arrived through.
+fn editor_session_config() -> Config {
+    match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load config; using built-in defaults");
+            Config::default()
+        }
+    }
+}
+
 /// Route one grab outcome to the outer loop: an image arms the
 /// editor page and wakes the router; quiet exits and failures reopen
 /// the prior page (home), failures with the message on the status
@@ -602,15 +618,8 @@ fn route_grab(shared: &Shared, core: &mut HomeCore, grab: AppGrab) {
             img,
             selection_first,
         } => {
-            let cfg = match Config::load() {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not load config; using built-in defaults");
-                    Config::default()
-                }
-            };
             shared.set_pending_editor(PendingEditor {
-                state: crate::cli::state_from_config(img, &cfg),
+                state: crate::cli::state_from_config(img, &editor_session_config()),
                 selection_first,
             });
             if let Some(directive) = core.force_show() {
@@ -1360,29 +1369,33 @@ fn paste_clipboard_image() -> Option<EditorState> {
         height,
         bytes,
     } = clipboard.get_image().ok()?;
-    image_data_to_state(width, height, bytes.into_owned())
+    image_data_to_rgba(width, height, bytes.into_owned())
+        .map(|img| crate::cli::state_from_config(img, &editor_session_config()))
 }
 
 /// Pure seam of [`paste_clipboard_image`]: raw clipboard image data
-/// → editor state. `None` when the buffer does not match its
-/// dimensions, or either dimension is 0 (degenerate — never a state
-/// worth editing).
-fn image_data_to_state(width: usize, height: usize, bytes: Vec<u8>) -> Option<EditorState> {
+/// → the decoded RGBA image. `None` when the buffer does not match
+/// its dimensions, or either dimension is 0 (degenerate — never an
+/// image worth editing).
+fn image_data_to_rgba(width: usize, height: usize, bytes: Vec<u8>) -> Option<image::RgbaImage> {
     if width == 0 || height == 0 {
         return None;
     }
     let w = u32::try_from(width).ok()?;
     let h = u32::try_from(height).ok()?;
-    Some(EditorState::new(image::RgbaImage::from_raw(w, h, bytes)?))
+    image::RgbaImage::from_raw(w, h, bytes)
 }
 
 /// Decode a picked image file into the editor state the editor page
 /// runs over — the `flintshot open` decode (same `image::open` +
-/// `to_rgba8`), in-process: no child, no relay.
+/// `to_rgba8`), in-process: no child, no relay. Applies the `[ui]`
+/// session config ([`editor_session_config`]) so an opened image
+/// starts from the same persisted tool defaults as a capture.
 fn decode_image_file(path: &std::path::Path) -> eyre::Result<EditorState> {
     let img = image::open(path)
-        .map_err(|e| eyre::eyre!("could not load image {}: {e}", path.display()))?;
-    Ok(EditorState::new(img.to_rgba8()))
+        .map_err(|e| eyre::eyre!("could not load image {}: {e}", path.display()))?
+        .to_rgba8();
+    Ok(crate::cli::state_from_config(img, &editor_session_config()))
 }
 
 /// [`EditorPageBridge`] impl joining the editor page to the shared
@@ -2009,19 +2022,18 @@ mod tests {
     }
 
     #[test]
-    fn paste_image_data_becomes_an_editor_state() {
-        let state =
-            image_data_to_state(2, 2, vec![7_u8; 2 * 2 * 4]).expect("well-formed image data");
-        assert_eq!(state.image.dimensions(), (2, 2));
+    fn paste_image_data_becomes_an_rgba_image() {
+        let img = image_data_to_rgba(2, 2, vec![7_u8; 2 * 2 * 4]).expect("well-formed image data");
+        assert_eq!(img.dimensions(), (2, 2));
     }
 
     #[test]
     fn paste_image_data_rejects_a_mismatched_buffer() {
         assert!(
-            image_data_to_state(4, 4, vec![7_u8; 10]).is_none(),
+            image_data_to_rgba(4, 4, vec![7_u8; 10]).is_none(),
             "a buffer that does not match w*h*4 must never build a state"
         );
-        assert!(image_data_to_state(0, 0, Vec::new()).is_none());
+        assert!(image_data_to_rgba(0, 0, Vec::new()).is_none());
     }
 
     #[test]
