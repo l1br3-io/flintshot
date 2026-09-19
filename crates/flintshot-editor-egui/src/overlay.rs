@@ -759,12 +759,13 @@ pub(crate) struct OverlayApp {
     /// whenever the toolbar is hidden.
     toolbar_rect: Option<egui::Rect>,
     /// This frame's Move-tool object chrome (see [`crate::chrome`]):
-    /// the hovered / grabbed annotation's bbox plus its kind, in
-    /// canvas-physical px. Computed at the end of
-    /// [`Self::pointer_and_chrome`] (where the gating inputs live),
-    /// painted by `ui_impl` over the shared render output. `None`
-    /// whenever no affordance applies.
-    move_chrome: Option<(Rect, crate::chrome::MoveChromeKind)>,
+    /// the hovered / grabbed bounding boxes plus the kind, in
+    /// canvas-physical px — plural because a live multi-drag
+    /// outlines every member of the selection set. Computed at the
+    /// end of [`Self::pointer_and_chrome`] (where the gating inputs
+    /// live), painted by `ui_impl` over the shared render output.
+    /// `None` whenever no affordance applies.
+    move_chrome: Option<(Vec<Rect>, crate::chrome::MoveChromeKind)>,
     /// Last measured toolbar size, fed to [`toolbar_anchor`] for the
     /// flip/clamp decision. Seeded zero (the anchor fn tolerates it);
     /// one frame behind the layout, which is invisible in practice
@@ -1455,9 +1456,11 @@ impl OverlayApp {
         // selection handles and badge so the region chrome stays
         // legible over it. Computed in `pointer_and_chrome` this
         // frame; `None` paints nothing.
-        if let Some((r, kind)) = self.move_chrome {
-            let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
-            crate::chrome::paint_move_chrome(&painter, rect, kind);
+        if let Some((rects, kind)) = &self.move_chrome {
+            for r in rects {
+                let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
+                crate::chrome::paint_move_chrome(&painter, rect, *kind);
+            }
         }
 
         // Persistent-selection outlines (annotation-delete spec,
@@ -1760,10 +1763,15 @@ mod tests {
             1.0 / 60.0,
             vec![egui::Event::PointerMoved(egui::pos2(30.0, 25.0))],
         );
-        let (rect, kind) = app.move_chrome.expect("hover hit must yield chrome");
+        let (rects, kind) = app.move_chrome.expect("hover hit must yield chrome");
         assert_eq!(kind, crate::chrome::MoveChromeKind::Hover);
-        assert_eq!(rect.min, Point::new(10.0, 10.0), "chrome tracks the bbox");
-        assert_eq!(rect.max, Point::new(50.0, 40.0));
+        assert_eq!(rects.len(), 1, "hover outlines exactly the hit annotation");
+        assert_eq!(
+            rects[0].min,
+            Point::new(10.0, 10.0),
+            "chrome tracks the bbox"
+        );
+        assert_eq!(rects[0].max, Point::new(50.0, 40.0));
     }
 
     #[test]
@@ -1801,10 +1809,11 @@ mod tests {
             ],
         );
         assert!(app.state.moving.is_some(), "press grabbed the annotation");
-        let (rect, kind) = app.move_chrome.expect("live drag must yield chrome");
+        let (rects, kind) = app.move_chrome.expect("live drag must yield chrome");
         assert_eq!(kind, crate::chrome::MoveChromeKind::Grab);
-        assert_eq!(rect.min, Point::new(10.0, 10.0));
-        assert_eq!(rect.max, Point::new(50.0, 40.0));
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].min, Point::new(10.0, 10.0));
+        assert_eq!(rects[0].max, Point::new(50.0, 40.0));
     }
 
     #[test]
@@ -1837,10 +1846,15 @@ mod tests {
             vec![egui::Event::PointerMoved(egui::pos2(36.0, 29.0))],
         );
         assert!(app.state.moving.is_some(), "drag is still live");
-        let (rect, kind) = app.move_chrome.expect("drag frame keeps chrome");
+        let (rects, kind) = app.move_chrome.expect("drag frame keeps chrome");
         assert_eq!(kind, crate::chrome::MoveChromeKind::Grab);
-        assert_eq!(rect.min, Point::new(16.0, 14.0), "chrome tracks the drag");
-        assert_eq!(rect.max, Point::new(56.0, 44.0));
+        assert_eq!(rects.len(), 1);
+        assert_eq!(
+            rects[0].min,
+            Point::new(16.0, 14.0),
+            "chrome tracks the drag"
+        );
+        assert_eq!(rects[0].max, Point::new(56.0, 44.0));
     }
 
     #[test]

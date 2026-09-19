@@ -551,7 +551,7 @@ pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
 pub(crate) fn tool_hint(tool: Tool) -> &'static str {
     match tool {
         Tool::Select => "drag a region · Copy uses it · Enter crops",
-        Tool::Move => "press an annotation and drag to reposition · Del removes",
+        Tool::Move => "click selects · Shift+click adds · drag moves all · Del removes",
         Tool::Text => "click to place the caret",
         Tool::Blur => "drag over what to hide",
         Tool::Number => "click to place the next number",

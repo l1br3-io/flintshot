@@ -740,17 +740,19 @@ impl EditorApp {
             .filter(|p| canvas_rect.contains(*p) && !self.canvas_drag_active)
             // Screen-logical → image-physical, matching `logic_impl`.
             .map(|p| view.logical_to_image(p));
-        let Some((rect, kind)) = crate::chrome::move_chrome(&self.state, hover_at) else {
+        let Some((rects, kind)) = crate::chrome::move_chrome(&self.state, hover_at) else {
             return;
         };
-        crate::chrome::paint_move_chrome(
-            painter,
-            egui::Rect::from_two_pos(
-                view.image_to_logical(rect.min),
-                view.image_to_logical(rect.max),
-            ),
-            kind,
-        );
+        for rect in rects {
+            crate::chrome::paint_move_chrome(
+                painter,
+                egui::Rect::from_two_pos(
+                    view.image_to_logical(rect.min),
+                    view.image_to_logical(rect.max),
+                ),
+                kind,
+            );
+        }
     }
 
     /// Paint the persistent-selection outlines (annotation-delete
