@@ -18,6 +18,38 @@ Categories used below:
 
 ## [Unreleased]
 
+### Changed
+
+- **Tool palette remapped to Select / Crop / Hand**
+  (ADR-0064). The editor's conflated tools are split along the
+  mainstream image-editor lines: **Select** (V) is now the
+  object-selection tool — click selects an annotation,
+  Shift/Ctrl+click toggles membership, a drag on empty space draws a
+  marquee that bbox-intersection-selects every annotation it
+  touches (plain replaces the set, Shift/Ctrl merges), and dragging
+  a selected annotation moves the whole set. **Crop** (C) inherits
+  the old Select behavior exactly: drag a region, `Enter` or the
+  Crop button crops, and Copy honors the active region. **Hand**
+  (H) renames Move and becomes pan-only — it never selects, moves,
+  or otherwise touches annotations (the pan-only mainstream
+  contract; see the ADR's dropped-draft note). The default tool is
+  Select; the fullscreen overlay and the editor's selection-first
+  phase pre-arm Crop; the old `S` hotkey is freed. The commit-flip
+  config key renames `flip-to-move` → `flip-to-select` (same value;
+  legacy files migrate silently on first save, comments riding
+  along).
+
+### Added
+
+- **View pan + cursor-anchored wheel zoom.** From any tool, the
+  mouse wheel steps the view zoom (the same 0.25 quantization as
+  the floating +/− chips) keeping the image point under the cursor
+  fixed; a middle-button drag pans; a Hand primary drag pans
+  (Grab/Grabbing cursor). Pan clamps so the image never leaves the
+  viewport entirely and resets at the 1.0 fit zoom. Every mapping
+  site (pointer, chrome, magnifier, mask) composes pan through the
+  shared canvas view.
+
 ### Fixed
 
 - **The topbar overflow's Settings entry now works from worker editor
