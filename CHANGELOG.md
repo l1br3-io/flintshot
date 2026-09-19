@@ -18,6 +18,26 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- **Text selection & highlight while editing** (effort
+  `text-selection-highlight`). In-edit text now behaves like real
+  text in both shells (editor window and fullscreen overlay, fresh
+  drafts and re-edit sessions alike): **Shift+arrows / Home / End**
+  extend a selection char- or line-wise, **Ctrl+Shift+arrows**
+  word-wise, **Ctrl+A** selects all, **dragging** across glyphs
+  selects, **double-click** selects a word, **triple-click** the
+  line. Typing **replaces** the selection in one stroke;
+  **Backspace / Delete** delete the range (and `Delete` is no
+  longer dead mid-edit — without a selection it forward-deletes).
+  Selected glyphs carry a translucent blue highlight; the block
+  caret is retired in favour of the industry **thin bar caret**.
+  Plain caret moves collapse the selection; Enter / Esc /
+  tool-switch commit semantics and the one-undo-per-re-edit-session
+  bracketing are byte-for-byte unchanged. Click-away mid-edit now
+  commits-and-moves-on (previously clicks were ignored while
+  typing).
+
 ### Changed
 
 - **Tool palette remapped to Select / Crop / Hand**
