@@ -290,6 +290,7 @@ impl WindowApp {
             home.display_server(),
             home.version(),
             home.default_config_toml(),
+            home.session_is_wayland(),
         )
     }
 
@@ -555,6 +556,9 @@ impl WindowApp {
                         match action {
                             crate::settings::SettingsAction::EditConfigFile => {
                                 self.home.open_config_file();
+                            }
+                            crate::settings::SettingsAction::RebindShortcuts => {
+                                self.home.request_rebind();
                             }
                         }
                     }

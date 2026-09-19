@@ -1377,6 +1377,32 @@ impl HomeBridge for Bridge {
         flintshot_core::default_config_toml().to_owned()
     }
 
+    fn session_is_wayland(&mut self) -> bool {
+        crate::platform::session_is_wayland()
+    }
+
+    fn request_rebind(&mut self) {
+        // The portal bind dialog is a user-facing request/reply —
+        // thread it so the UI keeps painting while it is open (the
+        // tray helper's old arm, verbatim).
+        let spawned = std::thread::Builder::new()
+            .name("flintshot-settings-bind".into())
+            .spawn(|| match crate::ipc_client::bind_shortcuts_to(None) {
+                Ok(Some(_event)) => {
+                    tracing::info!("portal bind finished (settings)");
+                }
+                Ok(None) => {
+                    tracing::warn!("bind: daemon not running");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "bind: IPC failure");
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "spawning the settings bind thread");
+        }
+    }
+
     fn open_image(&mut self, path: std::path::PathBuf) -> bool {
         match decode_image_file(&path) {
             Ok(state) => {
