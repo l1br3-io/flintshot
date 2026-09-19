@@ -20,8 +20,78 @@ Categories used below:
 
 ### Fixed
 
+- **The worker editor's Settings entry closes behind its handoff —
+  no more duplicate windows** (effort `fix-tray-window-lifecycle`).
+  The worker's topbar ⋮ → Settings used to fire the delegate and
+  *stay open*, leaving the freshly-spawned app window beside the
+  still-visible editor (which then landed in the next shot). The arm
+  now mirrors the ADR-0065 `NavigateHome` choreography exactly:
+  delegate while alive to ask, publish `Cancelled`, close the
+  viewport. Hook-absent (tests, headless) keeps the same publish +
+  close contract. (Pinned by
+  `settings_with_hook_fires_it_then_cancels_and_closes`,
+  `settings_publishes_cancelled_on_worker_windows`,
+  `page_settings_with_hook_still_publishes_and_closes`.)
+- **A slow prepare no longer ghosts the tray for 30 s.** When the
+  worker's `PrepareCapture` reply exceeded its 2 s client bound, the
+  client fell back to a second, tray-only handshake — but the daemon
+  had already `begin_capture`d for the prepare, so the fallback began
+  *again* and the worker's single `ReportCaptured` left the tray
+  hidden until the 30 s safety restore. A reply timeout is now
+  understood as "armed but slow" (registered, unconfirmed, exactly
+  one report owed — no second handshake); only an explicit
+  `unsupported` reply from a known-old daemon keeps the legacy
+  tray-only fallback. (Pinned by
+  `prepare_capture_timeout_does_not_run_the_tray_fallback` and
+  `prepare_capture_falls_back_to_tray_on_unsupported`.)
+- **Tray helper loss is never silent, and churn backs off.** A
+  failed helper spawn used to leave the tray gone until the next
+  capture's hide/show cycle, `TraySupervisor::is_present`
+  unconditionally claimed a tray existed (so the gate waited on
+  pixels that were never there), and an IPC-less daemon produced a
+  ~0.5 s infinite respawn churn. Spawns now retry with capped
+  exponential backoff (first fast exit free — it may be a real
+  capture/quit click; stable uptime resets the curve), presence
+  reports the real child state, and the helper's daemon watch
+  retries its connect inside a bounded ~2 s startup-race window
+  before following a dead daemon. (Pinned by
+  `helper_backoff_delay_curve`, `spawn_failures_retry_with_growing_backoff`,
+  `consecutive_fast_self_exits_back_off`,
+  `stable_uptime_resets_the_churn_backoff`,
+  `late_listener_is_accepted_within_the_window`,
+  `absent_daemon_marks_gone_after_the_window`.)
+- **The no-daemon fallback spawns from worker editors carry
+  `--standalone`.** The direct `flintshot app` / `app --route
+  settings` spawns (Settings/Home entries with no daemon answering)
+  used to die on the "stale `flintshot app` process?" error against
+  a lock holder instead of exiting quietly; they now route through
+  the daemon's own `worker::app_argv` builder. (Pinned by
+  `fallback_app_spawns_carry_standalone`.)
+
+### Changed
+
+- **The app window is the liveness anchor: daemon death self-heals**
+  (effort `fix-tray-window-lifecycle`, ADR-0066). Losing the daemon
+  subscription no longer degrades the window permanently — the pump
+  keeps answering capture commands with in-process grabs while it
+  reconnects on a capped exponential curve (250 ms base, 5 s cap),
+  respawns the daemon through a 30 s rate limiter (a crash-looping
+  daemon cannot storm process spawns), and on reconnect re-announces
+  presence — so the fresh daemon routes the next capture to the
+  window instead of spawning a worker editor beside it — and returns
+  the status to "connected". The old terminal banner ("daemon
+  connection lost — restart `flintshot app`") is now a
+  *reconnecting* status; there is no terminal degraded mode anymore.
+  (Pinned by
+  `disconnect_status_says_reconnecting_not_terminal`,
+  `reconnect_delay_grows_from_the_base_and_caps`,
+  `daemon_spawn_limiter_rate_limits_respawns`,
+  `reconnecting_loop_reconnects_when_the_daemon_returns`, and
+  `reconnecting_loop_rate_limits_respawns_and_exits_on_close`; see
+  ADR-0066 for the runtime matrix.)
+
 - **Settings page no longer paints red duplicate-id debug overlays
-  over the rows and the topbar while scrolling.** The section
+  over the rows and the topbar while scrolling (prior entry).** The section
   widget's invisible measure pass used to run 10 000 px offscreen,
   so every row's widget id registered at two distant rects per
   frame — and egui's duplicate-id detector (debug builds only)
