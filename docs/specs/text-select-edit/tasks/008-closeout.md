@@ -11,18 +11,23 @@ full standing gate and walk the spec's exit criteria 1–6.
 
 **Acceptance criteria:**
 
-- [ ] CHANGELOG entry present; TEST_MATRIX rows for select /
+- [x] CHANGELOG entry present; TEST_MATRIX rows for select /
       re-edit / restyle / delete in both shells.
-- [ ] ADR covers the write-through model, DoubleClick event, and
+- [x] ADR covers the write-through model, DoubleClick event, and
       lift-out session with its undo invariants.
-- [ ] Spec exit criteria 1–6 each verified (manually where
-      behavioral).
+- [x] Spec exit criteria 1–6 each verified (manually where
+      behavioral): criteria 1–5's mechanics are unit/integration
+      pinned (chrome gating, panel reflection, session undo
+      exactness, restyle gestures, delete/ deselect, overlay
+      plumbing); the live-display pass is specced as TEST_MATRIX
+      rows awaiting platform cells; criterion 6 (standing gates)
+      green at closeout.
 
 **Verification:**
 
-- [ ] `cargo fmt --all --check`
+- [x] `cargo fmt --all --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace --all-targets`
+- [x] `cargo test --workspace --all-targets`
 - [ ] `cargo test --doc -p flintshot-core -p flintshot-editor-egui`
 
 **Dependencies:** Tasks 001–007

@@ -2071,6 +2071,99 @@ chrome-only by construction; this verifies it live).
 
 ---
 
+## Text select & re-edit — committed text as a live object
+
+Effort: `text-select-edit` (ADR-0061). Applies to **both** shells.
+The select / re-edit / restyle state machines, undo exactness (one
+session = one entry, one style gesture = one entry), defaults sync,
+lifecycle guards, chrome gating, double-click synthesis, and the
+panel/pod source-switch are unit-pinned in `flintshot-core` and
+`flintshot-editor-egui`; the rows below verify what tests can't —
+the visible affordances and the live gesture chains on real
+displays.
+
+### Test setup
+
+```sh
+cargo build --release
+cargo test --workspace --all-targets   # gates green before manual
+flintshot fullscreen                   # or: flintshot region / open
+flintshot region --overlay             # overlay rows (X11 / macOS / Windows)
+```
+
+### Test script
+
+**1. Click-to-select (row 1).**
+
+`flintshot fullscreen` → `T` + click, type "hello", `Enter` → with
+the Text tool still active, single-click the text. Expected: dashed
+selection outline; the panel's Text section shows *its* size /
+colour / family (not the session defaults); hovering it first shows
+the dashed affordance + I-beam cursor. Click empty canvas → a fresh
+caret starts and the selection clears (every fresh-draft behaviour
+byte-for-byte unchanged).
+
+**2. Re-edit lifecycle (row 2).**
+
+Double-click the text → caret at end; append " world"; `Enter`.
+Expected: exactly **one** `Ctrl+Z` reverts the whole re-edit (back
+to "hello" with its original style). Repeat, then `Esc` mid-edit →
+the original returns with **no** undo entry consumed (`Ctrl+Z` still
+undoes the prior commit). Open a session, change nothing, `Enter` →
+no undo entry either.
+
+**3. Restyle write-through (row 3).**
+
+Single-click to select → panel Text section: change size (− / + and
+a full DragValue drag), family (Aa popup), colour (colour pod). The
+text restyles live; the *next* placed text inherits each change;
+each discrete change is one `Ctrl+Z` step and a full slider drag is
+one step. Mid-re-edit the same panel applies live to the draft and
+the session's single entry covers it.
+
+**4. Delete + Esc layering (row 4).**
+
+Selected → `Del` / `Backspace` → gone, one undo entry, `Ctrl+Z`
+restores. Selected → `Esc` → deselects only (editor stays open);
+second `Esc` cancels as today.
+
+**5. Overlay parity (row 5).**
+
+Repeat 1–2 and 4 in the overlay shell — identical behaviour via the
+shared queries; region handles and Move-tool flows untouched.
+(Restyle is editor-window UX per the spec: the overlay has no
+typography surface; its colour popover reuses the same retargeted
+bay when a future effort mounts it there.)
+
+**6. Chrome-free output (row 6).**
+
+With the selection outline (or hover affordance) on screen: Save →
+re-open the PNG, Copy → paste — no outline ever in the output.
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Text click selects: dashed outline, panel reflects the annotation's values; hover affordance + I-beam; empty-canvas click reverts to fresh caret | | | | | | | | | | |
+| Double-click re-edits: caret at end; Enter commits with exactly one undo for the whole session; Esc mid-edit reverts with no entry; no-op edit costs nothing | | | | | | | | | | |
+| Restyle write-through: live recolour/resize/refamily; next text inherits; one undo per discrete change, one per full DragValue drag; mid-session absorbed | | | | | | | | | | |
+| `Del` / `Backspace` deletes from the Text tool; `Esc` deselects without closing (second `Esc` cancels) | | | | | | | | | | |
+| Overlay shell identical (select / re-edit / delete); region + Move flows unregressed (restyle is editor-window UX) | | | | | | | | | | |
+| Selection / hover chrome never in saved or copied output | | | | | | | | | | |
+
+### Known caveats
+
+- Caret placement on re-edit is always end-of-text (v1);
+  caret-from-click needs shell-side glyph metrics (spec open
+  question 2).
+- Live style application to a *fresh* draft mid-typing is
+  deliberately unchanged (style snapshots at placement; spec open
+  question 1 defaults to no).
+- Write-through is Text-only; extending to other annotation variants
+  via the same restyle API is a future effort (spec open question 3).
+
+---
+
 ## App window — `flintshot app` capture home (Win11-Snipping-Tool-style)
 
 Spec: `docs/specs/app-window/`; design: ADR-0045. Run on a session

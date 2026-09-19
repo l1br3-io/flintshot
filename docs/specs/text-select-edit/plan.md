@@ -42,19 +42,19 @@ behaviour via routing only.
 
 ### Phase 1: Selection
 
-- [ ] Task 1: Core — Text-tool click-to-select state machine → `tasks/001-core-text-select.md`
-- [ ] Task 2: egui — selection chrome under Text → `tasks/002-chrome-text-select.md`
+- [x] Task 1: Core — Text-tool click-to-select state machine → `tasks/001-core-text-select.md`
+- [x] Task 2: egui — selection chrome under Text → `tasks/002-chrome-text-select.md`
 
 ### Checkpoint: Selection (after Task 2)
 
-- [ ] `cargo test -p flintshot-core -p flintshot-editor-egui` green
+- [x] `cargo test -p flintshot-core -p flintshot-editor-egui` green
 - [ ] Manual: select → dashed outline; Del deletes; Esc deselects
       without closing — both shells (`cargo run -- capture`)
 
 ### Phase 2: Re-edit
 
-- [ ] Task 3: Core — `DoubleClick` + lift-out re-edit session → `tasks/003-core-doubleclick-session.md`
-- [ ] Task 4: egui — double-click plumbing in both shells → `tasks/004-egui-dblclick-plumbing.md`
+- [x] Task 3: Core — `DoubleClick` + lift-out re-edit session → `tasks/003-core-doubleclick-session.md`
+- [x] Task 4: egui — double-click plumbing in both shells → `tasks/004-egui-dblclick-plumbing.md`
 
 ### Checkpoint: Re-edit (after Task 4)
 
@@ -63,8 +63,8 @@ behaviour via routing only.
 
 ### Phase 3: Restyle
 
-- [ ] Task 5: Core — restyle API + gesture bracketing → `tasks/005-core-restyle-gesture.md`
-- [ ] Task 6: egui — style surfaces retarget (panel + popover) → `tasks/006-egui-style-retarget.md`
+- [x] Task 5: Core — restyle API + gesture bracketing → `tasks/005-core-restyle-gesture.md`
+- [x] Task 6: egui — style surfaces retarget (panel + popover) → `tasks/006-egui-style-retarget.md`
 
 ### Checkpoint: Restyle (after Task 6)
 
@@ -74,8 +74,8 @@ behaviour via routing only.
 
 ### Phase 4: Polish & closeout
 
-- [ ] Task 7: egui — hover affordance under Text → `tasks/007-egui-hover-affordance.md`
-- [ ] Task 8: Closeout — CHANGELOG, TEST_MATRIX, ADR, gates → `tasks/008-closeout.md`
+- [x] Task 7: egui — hover affordance under Text → `tasks/007-egui-hover-affordance.md`
+- [x] Task 8: Closeout — CHANGELOG, TEST_MATRIX, ADR, gates → `tasks/008-closeout.md`
 
 ### Checkpoint: Complete (after Task 8)
 

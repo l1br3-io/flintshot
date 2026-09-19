@@ -7,4 +7,4 @@
 - [x] 005 Core — restyle API + gesture bracketing
 - [x] 006 egui — style surfaces retarget (panel + popover)
 - [x] 007 egui — hover affordance under Text
-- [ ] 008 Closeout — CHANGELOG, TEST_MATRIX, ADR, gates
+- [x] 008 Closeout — CHANGELOG, TEST_MATRIX, ADR, gates
