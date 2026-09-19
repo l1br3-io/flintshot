@@ -1,7 +1,7 @@
 # Fix tray + window lifecycle — task checklist
 
 - [x] 001 — Settings arm closes behind the handoff (ADR-0065 mirror)
-- [ ] 002 — No-daemon fallback spawns route through `worker::app_argv`
+- [x] 002 — No-daemon fallback spawns route through `worker::app_argv`
 - [ ] 003 — `Prepared` fallback split: timeout ≠ old-daemon `unsupported`
 - [ ] 004 — Tray helper daemon-watch bounded connect retry
 - [ ] 005 — TraySupervisor: spawn retry, churn backoff, truthful `is_present`

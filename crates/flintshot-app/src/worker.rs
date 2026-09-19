@@ -402,7 +402,7 @@ pub enum AppRoute {
 /// the child would re-delegate `OpenApp`, the daemon would spawn the
 /// next child, and the chain would never end (the tray Settings /
 /// Open-app spawn storm). Only a lock-free spawn becomes the window.
-fn app_argv(route: AppRoute) -> Vec<String> {
+pub(crate) fn app_argv(route: AppRoute) -> Vec<String> {
     let mut argv = match route {
         AppRoute::Home => vec!["app".to_string()],
         AppRoute::Settings => vec!["app".to_string(), "--route".into(), "settings".into()],
