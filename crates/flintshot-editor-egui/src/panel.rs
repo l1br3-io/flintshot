@@ -30,6 +30,7 @@ use flintshot_core::{EditorState, Tool};
 
 use egui::{Color32, CornerRadius, FontId, Pos2, Sense, Stroke, StrokeKind, Vec2};
 use flintshot_core::{BlurKind, Color, FontFamily, FontStyle, FontWeight, TextAlign, TextOutline};
+use flintshot_core::{NUMBER_MAX_DIAMETER, NUMBER_MIN_DIAMETER};
 
 use crate::popover;
 use crate::rail::{arrowhead, pt, seg, Glyph};
@@ -166,7 +167,10 @@ fn delete_button(ui: &mut egui::Ui, enabled: bool) -> bool {
     enabled && resp.clicked()
 }
 
-/// The Number section's next-number stepper.
+/// The Number section's rows: the next-number stepper and the
+/// bubble-size stepper. Both are plain session tool-state edits —
+/// no history entries, nothing observable on already-committed
+/// bubbles until the next placement.
 fn number_row(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.horizontal(|ui| {
         ui.label(
@@ -177,6 +181,23 @@ fn number_row(ui: &mut egui::Ui, state: &mut EditorState) {
         ui.add(
             egui::DragValue::new(&mut state.next_number)
                 .range(1.0..=999.0)
+                .speed(1.0),
+        );
+    });
+    // The range comes from core so the clamp bound lives beside the
+    // default it constrains, not as a duplicated panel literal.
+    // egui's DragValue clamps user edits AND stale out-of-range
+    // values to the range on render (clamp_existing_to_range
+    // defaults on) — the panel tests pin that through the bound field.
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Size")
+                .size(theme::TYPE_SM)
+                .color(theme::palette::INK_SOFT),
+        );
+        ui.add(
+            egui::DragValue::new(&mut state.number_diameter)
+                .range(NUMBER_MIN_DIAMETER..=NUMBER_MAX_DIAMETER)
                 .speed(1.0),
         );
     });
@@ -929,6 +950,11 @@ pub(crate) fn g_plus(p: &egui::Painter, r: egui::Rect, c: Color32) {
 }
 
 #[cfg(test)]
+#[cfg(test)]
+#[allow(
+    clippy::float_cmp,
+    reason = "the Size-row tests assert equality against the exact const bounds the DragValue clamps to — the value is assigned, never computed"
+)]
 mod tests {
     use super::*;
     use flintshot_core::{Annotation, Color, Rect as CoreRect, Stroke as CoreStroke};
@@ -1077,4 +1103,58 @@ mod tests {
     }
 
     // --- Panel geometry (the structural pivot's own contracts) ---
+
+    // --- Number section: the Size stepper (number-tool effort) ---
+
+    /// The Size row is bound to `state.number_diameter` and wired to
+    /// core's range consts: `DragValue::range` clamps an existing
+    /// out-of-range value on render (egui's documented default with
+    /// `clamp_existing_to_range`), so a stale diameter snaps into
+    /// 16–96 the moment the Number section draws. One assertion
+    /// covers render + binding + bounds without addressing the
+    /// auto-id'd widget.
+    #[test]
+    fn number_size_row_clamps_stale_diameter_on_render() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut panel = PanelState::default();
+
+        let mut state = panel_state();
+        state.tool = Tool::Number;
+        state.number_diameter = 200.0;
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        assert_eq!(
+            state.number_diameter,
+            flintshot_core::NUMBER_MAX_DIAMETER,
+            "a diameter above the range clamps down on render"
+        );
+
+        let mut state = panel_state();
+        state.tool = Tool::Number;
+        state.number_diameter = 8.0;
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        assert_eq!(
+            state.number_diameter,
+            flintshot_core::NUMBER_MIN_DIAMETER,
+            "a diameter below the range clamps up on render"
+        );
+    }
+
+    /// The row renders only in the Number section: under `Tool::Rect`
+    /// (whose section map has no Number card) an out-of-range value
+    /// passes through untouched — no widget exists to clamp it.
+    #[test]
+    fn number_size_row_leaves_diameter_untouched_for_other_tools() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut state = panel_state();
+        state.tool = Tool::Rect;
+        state.number_diameter = 200.0;
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        assert_eq!(
+            state.number_diameter, 200.0,
+            "no Size widget renders outside the Number section"
+        );
+    }
 }

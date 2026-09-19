@@ -15,16 +15,16 @@ bubbles, no persistence.
 - [ ] Number section renders both rows: "Start at" (existing,
       unchanged) and "Size" (new DragValue on
       `state.number_diameter`).
-- [ ] DragValue range comes from the imported core consts (16.0–96.0);
+- [x] DragValue range comes from the imported core consts (16.0–96.0);
       typing/dragging outside the range clamps at the bounds.
 - [ ] Fresh editor session shows 28 (the core default); the value
       survives tool switches within the session.
 - [ ] Committed bubbles on canvas do not change while dragging the
       stepper; the next placed bubble uses the new diameter.
-- [ ] No other panel section, tool hint, or the overlay rail changes.
+- [x] No other panel section, tool hint, or the overlay rail changes.
 
 **Verification:**
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` and
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` and
       `just ci` green.
 - [ ] Manual (`cargo run -- editor` → Number tool): set Size 60 →
       next bubble lands at 60 px with centered digit; set 16 → small

@@ -44,7 +44,9 @@ pub use config::{
     parse_size_mode, render_filename_template, sanitize_filename, CaptureConfig, Config,
     DefaultMode, HotkeyConfig, OutputConfig, OutputFormat, SizeMode, UiConfig, UploadConfig,
 };
-pub use editor::{Annotation, BlurKind, EditorState, Snapshot, Tool};
+pub use editor::{
+    Annotation, BlurKind, EditorState, Snapshot, Tool, NUMBER_MAX_DIAMETER, NUMBER_MIN_DIAMETER,
+};
 pub use error::{FlintshotError, Result};
 pub use freehand::{smooth_polyline, MARKER_ALPHA};
 pub use geom::{Color, Key, Point, Rect, Stroke};
