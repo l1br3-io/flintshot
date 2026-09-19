@@ -18,8 +18,11 @@ use crate::geom::{Color, Point, Rect, Stroke};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Tool {
-    /// Region select / crop.
+    /// Object selection: click / marquee / drag-move annotations.
     Select,
+    /// Region crop: drag a region, then Enter or the Crop button
+    /// narrows the image to it.
+    Crop,
     /// Select and move a committed annotation by dragging it.
     #[default]
     Hand,
@@ -292,13 +295,17 @@ pub struct EditorState {
     /// In-flight annotation being drawn (live feedback during drag).
     /// `None` when no tool interaction is in progress.
     pub pending: Option<Annotation>,
-    /// In-flight region selection for `Tool::Select` (Task 14).
-    /// `None` when no selection drag is active. Set by the dispatcher
-    /// on PointerDown/PointerDrag with `Tool::Select`; consumed by
-    /// [`confirm_selection`](Self::confirm_selection) on Enter or the
-    /// shell's Crop button. Rendered on top of annotations so the user
-    /// sees live feedback during the drag.
-    pub selection: Option<Rect>,
+    /// In-flight crop region for `Tool::Crop`.
+    ///
+    /// GOTCHA: formerly `selection`; **not** the annotation selection
+    /// set ([`selected`](Self::selected)) — that is the selection
+    /// tools' multi-select state. This rect is the region drag:
+    /// `None` when no drag is active. Set by the dispatcher on
+    /// PointerDown/PointerDrag with `Tool::Crop`; consumed by
+    /// [`confirm_crop`](Self::confirm_crop) on Enter or the shell's
+    /// Crop button. Rendered on top of annotations so the user sees
+    /// live feedback during the drag.
+    pub crop_region: Option<Rect>,
     /// Currently-active tool.
     pub tool: Tool,
     /// Policy: committing an eligible annotation flips `tool` to
@@ -374,9 +381,8 @@ pub struct EditorState {
     /// Chrome-only: never composed into Save / Copy / Upload output,
     /// never restored by undo (the set is chrome, not content).
     ///
-    /// Not to be confused with [`selection`](Self::selection) — the
-    /// `Tool::Select` region selection rectangle, a different
-    /// concept that keeps its name.
+    /// Not to be confused with [`crop_region`](Self::crop_region) —
+    /// the `Tool::Crop` region rectangle, a different concept.
     pub selected: Vec<usize>,
     /// Insertion-point position within the in-flight `Tool::Text`
     /// draft, as a **char index** (not byte index) into
@@ -416,7 +422,7 @@ impl EditorState {
             undo: Vec::new(),
             redo: Vec::new(),
             pending: None,
-            selection: None,
+            crop_region: None,
             tool: Tool::default(),
             flip_to_move: false,
             fill_shapes: false,
@@ -475,7 +481,8 @@ impl EditorState {
     /// text-editing branch).
     ///
     /// Tools with a different input model (`Number`, `Select`,
-    /// `Hand`) are no-ops here; they have dedicated entry points.
+    /// `Crop`, `Hand`) are no-ops here; they have dedicated entry
+    /// points.
     ///
     /// If a `pending` annotation already exists it is replaced — the
     /// shell should `commit_annotation()` or `cancel_annotation()`
@@ -540,9 +547,10 @@ impl EditorState {
                 };
                 Annotation::text(at, "", style)
             }
-            // Number / Select / Hand have non-drag input models; their
-            // entry points are tool-specific (see method doc).
-            Tool::Number | Tool::Select | Tool::Hand => return,
+            // Number / Select / Crop / Hand have non-drag input
+            // models; their entry points are tool-specific (see
+            // method doc).
+            Tool::Number | Tool::Select | Tool::Crop | Tool::Hand => return,
         };
         if self.tool == Tool::Text {
             self.text_cursor = 0;
@@ -645,25 +653,26 @@ impl EditorState {
         self.next_number = self.next_number.saturating_add(1);
     }
 
-    // --- Region selection (Tool::Select, Task 14) ---
+    // --- Crop region (Tool::Crop) ---
 
-    /// Begin a selection drag at `anchor`. Replaces any prior selection.
-    fn begin_selection(&mut self, anchor: Point) {
-        self.selection = Some(Rect::new(anchor, anchor));
+    /// Begin a crop-region drag at `anchor`. Replaces any prior region.
+    fn begin_crop_region(&mut self, anchor: Point) {
+        self.crop_region = Some(Rect::new(anchor, anchor));
     }
 
-    /// Extend the in-flight selection's far corner to `at`. No-op when
-    /// no selection is active (e.g. a stray drag before `PointerDown`).
-    fn update_selection(&mut self, at: Point) {
-        if let Some(sel) = &mut self.selection {
+    /// Extend the in-flight crop region's far corner to `at`. No-op
+    /// when no region is active (e.g. a stray drag before
+    /// `PointerDown`).
+    fn update_crop_region(&mut self, at: Point) {
+        if let Some(sel) = &mut self.crop_region {
             sel.max = at;
         }
     }
 
-    /// Normalize the selection rect on pointer release so `min` is
+    /// Normalize the crop region on pointer release so `min` is
     /// top-left. Matches [`commit_annotation`]'s normalization contract.
-    fn finish_selection(&mut self) {
-        if let Some(sel) = &mut self.selection {
+    fn finish_crop_region(&mut self) {
+        if let Some(sel) = &mut self.crop_region {
             *sel = sel.normalized();
         }
     }
@@ -835,14 +844,14 @@ impl EditorState {
         }
     }
 
-    /// Confirm the current selection: crop the editor to the selected
-    /// region, then clear the selection. No-op when no selection is
-    /// active or the selection is degenerate (see [`crop`]).
+    /// Confirm the active crop region: crop the editor to it, then
+    /// clear the region. No-op when no region is active or the region
+    /// is degenerate (see [`crop`]).
     ///
     /// This is the entry point the dispatcher's Enter handler and the
     /// shell's "Crop" button both call.
-    pub fn confirm_selection(&mut self) {
-        let Some(sel) = self.selection.take() else {
+    pub fn confirm_crop(&mut self) {
+        let Some(sel) = self.crop_region.take() else {
             return;
         };
         self.crop(sel);
@@ -1049,25 +1058,25 @@ impl EditorState {
 
         match event {
             InputEvent::Key { key, modifiers } => {
-                // Enter confirms a Select-tool selection (Task 14)
-                // before falling through to the normal shortcut path.
+                // Enter confirms a Crop-tool region before falling
+                // through to the normal shortcut path.
                 if *key == crate::geom::Key::Enter
-                    && self.tool == Tool::Select
-                    && self.selection.is_some()
+                    && self.tool == Tool::Crop
+                    && self.crop_region.is_some()
                 {
-                    self.confirm_selection();
+                    self.confirm_crop();
                     DispatchOutcome::Continue
                 } else {
                     self.dispatch_key(*key, *modifiers)
                 }
             }
             InputEvent::PointerDown { pos, modifiers } => {
-                if self.tool == Tool::Select {
-                    // Select owns region selection only — a press on a
-                    // committed annotation starts a fresh selection
-                    // drag over it (annotation moves belong to
-                    // `Tool::Hand`).
-                    self.begin_selection(*pos);
+                if self.tool == Tool::Crop {
+                    // Crop owns the region drag — a press on a
+                    // committed annotation still starts a fresh region
+                    // over it (annotation moves belong to the
+                    // selection tools).
+                    self.begin_crop_region(*pos);
                 } else if self.tool == Tool::Hand {
                     // A press routes through the selection set first
                     // (Shift toggles, plain replaces, miss clears),
@@ -1093,8 +1102,8 @@ impl EditorState {
                 DispatchOutcome::Continue
             }
             InputEvent::PointerDrag { pos } => {
-                if self.tool == Tool::Select {
-                    self.update_selection(*pos);
+                if self.tool == Tool::Crop {
+                    self.update_crop_region(*pos);
                 } else if self.tool == Tool::Hand {
                     self.update_move(*pos);
                 } else {
@@ -1103,8 +1112,8 @@ impl EditorState {
                 DispatchOutcome::Continue
             }
             InputEvent::PointerUp => {
-                if self.tool == Tool::Select {
-                    self.finish_selection();
+                if self.tool == Tool::Crop {
+                    self.finish_crop_region();
                 } else if self.tool == Tool::Hand {
                     // Release ends the drag but keeps the selection —
                     // the press selected the annotation (persistent
@@ -1244,8 +1253,8 @@ impl EditorState {
             // toolbar, the new tool's drag begins.
             InputEvent::PointerDown { pos, modifiers } => {
                 self.commit_text_draft();
-                if self.tool == Tool::Select {
-                    self.begin_selection(*pos);
+                if self.tool == Tool::Crop {
+                    self.begin_crop_region(*pos);
                 } else if self.tool == Tool::Hand {
                     self.route_move_press(*pos, modifiers.shift);
                 } else if self.tool == Tool::Number {
@@ -2142,7 +2151,7 @@ mod tests {
         assert_eq!(s.font_size, 16.0);
         assert_eq!(s.next_number, 1);
         assert!(s.selected.is_empty());
-        assert!(s.selection.is_none(), "selection rect starts None");
+        assert!(s.crop_region.is_none(), "crop region starts None");
         assert_eq!(s.tool, Tool::Hand, "Hand is the default tool");
         assert!(!s.flip_to_move, "flip policy defaults off (sticky tools)");
     }
@@ -2545,7 +2554,7 @@ mod tests {
     #[test]
     fn begin_annotation_skips_non_drag_tools() {
         let mut s = EditorState::new(blank_image());
-        for tool in [Tool::Number, Tool::Select, Tool::Hand] {
+        for tool in [Tool::Number, Tool::Select, Tool::Crop, Tool::Hand] {
             s.tool = tool;
             s.begin_annotation(Point::new(1.0, 1.0));
             assert!(s.pending.is_none(), "{tool:?} should be a no-op");
@@ -4247,49 +4256,52 @@ mod tests {
         assert!(s.undo.is_empty(), "no snapshot pushed");
     }
 
-    /// Select tool: `PointerDown` starts a selection; `PointerDrag` extends it.
+    /// Crop tool: `PointerDown` starts a region; `PointerDrag` extends it.
     #[test]
-    fn dispatch_select_drag_creates_selection() {
+    fn dispatch_crop_drag_creates_region() {
         let mut s = hundred_state();
-        s.tool = Tool::Select;
+        s.tool = Tool::Crop;
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
-        assert!(s.selection.is_some(), "PointerDown starts selection");
+        assert!(
+            s.crop_region.is_some(),
+            "PointerDown starts the crop region"
+        );
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 60.0),
         });
-        match s.selection {
+        match s.crop_region {
             Some(r) => {
                 assert_eq!(r.min, Point::new(10.0, 10.0));
                 assert_eq!(r.max, Point::new(50.0, 60.0));
             }
-            None => panic!("selection should be active"),
+            None => panic!("crop region should be active"),
         }
     }
 
-    /// Select tool: `PointerUp` normalizes the selection rect.
+    /// Crop tool: `PointerUp` normalizes the region rect.
     #[test]
-    fn dispatch_select_up_normalizes_selection() {
+    fn dispatch_crop_up_normalizes_region() {
         let mut s = hundred_state();
-        s.tool = Tool::Select;
+        s.tool = Tool::Crop;
         s.dispatch_input(&down(Point::new(50.0, 60.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(10.0, 10.0),
         });
         s.dispatch_input(&InputEvent::PointerUp);
-        match s.selection {
+        match s.crop_region {
             Some(r) => {
                 assert_eq!(r.min, Point::new(10.0, 10.0), "normalized: min is top-left");
                 assert_eq!(r.max, Point::new(50.0, 60.0));
             }
-            None => panic!("selection retained after PointerUp"),
+            None => panic!("crop region retained after PointerUp"),
         }
     }
 
-    /// Select tool: Enter confirms the selection (crops) and clears it.
+    /// Crop tool: Enter confirms the region (crops) and clears it.
     #[test]
-    fn dispatch_enter_confirms_selection() {
+    fn dispatch_enter_confirms_crop() {
         let mut s = hundred_state();
-        s.tool = Tool::Select;
+        s.tool = Tool::Crop;
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 50.0),
@@ -4299,17 +4311,17 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
         });
-        assert!(s.selection.is_none(), "selection cleared on confirm");
-        assert_eq!(s.image.dimensions(), (40, 40), "cropped to selection");
+        assert!(s.crop_region.is_none(), "region cleared on confirm");
+        assert_eq!(s.image.dimensions(), (40, 40), "cropped to region");
         assert_eq!(s.undo.len(), 1, "crop pushed undo");
     }
 
-    /// Select tool: Enter without an active selection is a no-op
+    /// Crop tool: Enter without an active region is a no-op
     /// (falls through to the normal key path).
     #[test]
-    fn dispatch_enter_without_selection_is_noop() {
+    fn dispatch_enter_without_region_is_noop() {
         let mut s = hundred_state();
-        s.tool = Tool::Select;
+        s.tool = Tool::Crop;
         s.dispatch_input(&InputEvent::Key {
             key: Key::Enter,
             modifiers: Modifiers::default(),
@@ -4318,21 +4330,21 @@ mod tests {
         assert!(s.undo.is_empty());
     }
 
-    /// `confirm_selection` is a no-op when no selection is active.
+    /// `confirm_crop` is a no-op when no region is active.
     #[test]
-    fn confirm_selection_noop_without_selection() {
+    fn confirm_crop_noop_without_region() {
         let mut s = hundred_state();
-        s.confirm_selection();
+        s.confirm_crop();
         assert_eq!(s.image.dimensions(), (100, 100));
         assert!(s.undo.is_empty());
     }
 
-    /// Select tool does not interfere with keyboard shortcuts (Ctrl+Z
-    /// still undoes while Select is active).
+    /// Crop tool does not interfere with keyboard shortcuts (Ctrl+Z
+    /// still undoes while Crop is active).
     #[test]
-    fn dispatch_select_does_not_suppress_undo() {
+    fn dispatch_crop_does_not_suppress_undo() {
         let mut s = hundred_state();
-        s.tool = Tool::Select;
+        s.tool = Tool::Crop;
         s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
         s.anns.push(rect_ann(20.0, 20.0, 30.0, 30.0));
         s.commit_annotation();
@@ -4624,7 +4636,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         assert!(s.moving.is_some(), "press on annotation starts a move");
         assert_eq!(s.selected, vec![0]);
-        assert!(s.selection.is_none(), "move does not start a selection");
+        assert!(s.crop_region.is_none(), "move does not start a crop region");
         // Drag so the cursor lands at (60, 45): bbox.min follows at
         // cursor − grab offset = (40, 30).
         s.dispatch_input(&InputEvent::PointerDrag {
@@ -4728,18 +4740,21 @@ mod tests {
         }
     }
 
-    /// Select press (on or off an annotation) always starts a fresh
+    /// Crop press (on or off an annotation) always starts a fresh
     /// region selection — annotation moves are `Tool::Hand`'s job, so
-    /// Select never grabs.
+    /// Crop never grabs.
     #[test]
-    fn select_press_off_annotation_starts_selection() {
+    fn crop_press_off_annotation_starts_region() {
         let mut s = move_state();
-        s.tool = Tool::Select;
+        s.tool = Tool::Crop;
         // Off the annotation.
         s.dispatch_input(&down(Point::new(70.0, 70.0)));
         assert!(s.moving.is_none());
-        assert!(s.selection.is_some(), "empty-space press selects");
-        // The drag extends the selection, not the annotation.
+        assert!(
+            s.crop_region.is_some(),
+            "empty-space press starts the region"
+        );
+        // The drag extends the region, not the annotation.
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(90.0, 80.0),
         });
@@ -4749,15 +4764,18 @@ mod tests {
         }
     }
 
-    /// Select press directly on an annotation also starts a selection
-    /// — the separation contract: Select selects, Hand moves.
+    /// Crop press directly on an annotation also starts a region
+    /// — the separation contract: Crop owns the region, Hand moves
     #[test]
-    fn select_press_on_annotation_starts_selection() {
+    fn crop_press_on_annotation_starts_region() {
         let mut s = move_state();
-        s.tool = Tool::Select;
+        s.tool = Tool::Crop;
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
-        assert!(s.moving.is_none(), "Select never grabs an annotation");
-        assert!(s.selection.is_some(), "press on annotation selects");
+        assert!(s.moving.is_none(), "Crop never grabs an annotation");
+        assert!(
+            s.crop_region.is_some(),
+            "press on annotation starts the region"
+        );
         match &s.anns[0] {
             Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
             other => panic!("expected Rect, got {other:?}"),
@@ -4805,7 +4823,7 @@ mod tests {
         assert!(!s.begin_move(0, Point::new(50.0, 50.0)));
         s.dispatch_input(&down(Point::new(50.0, 50.0)));
         assert!(s.moving.is_none());
-        assert!(s.selection.is_none(), "Hand never starts a selection");
+        assert!(s.crop_region.is_none(), "Hand never starts a crop region");
     }
 
     /// A Hand-tool press that misses every annotation is a no-op —
@@ -4819,7 +4837,7 @@ mod tests {
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.moving.is_none());
-        assert!(s.selection.is_none());
+        assert!(s.crop_region.is_none());
         assert!(s.undo.is_empty());
         match &s.anns[0] {
             Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
@@ -4869,7 +4887,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(70.0, 70.0)));
         assert!(s.selected.is_empty(), "miss press clears selection");
         assert!(s.moving.is_none());
-        assert!(s.selection.is_none());
+        assert!(s.crop_region.is_none());
     }
 
     #[test]

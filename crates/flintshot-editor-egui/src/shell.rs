@@ -173,7 +173,7 @@ pub(crate) type PageBridgeSlot = Rc<RefCell<Box<dyn EditorPageBridge>>>;
 #[derive(Default)]
 pub struct EguiShell {
     /// Whether the next `run_editor` call opens selection-first (the
-    /// `region` capture landing experience: Select pre-armed, dim
+    /// `region` capture landing experience: Crop pre-armed, dim
     /// mask, hint line — see `EditorApp::selection_first`). Set by
     /// the app crate's region path only.
     selection_first: bool,
@@ -199,7 +199,7 @@ impl EguiShell {
     }
 
     /// Open the next [`EditorShell::run_editor`] session
-    /// **selection-first**: `Tool::Select` pre-armed, the overlay's
+    /// **selection-first**: `Tool::Crop` pre-armed, the overlay's
     /// dim mask outside the live selection, and the hint line — the
     /// `region` capture landing experience. The phase ends
     /// permanently on the session's first crop.
@@ -350,7 +350,7 @@ fn start_route(start: &WindowStart) -> Route {
 /// [`EditorApp`] running on the same thread.
 ///
 /// `selection_first` seeds the region-capture landing phase in
-/// [`EditorApp::new`] (Select pre-arm + mask + hint; see the app
+/// [`EditorApp::new`] (Crop pre-arm + mask + hint; see the app
 /// module for the phase lifecycle). `close`, when present, is
 /// installed into the window so the worker's supersede listener can
 /// close it from another thread (see [`CloseHandle`]).

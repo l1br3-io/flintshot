@@ -133,7 +133,7 @@ pub(crate) struct EditorApp {
     /// the button is held — including presses that began on the
     /// side panel. A panel press would then feed `PointerDrag`s
     /// straight into the dispatcher, corrupting in-flight state:
-    /// e.g. an active `Tool::Select` selection would be extended to
+    /// e.g. an active `Tool::Crop` region would be extended to
     /// a panel-side position while the user is clicking Copy, and
     /// Copy would then read the mangled rect. GOTCHA: the retired
     /// top-rail era described this as "negative canvas-y" — with
@@ -244,7 +244,7 @@ impl EditorApp {
     /// [`Context`] for texture loading outside the per-frame `ui` call.
     ///
     /// `selection_first` seeds the region-capture landing phase:
-    /// `Tool::Select` is pre-armed (mirroring `OverlayApp::new`, so
+    /// `Tool::Crop` is pre-armed (mirroring `OverlayApp::new`, so
     /// the first drag draws a region instead of a rect annotation)
     /// and the dim mask + hint line render until the first crop.
     /// Core stays untouched — the phase is shell-owned state, the
@@ -282,7 +282,7 @@ impl EditorApp {
         page: Option<crate::shell::PageBridgeSlot>,
     ) -> Self {
         if selection_first {
-            state.tool = Tool::Select;
+            state.tool = Tool::Crop;
         }
         // One-time theme application: the graphite + ember styling
         // (see `crate::theme`) persists for the window's lifetime.
@@ -358,13 +358,13 @@ impl EditorApp {
     /// from both crop sites (`logic`'s Enter dispatch and `ui`'s
     /// toolbar action) so the mask never paints on the crop's own
     /// frame. One-way by design: undo pops the snapshot, the latch
-    /// keeps the phase ended. On the latch, a still-`Select` tool
-    /// becomes `Hand` — the phase force-armed `Select` at
+    /// keeps the phase ended. On the latch, a still-`Crop` tool
+    /// becomes `Hand` — the phase force-armed `Crop` at
     /// construction, so this restores the edit-phase default (the
     /// shell's own override, not the config-gated commit flip). The
-    /// still-`Select` guard is defensive: the input gates (rail
-    /// lock, hotkey, pointer) keep the tool `Select` for the phase's
-    /// whole lifetime, so a non-Select tool at latch time can only
+    /// still-`Crop` guard is defensive: the input gates (rail
+    /// lock, hotkey, pointer) keep the tool `Crop` for the phase's
+    /// whole lifetime, so a non-Crop tool at latch time can only
     /// arrive via direct state mutation — and it stays put rather
     /// than being silently flipped. The flip routes through core
     /// `set_tool` so the persistent selection (if any state arrived
@@ -372,7 +372,7 @@ impl EditorApp {
     fn end_phase_on_crop(&mut self) {
         if self.phase == SelectionPhase::Live && self.state.undo.iter().any(|s| s.image.is_some()) {
             self.phase = SelectionPhase::Ended;
-            if self.state.tool == Tool::Select {
+            if self.state.tool == Tool::Crop {
                 self.state.set_tool(Tool::Hand);
             }
         }
@@ -388,7 +388,7 @@ impl EditorApp {
             return;
         };
         let view = self.canvas.view_over(panel);
-        let sel_logical = usable_selection(self.state.selection).map(|s| {
+        let sel_logical = usable_selection(self.state.crop_region).map(|s| {
             egui::Rect::from_two_pos(view.image_to_logical(s.min), view.image_to_logical(s.max))
         });
         for band in mask_rects(panel, sel_logical) {
@@ -901,8 +901,8 @@ impl EditorApp {
         // keep their dispatcher meanings; text-editing mode returned
         // early above, so typed letters can't switch tools mid-draft.
         // While the selection-first phase is live, every mapping
-        // except Select is ignored — selection is the phase's only
-        // job (S stays harmless: Select is what the phase armed).
+        // except Crop is ignored — the region is the phase's only
+        // job (C stays harmless: Crop is what the phase armed).
         // Post-crop the keys work again. Switches route through core
         // `set_tool`: leaving Hand drops the persistent selection.
         if let Some(tool) = ctx.input(|i| {
@@ -916,7 +916,7 @@ impl EditorApp {
                 _ => None,
             })
         }) {
-            if !self.phase_active() || tool == Tool::Select {
+            if !self.phase_active() || tool == Tool::Crop {
                 self.state.set_tool(tool);
             }
         }
@@ -960,10 +960,10 @@ impl EditorApp {
         // *press* began in the canvas. Without it, a toolbar click
         // (Copy / Crop / tool selectors / pickers) would emit
         // `PointerDrag`s for every held frame and a `PointerUp` on
-        // release, all routed into the dispatcher. For `Tool::Select`
-        // this updates `selection.max` to the toolbar's (negative
+        // release, all routed into the dispatcher. For `Tool::Crop`
+        // this updates `crop_region.max` to the toolbar's (negative
         // canvas-y) position, so by the time the toolbar's click
-        // handler runs `handle_copy` / `confirm_selection`, the rect
+        // handler runs `handle_copy` / `confirm_crop`, the rect
         // no longer matches what the user dragged.
         // The floating quick cluster floats over the canvas: its
         // chips sit inside `canvas_rect`, so the press gate must
@@ -979,7 +979,7 @@ impl EditorApp {
         // backstop for state that got to a non-Select tool by other
         // means. `canvas_drag_active` below still tracks press /
         // release, so no stale drag state survives the gate.
-        let annotation_gated = self.phase_active() && self.state.tool != Tool::Select;
+        let annotation_gated = self.phase_active() && self.state.tool != Tool::Crop;
         let mut pointer_events: Vec<InputEvent> = Vec::new();
         if primary_pressed && canvas_rect.contains(pos) && !on_floating {
             self.canvas_drag_active = true;
@@ -1230,7 +1230,7 @@ impl EditorApp {
         let panel_action = panel::show(ui, &mut self.state, &mut self.panel);
 
         // Selection-first phase: the toolbar's "Crop · Enter" button
-        // crops through `confirm_selection`, bypassing `logic` — so
+        // crops through `confirm_crop`, bypassing `logic` — so
         // this is the second latch site, checked before this frame's
         // render paints the mask.
         self.end_phase_on_crop();
@@ -1980,12 +1980,12 @@ pub(crate) fn save_region_to_disk(
     save_to_disk(state, true)
 }
 
-/// Compose the final image honouring an active `Tool::Select`
-/// selection: a non-degenerate selection emits just the selected
-/// region (`compose_final_region`); otherwise the whole composed
+/// Compose the final image honouring an active `Tool::Crop`
+/// region: a non-degenerate region emits just its pixels
+/// (`compose_final_region`); otherwise the whole composed
 /// image (`compose_final`). Pure / non-mutating.
 ///
-/// The single selection-aware compose for every region-defining
+/// The single region-aware compose for every region-defining
 /// output (Copy / Upload / the Phase 5 overlay's Save, and
 /// the editor window's Save while the selection-first phase is
 /// live — see [`compose_for_save`]), so "what the user sees
@@ -1996,7 +1996,7 @@ pub(crate) fn compose_selection_aware(state: &EditorState) -> image::RgbaImage {
     // The 1.0-px threshold matches the render path's selection-rect
     // guard (`render::render`) and `EditorState::crop`'s degenerate
     // no-op; a degenerate selection counts as absent.
-    match state.selection.map(Rect::normalized) {
+    match state.crop_region.map(Rect::normalized) {
         Some(n) if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 => {
             compose_final_region(state, n)
         }
@@ -2056,11 +2056,11 @@ fn os_owns_clipboard() -> bool {
     false
 }
 
-/// When a non-degenerate `state.selection` is active, Copy emits just
+/// When a non-degenerate `state.crop_region` is active, Copy emits just
 /// the selected region (Flameshot-style): the user expects the active
 /// selection to define what gets copied, separate from the Crop tool
 /// which permanently narrows the editor. The editor state is **not**
-/// mutated — `state.image`, `state.anns`, and `state.selection` are
+/// mutated — `state.image`, `state.anns`, and `state.crop_region` are
 /// untouched, so the user can keep adjusting the selection and copy
 /// again. A degenerate selection (< 1 px) falls back to the full
 /// image, matching the no-selection behaviour.
@@ -2327,12 +2327,12 @@ fn parse_magnifier_key(name: &str) -> egui::Key {
 }
 
 /// The rail's tool gate from the selection-first phase state: a
-/// live phase locks the rail to `Select`; an ended (or never
+/// live phase locks the rail to `Crop`; an ended (or never
 /// requested) phase renders the full set. Pure so the phase→gate
 /// contract is testable without a live `Ui`.
 fn rail_gate(phase_active: bool) -> rail::ToolGate {
     if phase_active {
-        rail::ToolGate::SelectOnly
+        rail::ToolGate::CropOnly
     } else {
         rail::ToolGate::All
     }
@@ -2347,8 +2347,9 @@ fn rail_gate(phase_active: bool) -> rail::ToolGate {
 /// decision 5's factored translation helper).
 pub(crate) fn tool_for_key(key: egui::Key) -> Option<Tool> {
     match key {
-        egui::Key::S => Some(Tool::Select),
-        egui::Key::V => Some(Tool::Hand),
+        egui::Key::V => Some(Tool::Select),
+        egui::Key::H => Some(Tool::Hand),
+        egui::Key::C => Some(Tool::Crop),
         egui::Key::R => Some(Tool::Rect),
         egui::Key::E => Some(Tool::Ellipse),
         egui::Key::A => Some(Tool::Arrow),
@@ -2380,8 +2381,9 @@ mod tests {
     #[test]
     fn tool_shortcuts_are_complete_and_injective() {
         let pairs = [
-            (egui::Key::S, Tool::Select),
-            (egui::Key::V, Tool::Hand),
+            (egui::Key::V, Tool::Select),
+            (egui::Key::H, Tool::Hand),
+            (egui::Key::C, Tool::Crop),
             (egui::Key::R, Tool::Rect),
             (egui::Key::E, Tool::Ellipse),
             (egui::Key::A, Tool::Arrow),
@@ -2396,9 +2398,10 @@ mod tests {
             assert_eq!(tool_for_key(key), Some(tool));
         }
         // Keys that must never switch tools: chords are handled by the
-        // dispatcher, and unrelated letters fall through.
+        // dispatcher, and unrelated letters fall through. S is freed
+        // (formerly Select's key, now unbound).
         for key in [
-            egui::Key::C,
+            egui::Key::S,
             egui::Key::Z,
             egui::Key::Y,
             egui::Key::Escape,
@@ -2433,7 +2436,7 @@ mod tests {
     #[test]
     fn compose_and_write_upload_honours_selection() {
         let mut state = blank_state(10, 10);
-        state.selection = Some(Rect::from_xywh(2.0, 3.0, 4.0, 3.0));
+        state.crop_region = Some(Rect::from_xywh(2.0, 3.0, 4.0, 3.0));
         let path = compose_and_write_upload(&state).expect("compose + write succeeds");
         let bytes = std::fs::read(&path).expect("temp file is readable");
         let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
@@ -2457,7 +2460,7 @@ mod tests {
     #[test]
     fn compose_selection_aware_crops_to_usable_selection() {
         let mut state = blank_state(10, 10);
-        state.selection = Some(Rect::from_xywh(2.0, 3.0, 4.0, 3.0));
+        state.crop_region = Some(Rect::from_xywh(2.0, 3.0, 4.0, 3.0));
         let img = compose_selection_aware(&state);
         assert_eq!(img.dimensions(), (4, 3), "selection crops the output");
     }
@@ -2465,7 +2468,7 @@ mod tests {
     #[test]
     fn compose_selection_aware_falls_back_on_degenerate_selection() {
         let mut state = blank_state(10, 8);
-        state.selection = Some(Rect::from_xywh(2.0, 3.0, 0.5, 3.0));
+        state.crop_region = Some(Rect::from_xywh(2.0, 3.0, 0.5, 3.0));
         let img = compose_selection_aware(&state);
         assert_eq!(
             img.dimensions(),
@@ -2504,21 +2507,21 @@ mod tests {
         let _ = state.dispatch_input(&InputEvent::PointerUp);
     }
 
-    /// The rail gate follows the phase: live phase → Select-only
+    /// The rail gate follows the phase: live phase → Crop-only
     /// rail; ended / never-requested phase → full rail.
     #[test]
     fn rail_gate_tracks_phase() {
-        assert_eq!(rail_gate(true), rail::ToolGate::SelectOnly);
+        assert_eq!(rail_gate(true), rail::ToolGate::CropOnly);
         assert_eq!(rail_gate(false), rail::ToolGate::All);
     }
 
     #[test]
-    fn selection_first_opens_select_armed_and_phase_active() {
+    fn selection_first_opens_crop_armed_and_phase_active() {
         let app = phase_app(true);
         assert_eq!(
             app.state.tool,
-            Tool::Select,
-            "the first drag must draw a selection, not a rect annotation"
+            Tool::Crop,
+            "the first drag must draw a crop region, not a rect annotation"
         );
         assert!(app.phase_active(), "no crop yet → phase is live");
     }
@@ -2768,8 +2771,8 @@ mod tests {
         // The latch's still-Select guard is defensive for exactly
         // this state, and must not clobber it.
         app.state.tool = Tool::Rect;
-        app.state.selection = Some(Rect::from_xywh(8.0, 8.0, 32.0, 16.0));
-        app.state.confirm_selection(); // the "Crop · Enter" button's call
+        app.state.crop_region = Some(Rect::from_xywh(8.0, 8.0, 32.0, 16.0));
+        app.state.confirm_crop(); // the "Crop · Enter" button's call
         app.end_phase_on_crop();
         assert!(!app.phase_active(), "fixture: the crop ended the phase");
         assert_eq!(
@@ -2782,8 +2785,8 @@ mod tests {
     #[test]
     fn panel_crop_button_path_ends_phase() {
         let mut app = phase_app(true);
-        app.state.selection = Some(Rect::from_xywh(8.0, 8.0, 32.0, 16.0));
-        app.state.confirm_selection(); // the "Crop · Enter" button's call
+        app.state.crop_region = Some(Rect::from_xywh(8.0, 8.0, 32.0, 16.0));
+        app.state.confirm_crop(); // the "Crop · Enter" button's call
         app.end_phase_on_crop();
         assert!(!app.phase_active(), "the panel crop must end the phase too");
     }
@@ -2955,7 +2958,7 @@ mod tests {
         // fabricated — and a stray Esc must not end the phase (only
         // a crop does), so the landing chrome survives it.
         assert!(app.state.anns.is_empty());
-        assert!(app.state.selection.is_none());
+        assert!(app.state.crop_region.is_none());
         assert!(app.phase_active());
     }
 
@@ -3779,7 +3782,7 @@ mod tests {
     #[test]
     fn save_during_phase_honours_live_selection() {
         let mut app = phase_app(true);
-        app.state.selection = Some(Rect::from_xywh(4.0, 8.0, 20.0, 12.0));
+        app.state.crop_region = Some(Rect::from_xywh(4.0, 8.0, 20.0, 12.0));
         let img = compose_for_save(app.phase_active(), &app.state);
         assert_eq!(
             img.dimensions(),
@@ -3800,7 +3803,7 @@ mod tests {
         assert!(!app.phase_active(), "fixture: the crop ended the phase");
         // A fresh selection after the crop must not scope Save — the
         // post-phase editor keeps the Phase 1 full-image contract.
-        app.state.selection = Some(Rect::from_xywh(0.0, 0.0, 10.0, 6.0));
+        app.state.crop_region = Some(Rect::from_xywh(0.0, 0.0, 10.0, 6.0));
         let img = compose_for_save(app.phase_active(), &app.state);
         assert_eq!(img.dimensions(), (20, 12), "post-crop image saves whole");
     }
@@ -3829,10 +3832,10 @@ mod tests {
         state.tool = Tool::Rect;
         drag_selection(&mut state, (6.0, 4.0), (18.0, 14.0));
         assert_eq!(state.anns.len(), 1, "fixture: annotation committed");
-        state.selection = Some(Rect::from_xywh(2.0, 2.0, 20.0, 16.0));
+        state.crop_region = Some(Rect::from_xywh(2.0, 2.0, 20.0, 16.0));
         let live = compose_for_save(true, &state);
         let mut cropped = state.clone();
-        cropped.confirm_selection();
+        cropped.confirm_crop();
         let after = compose_final(&cropped);
         assert_eq!(live.dimensions(), after.dimensions());
         assert_eq!(
@@ -3912,7 +3915,7 @@ mod tests {
         editor_frame(&ctx, &mut app, vec![key_press(egui::Key::P)]);
         assert_eq!(
             app.state.tool,
-            Tool::Select,
+            Tool::Crop,
             "phase live: P must not arm Pencil"
         );
         // Crop through the shell translation — the phase-ending
@@ -3929,11 +3932,12 @@ mod tests {
     }
 
     #[test]
-    fn every_non_select_tool_key_is_gated_during_phase() {
+    fn every_non_crop_tool_key_is_gated_during_phase() {
         let ctx = egui::Context::default();
         let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::new(RefCell::new(None)), true);
         for key in [
             egui::Key::V,
+            egui::Key::H,
             egui::Key::R,
             egui::Key::E,
             egui::Key::A,
@@ -3947,21 +3951,21 @@ mod tests {
             editor_frame(&ctx, &mut app, vec![key_press(key)]);
             assert_eq!(
                 app.state.tool,
-                Tool::Select,
+                Tool::Crop,
                 "{key:?} is gated while the phase is live"
             );
         }
     }
 
     #[test]
-    fn select_key_is_harmless_during_phase() {
+    fn crop_key_is_harmless_during_phase() {
         let ctx = egui::Context::default();
         let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::new(RefCell::new(None)), true);
-        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::S)]);
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::C)]);
         assert_eq!(
             app.state.tool,
-            Tool::Select,
-            "S keeps arming Select — the phase's own armed tool"
+            Tool::Crop,
+            "C keeps arming Crop — the phase's own armed tool"
         );
         assert!(app.phase_active());
     }
@@ -3988,14 +3992,14 @@ mod tests {
             app.state.undo.is_empty(),
             "no undo snapshot through the gate"
         );
-        // Select drags are the phase's one job and keep flowing.
-        app.state.tool = Tool::Select;
-        editor_frame(&ctx, &mut app, vec![]); // settle at Select's rail
+        // Crop drags are the phase's one job and keep flowing.
+        app.state.tool = Tool::Crop;
+        editor_frame(&ctx, &mut app, vec![]); // settle at Crop's rail
         canvas_drag(&ctx, &mut app, (5.0, 5.0), (30.0, 25.0));
         let sel = app
             .state
-            .selection
-            .expect("the Select drag drew a selection")
+            .crop_region
+            .expect("the Crop drag drew a region")
             .normalized();
         assert_eq!(sel.min, Point::new(5.0, 5.0));
         assert_eq!(sel.max, Point::new(30.0, 25.0));
