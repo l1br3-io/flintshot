@@ -1174,8 +1174,11 @@ fn run_editor_session(
             flintshot_editor_egui::EguiShell::new()
                 .with_selection_first()
                 .with_close_handle(close.clone())
+                .with_open_settings(open_settings_from_worker)
         } else {
-            flintshot_editor_egui::EguiShell::new().with_close_handle(close.clone())
+            flintshot_editor_egui::EguiShell::new()
+                .with_close_handle(close.clone())
+                .with_open_settings(open_settings_from_worker)
         };
         shell.run_editor(state)
     })
@@ -1183,6 +1186,40 @@ fn run_editor_session(
     .with_context(|| format!("running editor for {mode} capture"))?;
 
     Ok(outcome)
+}
+
+/// The worker editor's Settings delegate (the shell's
+/// `with_open_settings` hook): the daemon's `OpenSettings`
+/// choreography from a worker process — an already-running app
+/// window focuses + routes itself to Settings (the broadcast);
+/// otherwise the daemon spawns one opened on Settings. With no
+/// daemon at all, the worker performs the spawn step itself.
+#[cfg(feature = "egui")]
+fn open_settings_from_worker() {
+    match crate::ipc_client::try_delegate(&Request::OpenSettings) {
+        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {}
+        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {
+            if let Err(e) = spawn_settings_app() {
+                tracing::warn!(error = %e, "editor Settings: no daemon and the direct spawn failed");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "editor Settings: delegating to the daemon"),
+    }
+}
+
+/// The daemon's own `OpenSettings` spawn step (`app --route
+/// settings`), detached — the `NoDaemon` fallback for worker editors
+/// (the broadcast would land on nobody).
+#[cfg(feature = "egui")]
+fn spawn_settings_app() -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| color_eyre::eyre::eyre!("resolving current_exe: {e}"))?;
+    std::process::Command::new(exe)
+        .args(["app", "--route", "settings"])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| color_eyre::eyre::eyre!("spawning `flintshot app --route settings`: {e}"))
 }
 
 /// Which recapture an outcome asks for, if any. Pure so the loop's

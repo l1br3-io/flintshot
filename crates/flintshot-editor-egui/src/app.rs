@@ -191,6 +191,14 @@ pub(crate) struct EditorApp {
     /// the page stays; see [`EditorPageBridge`]). `None` = the worker
     /// window lifecycle of every pre-single-window path.
     page: Option<crate::shell::PageBridgeSlot>,
+    /// Worker-window seam for the topbar overflow's **Settings**
+    /// entry: worker windows never route to Settings in-window (spec
+    /// §Settings route — there is no home behind a worker), so the
+    /// shell hands in the app crate's delegate (the daemon's
+    /// `OpenSettings` choreography). Page mode never lands on this —
+    /// the router handles Settings before forwarding editor actions.
+    /// `None` keeps the entry inert (headless tests).
+    open_settings: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// Whether the stable editor viewport still owes its one-shot
     /// open-time clamp to the monitor (page epochs only; see
     /// [`Self::update_fit`]).
@@ -311,6 +319,7 @@ impl EditorApp {
             },
             open_clamp_pending: page.is_some(),
             page,
+            open_settings: None,
             panel: panel::PanelState::default(),
             rail: rail::RailState::default(),
             floating_rects: Vec::new(),
@@ -1385,8 +1394,9 @@ impl EditorApp {
 impl EditorApp {
     /// Apply a topbar action (worker windows; the router forwards
     /// routed-page actions here too). Open / Paste have no worker
-    /// bridge and stay disabled; Settings is inert until its route
-    /// lands.
+    /// bridge and stay disabled; Settings delegates through the
+    /// shell's hook — worker windows never route to Settings
+    /// in-window (spec §Settings route).
     pub(crate) fn handle_topbar_action(&mut self, action: TopbarAction, ctx: &Context) {
         match action {
             TopbarAction::Capture => {
@@ -1404,7 +1414,17 @@ impl EditorApp {
             TopbarAction::Upload => self.handle_upload(ctx),
             TopbarAction::Open => self.handle_page_open(ctx),
             TopbarAction::Paste => self.handle_page_paste(ctx),
-            TopbarAction::Settings => {} // inert until the settings route lands
+            // The shell's delegate (the daemon's `OpenSettings`
+            // choreography: an open app window focuses + routes
+            // itself to Settings; otherwise one is spawned on the
+            // Settings route). Page mode never reaches this arm —
+            // the router swaps routes before forwarding editor
+            // actions — so the hook cannot double-open.
+            TopbarAction::Settings => {
+                if let Some(open) = &self.open_settings {
+                    open();
+                }
+            }
             // The breadcrumb's Home link: worker windows have no
             // home route behind them, so leaving the editor is the
             // Esc contract — publish-if-unset and close.
@@ -1413,6 +1433,13 @@ impl EditorApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
+    }
+
+    /// Install the worker Settings entry's delegate (see the
+    /// `open_settings` field). Called by the shell's app creator
+    /// right after [`Self::new`].
+    pub(crate) fn set_open_settings(&mut self, f: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.open_settings = Some(f);
     }
 
     /// Live-apply a refreshed config snapshot (the router calls this
@@ -4265,6 +4292,54 @@ mod tests {
             captured,
             Some(true),
             "fullscreen default-mode seeds the NewCapture exit"
+        );
+    }
+
+    /// The worker overflow's Settings entry fires the shell's
+    /// open-settings delegate end-to-end (popup open → row click →
+    /// hook). Worker windows never route to Settings in-window — the
+    /// app crate owns the choreography (spec §Settings route).
+    #[test]
+    fn worker_overflow_settings_click_fires_the_open_settings_hook() {
+        let ctx = egui::Context::default();
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&fired);
+        let mut app = EditorApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        app.set_open_settings(std::sync::Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }));
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        let ovf = ctx
+            .read_response(egui::Id::new("topbar-overflow"))
+            .expect("the worker topbar's overflow registers")
+            .rect;
+        let click = |pos: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                primary_button(pos, true),
+                primary_button(pos, false),
+            ]
+        };
+        // Open the popup, then the settle passes: the popup anchors
+        // at the screen centre on its open pass and re-anchors below
+        // the chip one pass later (the + popup tests' quirk).
+        editor_frame(&ctx, &mut app, click(ovf.center()));
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        let settings = ctx
+            .read_response(egui::Id::new("topbar-settings"))
+            .expect("the Settings entry renders in the worker overflow")
+            .rect;
+        editor_frame(&ctx, &mut app, click(settings.center()));
+        assert!(
+            fired.load(std::sync::atomic::Ordering::Relaxed),
+            "the worker Settings entry fired the open-settings delegate"
         );
     }
 

@@ -813,6 +813,70 @@ mod tests {
         );
     }
 
+    /// The dots overflow's Settings entry routes the editor page to
+    /// Settings in place — the router handles the entry itself, so
+    /// editor pages never see the action (spec §Settings route).
+    #[test]
+    fn editor_overflow_settings_routes_to_the_settings_route() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, _bridge, _host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let frame = |ctx: &egui::Context, app: &mut WindowApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        };
+        let click = |pos: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let ovf = ctx
+            .read_response(egui::Id::new("topbar-overflow"))
+            .expect("the routed editor's overflow registers")
+            .rect;
+        // Open the popup, then the settle passes (the popup anchors
+        // at the screen centre on its open pass and re-anchors below
+        // the chip one pass later — the + popup tests' quirk).
+        frame(&ctx, &mut app, click(ovf.center()));
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let settings = ctx
+            .read_response(egui::Id::new("topbar-settings"))
+            .expect("the Settings entry renders in the editor overflow")
+            .rect;
+        frame(&ctx, &mut app, click(settings.center()));
+        assert!(
+            matches!(app.route, Route::Settings),
+            "the overflow's Settings entry routed the editor page to Settings"
+        );
+    }
+
     /// The breadcrumb's Home link routes the editor page home
     /// in-place — the same swap Esc performs, asserted through the
     /// route slot (the geometry batch follows the kind change).
