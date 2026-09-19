@@ -232,7 +232,7 @@ mod tests {
         let mut s = state_with(Tool::Move, &anns);
         s.moving = Some(AnnotationDrag {
             index: 1,
-            grab_offset: Point::new(1.0, 1.0),
+            last_pos: Point::new(1.0, 1.0),
             moved: true,
         });
         // Hover points at ann 0; the live drag on ann 1 must win.
@@ -254,7 +254,7 @@ mod tests {
         let mut s = state_with(Tool::Rect, &[rect_ann(10.0, 10.0, 30.0, 30.0)]);
         s.moving = Some(AnnotationDrag {
             index: 0,
-            grab_offset: Point::new(1.0, 1.0),
+            last_pos: Point::new(1.0, 1.0),
             moved: false,
         });
         assert!(move_chrome(&s, None).is_some());
