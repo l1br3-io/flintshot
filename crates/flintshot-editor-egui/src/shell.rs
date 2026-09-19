@@ -185,6 +185,10 @@ pub struct EguiShell {
     /// [`Self::with_open_settings`]). Page mode never consults it —
     /// the router swaps routes itself before editor actions flow.
     open_settings: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// The worker editor's **open home** hook (see
+    /// [`Self::with_open_home`]). Page mode never consults it — the
+    /// router intercepts Home navigation before editor actions flow.
+    open_home: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl EguiShell {
@@ -195,6 +199,7 @@ impl EguiShell {
             selection_first: false,
             close: None,
             open_settings: None,
+            open_home: None,
         }
     }
 
@@ -238,6 +243,19 @@ impl EguiShell {
         self.open_settings = Some(std::sync::Arc::new(f));
         self
     }
+
+    /// Attach the worker editor's **open home** hook: fired when the
+    /// breadcrumb's Home link is clicked in a worker window. Worker
+    /// windows have no home route behind them, so the app crate
+    /// delegates: the daemon's `OpenApp` choreography focuses a
+    /// running app window or spawns one. The routed window's router
+    /// intercepts Home navigation before editor actions flow, so the
+    /// hook stays worker-only.
+    #[must_use]
+    pub fn with_open_home(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
+        self.open_home = Some(std::sync::Arc::new(f));
+        self
+    }
 }
 
 impl EditorShell for EguiShell {
@@ -247,6 +265,7 @@ impl EditorShell for EguiShell {
             self.selection_first,
             self.close.as_ref(),
             self.open_settings.as_ref(),
+            self.open_home.as_ref(),
         )
     }
 }
@@ -355,12 +374,15 @@ fn start_route(start: &WindowStart) -> Route {
 /// installed into the window so the worker's supersede listener can
 /// close it from another thread (see [`CloseHandle`]).
 /// `open_settings`, when present, is the worker Settings entry's
-/// delegate (see [`EguiShell::with_open_settings`]).
+/// delegate (see [`EguiShell::with_open_settings`]);
+/// `open_home`, when present, is the worker Home link's delegate
+/// (see [`EguiShell::with_open_home`]).
 fn run_editor_blocking(
     state: EditorState,
     selection_first: bool,
     close: Option<&CloseHandle>,
     open_settings: Option<&std::sync::Arc<dyn Fn() + Send + Sync>>,
+    open_home: Option<&std::sync::Arc<dyn Fn() + Send + Sync>>,
 ) -> flintshot_core::Result<EditorOutcome> {
     let (img_w, img_h) = state.image.dimensions();
     // egui's `ViewportBuilder::with_inner_size` takes logical px.
@@ -390,6 +412,7 @@ fn run_editor_blocking(
     let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
     let outcome_for_app = Rc::clone(&outcome);
     let open_settings_hook = open_settings.cloned();
+    let open_home_hook = open_home.cloned();
 
     let app_creator: AppCreator<'_> = Box::new(move |cc| {
         if let Some(handle) = close {
@@ -398,6 +421,9 @@ fn run_editor_blocking(
         let mut app = EditorApp::new(state, &cc.egui_ctx, outcome_for_app, selection_first);
         if let Some(hook) = open_settings_hook {
             app.set_open_settings(hook);
+        }
+        if let Some(hook) = open_home_hook {
+            app.set_open_home(hook);
         }
         Ok(Box::new(app))
     });
@@ -605,6 +631,13 @@ mod tests {
             EguiShell::new().open_settings.is_none(),
             "no hook by default"
         );
+    }
+
+    #[test]
+    fn with_open_home_stores_the_hook() {
+        let shell = EguiShell::new().with_open_home(|| {});
+        assert!(shell.open_home.is_some());
+        assert!(EguiShell::new().open_home.is_none(), "no hook by default");
     }
 
     #[test]
