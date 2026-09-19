@@ -5012,6 +5012,22 @@ mod tests {
         assert_eq!(s.anns.len(), 0, "committed anns untouched (lifted)");
     }
 
+    /// Spec success criterion 1, replayed end-to-end: "hello world",
+    /// Shift+Left ×3 highlights "rld"; typing replaces it in one
+    /// stroke.
+    #[test]
+    fn spec_criterion_shift_left_three_then_type() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello world");
+        for _ in 0..3 {
+            s.dispatch_input(&shift_key(Key::ArrowLeft));
+        }
+        assert_eq!(s.selection_range(), Some(8..11), "'rld' selected");
+        s.dispatch_input(&InputEvent::TextInput('X'));
+        assert_eq!(pending_text(&s), "hello woX");
+        assert_eq!(s.text_cursor, 9);
+    }
+
     // --- Click-count gesture arms (text-selection-highlight Task 007) ---
 
     #[test]

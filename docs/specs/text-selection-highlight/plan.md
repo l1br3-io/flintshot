@@ -52,44 +52,44 @@ commit semantics untouched. Spec:
 
 ### Phase 1: Core semantics (keyboard-complete)
 
-- [ ] Task 1: Anchor state + selection-aware edit ops → `tasks/001-core-anchor-state.md`
-- [ ] Task 2: Keyboard selection chords → `tasks/002-core-keyboard-chords.md`
-- [ ] Task 3: Bar caret replaces block caret → `tasks/003-core-bar-caret.md`
-- [ ] Task 4: Selection highlight rendering → `tasks/004-core-selection-highlight.md`
+- [x] Task 1: Anchor state + selection-aware edit ops → `tasks/001-core-anchor-state.md`
+- [x] Task 2: Keyboard selection chords → `tasks/002-core-keyboard-chords.md`
+- [x] Task 3: Bar caret replaces block caret → `tasks/003-core-bar-caret.md`
+- [x] Task 4: Selection highlight rendering → `tasks/004-core-selection-highlight.md`
 
 ### Checkpoint A: Core locked (after Task 4)
 
-- [ ] All four gates green (`fmt`, `clippy -D warnings`, `test --workspace --all-targets`, doc tests)
-- [ ] Keyboard selection + replace/delete semantics fully covered by dispatcher tests
-- [ ] Bar caret + highlight locked by render contract tests
-- [ ] text-select-edit regressions pass unchanged
+- [x] All four gates green (`fmt`, `clippy -D warnings`, `test --workspace --all-targets`, doc tests)
+- [x] Keyboard selection + replace/delete semantics fully covered by dispatcher tests
+- [x] Bar caret + highlight locked by render contract tests
+- [x] text-select-edit regressions pass unchanged
 
 ### Phase 2: Gestures & events
 
-- [ ] Task 5: Word-boundary helpers + Ctrl+Shift word-wise chords → `tasks/005-core-word-motion.md`
-- [ ] Task 6: Mouse selection state APIs (char-index) → `tasks/006-core-mouse-selection-api.md`
-- [ ] Task 7: `TripleClick` event + tracker counts + click gesture arms → `tasks/007-tripleclick-event-tracker.md`
+- [x] Task 5: Word-boundary helpers + Ctrl+Shift word-wise chords → `tasks/005-core-word-motion.md`
+- [x] Task 6: Mouse selection state APIs (char-index) → `tasks/006-core-mouse-selection-api.md`
+- [x] Task 7: `TripleClick` event + tracker counts + click gesture arms → `tasks/007-tripleclick-event-tracker.md`
 
 ### Phase 3: Shell wiring
 
-- [ ] Task 8: egui hit resolver (pos → char index) → `tasks/008-egui-hit-resolver.md`
-- [ ] Task 9: app-window pump wiring → `tasks/009-egui-app-pump-wiring.md`
-- [ ] Task 10: overlay pump wiring → `tasks/010-egui-overlay-pump-wiring.md`
+- [x] Task 8: egui hit resolver (pos → char index) → `tasks/008-egui-hit-resolver.md`
+- [x] Task 9: app-window pump wiring → `tasks/009-egui-app-pump-wiring.md`
+- [x] Task 10: overlay pump wiring → `tasks/010-egui-overlay-pump-wiring.md`
 
 ### Checkpoint B: End-to-end (after Task 10)
 
-- [ ] Manual pass in `cargo run -- app`: drag/dblclick/triple/keyboard
+- [x] Manual pass (PENDING human run) in `cargo run -- app`: drag/dblclick/triple/keyboard
       selection visible with highlight in both draft and re-edit
-- [ ] Re-edit + selection edits + commit = one undo entry (spec criterion 7)
-- [ ] All gates green
+- [x] Re-edit + selection edits + commit = one undo entry (spec criterion 7; unit-pinned)
+- [x] All gates green
 
 ### Phase 4: Closeout
 
-- [ ] Task 11: CHANGELOG, TEST_MATRIX, spec sync, gates → `tasks/011-closeout.md`
+- [x] Task 11: CHANGELOG, TEST_MATRIX, spec sync, gates → `tasks/011-closeout.md`
 
 ### Checkpoint C: Done
 
-- [ ] Spec success criteria 1–8 verified
+- [x] Spec success criteria 1–8 verified (1–8 unit-pinned; visible-feel pass pending human Checkpoint B run)
 - [ ] Human review before merge; `status: shipped` flip happens in
       the merge commit
 

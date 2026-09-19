@@ -2201,6 +2201,90 @@ re-open the PNG, Copy → paste — no outline ever in the output.
 
 ---
 
+## Text selection & highlight — select ranges inside the text being edited
+
+Effort: `text-selection-highlight`. Applies to **both** shells and
+**both** contexts (fresh draft + re-edit session — they share the
+pending path). The anchor/cursor model, chords, gestures,
+replace/delete-over-range semantics, bar-caret geometry, and
+per-line highlight rects are unit-pinned in `flintshot-core`
+(dispatcher + render contract tests) and `flintshot-editor-egui`
+(resolver tables, tracker counts, pump wiring); the rows below
+verify the visible chains on real displays.
+
+### Test setup
+
+```sh
+cargo build --release
+cargo test --workspace --all-targets   # gates green before manual
+flintshot fullscreen                   # or: flintshot region / open
+flintshot region --overlay             # overlay rows (X11 / macOS / Windows)
+```
+
+### Test script
+
+**1. Keyboard selection (rows 1–2).**
+
+`T` + click, type "hello world". Hold Shift and press ← ×3 → "rld"
+highlighted (bar caret at the range's left edge); release, type
+`X` → "hello woX" in one stroke. `Ctrl+A` → whole text
+highlighted; `Backspace` → empty draft; `Esc` still never commits
+an empty draft. `Ctrl+Shift+←/→` extend word-wise; `Ctrl+←/→`
+without Shift move word-wise and collapse; `Shift+Home` / `End`
+extend to the line edges; plain arrows collapse.
+
+**2. Mouse gestures (row 3).**
+
+Press between glyphs and drag across "hello world" → the swept
+range highlights live; release keeps it; typing replaces it. Drag
+off the block → selection extends to the boundary, never cancels.
+Double-click a word → only that word; triple-click → the clicked
+line (all of it for single-line text). A plain click inside the
+text repositions the caret (no commit, no new draft); a click
+outside it commits-and-moves-on.
+
+**3. Bar caret + highlight (row 4).**
+
+While editing (empty draft included) a thin bar caret is always
+visible — no block caret anywhere. The highlight tints over both a
+bright and a dark region of the capture and the glyphs stay
+legible. Committed text shows neither caret nor highlight; Save /
+Copy output is chrome-free.
+
+**4. Re-edit + boundaries (row 5).**
+
+Double-click a committed text → session opens collapsed. All the
+gestures above work inside the session; make selection edits, then
+`Enter` → exactly **one** `Ctrl+Z` reverts the whole session.
+`Esc` mid-session still reverts with no undo entry.
+
+**5. Overlay parity (row 6).**
+
+Repeat 1–4 in the fullscreen overlay. Region handles / edges still
+win presses that overlap the pending text; presses outside the crop
+region are still swallowed (dimmed-area contract); Enter still
+crops only when *not* editing.
+
+### Matrix
+
+| Behavior                                                    | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Shift+arrow/Home/End/Ctrl+A/Ctrl+Shift chords select; plain moves and Ctrl+arrows collapse; typing replaces; emoji never split | | | | | | | | | | |
+| Drag-select grows live, clamps at block edges, survives release; double-click = word, triple-click = line; in-text click repositions the caret, outside click commits-and-moves-on | | | | | | | | | | |
+| Thin bar caret always visible while editing (empty draft too); no block caret; translucent highlight readable over bright and dark captures; committed text shows neither | | | | | | | | | | |
+| Re-edit session: gestures work inside it; selection edits + Enter = one undo entry; Esc reverts entry-free | | | | | | | | | | |
+| Overlay shell identical (chords, drag, dblclick/triple, bar caret, highlight); region handle / dimmed-area precedence unregressed | | | | | | | | | | |
+| Selection / caret / highlight chrome never in saved or copied output | | | | | | | | | | |
+
+### Known caveats
+
+- Clipboard operations on the selection (Ctrl+C / X / V) are a
+  follow-up effort by decision.
+- Caret-from-click on re-edit *open* is still caret-at-end (v1
+  rule); clicking inside once the session is open works.
+
+---
+
 ## App window — `flintshot app` capture home (Win11-Snipping-Tool-style)
 
 Spec: `docs/specs/app-window/`; design: ADR-0045. Run on a session

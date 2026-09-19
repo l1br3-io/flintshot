@@ -10,4 +10,4 @@
 - [x] 008 egui — shared pos→char hit resolver
 - [x] 009 egui — app-window pump wiring (press/drag/dblclick/triple)
 - [x] 010 egui — overlay pump wiring (press/drag/dblclick/triple)
-- [ ] 011 Closeout — CHANGELOG, TEST_MATRIX, spec sync, gates
+- [x] 011 Closeout — CHANGELOG, TEST_MATRIX, spec sync, gates
