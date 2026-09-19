@@ -98,6 +98,24 @@ pub(crate) fn selected_chrome(state: &EditorState) -> Option<Rect> {
     state.anns.get(index)?.bounding_box()
 }
 
+/// The Text-tool hover affordance (text-select-edit): the topmost
+/// committed Text under the pointer, announcing selectability with
+/// the same dashed rhythm the Move tool's hover uses (paint with
+/// [`move_chrome`](crate::chrome)'s `Hover` kind).
+///
+/// `None` when the tool is not Text, no pointer, the pointer is over
+/// empty canvas, or the topmost annotation under it is not a Text —
+/// non-Text hits are misses under the Text tool (Task 001's rule), so
+/// they get no affordance. Read-only like the rest of this module.
+#[must_use]
+pub(crate) fn text_hover_chrome(state: &EditorState, hover_at: Option<Point>) -> Option<Rect> {
+    if state.tool != Tool::Text {
+        return None;
+    }
+    let at = hover_at?;
+    state.anns.get(state.text_hit_test(at)?)?.bounding_box()
+}
+
 /// Paint the persistent-selection outline (screen-logical,
 /// shell-transformed): 1 px dashed forest on the move chrome's dash /
 /// pad rhythm, over the shared render output with the other chrome —
@@ -349,6 +367,55 @@ mod tests {
             Point::new(10.0 + 16.0 * 0.5 * 5.0, 10.0 + 16.0 * 1.2),
             "coarse bbox: half-em advance per char, one line at line-spacing height"
         );
+    }
+
+    // --- Text-tool hover affordance (text-select-edit Task 007) ---
+
+    fn text_ann_state(tool: Tool) -> EditorState {
+        let mut s = state_with(
+            tool,
+            &[Annotation::text(
+                Point::new(10.0, 10.0),
+                "hello",
+                flintshot_core::text::TextStyle::simple(16.0, flintshot_core::Color::RED),
+            )],
+        );
+        s.tool = tool;
+        s
+    }
+
+    #[test]
+    fn text_hover_chrome_tracks_committed_text_under_text_tool() {
+        let s = text_ann_state(Tool::Text);
+        let rect = text_hover_chrome(&s, Some(Point::new(20.0, 15.0)))
+            .expect("hover on a committed Text must yield its bbox");
+        assert_eq!(rect.min, Point::new(10.0, 10.0));
+        assert_eq!(rect.max, Point::new(10.0 + 40.0, 10.0 + 16.0 * 1.2));
+        assert!(
+            text_hover_chrome(&s, None).is_none(),
+            "no pointer → no hover"
+        );
+        assert!(
+            text_hover_chrome(&s, Some(Point::new(60.0, 60.0))).is_none(),
+            "empty canvas → no hover"
+        );
+    }
+
+    #[test]
+    fn text_hover_chrome_ignores_non_text_hits_and_other_tools() {
+        // A non-Text annotation on top: transparent under Text.
+        let mut s = text_ann_state(Tool::Text);
+        s.anns.push(rect_ann(12.0, 12.0, 40.0, 24.0));
+        assert!(
+            text_hover_chrome(&s, Some(Point::new(20.0, 15.0))).is_none(),
+            "a rect covering the text is a miss under the Text tool"
+        );
+        // Under Move the affordance belongs to move_chrome instead.
+        let s = text_ann_state(Tool::Move);
+        assert!(text_hover_chrome(&s, Some(Point::new(20.0, 15.0))).is_none());
+        // Non-selection-owning tools get nothing.
+        let s = text_ann_state(Tool::Rect);
+        assert!(text_hover_chrome(&s, Some(Point::new(20.0, 15.0))).is_none());
     }
 
     #[test]

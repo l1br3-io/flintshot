@@ -10,14 +10,14 @@ both shells, mirroring the `move_chrome` pattern.
 
 **Acceptance criteria:**
 
-- [ ] Hovering a committed text under Text tool: dashed outline +
+- [x] Hovering a committed text under Text tool: dashed outline +
       text cursor icon, both shells. Hover on empty canvas /
       non-text annotation: no affordance.
-- [ ] Move-tool hover/grab chrome behavior unchanged.
+- [x] Move-tool hover/grab chrome behavior unchanged.
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-editor-egui` (chrome query tests)
+- [x] `cargo test -p flintshot-editor-egui` (chrome query tests)
 - [ ] Manual: hover behaviours in both shells.
 
 **Dependencies:** Task 002 (chrome pattern), Task 004 (feature

@@ -746,6 +746,19 @@ impl EditorApp {
             // Screen-logical → image-physical, matching `logic_impl`.
             .map(|p| view.logical_to_image(p));
         let Some((rect, kind)) = crate::chrome::move_chrome(&self.state, hover_at) else {
+            // Text-tool hover affordance (text-select-edit): same gate,
+            // same dashed rhythm, Hover kind — one query, one paint
+            // helper, zero new visuals.
+            if let Some(rect) = crate::chrome::text_hover_chrome(&self.state, hover_at) {
+                crate::chrome::paint_move_chrome(
+                    painter,
+                    egui::Rect::from_two_pos(
+                        view.image_to_logical(rect.min),
+                        view.image_to_logical(rect.max),
+                    ),
+                    crate::chrome::MoveChromeKind::Hover,
+                );
+            }
             return;
         };
         crate::chrome::paint_move_chrome(
@@ -997,6 +1010,10 @@ impl EditorApp {
         let hover_at = (canvas_rect.contains(pos) && !self.canvas_drag_active).then_some(at);
         if crate::chrome::move_chrome(&self.state, hover_at).is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Move);
+        } else if crate::chrome::text_hover_chrome(&self.state, hover_at).is_some() {
+            // Text-tool hover affordance (text-select-edit): the I-beam
+            // announces "click to select / double-click to re-edit".
+            ctx.set_cursor_icon(egui::CursorIcon::Text);
         }
     }
 
@@ -4597,5 +4614,29 @@ mod tests {
             "no session for slow presses"
         );
         assert!(app.state.pending.is_none(), "no caret on top of the text");
+    }
+
+    /// Hovering a committed text under the Text tool announces
+    /// selectability: the text cursor icon (the dashed outline paints
+    /// through the shared chrome query on the same gate).
+    #[test]
+    fn text_hover_over_committed_text_sets_text_cursor() {
+        let (ctx, mut app) = text_app();
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        let at = screen_point(&app, (20.0, 15.0));
+        let out = editor_frame_output(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+        assert_eq!(
+            out.platform_output.cursor_icon,
+            egui::CursorIcon::Text,
+            "hover on the text shows the text cursor"
+        );
+        let miss = screen_point(&app, (70.0, 70.0));
+        let out = editor_frame_output(&ctx, &mut app, vec![egui::Event::PointerMoved(miss)]);
+        assert_eq!(
+            out.platform_output.cursor_icon,
+            egui::CursorIcon::Default,
+            "hover on empty canvas shows no affordance"
+        );
     }
 }
