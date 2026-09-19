@@ -20,6 +20,38 @@ Categories used below:
 
 ### Added
 
+- **Recent Captures v2: standard storage, richer cards,
+  clipboard-copy persistence** (effort `recent-captures-v2`).
+  - *Standard, configurable storage*: an empty `[output] save-dir`
+    now resolves at runtime to `~/Pictures/Flintshot` (platform
+    pictures dir; created on first write) instead of silently
+    writing to the process CWD — the fallback the docs promised
+    but never shipped. The Settings *Save location* row became a
+    real picker: the effective path display (never a placeholder),
+    a **Browse** folder dialog, and a **Use default** reset. The
+    plain Save dialog prefills the resolved directory.
+  - *Richer recents cards*: each card shows the filename over a
+    metadata line (`1920×1080 · 240 KB · 5 mins ago`, one stat per
+    file at decode); hovering reveals cutout chips — **Copy**
+    (file → clipboard, X11/Wayland keep-alive rules honored),
+    **Reveal** (parent folder in the file manager), **Delete**
+    (two-step "Sure?" confirm on the chip; removes file + index
+    entry). Clicking elsewhere still opens in the editor. The grid
+    scrolls once rows overflow; still 4 per row. The
+    `recents.toml` schema is untouched (path + mtime; zero
+    migration).
+  - *Clipboard copies are persisted*: with `[output]
+    save-clipboard-copies = true` (default), the editor's **Copy**
+    button and `after-grab = "clipboard"` captures also write the
+    image to the resolved save dir — template-or-`flintshot-{date}-
+    {time}` naming, `-2` collision suffixing, `[output] format`
+    encoding — and land in recents. A save failure never fails the
+    copy.
+  - *Configurable capacity*: `[ui] recent-captures-limit`
+    (default 50, clamped 1–200) drives the index truncation and
+    the grid; Settings exposes it as preset wells. Legacy
+    20-entry indexes load unchanged and grow to the new limit on
+    the next record.
 - **History tab in the editor panel** (effort
   `properties-history-tabs`). The docked panel grew a
   `PROPERTIES | HISTORY` tab header; the new History tab renders
@@ -37,6 +69,17 @@ Categories used below:
   inspector) is unchanged.
 
 ### Fixed
+
+- **Settings edits to `[output]` (and three `[ui]` keys) never
+  reached disk** (effort `recent-captures-v2`). Saving into an
+  existing `config.toml` merged only the early `[ui]`/`[capture]`/
+  `[hotkeys]`/`[upload]` keys — the whole `[output]` table plus
+  `show-statusbar`, `statusbar-size-mode`, and `animations` were
+  silently dropped from the rewrite, so Settings-driven changes to
+  the save format, template, or directory did not survive a
+  re-save. The merge now writes every known key in all five
+  tables (comments preserved, pinned by
+  `save_into_existing_file_writes_output_and_late_ui_fields`).
 
 - **The worker editor's Settings entry closes behind its handoff —
   no more duplicate windows** (effort `fix-tray-window-lifecycle`).
