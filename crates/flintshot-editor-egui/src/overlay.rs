@@ -23,7 +23,7 @@
 //! helpers (`translate_modifiers`, `tool_for_key`,
 //! `dispatch_text_input`). The overlay-specific deltas:
 //!
-//! - it opens with `Tool::Select`, so the first drag is a region
+//! - it opens with `Tool::Crop`, so the first drag is a region
 //!   selection (Flameshot muscle memory);
 //! - `Enter` is intercepted **before** dispatch — the dispatcher's
 //!   Enter path crops via `confirm_selection`, which is editor-window
@@ -64,7 +64,7 @@
 //! region, 8 grab handles, move-by-drag inside the region, a live
 //! `W × H` badge, and the magnifier on hover. The dispatcher keeps
 //! owning *fresh* selection drags; handle and interior presses with
-//! `Tool::Select` active are intercepted by the shell and run as
+//! `Tool::Crop` active are intercepted by the shell and run as
 //! [`Gesture`]s that mutate `EditorState::selection` (a `pub` field)
 //! through the pure helpers in this module. This is the effort's one
 //! documented, tested exception to "all mutation flows through
@@ -101,7 +101,7 @@
 //!   annotation tool active, a primary press dispatches only when it
 //!   lands inside the usable selection; elsewhere it is swallowed
 //!   whole (no `drag_active`, so its drags / release never reach the
-//!   dispatcher either). `Tool::Select` and `Tool::Hand` always flow
+//!   dispatcher either). `Tool::Crop` and `Tool::Hand` always flow
 //!   — the dispatcher owns fresh region drags and annotation grabs,
 //!   and the chrome owns the gestures. Drags
 //!   that start inside and wander outside keep dispatching raw
@@ -323,7 +323,7 @@ pub(crate) const ALL_HANDLES: [Handle; 8] = [
     Handle::W,
 ];
 
-/// Filter a raw `state.selection` down to the form the chrome cares
+/// Filter a raw `state.crop_region` down to the form the chrome cares
 /// about: `Some(normalized)` only when the rect is non-degenerate
 /// (both normalized dimensions ≥ 1 px, matching the render path's
 /// selection-outline guard and `EditorState::crop`'s no-op bound).
@@ -374,7 +374,7 @@ pub(crate) fn handle_at(sel: Rect, at: Point, radius: f32) -> Option<Handle> {
 /// Resize `sel` so the grabbed corner/edge follows `at` while the
 /// opposite corner(s) stay anchored. The result is intentionally
 /// un-normalized during the drag (mirroring
-/// `EditorState::update_selection`); normalize on release.
+/// `EditorState::update_crop_region`); normalize on release.
 #[must_use]
 pub(crate) fn resize_from(handle: Handle, sel: Rect, at: Point) -> Rect {
     let mut r = sel;
@@ -411,9 +411,9 @@ pub(crate) fn moved_rect(sel: Rect, at: Point, offset: Point, bounds: Rect) -> R
 }
 
 /// An overlay-owned selection manipulation in progress. Presses with
-/// `Tool::Select` active resolve to one of the gesture variants
+/// `Tool::Crop` active resolve to one of the gesture variants
 /// *before* dispatcher dispatch (see `gesture_for_press`); while a
-/// gesture is active, pointer drags mutate `state.selection` via the
+/// gesture is active, pointer drags mutate `state.crop_region` via the
 /// pure helpers above instead of dispatching `PointerDrag`s.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Gesture {
@@ -437,7 +437,7 @@ pub(crate) enum Gesture {
 /// Decide what a primary press inside the overlay does when a usable
 /// selection exists: grabs a handle (`Resize`), grabs the interior
 /// (`Move`), or returns `None` to fall through to the dispatcher
-/// (fresh selection / annotation). Interception is Select-tool-only:
+/// (fresh region / annotation). Interception is Crop-tool-only:
 /// with an annotation tool active, presses must draw, not manipulate
 /// the region; with Hand active, presses must reach the dispatcher so
 /// it can grab a committed annotation.
@@ -448,7 +448,7 @@ pub(crate) fn gesture_for_press(
     tool: Tool,
     hit_radius: f32,
 ) -> Option<Gesture> {
-    if tool != Tool::Select {
+    if tool != Tool::Crop {
         return None;
     }
     let sel = usable_selection(sel);
@@ -467,14 +467,14 @@ pub(crate) fn gesture_for_press(
 /// are confined to the usable selection (Flameshot semantics — the
 /// region defines both what is visible and what ships in the output,
 /// so anything drawn outside it would be invisible-overflow).
-/// `Tool::Select` presses always flow: the dispatcher owns fresh
-/// selection drags and the chrome owns the Task 003 gestures, so
-/// Select must keep working outside (and without) a region.
+/// `Tool::Crop` presses always flow: the dispatcher owns fresh
+/// region drags and the chrome owns the region gestures, so
+/// Crop must keep working outside (and without) a region.
 /// `Tool::Hand` presses likewise always flow — the dispatcher owns
 /// annotation grabs, and annotations only exist inside the region.
 #[must_use]
 pub(crate) fn annotation_press_allowed(tool: Tool, sel: Option<Rect>, at: Point) -> bool {
-    if matches!(tool, Tool::Select | Tool::Hand) {
+    if matches!(tool, Tool::Crop | Tool::Hand) {
         return true;
     }
     usable_selection(sel).is_some_and(|s| s.contains(at))
@@ -744,7 +744,7 @@ pub(crate) struct OverlayApp {
     /// documented exception to all-mutation-through-dispatch: the
     /// dispatcher's selection transitions model fresh
     /// anchor-to-corner drags only and have no grab points). While a
-    /// gesture is active, drags mutate `state.selection` through the
+    /// gesture is active, drags mutate `state.crop_region` through the
     /// pure chrome helpers instead of dispatching pointer events.
     gesture: Gesture,
     /// Pixel-zoom magnifier (hover-triggered in the overlay, per the
@@ -806,7 +806,7 @@ impl Gesture {
 }
 
 impl OverlayApp {
-    /// Construct the app. Forces `Tool::Select` — the overlay opens
+    /// Construct the app. Forces `Tool::Crop` — the overlay opens
     /// in selection mode so the first drag draws a region (the
     /// editor window's `Tool::Rect` default would instead commit a
     /// rectangle annotation on the first drag, which is not what a
@@ -817,7 +817,7 @@ impl OverlayApp {
         outcome: OutcomeSlot,
         clipboard_out: ClipboardSlot,
     ) -> Self {
-        state.tool = Tool::Select;
+        state.tool = Tool::Crop;
         // Same one-time theme application as `EditorApp::new`: the
         // floating toolbar reuses the editor's chips, so its
         // separators, tooltips, and spacing must read identically.
@@ -972,14 +972,15 @@ impl OverlayApp {
         };
         let at = to_canvas_physical(pos, panel, ppp);
 
-        // Chrome interception (Task 003): with Select active and a
+        // Chrome interception (Task 003): with Crop active and a
         // usable region present, a press on a handle or inside the
         // region starts an overlay-owned gesture instead of a
-        // dispatcher `PointerDown` (which would restart the selection
-        // from a point — `begin_selection`). While the gesture runs,
-        // drags mutate `state.selection` directly (the documented
-        // exception; see `OverlayApp::gesture`) and release
-        // normalizes, mirroring the dispatcher's `finish_selection`.
+        // dispatcher `PointerDown` (which would restart the region
+        // from a point — `begin_crop_region`). While the gesture
+        // runs, drags mutate `state.crop_region` directly (the
+        // documented exception; see `OverlayApp::gesture`) and
+        // release normalizes, mirroring the dispatcher's
+        // `finish_crop_region`.
         let image_bounds = {
             let (w, h) = self.state.image.dimensions();
             #[allow(
@@ -1004,27 +1005,15 @@ impl OverlayApp {
 
         let mut pointer_events: Vec<InputEvent> = Vec::new();
         if primary_pressed && panel.contains(pos) && !over_toolbar {
-            match gesture_for_press(self.state.selection, at, self.state.tool, hit_radius) {
+            match gesture_for_press(self.state.crop_region, at, self.state.tool, hit_radius) {
                 Some(gesture) => {
                     self.drag_active = true;
                     self.gesture = gesture;
                 }
-                None if annotation_press_allowed(self.state.tool, self.state.selection, at) => {
+                None if annotation_press_allowed(self.state.tool, self.state.crop_region, at) => {
                     self.drag_active = true;
                     pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
-                    // Double-click synthesis (text-select-edit): fed
-                    // only on dispatching presses, fired in the same
-                    // frame right after the press — core's ordering
-                    // contract.
-                    let (max_delay, max_dist) = ctx.options(|o| {
-                        (
-                            o.input_options.max_double_click_delay,
-                            o.input_options.max_click_dist,
-                        )
-                    });
-                    if self.dblclick.on_press(now, pos, max_delay, max_dist) {
-                        pointer_events.push(InputEvent::DoubleClick { pos: at });
-                    }
+                    self.push_dblclick_if_due(ctx, now, pos, at, &mut pointer_events);
                 }
                 // Annotation-tool press outside the region (Task 005):
                 // swallow it whole. `drag_active` stays false, so the
@@ -1040,21 +1029,22 @@ impl OverlayApp {
             } else {
                 // Normalize the dragged rect so `min` is top-left —
                 // the same contract the dispatcher's release path
-                // (`finish_selection`) upholds for fresh drags.
-                self.state.selection = self.state.selection.map(Rect::normalized);
+                // (`finish_crop_region`) upholds for fresh drags.
+                self.state.crop_region = self.state.crop_region.map(Rect::normalized);
                 self.gesture = Gesture::None;
             }
         } else if primary_down && self.drag_active {
             match self.gesture {
                 Gesture::None => pointer_events.push(InputEvent::PointerDrag { pos: at }),
                 Gesture::Move { offset } => {
-                    if let Some(sel) = usable_selection(self.state.selection) {
-                        self.state.selection = Some(moved_rect(sel, clamped, offset, image_bounds));
+                    if let Some(sel) = usable_selection(self.state.crop_region) {
+                        self.state.crop_region =
+                            Some(moved_rect(sel, clamped, offset, image_bounds));
                     }
                 }
                 Gesture::Resize { handle } => {
-                    if let Some(sel) = usable_selection(self.state.selection) {
-                        self.state.selection = Some(resize_from(handle, sel, clamped));
+                    if let Some(sel) = usable_selection(self.state.crop_region) {
+                        self.state.crop_region = Some(resize_from(handle, sel, clamped));
                     }
                 }
             }
@@ -1091,7 +1081,7 @@ impl OverlayApp {
         let hover_at = (!self.drag_active
             && self.gesture.is_none()
             && !over_toolbar
-            && annotation_press_allowed(Tool::Hand, self.state.selection, at))
+            && annotation_press_allowed(Tool::Hand, self.state.crop_region, at))
         .then_some(at);
         self.move_chrome = crate::chrome::move_chrome(&self.state, hover_at);
 
@@ -1101,9 +1091,31 @@ impl OverlayApp {
         let text_hover_at = (!self.drag_active
             && self.gesture.is_none()
             && !over_toolbar
-            && annotation_press_allowed(Tool::Text, self.state.selection, at))
+            && annotation_press_allowed(Tool::Text, self.state.crop_region, at))
         .then_some(at);
         self.text_hover = crate::chrome::text_hover_chrome(&self.state, text_hover_at);
+    }
+
+    /// Double-click synthesis (text-select-edit): fed only on
+    /// dispatching presses, fired in the same frame right after the
+    /// press — core's ordering contract.
+    fn push_dblclick_if_due(
+        &mut self,
+        ctx: &Context,
+        now: f64,
+        pos: egui::Pos2,
+        at: Point,
+        pointer_events: &mut Vec<InputEvent>,
+    ) {
+        let (max_delay, max_dist) = ctx.options(|o| {
+            (
+                o.input_options.max_double_click_delay,
+                o.input_options.max_click_dist,
+            )
+        });
+        if self.dblclick.on_press(now, pos, max_delay, max_dist) {
+            pointer_events.push(InputEvent::DoubleClick { pos: at });
+        }
     }
 
     /// Cursor icon for the current hover position when no gesture is
@@ -1125,10 +1137,10 @@ impl OverlayApp {
             // I-beam announces click-to-select / double-click-to-edit.
             return self.state.text_hit_test(at).map(|_| egui::CursorIcon::Text);
         }
-        if self.state.tool != Tool::Select {
+        if self.state.tool != Tool::Crop {
             return None;
         }
-        let sel = usable_selection(self.state.selection);
+        let sel = usable_selection(self.state.crop_region);
         if let Some(sel) = sel {
             if let Some(handle) = handle_at(sel, at, hit_radius) {
                 return Some(cursor_for_handle(handle));
@@ -1419,7 +1431,7 @@ impl OverlayApp {
                 _ => None,
             })
         }) {
-            if tool == Tool::Select || usable_selection(self.state.selection).is_some() {
+            if tool == Tool::Crop || usable_selection(self.state.crop_region).is_some() {
                 self.state.set_tool(tool);
             }
         }
@@ -1441,7 +1453,7 @@ impl OverlayApp {
         // positions, keeping tool semantics byte-identical to the
         // editor window) — the edge just stops painting, exactly
         // where the region-cropped output will cut too.
-        let sel_phys = usable_selection(self.state.selection);
+        let sel_phys = usable_selection(self.state.crop_region);
         self.canvas.set_clip(sel_phys);
         // Frame::NONE: no margin and no panel background — the frozen
         // capture must land at exact screen position (0, 0) so
@@ -1535,7 +1547,7 @@ impl OverlayApp {
         // dispatcher-driven selection drag in progress (during a
         // fresh drag the midpoint handles would jitter as the rect
         // grows; Flameshot hides them until release too).
-        if self.state.tool == Tool::Select && !(self.drag_active && self.gesture.is_none()) {
+        if self.state.tool == Tool::Crop && !(self.drag_active && self.gesture.is_none()) {
             if let Some(s) = sel_phys {
                 let edge = HANDLE_EDGE_LOGICAL;
                 for center in handle_centers(s) {
@@ -1619,7 +1631,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_app_opens_in_select_mode() {
+    fn overlay_app_opens_in_crop_mode() {
         let app = OverlayApp::new(
             blank_state(8, 8),
             &egui::Context::default(),
@@ -1628,8 +1640,8 @@ mod tests {
         );
         assert_eq!(
             app.state.tool,
-            Tool::Select,
-            "the first drag must draw a selection, not a rect annotation"
+            Tool::Crop,
+            "the first drag must draw a crop region, not a rect annotation"
         );
     }
 
@@ -1652,10 +1664,11 @@ mod tests {
         );
     }
 
-    /// Every `(key, tool)` pair `tool_for_key` admits besides Select.
+    /// Every `(key, tool)` pair `tool_for_key` admits besides Crop.
     fn annotation_key_pairs() -> Vec<(egui::Key, Tool)> {
         vec![
-            (egui::Key::V, Tool::Hand),
+            (egui::Key::V, Tool::Select),
+            (egui::Key::H, Tool::Hand),
             (egui::Key::R, Tool::Rect),
             (egui::Key::E, Tool::Ellipse),
             (egui::Key::A, Tool::Arrow),
@@ -1669,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_tool_keys_inert_without_selection() {
+    fn overlay_tool_keys_inert_without_region() {
         let ctx = egui::Context::default();
         let mut app = OverlayApp::new(
             blank_state(64, 64),
@@ -1683,14 +1696,14 @@ mod tests {
             key_frame(&ctx, &mut app, t, key);
             assert_eq!(
                 app.state.tool,
-                Tool::Select,
+                Tool::Crop,
                 "{key:?} must not arm {tool:?} before any region exists"
             );
         }
     }
 
     #[test]
-    fn overlay_tool_keys_inert_with_degenerate_selection() {
+    fn overlay_tool_keys_inert_with_degenerate_region() {
         let ctx = egui::Context::default();
         let mut app = OverlayApp::new(
             blank_state(64, 64),
@@ -1700,21 +1713,21 @@ mod tests {
         );
         // Sub-pixel width: present but not usable — the rail and the
         // press gate already treat this as "no selection".
-        app.state.selection = Some(Rect::from_xywh(10.0, 10.0, 0.5, 50.0));
+        app.state.crop_region = Some(Rect::from_xywh(10.0, 10.0, 0.5, 50.0));
         let mut t = 0.0;
         for (key, tool) in annotation_key_pairs() {
             t += 1.0 / 60.0;
             key_frame(&ctx, &mut app, t, key);
             assert_eq!(
                 app.state.tool,
-                Tool::Select,
+                Tool::Crop,
                 "{key:?} must not arm {tool:?} on a degenerate region"
             );
         }
     }
 
     #[test]
-    fn overlay_tool_keys_arm_once_selection_usable() {
+    fn overlay_tool_keys_arm_once_region_usable() {
         let ctx = egui::Context::default();
         let mut app = OverlayApp::new(
             blank_state(64, 64),
@@ -1722,9 +1735,9 @@ mod tests {
             Rc::new(RefCell::new(None)),
             Rc::new(RefCell::new(None)),
         );
-        app.state.selection = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
+        app.state.crop_region = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
         let mut pairs = annotation_key_pairs();
-        pairs.push((egui::Key::S, Tool::Select));
+        pairs.push((egui::Key::C, Tool::Crop));
         let mut t = 0.0;
         for (key, tool) in pairs {
             t += 1.0 / 60.0;
@@ -1737,7 +1750,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_select_key_always_arms() {
+    fn overlay_crop_key_always_arms() {
         let ctx = egui::Context::default();
         let mut app = OverlayApp::new(
             blank_state(64, 64),
@@ -1745,16 +1758,16 @@ mod tests {
             Rc::new(RefCell::new(None)),
             Rc::new(RefCell::new(None)),
         );
-        // Direct mutation: pre-selection no input path can leave
-        // Select (the rail is unrendered, other keys gated) — yet S
-        // must keep arming Select, so the tool has to start elsewhere
+        // Direct mutation: pre-region no input path can leave
+        // Crop (the rail is unrendered, other keys gated) — yet C
+        // must keep arming Crop, so the tool has to start elsewhere
         // for the press to be observable.
         app.state.tool = Tool::Pencil;
-        key_frame(&ctx, &mut app, 0.0, egui::Key::S);
+        key_frame(&ctx, &mut app, 0.0, egui::Key::C);
         assert_eq!(
             app.state.tool,
-            Tool::Select,
-            "S is the region-drawing tool and stays armable without a region"
+            Tool::Crop,
+            "C is the region-drawing tool and stays armable without a region"
         );
     }
 
@@ -1955,7 +1968,7 @@ mod tests {
             Rc::new(RefCell::new(None)),
         );
         app.state.tool = Tool::Text;
-        app.state.selection = Some(Rect::from_xywh(4.0, 34.0, 56.0, 26.0));
+        app.state.crop_region = Some(Rect::from_xywh(4.0, 34.0, 56.0, 26.0));
         app
     }
 
@@ -2043,7 +2056,7 @@ mod tests {
         let ctx = prime_fonts();
         let mut app = text_overlay_app(&ctx);
         // Shrink the region so the text hit point falls outside it.
-        app.state.selection = Some(Rect::from_xywh(4.0, 34.0, 10.0, 6.0));
+        app.state.crop_region = Some(Rect::from_xywh(4.0, 34.0, 10.0, 6.0));
         let _ = wide_frame(&ctx, &mut app, 0.0, vec![]);
         let press = egui::pos2(20.0, 45.0);
         wide_frame(
@@ -2455,7 +2468,7 @@ mod tests {
     #[test]
     fn gesture_for_press_grabs_handle_first() {
         assert_eq!(
-            gesture_for_press(Some(sel()), Point::new(100.0, 100.0), Tool::Select, 10.0),
+            gesture_for_press(Some(sel()), Point::new(100.0, 100.0), Tool::Crop, 10.0),
             Some(Gesture::Resize { handle: Handle::Nw }),
             "a press on a handle resizes, even though it's inside the rect too"
         );
@@ -2464,7 +2477,7 @@ mod tests {
     #[test]
     fn gesture_for_press_inside_is_move_with_offset() {
         assert_eq!(
-            gesture_for_press(Some(sel()), Point::new(150.0, 140.0), Tool::Select, 10.0),
+            gesture_for_press(Some(sel()), Point::new(150.0, 140.0), Tool::Crop, 10.0),
             Some(Gesture::Move {
                 offset: Point::new(50.0, 40.0)
             }),
@@ -2475,7 +2488,7 @@ mod tests {
     #[test]
     fn gesture_for_press_outside_falls_through() {
         assert_eq!(
-            gesture_for_press(Some(sel()), Point::new(50.0, 50.0), Tool::Select, 10.0),
+            gesture_for_press(Some(sel()), Point::new(50.0, 50.0), Tool::Crop, 10.0),
             None,
             "exterior press starts a fresh selection via the dispatcher"
         );
@@ -2498,7 +2511,7 @@ mod tests {
     #[test]
     fn gesture_for_press_without_selection_falls_through() {
         assert_eq!(
-            gesture_for_press(None, Point::new(150.0, 140.0), Tool::Select, 10.0),
+            gesture_for_press(None, Point::new(150.0, 140.0), Tool::Crop, 10.0),
             None
         );
         // Degenerate selections are treated as absent.
@@ -2506,7 +2519,7 @@ mod tests {
             gesture_for_press(
                 Some(Rect::from_xywh(10.0, 10.0, 0.5, 0.5)),
                 Point::new(10.0, 10.0),
-                Tool::Select,
+                Tool::Crop,
                 10.0
             ),
             None
@@ -2520,7 +2533,7 @@ mod tests {
     #[test]
     fn gesture_for_press_on_annotation_grabs_region() {
         assert_eq!(
-            gesture_for_press(Some(sel()), Point::new(150.0, 145.0), Tool::Select, 10.0),
+            gesture_for_press(Some(sel()), Point::new(150.0, 145.0), Tool::Crop, 10.0),
             Some(Gesture::Move {
                 offset: Point::new(50.0, 45.0)
             }),
@@ -2895,7 +2908,7 @@ mod tests {
     fn overlay_tool_chip_click_switches_tool() {
         let ctx = egui::Context::default();
         let mut state = blank_state(64, 64);
-        state.tool = Tool::Select;
+        state.tool = Tool::Crop;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.horizontal(|ui| {
                 let _ = overlay_rail_row(ui, &mut state);
@@ -2981,11 +2994,11 @@ mod tests {
     #[test]
     fn select_and_move_presses_always_flow() {
         assert!(
-            annotation_press_allowed(Tool::Select, None, Point::new(0.0, 0.0)),
+            annotation_press_allowed(Tool::Crop, None, Point::new(0.0, 0.0)),
             "Select must keep working before any selection exists"
         );
         assert!(
-            annotation_press_allowed(Tool::Select, Some(sel()), Point::new(50.0, 50.0)),
+            annotation_press_allowed(Tool::Crop, Some(sel()), Point::new(50.0, 50.0)),
             "a Select press outside the region starts a fresh selection drag"
         );
         assert!(
@@ -3010,7 +3023,7 @@ mod tests {
     /// A fresh state with `sel()` as the region and `tool` active.
     fn state_with_region(tool: Tool) -> EditorState {
         let mut s = blank_state(1920, 1080);
-        s.selection = Some(sel());
+        s.crop_region = Some(sel());
         s.tool = tool;
         s
     }
@@ -3105,7 +3118,7 @@ mod tests {
 
     #[test]
     fn select_tool_updates_region_and_commits_nothing() {
-        let mut s = state_with_region(Tool::Select);
+        let mut s = state_with_region(Tool::Crop);
         press(&mut s, Point::new(120.0, 120.0));
         drag(&mut s, Point::new(180.0, 160.0));
         release(&mut s);
@@ -3114,7 +3127,7 @@ mod tests {
             "Select manipulates the region, never the annotation list"
         );
         assert_eq!(
-            s.selection,
+            s.crop_region,
             Some(Rect::new(
                 Point::new(120.0, 120.0),
                 Point::new(180.0, 160.0)
@@ -3495,7 +3508,7 @@ mod tests {
         let mut app = move_overlay_app();
         // The overlay's selection-first lock: annotation tools arm
         // only with a usable region.
-        app.state.selection = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
+        app.state.crop_region = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
         app.state.selected = vec![0];
         key_frame(&ctx, &mut app, 0.0, egui::Key::R);
         assert_eq!(app.state.tool, Tool::Rect, "fixture: R armed Rect");
@@ -3561,7 +3574,7 @@ mod tests {
         );
         // Place a caret and type "hi" (direct dispatch — fixture
         // setup, the path under test is the Backspace frame below).
-        app.state.selection = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
+        app.state.crop_region = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
         app.state.tool = Tool::Text;
         let _ = app.state.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(20.0, 20.0),

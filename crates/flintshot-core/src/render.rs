@@ -202,7 +202,7 @@ pub fn render<C: Canvas>(
         draw_blur_outline(canvas, *rect);
     }
 
-    if let Some(sel) = state.selection {
+    if let Some(sel) = state.crop_region {
         let n = sel.normalized();
         if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 {
             canvas.draw_rect_outline(n, &SELECTION_STROKE);
@@ -220,10 +220,10 @@ fn draw_blur_outline<C: Canvas>(canvas: &mut C, rect: Rect) {
     }
 }
 
-/// Stroke style for the in-flight `Tool::Select` region. Distinct from
-/// any annotation color so the user can tell the selection rectangle
+/// Stroke style for the in-flight `Tool::Crop` region. Distinct from
+/// any annotation color so the user can tell the crop rectangle
 /// apart from a committed `Annotation::Rect`. Blue is picked to match
-/// conventional selection-rectangle UX in screenshot tools.
+/// conventional region-selection UX in screenshot tools.
 const SELECTION_STROKE: Stroke = Stroke::new(Color::rgb(0, 120, 215), 2.0);
 
 /// Outline drawn around the in-flight `Tool::Text` block so the user
@@ -667,12 +667,12 @@ pub fn compose_final(state: &EditorState) -> image::RgbaImage {
 
 /// Compose the final image (background + annotations), then crop to
 /// `rect`. The source of truth for selection-aware outputs: Copy with
-/// an active `Tool::Select` region emits just the selected pixels,
+/// an active `Tool::Crop` region emits just the region's pixels,
 /// with annotations baked in (clipped at the region boundary by the
 /// canvas's pixel-level bounds).
 ///
 /// Pure / non-mutating: `state.image`, `state.anns`, and
-/// `state.selection` are untouched. This is the key difference from
+/// `state.crop_region` are untouched. This is the key difference from
 /// [`EditorState::crop`](crate::EditorState::crop), which *replaces*
 /// `state.image` with the cropped sub-image. Use `compose_final_region`
 /// when the caller wants a one-shot cropped buffer (e.g. placing bytes
@@ -685,7 +685,7 @@ pub fn compose_final(state: &EditorState) -> image::RgbaImage {
 /// [`crop_region`](crate::image_ops::crop_region)). Callers that need
 /// a non-empty result should guard against degenerate rects before
 /// calling, typically with the same `width/height >= 1.0` check the
-/// render path uses for the in-flight selection outline.
+/// render path uses for the in-flight crop-region outline.
 #[must_use]
 pub fn compose_final_region(state: &EditorState, rect: Rect) -> image::RgbaImage {
     let full = compose_final(state);
@@ -2549,17 +2549,17 @@ mod tests {
             stroke: Stroke::new(Color::RED, 1.0),
             fill: None,
         });
-        state.selection = Some(Rect::from_xywh(10.0, 10.0, 20.0, 20.0));
+        state.crop_region = Some(Rect::from_xywh(10.0, 10.0, 20.0, 20.0));
 
         let img_before = state.image.clone();
         let anns_before = state.anns.clone();
-        let sel_before = state.selection;
+        let sel_before = state.crop_region;
 
         let _ = compose_final_region(&state, Rect::from_xywh(10.0, 10.0, 20.0, 20.0));
 
         assert_eq!(state.image.as_raw(), img_before.as_raw(), "image unchanged");
         assert_eq!(state.anns.len(), anns_before.len(), "anns unchanged");
-        assert_eq!(state.selection, sel_before, "selection unchanged");
+        assert_eq!(state.crop_region, sel_before, "crop region unchanged");
     }
 
     /// A zero-area `rect` (matching `crop_region`'s degenerate-input
@@ -2574,7 +2574,7 @@ mod tests {
         assert_eq!(out.dimensions(), (0, 0));
     }
 
-    /// TODO Task 14: a non-empty `state.selection` renders as a single
+    /// A non-empty `state.crop_region` renders as a single
     /// `DrawRectOutline` on top of annotations + pending, using the
     /// distinct selection stroke.
     #[test]
@@ -2585,7 +2585,7 @@ mod tests {
             stroke: Stroke::new(Color::RED, 3.0),
             fill: None,
         });
-        state.selection = Some(Rect::from_xywh(5.0, 5.0, 80.0, 80.0));
+        state.crop_region = Some(Rect::from_xywh(5.0, 5.0, 80.0, 80.0));
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;
@@ -2610,7 +2610,7 @@ mod tests {
     #[test]
     fn render_skips_degenerate_selection() {
         let mut state = EditorState::new(image::RgbaImage::new(100, 100));
-        state.selection = Some(Rect::new(Point::new(50.0, 50.0), Point::new(50.5, 50.0)));
+        state.crop_region = Some(Rect::new(Point::new(50.0, 50.0), Point::new(50.5, 50.0)));
 
         let mut canvas = MockCanvas::default();
         let mut bg = None;

@@ -77,7 +77,7 @@ pub(crate) enum Section {
     Number,
     /// Blur kind wells + strength.
     Effects,
-    /// The Select tool's crop bay.
+    /// The Crop tool's region bay.
     Crop,
     /// Danger Delete — always present.
     Selection,
@@ -91,7 +91,8 @@ pub(crate) enum Section {
 )]
 pub(crate) fn sections_for(tool: Tool) -> &'static [Section] {
     match tool {
-        Tool::Hand => &[Section::Selection],
+        Tool::Hand | Tool::Select => &[Section::Selection],
+        Tool::Crop => &[Section::Crop],
         Tool::Rect | Tool::Ellipse | Tool::Pencil => {
             &[Section::Stroke, Section::Fill, Section::Selection]
         }
@@ -99,7 +100,6 @@ pub(crate) fn sections_for(tool: Tool) -> &'static [Section] {
         Tool::Text => &[Section::Stroke, Section::Text, Section::Selection],
         Tool::Number => &[Section::Stroke, Section::Number, Section::Selection],
         Tool::Blur => &[Section::Effects, Section::Selection],
-        Tool::Select => &[Section::Crop, Section::Selection],
         // Future variants (the enum is `#[non_exhaustive]`) get the
         // same base kit as Line / Arrow / Marker.
         _ => &[Section::Stroke, Section::Selection],
@@ -755,7 +755,8 @@ pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
 /// Per-tool hint copy. Kept pure for testing.
 pub(crate) fn tool_hint(tool: Tool) -> &'static str {
     match tool {
-        Tool::Select => "drag a region · Copy uses it · Enter crops",
+        Tool::Select => "click / marquee / drag-move annotations",
+        Tool::Crop => "drag a region · Copy uses it · Enter crops",
         Tool::Hand => "click selects · Shift+click adds · drag moves all · Del removes",
         Tool::Text => "click to place the caret",
         Tool::Blur => "drag over what to hide",
@@ -836,10 +837,10 @@ pub(crate) fn pod_gap(ui: &mut egui::Ui) {
 // Bay
 // ------------------------------------------------------------------
 
-/// Select: live selection dims + crop. Without a selection the bay
-/// shows only the hint — no dead controls.
+/// Crop: live region dims + crop. Without a region the bay shows
+/// only the hint — no dead controls.
 pub(crate) fn select_bay(ui: &mut egui::Ui, state: &mut EditorState) {
-    let sel = state.selection.map(flintshot_core::Rect::normalized);
+    let sel = state.crop_region.map(flintshot_core::Rect::normalized);
     if let Some(n) = sel.filter(|n| n.width().abs() >= 1.0 && n.height().abs() >= 1.0) {
         ui.label(
             egui::RichText::new(dims_label(n))
@@ -847,7 +848,7 @@ pub(crate) fn select_bay(ui: &mut egui::Ui, state: &mut EditorState) {
                 .size(theme::TYPE_SM),
         );
         if ui.button("Crop · Enter").clicked() {
-            state.confirm_selection();
+            state.confirm_crop();
         }
     }
 }

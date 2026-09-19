@@ -1241,8 +1241,8 @@ fn recapture_request(
 /// Run the Phase 5 fullscreen frozen-capture overlay over an
 /// already-loaded config (mirror of [`run_editor_with_config`]).
 ///
-/// The overlay opens with `Tool::Select` (forced inside
-/// `OverlayApp`), so the first drag draws a region selection;
+/// The overlay opens with `Tool::Crop` (forced inside
+/// `OverlayApp`), so the first drag draws a crop region;
 /// `Esc` cancels, `Enter` accepts (Enter = Copy: the annotated
 /// region lands on the clipboard and the overlay closes; the shell
 /// lingers briefly to keep the X11 selection alive). A `NewCapture`
@@ -2853,7 +2853,7 @@ mod tests {
         assert_eq!(state.stroke_width, 7.0);
         assert_eq!(state.font_size, 21.0);
         // Untouched baseline: the tool default stays core's choice
-        // here — the overlay forces Select inside `OverlayApp::new`,
+        // here — the overlay forces Crop inside `OverlayApp::new`,
         // not in the shared builder.
         assert_eq!(state.tool, Tool::Hand);
     }

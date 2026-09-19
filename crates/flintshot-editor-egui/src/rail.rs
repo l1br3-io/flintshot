@@ -43,25 +43,30 @@ pub(crate) struct ToolSpec {
 
 /// The tool chips in rail order, partitioned into pods (spec
 /// `toolbar-groups`): selection · shapes · freehand · labels ·
-/// redact. Hand leads (labeled) because it is the resting tool the
-/// editor lands on after every commit — the rail teaches the
-/// tool's existence without a tooltip.
+/// redact. Select leads the selection pod; Hand and Crop follow
+/// (V / H / C) so the three region-and-object jobs sit together.
 ///
 /// The pod arrays below are the single source of truth; both the
 /// editor rail and the overlay's floating tool row walk
 /// [`TOOL_PODS`].
 const SELECTION_POD: &[ToolSpec] = &[
     ToolSpec {
-        tool: Tool::Hand,
-        name: "Hand",
-        key: "V",
-        glyph: g_move,
-    },
-    ToolSpec {
         tool: Tool::Select,
         name: "Select",
-        key: "S",
+        key: "V",
         glyph: g_select,
+    },
+    ToolSpec {
+        tool: Tool::Hand,
+        name: "Hand",
+        key: "H",
+        glyph: g_hand,
+    },
+    ToolSpec {
+        tool: Tool::Crop,
+        name: "Crop",
+        key: "C",
+        glyph: g_crop,
     },
 ];
 
@@ -176,9 +181,9 @@ pub(crate) const TOOL_PODS: &[ToolPod] = &[
 pub(crate) enum ToolGate {
     /// Every tool chip is live.
     All,
-    /// Only `Tool::Select` is live; every other chip renders
+    /// Only `Tool::Crop` is live; every other chip renders
     /// disabled with a lock clause in its tooltip.
-    SelectOnly,
+    CropOnly,
 }
 
 impl ToolGate {
@@ -187,7 +192,7 @@ impl ToolGate {
     pub(crate) fn contains(self, tool: Tool) -> bool {
         match self {
             ToolGate::All => true,
-            ToolGate::SelectOnly => tool == Tool::Select,
+            ToolGate::CropOnly => tool == Tool::Crop,
         }
     }
 }
@@ -244,24 +249,42 @@ fn g_select(p: &egui::Painter, r: egui::Rect, c: Color32) {
     }
 }
 
-/// Four-direction move cross with mini chevrons — the universal
-/// "reposition object" idiom. The chevrons are deliberately smaller
-/// than `arrowhead`'s barbs so the cross reads as arrows without
-/// swamping the 28 px chip.
-fn g_move(p: &egui::Painter, r: egui::Rect, c: Color32) {
-    seg(p, r, (0.0, -5.0), (0.0, 5.0), c, 2.0);
-    seg(p, r, (-5.0, 0.0), (5.0, 0.0), c, 2.0);
-    for (tip, dx, dy) in [
-        ((0.0, -5.0), -1.0, 1.0),
-        ((0.0, -5.0), 1.0, 1.0),
-        ((0.0, 5.0), -1.0, -1.0),
-        ((0.0, 5.0), 1.0, -1.0),
-        ((-5.0, 0.0), 1.0, -1.0),
-        ((-5.0, 0.0), 1.0, 1.0),
-        ((5.0, 0.0), -1.0, -1.0),
-        ((5.0, 0.0), -1.0, 1.0),
+/// Stylized open hand — the pan idiom (palm + three fingers +
+/// thumb). Simple strokes by design: it must read at 28 px next to
+/// the arrow glyphs.
+fn g_hand(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    // Palm.
+    let palm = egui::Rect::from_min_size(pt(r, -4.0, -1.0), egui::vec2(8.0, 6.5));
+    p.rect(
+        palm,
+        CornerRadius::same(2),
+        Color32::TRANSPARENT,
+        Stroke::new(2.0, c),
+        StrokeKind::Middle,
+    );
+    // Fingers.
+    seg(p, r, (-2.0, -5.5), (-2.0, -1.0), c, 2.0);
+    seg(p, r, (0.5, -6.5), (0.5, -1.0), c, 2.0);
+    seg(p, r, (3.0, -5.0), (3.0, -1.0), c, 2.0);
+    // Thumb, angled off the palm's right edge.
+    seg(p, r, (4.0, 2.5), (6.5, 1.0), c, 2.0);
+}
+
+/// Four corner brackets — the crop / viewfinder idiom. Reads as
+/// "frame this region", distinct from the dashed marquee at a
+/// glance.
+fn g_crop(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    for (a, b) in [
+        ((-6.0, -6.0), (-2.0, -6.0)),
+        ((-6.0, -6.0), (-6.0, -2.0)),
+        ((6.0, -6.0), (2.0, -6.0)),
+        ((6.0, -6.0), (6.0, -2.0)),
+        ((-6.0, 6.0), (-2.0, 6.0)),
+        ((-6.0, 6.0), (-6.0, 2.0)),
+        ((6.0, 6.0), (2.0, 6.0)),
+        ((6.0, 6.0), (6.0, 2.0)),
     ] {
-        seg(p, r, tip, (tip.0 + dx * 2.6, tip.1 + dy * 2.6), c, 2.0);
+        seg(p, r, a, b, c, 2.0);
     }
 }
 
@@ -561,7 +584,7 @@ mod tests {
     #[test]
     fn tool_pods_partition_every_variant_in_spec_order() {
         let expected: &[(&str, &[Tool])] = &[
-            ("selection", &[Tool::Hand, Tool::Select]),
+            ("selection", &[Tool::Select, Tool::Hand, Tool::Crop]),
             (
                 "shapes",
                 &[Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow],
@@ -582,6 +605,7 @@ mod tests {
         for tool in [
             Tool::Select,
             Tool::Hand,
+            Tool::Crop,
             Tool::Rect,
             Tool::Ellipse,
             Tool::Line,
@@ -598,27 +622,30 @@ mod tests {
                 .count();
             assert_eq!(hits, 1, "{tool:?} must sit in exactly one pod");
         }
-        // Hand leads and Select seconds overall.
+        // Select leads the selection pod, Hand seconds, Crop thirds.
         let flat: Vec<Tool> = TOOL_PODS
             .iter()
             .flat_map(|p| p.tools.iter().map(|t| t.tool))
             .collect();
-        assert_eq!(flat.first(), Some(&Tool::Hand));
-        assert_eq!(flat.get(1), Some(&Tool::Select));
+        assert_eq!(flat.first(), Some(&Tool::Select));
+        assert_eq!(flat.get(1), Some(&Tool::Hand));
+        assert_eq!(flat.get(2), Some(&Tool::Crop));
     }
 
     #[test]
-    fn move_leads_the_rail_with_select_second() {
+    fn select_leads_the_selection_pod() {
         let flat = flat();
         assert!(
-            flat.first().is_some_and(|t| t.tool == Tool::Hand),
-            "Hand must be the first rail chip"
+            flat.first().is_some_and(|t| t.tool == Tool::Select),
+            "Select must be the first rail chip"
         );
-        assert!(
-            flat.get(1).is_some_and(|t| t.tool == Tool::Select),
-            "Select must be the second rail chip"
+        assert_eq!(flat[0].name, "Select", "the label reads Select");
+        let keys: Vec<&str> = flat.iter().map(|t| t.key).collect();
+        assert_eq!(
+            &keys[..3],
+            &["V", "H", "C"],
+            "the selection pod maps to V / H / C"
         );
-        assert_eq!(flat[0].name, "Hand", "the label reads Hand");
     }
 
     #[test]
@@ -636,7 +663,7 @@ mod tests {
             }
             fns.push(spec.key);
         }
-        assert_eq!(fns.len(), 11, "the full vocabulary rides the rail");
+        assert_eq!(fns.len(), 12, "the full vocabulary rides the rail");
     }
 
     #[test]
@@ -647,7 +674,7 @@ mod tests {
             format!("{} · {}", pen.name, pen.key)
         );
         assert!(
-            tooltip_text(pen, ToolGate::SelectOnly).contains(LOCK_CLAUSE),
+            tooltip_text(pen, ToolGate::CropOnly).contains(LOCK_CLAUSE),
             "gated-off tools expose the lock clause"
         );
     }
@@ -656,7 +683,7 @@ mod tests {
 
     fn tool_after_pen_click(gate: ToolGate) -> Tool {
         let mut state = blank_state();
-        state.tool = Tool::Select;
+        state.tool = Tool::Crop;
         let ctx = egui::Context::default();
         let mut rail = RailState::default();
         rail_frame(&ctx, &mut state, gate, &mut rail, vec![]);
@@ -674,10 +701,10 @@ mod tests {
     }
 
     #[test]
-    fn select_only_click_cannot_switch_tool() {
+    fn crop_only_click_cannot_switch_tool() {
         assert_eq!(
-            tool_after_pen_click(ToolGate::SelectOnly),
-            Tool::Select,
+            tool_after_pen_click(ToolGate::CropOnly),
+            Tool::Crop,
             "a gated-off chip must render hover-only and stay inert"
         );
     }
@@ -807,7 +834,7 @@ mod tests {
         theme::apply(&ctx);
         let mut state = blank_state();
         let mut rail = RailState::default();
-        rail_frame(&ctx, &mut state, ToolGate::SelectOnly, &mut rail, vec![]);
+        rail_frame(&ctx, &mut state, ToolGate::CropOnly, &mut rail, vec![]);
         for spec in flat() {
             assert!(
                 ctx.read_response(egui::Id::new(("rail-tool", spec.key)))
@@ -822,7 +849,7 @@ mod tests {
         rail_frame(
             &ctx,
             &mut state,
-            ToolGate::SelectOnly,
+            ToolGate::CropOnly,
             &mut rail,
             click_events(pen.rect.center()),
         );
