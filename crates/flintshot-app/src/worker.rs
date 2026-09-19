@@ -1050,8 +1050,8 @@ mod tests {
         assert_eq!(spawner.snapshot(), vec![vec!["app".to_string()]]);
     }
 
-    /// settings-improvement Task 003: the OpenSettings dispatch is
-    /// the OpenApp arm with the route carried — broadcast-first (a
+    /// settings-improvement Task 003: the `OpenSettings` dispatch is
+    /// the `OpenApp` arm with the route carried — broadcast-first (a
     /// running window shows + routes itself), then the spawn with
     /// the route flag (a lock-held worker exits promptly; the
     /// broadcast did the real work).
