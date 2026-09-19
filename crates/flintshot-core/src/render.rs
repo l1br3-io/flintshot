@@ -208,7 +208,46 @@ pub fn render<C: Canvas>(
             canvas.draw_rect_outline(n, &SELECTION_STROKE);
         }
     }
+
+    if let Some(m) = state.marquee {
+        let n = m.normalized();
+        if n.width().abs() >= 1.0 && n.height().abs() >= 1.0 {
+            draw_dashed_rect(canvas, n, MARQUEE_STROKE);
+        }
+    }
     Ok(())
+}
+
+/// Draw an axis-aligned rect as a marching-ants dashed outline:
+/// each edge dashed independently (edges start on a dash; corners
+/// may end on a gap). Shared rhythm with the shells' hover chrome.
+fn draw_dashed_rect<C: Canvas>(canvas: &mut C, rect: Rect, stroke: Stroke) {
+    for (a, b) in [
+        (rect.min, Point::new(rect.max.x, rect.min.y)),
+        (
+            Point::new(rect.max.x, rect.min.y),
+            Point::new(rect.max.x, rect.max.y),
+        ),
+        (rect.max, Point::new(rect.min.x, rect.max.y)),
+        (Point::new(rect.min.x, rect.max.y), rect.min),
+    ] {
+        let length = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        let (dash, gap) = (6.0, 4.0);
+        let step = dash + gap;
+        let mut travelled = 0.0;
+        while travelled < length {
+            let t0 = travelled;
+            let t1 = (travelled + dash).min(length);
+            let f = |t: f32| {
+                Point::new(
+                    a.x + (b.x - a.x) * t / length,
+                    a.y + (b.y - a.y) * t / length,
+                )
+            };
+            canvas.draw_line(f(t0), f(t1), &stroke);
+            travelled += step;
+        }
+    }
 }
 
 /// Draw a thin outline around a blur region. No-op on degenerate rects
@@ -225,6 +264,11 @@ fn draw_blur_outline<C: Canvas>(canvas: &mut C, rect: Rect) {
 /// apart from a committed `Annotation::Rect`. Blue is picked to match
 /// conventional region-selection UX in screenshot tools.
 const SELECTION_STROKE: Stroke = Stroke::new(Color::rgb(0, 120, 215), 2.0);
+
+/// Stroke style for the in-flight `Tool::Select` marquee (the rubber
+/// band). Same blue family as [`SELECTION_STROKE`] (the Crop region
+/// outline) but dashed, so the two live drags read apart at a glance.
+const MARQUEE_STROKE: Stroke = Stroke::new(Color::rgb(0, 120, 215), 1.5);
 
 /// Outline drawn around the in-flight `Tool::Text` block so the user
 /// can see the text's extent. Semi-transparent mid-grey reads on both

@@ -1,7 +1,7 @@
-//! Hand-tool object chrome, shared by both shells.
+//! Select-tool object chrome, shared by both shells.
 //!
 //! The prominent-move affordance (prominent-move-tool spec): under
-//! [`Tool::Hand`], the object under the pointer announces itself.
+//! [`Tool::Select`], the object under the pointer announces itself.
 //! Industry convention (Flameshot, Snagit, Excalidraw): hover is a
 //! subtle dashed outline + grab cursor; a live grab is a solid,
 //! accent-colored outline that tracks the object through the drag.
@@ -36,7 +36,7 @@ pub(crate) enum MoveChromeKind {
 /// the `Grab` outline regardless of where the pointer is now.
 /// Otherwise, `hover_at` — a position the shell has already gated —
 /// hit-tests against `anns`; a hit yields a single-rect `Hover`
-/// outline. `None` when the tool is not Hand (and no drag is live),
+/// outline. `None` when the tool is not Select (and no drag is live),
 /// the pointer misses, or the hit annotation has no extent
 /// (degenerate bbox).
 #[must_use]
@@ -64,7 +64,7 @@ pub(crate) fn move_chrome(
         }
         return Some((rects, MoveChromeKind::Grab));
     }
-    if state.tool != Tool::Hand {
+    if state.tool != Tool::Select {
         return None;
     }
     let at = hover_at?;
@@ -99,7 +99,7 @@ pub(crate) fn paint_move_chrome(painter: &egui::Painter, rect: egui::Rect, kind:
 /// bounding box in canvas-physical px **per selected annotation**,
 /// in selection-set order.
 ///
-/// Rendered under the selection-owning tools — Hand (grab-to-select,
+/// Rendered under the selection-owning tools — Select (grab-to-select,
 /// one rect per member) and Text (click-to-select over committed
 /// text, text-select-edit spec; the set is a singleton there, so at
 /// most one rect). Empty when the tool owns no selection, the set is
@@ -110,7 +110,7 @@ pub(crate) fn paint_move_chrome(painter: &egui::Painter, rect: egui::Rect, kind:
 /// frame).
 #[must_use]
 pub(crate) fn selected_chrome(state: &EditorState) -> Vec<Rect> {
-    if !matches!(state.tool, Tool::Hand | Tool::Text) {
+    if !matches!(state.tool, Tool::Select | Tool::Text) {
         return Vec::new();
     }
     state
@@ -123,7 +123,7 @@ pub(crate) fn selected_chrome(state: &EditorState) -> Vec<Rect> {
 
 /// The Text-tool hover affordance (text-select-edit): the topmost
 /// committed Text under the pointer, announcing selectability with
-/// the same dashed rhythm the Hand tool's hover uses (paint with
+/// the same dashed rhythm the Select tool's hover uses (paint with
 /// [`move_chrome`](crate::chrome)'s `Hover` kind).
 ///
 /// `None` when the tool is not Text, no pointer, the pointer is over
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn hover_chrome_tracks_hit_annotation_bbox() {
-        let s = state_with(Tool::Hand, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
+        let s = state_with(Tool::Select, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
         let (rects, kind) = move_chrome(&s, Some(Point::new(30.0, 25.0)))
             .expect("hover inside the rect must yield chrome");
         assert_eq!(kind, MoveChromeKind::Hover);
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn hover_chrome_miss_returns_none() {
-        let s = state_with(Tool::Hand, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
+        let s = state_with(Tool::Select, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
         assert!(move_chrome(&s, Some(Point::new(5.0, 5.0))).is_none());
         assert!(move_chrome(&s, None).is_none(), "no pointer → no hover");
     }
@@ -241,7 +241,7 @@ mod tests {
         let s = state_with(Tool::Rect, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
         assert!(
             move_chrome(&s, Some(Point::new(30.0, 25.0))).is_none(),
-            "non-Hand tools get no hover chrome"
+            "non-Select tools get no hover chrome"
         );
     }
 
@@ -252,7 +252,7 @@ mod tests {
             b: Point::new(50.0, 20.0),
             stroke: Stroke::new(flintshot_core::Color::RED, 2.0),
         };
-        let s = state_with(Tool::Hand, &[line]);
+        let s = state_with(Tool::Select, &[line]);
         // On the line (within hit tolerance) → chrome; the bbox spans
         // both endpoints even though the line has zero height.
         let (rects, _) = move_chrome(&s, Some(Point::new(30.0, 21.0)))
@@ -270,7 +270,7 @@ mod tests {
             rect_ann(10.0, 10.0, 30.0, 30.0),
             rect_ann(40.0, 40.0, 60.0, 60.0),
         ];
-        let mut s = state_with(Tool::Hand, &anns);
+        let mut s = state_with(Tool::Select, &anns);
         s.selected = vec![1];
         s.moving = Some(AnnotationDrag {
             index: 1,
@@ -298,7 +298,7 @@ mod tests {
             rect_ann(10.0, 10.0, 30.0, 30.0),
             rect_ann(40.0, 40.0, 60.0, 60.0),
         ];
-        let mut s = state_with(Tool::Hand, &anns);
+        let mut s = state_with(Tool::Select, &anns);
         s.selected = vec![0, 1];
         s.moving = Some(AnnotationDrag {
             index: 0,
@@ -376,9 +376,9 @@ mod tests {
     // --- Persistent-selection chrome (annotation-delete Task 003) ---
 
     #[test]
-    fn selected_chrome_returns_one_bbox_per_member_under_move() {
+    fn selected_chrome_returns_one_bbox_per_member_under_select() {
         let mut s = state_with(
-            Tool::Hand,
+            Tool::Select,
             &[
                 rect_ann(10.0, 10.0, 50.0, 40.0),
                 rect_ann(60.0, 10.0, 90.0, 40.0),
@@ -412,7 +412,7 @@ mod tests {
     fn selected_chrome_returns_selected_bbox_under_text() {
         // text-select-edit: the Text tool owns a persistent selection
         // too (click-to-select over committed text); its chrome is
-        // the same dashed outline Hand renders.
+        // the same dashed outline Select renders.
         let mut s = state_with(
             Tool::Text,
             &[Annotation::text(
@@ -475,8 +475,8 @@ mod tests {
             text_hover_chrome(&s, Some(Point::new(20.0, 15.0))).is_none(),
             "a rect covering the text is a miss under the Text tool"
         );
-        // Under Hand the affordance belongs to move_chrome instead.
-        let s = text_ann_state(Tool::Hand);
+        // Under Select the affordance belongs to move_chrome instead.
+        let s = text_ann_state(Tool::Select);
         assert!(text_hover_chrome(&s, Some(Point::new(20.0, 15.0))).is_none());
         // Non-selection-owning tools get nothing.
         let s = text_ann_state(Tool::Rect);
@@ -485,14 +485,14 @@ mod tests {
 
     #[test]
     fn selected_chrome_none_without_selection() {
-        let s = state_with(Tool::Hand, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
+        let s = state_with(Tool::Select, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
         assert!(selected_chrome(&s).is_empty(), "no selection → no chrome");
     }
 
     #[test]
     fn selected_chrome_skips_degenerate_or_stale_members() {
         let mut degenerate = blank_state();
-        degenerate.tool = Tool::Hand;
+        degenerate.tool = Tool::Select;
         degenerate.anns.push(Annotation::Pencil {
             points: vec![],
             color: flintshot_core::Color::RED,

@@ -392,7 +392,7 @@ mod tests {
 
     fn state_with(anns: Vec<Annotation>) -> EditorState {
         let mut s = blank();
-        s.tool = Tool::Hand;
+        s.tool = Tool::Select;
         let n = anns.len();
         s.anns = anns;
         s.selected = (0..n).collect();

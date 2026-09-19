@@ -101,7 +101,7 @@
 //!   annotation tool active, a primary press dispatches only when it
 //!   lands inside the usable selection; elsewhere it is swallowed
 //!   whole (no `drag_active`, so its drags / release never reach the
-//!   dispatcher either). `Tool::Crop` and `Tool::Hand` always flow
+//!   dispatcher either). `Tool::Crop` and `Tool::Select` always flow
 //!   — the dispatcher owns fresh region drags and annotation grabs,
 //!   and the chrome owns the gestures. Drags
 //!   that start inside and wander outside keep dispatching raw
@@ -470,11 +470,12 @@ pub(crate) fn gesture_for_press(
 /// `Tool::Crop` presses always flow: the dispatcher owns fresh
 /// region drags and the chrome owns the region gestures, so
 /// Crop must keep working outside (and without) a region.
-/// `Tool::Hand` presses likewise always flow — the dispatcher owns
-/// annotation grabs, and annotations only exist inside the region.
+/// `Tool::Select` presses likewise always flow — the dispatcher owns
+/// annotation selection and grabs, and annotations only exist inside
+/// the region.
 #[must_use]
 pub(crate) fn annotation_press_allowed(tool: Tool, sel: Option<Rect>, at: Point) -> bool {
-    if matches!(tool, Tool::Crop | Tool::Hand) {
+    if matches!(tool, Tool::Crop | Tool::Select) {
         return true;
     }
     usable_selection(sel).is_some_and(|s| s.contains(at))
@@ -564,10 +565,11 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
             for spec in pod.tools {
                 let selected = state.tool == spec.tool;
                 let tooltip = format!("{} · {}", spec.name, spec.key);
-                // Hand renders labeled (rail emphasis), matching the editor
-                // rail; the wider chip simply widens the measured toolbar
-                // size that drives `toolbar_anchor`.
-                let resp = if spec.tool == Tool::Hand {
+                // Select renders labeled (rail emphasis — it is the
+                // resting tool), matching the editor rail; the wider
+                // chip simply widens the measured toolbar size that
+                // drives `toolbar_anchor`.
+                let resp = if spec.tool == Tool::Select {
                     panel::labeled_chip(
                         ui,
                         egui::Id::new(("overlay_tool", spec.key)),
@@ -1081,7 +1083,7 @@ impl OverlayApp {
         let hover_at = (!self.drag_active
             && self.gesture.is_none()
             && !over_toolbar
-            && annotation_press_allowed(Tool::Hand, self.state.crop_region, at))
+            && annotation_press_allowed(Tool::Select, self.state.crop_region, at))
         .then_some(at);
         self.move_chrome = crate::chrome::move_chrome(&self.state, hover_at);
 
@@ -1120,12 +1122,12 @@ impl OverlayApp {
 
     /// Cursor icon for the current hover position when no gesture is
     /// active. Select tool: a per-handle resize cursor over a handle,
-    /// `Move` inside the region, `Crosshair` elsewhere. Hand tool:
+    /// `Move` inside the region, `Crosshair` elsewhere. Select tool:
     /// `Move` over a committed annotation (a press grabs it for a
     /// drag), default elsewhere. `None` leaves the default cursor
     /// (annotation tools).
     fn hover_cursor(&self, at: Point, hit_radius: f32) -> Option<egui::CursorIcon> {
-        if self.state.tool == Tool::Hand {
+        if self.state.tool == Tool::Select {
             return self
                 .state
                 .hit_test(at)
@@ -1536,7 +1538,7 @@ impl OverlayApp {
                 let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
                 crate::chrome::paint_selected_chrome(&painter, rect);
             }
-        } else if matches!(self.state.tool, Tool::Hand | Tool::Text)
+        } else if matches!(self.state.tool, Tool::Select | Tool::Text)
             && !self.state.selected.is_empty()
         {
             self.state.selected.clear();
@@ -1771,11 +1773,11 @@ mod tests {
         );
     }
 
-    // --- Hand-tool hover / grab chrome (prominent-move) ---
+    // --- Select-tool hover / grab chrome (prominent-move) ---
 
-    /// Overlay state on the Hand tool with one committed rect at
-    /// (10,10)-(50,40). Construction forces Select, so the fixture
-    /// re-arms Hand like a user pressing `V` would.
+    /// Overlay state on the Select tool with one committed rect at
+    /// (10,10)-(50,40). Construction forces Crop, so the fixture
+    /// re-arms Select like a user pressing `V` would.
     fn move_overlay_app() -> OverlayApp {
         let mut state = blank_state(64, 64);
         state.pending = Some(Annotation::Rect {
@@ -1790,7 +1792,7 @@ mod tests {
             Rc::new(RefCell::new(None)),
             Rc::new(RefCell::new(None)),
         );
-        app.state.tool = Tool::Hand;
+        app.state.tool = Tool::Select;
         app
     }
 
@@ -2526,10 +2528,10 @@ mod tests {
         );
     }
 
-    /// A Select press on a committed annotation *inside* the region
-    /// grabs the region (Select owns region manipulation; annotation
-    /// moves belong to `Tool::Hand`, which never reaches the gesture
-    /// layer).
+    /// A Crop press on a committed annotation *inside* the region
+    /// grabs the region (Crop owns region manipulation; annotation
+    /// moves belong to `Tool::Select`, which never reaches the
+    /// gesture layer).
     #[test]
     fn gesture_for_press_on_annotation_grabs_region() {
         assert_eq!(
@@ -2541,17 +2543,17 @@ mod tests {
         );
     }
 
-    /// Hand-tool presses never become region gestures — they flow to
-    /// the dispatcher, which hit-tests for the annotation grab.
+    /// Select-tool presses never become region gestures — they flow
+    /// to the dispatcher, which routes selection / annotation grabs.
     #[test]
-    fn gesture_for_press_ignores_move_tool() {
+    fn gesture_for_press_ignores_select_tool() {
         assert_eq!(
-            gesture_for_press(Some(sel()), Point::new(150.0, 140.0), Tool::Hand, 10.0),
+            gesture_for_press(Some(sel()), Point::new(150.0, 140.0), Tool::Select, 10.0),
             None,
-            "Hand presses belong to the dispatcher, even on a handle"
+            "Select presses belong to the dispatcher, even on a handle"
         );
         assert_eq!(
-            gesture_for_press(None, Point::new(150.0, 145.0), Tool::Hand, 10.0),
+            gesture_for_press(None, Point::new(150.0, 145.0), Tool::Select, 10.0),
             None
         );
     }
@@ -2992,22 +2994,22 @@ mod tests {
     }
 
     #[test]
-    fn select_and_move_presses_always_flow() {
+    fn crop_and_select_presses_always_flow() {
         assert!(
             annotation_press_allowed(Tool::Crop, None, Point::new(0.0, 0.0)),
-            "Select must keep working before any selection exists"
+            "Crop must keep working before any region exists"
         );
         assert!(
             annotation_press_allowed(Tool::Crop, Some(sel()), Point::new(50.0, 50.0)),
-            "a Select press outside the region starts a fresh selection drag"
+            "a Crop press outside the region starts a fresh region drag"
         );
         assert!(
-            annotation_press_allowed(Tool::Hand, None, Point::new(0.0, 0.0)),
-            "Hand must reach the dispatcher to grab annotations"
+            annotation_press_allowed(Tool::Select, None, Point::new(0.0, 0.0)),
+            "Select must reach the dispatcher to select / grab annotations"
         );
         assert!(
-            annotation_press_allowed(Tool::Hand, Some(sel()), Point::new(50.0, 50.0)),
-            "a Hand press outside the region is the dispatcher's (no-op) miss"
+            annotation_press_allowed(Tool::Select, Some(sel()), Point::new(50.0, 50.0)),
+            "a Select press outside the region is the dispatcher's miss"
         );
     }
 
@@ -3136,21 +3138,22 @@ mod tests {
         );
     }
 
-    /// Hand repositions a committed annotation through the overlay's
-    /// event sequence and commits nothing new (the separation
-    /// contract: Select owns the region, Hand owns the annotations).
+    /// Select repositions a committed annotation through the
+    /// overlay's event sequence and commits nothing new (the
+    /// separation contract: Crop owns the region, Select owns the
+    /// annotations).
     #[test]
     fn move_tool_repositions_annotation_and_commits_nothing() {
         let mut s = state_with_region(Tool::Rect);
         press(&mut s, Point::new(120.0, 120.0));
         drag(&mut s, Point::new(180.0, 160.0));
         release(&mut s);
-        s.tool = Tool::Hand;
+        s.tool = Tool::Select;
         // Press at the rect's centre: grab offset = (30, 20).
         press(&mut s, Point::new(150.0, 140.0));
         drag(&mut s, Point::new(160.0, 150.0));
         release(&mut s);
-        assert_eq!(s.anns.len(), 1, "Hand repositions, never commits");
+        assert_eq!(s.anns.len(), 1, "Select repositions, never commits");
         match &s.anns[0] {
             flintshot_core::Annotation::Rect { rect, .. } => {
                 assert_eq!(
@@ -3476,7 +3479,7 @@ mod tests {
                     fill: None,
                 });
                 s.commit_annotation();
-                s.tool = Tool::Hand;
+                s.tool = Tool::Select;
                 s.selected = vec![0];
                 s
             },

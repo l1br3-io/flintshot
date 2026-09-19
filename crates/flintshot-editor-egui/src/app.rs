@@ -359,7 +359,7 @@ impl EditorApp {
     /// toolbar action) so the mask never paints on the crop's own
     /// frame. One-way by design: undo pops the snapshot, the latch
     /// keeps the phase ended. On the latch, a still-`Crop` tool
-    /// becomes `Hand` — the phase force-armed `Crop` at
+    /// becomes `Select` — the phase force-armed `Crop` at
     /// construction, so this restores the edit-phase default (the
     /// shell's own override, not the config-gated commit flip). The
     /// still-`Crop` guard is defensive: the input gates (rail
@@ -373,7 +373,7 @@ impl EditorApp {
         if self.phase == SelectionPhase::Live && self.state.undo.iter().any(|s| s.image.is_some()) {
             self.phase = SelectionPhase::Ended;
             if self.state.tool == Tool::Crop {
-                self.state.set_tool(Tool::Hand);
+                self.state.set_tool(Tool::Select);
             }
         }
     }
@@ -794,7 +794,8 @@ impl EditorApp {
     fn paint_selected_chrome_if_any(&mut self, _ctx: &Context, painter: &egui::Painter) {
         let rects = crate::chrome::selected_chrome(&self.state);
         if rects.is_empty() {
-            if matches!(self.state.tool, Tool::Hand | Tool::Text) && !self.state.selected.is_empty()
+            if matches!(self.state.tool, Tool::Select | Tool::Text)
+                && !self.state.selected.is_empty()
             {
                 self.state.selected.clear();
             }
@@ -1017,11 +1018,11 @@ impl EditorApp {
             let _ = self.state.dispatch_input(&event);
         }
 
-        // Hand-tool hover / grab cursor: the editor window's first
+        // Select-tool hover / grab cursor: the editor window's first
         // hover cursor (prominent-move spec). Follows the same
         // condition as the chrome paint — a hover hit or a live move
         // drag — so cursor and outline can never disagree. Empty
-        // canvas under Hand sets nothing (egui falls back to the
+        // canvas under Select sets nothing (egui falls back to the
         // default arrow for the frame).
         let hover_at = (canvas_rect.contains(pos) && !self.canvas_drag_active).then_some(at);
         if crate::chrome::move_chrome(&self.state, hover_at).is_some() {
@@ -2531,7 +2532,7 @@ mod tests {
         let app = phase_app(false);
         assert_eq!(
             app.state.tool,
-            Tool::Hand,
+            Tool::Select,
             "the editor default is untouched"
         );
         assert!(!app.phase_active(), "no request → no phase");
@@ -2599,8 +2600,8 @@ mod tests {
         }
     }
 
-    /// An editor state on the default Hand tool with one committed
-    /// rect annotation at (10,10)-(50,40) — something to hover.
+    /// An editor state on the default Select tool with one committed
+    /// rect annotation — something to hover.
     fn move_state_with_ann() -> EditorState {
         // The annotation sits below the floating cluster's band (the
         // canvas's top-left ~40 px are chrome now).
@@ -2611,7 +2612,7 @@ mod tests {
             fill: None,
         });
         state.commit_annotation();
-        assert_eq!(state.tool, Tool::Hand, "fixture: tool stays Hand");
+        assert_eq!(state.tool, Tool::Select, "fixture: tool stays Select");
         state
     }
 
@@ -2747,7 +2748,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_end_crop_flips_select_to_move() {
+    fn phase_end_crop_flips_crop_to_select() {
         let mut app = phase_app(true);
         drag_selection(&mut app.state, (10.0, 10.0), (40.0, 30.0));
         let _ = app.state.dispatch_input(&InputEvent::Key {
@@ -2758,17 +2759,17 @@ mod tests {
         assert!(!app.phase_active(), "fixture: the crop ended the phase");
         assert_eq!(
             app.state.tool,
-            Tool::Hand,
-            "the edit phase opens on Hand, not the phase's armed Select"
+            Tool::Select,
+            "the edit phase opens on Select, not the phase's armed Crop"
         );
     }
 
     #[test]
-    fn phase_end_keeps_non_select_tool_against_flip() {
+    fn phase_end_keeps_non_crop_tool_against_flip() {
         let mut app = phase_app(true);
         // Direct state mutation — with the input gates live, no
-        // keyboard / chip / drag path can leave Select mid-phase.
-        // The latch's still-Select guard is defensive for exactly
+        // keyboard / chip / drag path can leave Crop mid-phase.
+        // The latch's still-Crop guard is defensive for exactly
         // this state, and must not clobber it.
         app.state.tool = Tool::Rect;
         app.state.crop_region = Some(Rect::from_xywh(8.0, 8.0, 32.0, 16.0));
