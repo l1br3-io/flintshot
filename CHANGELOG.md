@@ -18,6 +18,23 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-select annotations + selection inspector.** Under the Move
+  tool, Shift+click toggles annotations into a selection set (plain
+  click replaces it with the hit annotation, a miss clears it; the
+  set survives release). The whole set moves together — one drag,
+  one undo entry — and `Del` removes every member in a single
+  undoable step. With a selection live, the right panel becomes a
+  **selection inspector**: title `N selected · Properties`, showing
+  the properties shared by every selected annotation; edits apply
+  live to all of them (one undo entry per gesture) and teach the
+  session tool defaults. Marker keeps its translucency through
+  colour edits. Per-annotation dashed outlines render for every
+  selected member in both the editor window and the overlay, and a
+  live multi-drag shows the solid grab outline on each member.
+  With no selection, the panel is unchanged (tool-defaults mode).
+
 ### Fixed
 
 - **Sticky tools now reach every editor entry, not just captures.**
