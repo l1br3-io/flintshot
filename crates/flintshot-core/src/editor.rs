@@ -10,10 +10,11 @@ use crate::geom::{Color, Point, Rect, Stroke};
 
 /// Available annotation tools.
 ///
-/// `Default` is [`Tool::Move`] — every eligible commit flips the tool
-/// to Move (see [`EditorState::flip_to_move`]), so the editor opens
-/// on the tool annotations land on for repositioning;
-/// `flintshot-app` overrides this from config.
+/// `Default` is [`Tool::Move`] — the editor opens on the tool
+/// annotations land on for repositioning; `flintshot-app` overrides
+/// this from config. Tools are sticky across commits by default
+/// (see [`EditorState::flip_to_move`]); flipping to Move after a
+/// commit is opt-in via `[ui] flip-to-move`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Tool {
@@ -277,10 +278,11 @@ pub struct EditorState {
     pub tool: Tool,
     /// Policy: committing an eligible annotation flips `tool` to
     /// [`Tool::Move`] so the next press can reposition what was just
-    /// drawn. Defaults to `true`; plumbed from `[ui] flip-to-move` at
-    /// editor-session start (read-once, like the magnifier config).
-    /// The flip itself never creates an undo entry — history stays
-    /// purely about annotations.
+    /// drawn. Defaults to `false` — tools are sticky (ADR-0058,
+    /// superseding ADR-0040's default-on); plumbed from
+    /// `[ui] flip-to-move` at editor-session start (read-once, like
+    /// the magnifier config). The flip itself never creates an undo
+    /// entry — history stays purely about annotations.
     pub flip_to_move: bool,
     /// Active annotation color.
     pub color: Color,
@@ -358,7 +360,7 @@ impl EditorState {
             pending: None,
             selection: None,
             tool: Tool::default(),
-            flip_to_move: true,
+            flip_to_move: false,
             fill_shapes: false,
             color: Color::RED,
             stroke_width: 3.0,
@@ -1718,7 +1720,7 @@ mod tests {
         assert!(s.selected_index.is_none());
         assert!(s.selection.is_none(), "selection rect starts None");
         assert_eq!(s.tool, Tool::Move, "Move is the default tool");
-        assert!(s.flip_to_move, "flip policy defaults on");
+        assert!(!s.flip_to_move, "flip policy defaults off (sticky tools)");
     }
 
     #[test]
@@ -1917,6 +1919,7 @@ mod tests {
         ] {
             let mut s = EditorState::new(blank_image());
             s.tool = tool;
+            s.flip_to_move = true;
             drag_commit(&mut s, Point::new(10.0, 10.0), Point::new(50.0, 40.0));
             assert_eq!(s.anns.len(), 1, "{tool:?} drag must commit");
             assert_eq!(s.tool, Tool::Move, "{tool:?} commit must flip to Move");
@@ -1926,6 +1929,7 @@ mod tests {
     #[test]
     fn text_enter_commit_flips_to_move() {
         let mut s = text_state();
+        s.flip_to_move = true;
         s.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(10.0, 10.0),
         });
@@ -1954,6 +1958,7 @@ mod tests {
         // calling `commit_text_draft`; the explicit tool choice must
         // win over the flip.
         let mut s = text_state();
+        s.flip_to_move = true;
         s.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(10.0, 10.0),
         });
@@ -1992,6 +1997,7 @@ mod tests {
     fn flip_adds_no_undo_entry_and_undo_keeps_move() {
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Rect;
+        s.flip_to_move = true;
         drag_commit(&mut s, Point::new(10.0, 10.0), Point::new(50.0, 40.0));
         assert_eq!(
             s.undo.len(),
@@ -2010,6 +2016,7 @@ mod tests {
         // not flip — the ownership guard blocks it.
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Move;
+        s.flip_to_move = true;
         s.pending = Some(rect_ann(0.0, 0.0, 10.0, 10.0));
         s.commit_annotation();
         assert_eq!(s.anns.len(), 1);
@@ -2894,12 +2901,13 @@ mod tests {
     #[test]
     fn dispatch_text_pointer_commits_and_flips_to_move() {
         // Clicking elsewhere while a draft is active commits the
-        // current draft. With the flip policy on (default), the tool
+        // current draft. With the flip policy on (opt-in), the tool
         // switches to Move — the click's own follow-up action then
         // belongs to Move (here: a miss on the freshly committed
         // text, so nothing begins). The old behavior placed a new
         // caret; that now requires staying on Text via a re-press.
         let mut s = text_state();
+        s.flip_to_move = true;
         s.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(10.0, 10.0),
         });

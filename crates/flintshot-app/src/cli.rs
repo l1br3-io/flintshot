@@ -2759,7 +2759,8 @@ mod tests {
         cfg.ui.flip_to_move = false;
         let state = state_from_config(img(), &cfg);
         assert!(!state.flip_to_move, "false config must reach the state");
-        let state = state_from_config(img(), &Config::default());
+        cfg.ui.flip_to_move = true;
+        let state = state_from_config(img(), &cfg);
         assert!(state.flip_to_move, "true config must reach the state");
     }
 }

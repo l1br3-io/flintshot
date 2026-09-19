@@ -60,3 +60,8 @@ Two constraints made the policy non-obvious:
 - `Tool::default()` changed to `Move`, so every construction site
   relying on Rect-inheritance had to be audited; tests pin the
   default and the plain-editor entry tool.
+
+**Superseded by** [ADR-0058](ADR-0058-sticky-tools-by-default.md):
+the mechanism (policy bool, ownership guard, config knob) is retained;
+only the default inverted — tools are now sticky unless
+`flip-to-move = true`.
