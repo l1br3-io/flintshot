@@ -96,7 +96,8 @@ just bootstrap     # installs: cargo-watch, cargo-nextest
 
 CI does **not** use `cargo-nextest` — `just ci` and the `test` job in
 `.github/workflows/ci.yml` both invoke `cargo test` directly so local
-results match CI byte-for-byte. `just test` (without `ci`) prefers
+results match CI (`just ci` passes `-q`: quieter output, identical
+results). `just test` (without `ci`) prefers
 nextest when available for speed; doc tests always run via
 `cargo test` since nextest doesn't collect them.
 

@@ -3,6 +3,13 @@
 # Mirrors the CI gate (.github/workflows/ci.yml) so the same checks can
 # be run locally with one word. All commands run from the repo root.
 #
+# Cargo invocations are quiet by default (`-q`, nextest:
+# `--cargo-quiet`): silent on success, loud on failure — compile
+# errors, test failures, and remaining warnings still print in full.
+# Keeps output (and token cost, when an agent runs these) minimal.
+# `watch` / `dev` stay verbose: watch loops want visible rebuild
+# feedback.
+#
 # Optional cargo subcommands (install with `just bootstrap`):
 #   cargo-watch   - rebuild on save (used by `dev`, `watch`)
 #   cargo-nextest - faster test runner (used by `nextest`, preferred by `test`)
@@ -30,7 +37,8 @@ bootstrap:
             echo "ok: cargo-$name already installed ($(cargo "$name" --version))"
         else
             echo "installing: cargo-$name"
-            cargo install "$name" --locked
+            cargo install -q "$name" --locked
+            echo "ok: cargo-$name installed ($(cargo "$name" --version))"
         fi
     }
     install_if_missing watch
@@ -41,7 +49,7 @@ fix:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "== fmt ==";    cargo fmt --all
-    echo "== clippy =="; cargo clippy --fix --allow-dirty --all-targets -- -D warnings
+    echo "== clippy =="; cargo clippy -q --fix --allow-dirty --all-targets -- -D warnings
 
 # Run the same checks CI runs, locally. Fails fast on the first failing step.
 # Mirrors the `lint` + `test` jobs in .github/workflows/ci.yml.
@@ -49,30 +57,32 @@ ci:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "== fmt --check =="; cargo fmt --all -- --check
-    echo "== clippy ==";      cargo clippy --workspace --all-targets -- -D warnings
-    echo "== test ==";        cargo test --workspace --all-targets
-    echo "== test --doc ==";  cargo test --doc -p flintshot-core -p flintshot-editor-egui
+    echo "== clippy ==";      cargo clippy -q --workspace --all-targets -- -D warnings
+    echo "== test ==";        cargo test -q --workspace --all-targets
+    echo "== test --doc ==";  cargo test -q --doc -p flintshot-core -p flintshot-editor-egui
 
 # Run all tests. Prefers cargo-nextest for unit + integration (faster,
 # nicer output); falls back to `cargo test` if nextest is absent.
 # Doc tests always use `cargo test` — nextest doesn't run them.
+# Quiet everywhere: `-q` / `--cargo-quiet` hide compile chatter and
+# per-test lines; failures still print in full.
 test:
     #!/usr/bin/env bash
     set -euo pipefail
     if cargo nextest --version >/dev/null 2>&1; then
         echo "== nextest (unit + integration) =="
-        cargo nextest run --workspace --all-targets
+        cargo nextest run --cargo-quiet --workspace --all-targets
     else
         echo "== test (unit + integration) =="
-        cargo test --workspace --all-targets
+        cargo test -q --workspace --all-targets
     fi
     echo "== test --doc (lib crates) =="
-    cargo test --doc -p flintshot-core -p flintshot-editor-egui
+    cargo test -q --doc -p flintshot-core -p flintshot-editor-egui
 
 # Test only the core crate (the heavy-unit-coverage one).
 test-core:
-    cargo test -p flintshot-core --all-targets
-    cargo test -p flintshot-core --doc
+    cargo test -q -p flintshot-core --all-targets
+    cargo test -q -p flintshot-core --doc
 
 # Run tests with cargo-nextest explicitly. Requires cargo-nextest —
 # `just bootstrap` to install. Doc tests run via `cargo test` afterwards
@@ -80,8 +90,8 @@ test-core:
 nextest:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo nextest run --workspace --all-targets
-    cargo test --doc -p flintshot-core -p flintshot-editor-egui
+    cargo nextest run --cargo-quiet --workspace --all-targets
+    cargo test -q --doc -p flintshot-core -p flintshot-editor-egui
 
 # Rebuild on save. Defaults to `cargo check`; pass a cargo subcommand
 # (or several) to customize. Requires cargo-watch — `just bootstrap` to install.
@@ -94,14 +104,14 @@ watch args="check":
 # Verify the project builds on the pinned MSRV (1.95).
 # Toolchain is selected automatically by rust-toolchain.toml.
 msrv:
-    cargo build --all-targets
+    cargo build -q --all-targets
 
 # Build the opt-in COSMIC applet. Needs system deps; see AGENTS.md.
 # On Debian/Ubuntu: sudo apt-get install -y --no-install-recommends \
 #   cmake libxkbcommon-dev libfontconfig-dev libfreetype6-dev \
 #   libglib2.0-dev libgfxbuffer-dev pkg-config
 cosmic:
-    cargo build -p flintshot-cosmic
+    cargo build -q -p flintshot-cosmic
 
 # --- Install / uninstall (desktop integration) ---
 
@@ -181,7 +191,7 @@ _build:
     features="${FEATURES-tray}"
     if [[ -n "$features" ]]; then
         echo "== build (release, features: ${features}) =="
-        if ! cargo build --release --features "$features"; then
+        if ! cargo build -q --release --features "$features"; then
             # Comma-boundary match so a feature like 'mytray' can't
             # trigger the hint.
             if [[ ",${features}," == *",tray,"* ]]; then
@@ -193,7 +203,7 @@ _build:
         fi
     else
         echo "== build (release, minimal: no features) =="
-        cargo build --release
+        cargo build -q --release
     fi
 
 # Debug-profile build backing the `--refresh` flag of `daemon` / `dev`.
@@ -208,7 +218,7 @@ _refresh-build:
     features="${FEATURES-tray}"
     if [[ -n "$features" ]]; then
         echo "== build (debug, features: ${features}) =="
-        if ! cargo build --features "$features"; then
+        if ! cargo build -q --features "$features"; then
             # Comma-boundary match so a feature like 'mytray' can't
             # trigger the hint.
             if [[ ",${features}," == *",tray,"* ]]; then
@@ -220,7 +230,7 @@ _refresh-build:
         fi
     else
         echo "== build (debug, minimal: no features) =="
-        cargo build
+        cargo build -q
     fi
 
 # Copy the built artifacts under a scope root, then refresh desktop /
@@ -348,7 +358,7 @@ uninstall:
 
 # Show the CLI help (full subcommand surface).
 help:
-    cargo run -- --help
+    cargo run -q -- --help
 
 # Start the long-running daemon (tray, hotkeys, IPC server). [Phase 2]
 # Extra args pass through, e.g. `just daemon --replace`.
@@ -371,36 +381,36 @@ daemon *args:
             pass+=(--replace)
         fi
     fi
-    exec cargo run -- daemon "${pass[@]}"
+    exec cargo run -q -- daemon "${pass[@]}"
 
 # Capture a region and open the editor. Extra args pass through, e.g.
 #   just region --monitor 1 --delay-ms 500
 region *args:
-    cargo run -- region {{ args }}
+    cargo run -q -- region {{ args }}
 
 # Capture a full monitor and open the editor. Extra args pass through, e.g.
 #   just fullscreen --monitor 1
 fullscreen *args:
-    cargo run -- fullscreen {{ args }}
+    cargo run -q -- fullscreen {{ args }}
 
 # Print the resolved configuration as TOML to stdout.
 config *args:
-    cargo run -- config {{ args }}
+    cargo run -q -- config {{ args }}
 
 # Open an existing image in the editor (no capture). [Phase 3]
 open path *args:
-    cargo run -- open {{ path }} {{ args }}
+    cargo run -q -- open {{ path }} {{ args }}
 
 # Upload an image to a backend and print the resulting URL. [Phase 4]
 #   just upload foo.png --backend imgur
 upload path *args:
-    cargo run -- upload {{ path }} {{ args }}
+    cargo run -q -- upload {{ path }} {{ args }}
 
 # Set or clear credentials for an upload backend (OS keychain). [Phase 4]
 #   just auth imgur            # set (hidden prompt; or IMGUR_CLIENT_ID env)
 #   just auth imgur --clear    # remove the stored credential
 auth backend *args:
-    cargo run -- auth {{ backend }} {{ args }}
+    cargo run -q -- auth {{ backend }} {{ args }}
 
 # --- Dev loop ---
 
