@@ -53,7 +53,7 @@ defaults. Spec: [`spec.md`](spec.md).
 - [ ] Review with human before proceeding
 
 ### Phase 2: Property editing
-- [ ] Task 3: Capabilities query + property mutators + undo coalescing → `tasks/003-core-capabilities-mutators.md`
+- [x] Task 3: Capabilities query + property mutators + undo coalescing → `tasks/003-core-capabilities-mutators.md`
 - [ ] Task 4: Panel selection-inspector mode → `tasks/004-panel-inspector.md`
 
 ### Checkpoint: Inspector usable end-to-end
