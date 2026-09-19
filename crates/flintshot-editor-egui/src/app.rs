@@ -753,32 +753,36 @@ impl EditorApp {
         );
     }
 
-    /// Paint the persistent-selection outline (annotation-delete
-    /// spec): the selected annotation's bbox as a dashed ember rect
-    /// over the shared render output, painted after the move chrome
-    /// so a grab's solid ember outline visually wins over the dashed
-    /// selection outline of the same annotation. A selection that
-    /// yields no chrome while Move is active (degenerate bbox /
-    /// stale index) deselects instead of rendering — the selection
-    /// must never point at something unoutlinable.
+    /// Paint the persistent-selection outlines (annotation-delete
+    /// spec, pluralized by multi-select-properties): one dashed
+    /// ember rect per selected annotation over the shared render
+    /// output, painted after the move chrome so a grab's solid ember
+    /// outline visually wins over the dashed selection outline of
+    /// the same annotation. A selection that yields no chrome at
+    /// all while Move is active (degenerate bboxes / stale indices)
+    /// deselects instead of rendering — the selection must never
+    /// point at something unoutlinable.
     fn paint_selected_chrome_if_any(&mut self, _ctx: &Context, painter: &egui::Painter) {
-        let Some(rect) = crate::chrome::selected_chrome(&self.state) else {
-            if self.state.tool == Tool::Move && self.state.selected_index.is_some() {
-                self.state.selected_index = None;
+        let rects = crate::chrome::selected_chrome(&self.state);
+        if rects.is_empty() {
+            if self.state.tool == Tool::Move && !self.state.selected.is_empty() {
+                self.state.selected.clear();
             }
             return;
-        };
+        }
         let Some(canvas_rect) = self.canvas_rect else {
             return;
         };
         let view = self.canvas.view_over(canvas_rect);
-        crate::chrome::paint_selected_chrome(
-            painter,
-            egui::Rect::from_two_pos(
-                view.image_to_logical(rect.min),
-                view.image_to_logical(rect.max),
-            ),
-        );
+        for rect in rects {
+            crate::chrome::paint_selected_chrome(
+                painter,
+                egui::Rect::from_two_pos(
+                    view.image_to_logical(rect.min),
+                    view.image_to_logical(rect.max),
+                ),
+            );
+        }
     }
 }
 
@@ -939,7 +943,7 @@ impl EditorApp {
         let on_floating = self.floating_rects.iter().any(|r| r.contains(pos));
         let pointer_event = if primary_pressed && canvas_rect.contains(pos) && !on_floating {
             self.canvas_drag_active = true;
-            Some(InputEvent::PointerDown { pos: at })
+            Some(InputEvent::PointerDown { pos: at, modifiers })
         } else if primary_released && self.canvas_drag_active {
             self.canvas_drag_active = false;
             Some(InputEvent::PointerUp)
@@ -999,9 +1003,8 @@ impl EditorApp {
     /// as today's Cancel. Shell-side by design: the dispatcher's Esc
     /// → `Cancel` contract stays stable for future shells.
     fn dispatch_shortcut_key(&mut self, ctx: &Context, modifiers: Modifiers) -> bool {
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
-            && self.state.selected_index.take().is_some()
-        {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.state.selected.is_empty() {
+            self.state.selected.clear();
             return true;
         }
         let key_event = ctx.input(|i| {
@@ -2425,6 +2428,7 @@ mod tests {
     fn drag_selection(state: &mut EditorState, min: (f32, f32), max: (f32, f32)) {
         let _ = state.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(min.0, min.1),
+            modifiers: Modifiers::default(),
         });
         let _ = state.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(max.0, max.1),
@@ -3963,7 +3967,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = move_state_with_ann();
         state.tool = Tool::Rect;
-        state.selected_index = None;
+        state.selected.clear();
         let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
         editor_frame(&ctx, &mut app, vec![]);
         let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
@@ -4199,7 +4203,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = move_state_with_ann();
         state.tool = Tool::Rect;
-        state.selected_index = None;
+        state.selected.clear();
         let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
         editor_frame(&ctx, &mut app, vec![]);
         // Settle pass: egui's Area sizing pass places the cluster on
@@ -4253,7 +4257,7 @@ mod tests {
     fn delete_chip_removes_selected_annotation_through_shell() {
         let ctx = egui::Context::default();
         let mut state = move_state_with_ann();
-        state.selected_index = Some(0);
+        state.selected = vec![0];
         let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
         // The panel stacks ~450 px of pods + bay above the bottom
         // cluster; a short screen would clip the Delete chip out of
@@ -4313,7 +4317,7 @@ mod tests {
     fn app_with_selected_ann() -> (egui::Context, EditorApp) {
         let ctx = egui::Context::default();
         let mut state = move_state_with_ann();
-        state.selected_index = Some(0);
+        state.selected = vec![0];
         let app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
         (ctx, app)
     }
@@ -4326,7 +4330,7 @@ mod tests {
         let (ctx, mut app) = app_with_selected_ann();
         editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Delete)]);
         assert!(app.state.anns.is_empty(), "Del through the shell deletes");
-        assert_eq!(app.state.selected_index, None, "delete drops the selection");
+        assert!(app.state.selected.is_empty(), "delete drops the selection");
         assert!(
             app.state
                 .undo
@@ -4358,8 +4362,8 @@ mod tests {
         let (ctx, mut app) = app_with_selected_ann();
         let slot = app.outcome.clone();
         editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Escape)]);
-        assert_eq!(
-            app.state.selected_index, None,
+        assert!(
+            app.state.selected.is_empty(),
             "first Esc clears the selection"
         );
         assert!(
@@ -4403,7 +4407,7 @@ mod tests {
         assert!(app.phase_active(), "Del must not end the phase");
         assert!(app.state.undo.is_empty(), "an inert Del pushes no snapshot");
         assert!(
-            app.state.selected_index.is_none(),
+            app.state.selected.is_empty(),
             "nothing is selectable mid-phase"
         );
     }
@@ -4416,8 +4420,8 @@ mod tests {
         let (ctx, mut app) = app_with_selected_ann();
         editor_frame(&ctx, &mut app, vec![key_press(egui::Key::R)]);
         assert_eq!(app.state.tool, Tool::Rect, "fixture: R armed Rect");
-        assert_eq!(
-            app.state.selected_index, None,
+        assert!(
+            app.state.selected.is_empty(),
             "leaving Move via hotkey drops the selection"
         );
     }
@@ -4434,11 +4438,11 @@ mod tests {
             color: flintshot_core::Color::RED,
             width: 2.0,
         });
-        state.selected_index = Some(0);
+        state.selected = vec![0];
         let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
         editor_frame(&ctx, &mut app, vec![]);
-        assert_eq!(
-            app.state.selected_index, None,
+        assert!(
+            app.state.selected.is_empty(),
             "a degenerate bbox deselects instead of rendering"
         );
     }
