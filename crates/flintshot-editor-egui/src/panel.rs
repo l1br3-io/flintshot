@@ -262,7 +262,7 @@ pub(crate) fn show(
                         hint(body, tool_hint(state.tool));
                     }
                     Section::Selection => {
-                        if delete_button(body, state.selected_index.is_some()) {
+                        if delete_button(body, !state.selected.is_empty()) {
                             action = ToolbarAction::Delete;
                         }
                     }
@@ -1055,7 +1055,7 @@ mod tests {
             fill: None,
         });
         state.commit_annotation();
-        state.selected_index = Some(0);
+        state.selected = vec![0];
         state
     }
 

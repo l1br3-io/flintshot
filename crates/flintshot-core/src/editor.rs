@@ -331,14 +331,24 @@ pub struct EditorState {
     /// While set, Move-tool `PointerDrag`s translate the grabbed
     /// annotation.
     pub moving: Option<AnnotationDrag>,
-    /// Selected annotation index, if any. Set by the dispatcher when
-    /// a Move-tool press grabs an annotation; **kept after release**
-    /// (persistent selection — the outline the shells render).
-    /// Cleared by a miss press, [`set_tool`](Self::set_tool) away
-    /// from Move, `undo` / `redo` / `crop`, and
-    /// [`delete_selected`](Self::delete_selected). Chrome-only:
-    /// never composed into Save / Copy / Upload output.
-    pub selected_index: Option<usize>,
+    /// Selected annotation indices (Move-tool selection set).
+    ///
+    /// **Invariant: sorted ascending, no duplicates** — maintained
+    /// by the private routing helpers; consumers may rely on stable
+    /// ascending order. Built by the dispatcher's Move-tool press
+    /// routing: plain click replaces the set with the hit
+    /// annotation, Shift+click toggles membership, a miss clears.
+    /// **Kept after release** (persistent selection — the outline
+    /// the shells render). Cleared by a miss press,
+    /// [`set_tool`](Self::set_tool) away from Move, `undo` / `redo`
+    /// / `crop`, and [`delete_selected`](Self::delete_selected).
+    /// Chrome-only: never composed into Save / Copy / Upload output,
+    /// never restored by undo (the set is chrome, not content).
+    ///
+    /// Not to be confused with [`selection`](Self::selection) — the
+    /// `Tool::Select` region selection rectangle, a different
+    /// concept that keeps its name.
+    pub selected: Vec<usize>,
     /// Insertion-point position within the in-flight `Tool::Text`
     /// draft, as a **char index** (not byte index) into
     /// `pending`'s `text`. Reset to 0 when a draft begins; advanced by
@@ -377,7 +387,7 @@ impl EditorState {
             next_number: 1,
             number_diameter: NUMBER_DEFAULT_DIAMETER,
             moving: None,
-            selected_index: None,
+            selected: Vec::new(),
             text_cursor: 0,
         }
     }
@@ -393,7 +403,7 @@ impl EditorState {
     /// originated. Staying on (or switching to) Move never clears.
     pub fn set_tool(&mut self, tool: Tool) {
         if self.tool == Tool::Move && tool != Tool::Move {
-            self.selected_index = None;
+            self.selected.clear();
         }
         self.tool = tool;
     }
@@ -606,14 +616,64 @@ impl EditorState {
 
     // --- Annotation move (Tool::Move) ---
 
+    /// Route a Move-tool press: selection first (the set model),
+    /// then the drag grab.
+    ///
+    /// - hit + Shift: toggle membership. A toggle-*in* also grabs
+    ///   the pressed annotation for a drag (press-and-hold after
+    ///   adding moves it); a toggle-*out* starts no drag.
+    /// - hit, no Shift: replace the set with the hit annotation and
+    ///   grab it.
+    /// - miss: clear the set, start nothing.
+    ///
+    /// Shared by the normal dispatcher and the text-draft
+    /// commit-then-route path so both stay Shift-aware in lockstep.
+    fn route_move_press(&mut self, pos: Point, shift: bool) {
+        let Some(index) = self.hit_test(pos) else {
+            self.selected.clear();
+            return;
+        };
+        if shift {
+            if self.toggle_selected(index) {
+                self.begin_move(index, pos);
+            }
+        } else {
+            self.select_only(index);
+            self.begin_move(index, pos);
+        }
+    }
+
+    /// Replace the selection set with a single member.
+    fn select_only(&mut self, index: usize) {
+        self.selected.clear();
+        self.selected.push(index);
+    }
+
+    /// Toggle `index`'s membership in the selection set, preserving
+    /// the sorted-deduped invariant. Returns `true` when the index
+    /// is a member after the call (a toggle-in).
+    fn toggle_selected(&mut self, index: usize) -> bool {
+        match self.selected.binary_search(&index) {
+            Ok(pos) => {
+                self.selected.remove(pos);
+                false
+            }
+            Err(pos) => {
+                self.selected.insert(pos, index);
+                true
+            }
+        }
+    }
+
     /// Start moving the annotation at `index` from a press at `at`.
     ///
     /// Records the grab offset (press position minus bounding-box
     /// `min`) so subsequent [`update_move`](Self::update_move) calls
-    /// keep the grab point under the cursor, and publishes
-    /// `selected_index`. Returns `false` — the press is a no-op —
-    /// when the annotation has no bounding box (e.g. an empty
-    /// polyline) and thus nothing to grab or move by.
+    /// keep the grab point under the cursor. Selection is *not*
+    /// touched here — the press routing owns the set. Returns
+    /// `false` — the drag is a no-op — when the annotation has no
+    /// bounding box (e.g. an empty polyline) and thus nothing to
+    /// grab or move by.
     fn begin_move(&mut self, index: usize, at: Point) -> bool {
         let Some(grab_offset) = self.anns.get(index).and_then(|ann| {
             ann.bounding_box()
@@ -626,7 +686,6 @@ impl EditorState {
             grab_offset,
             moved: false,
         });
-        self.selected_index = Some(index);
         true
     }
 
@@ -664,30 +723,39 @@ impl EditorState {
         self.anns[drag.index].translate(dx, dy);
     }
 
-    /// Drop the in-flight move state (`moving` + `selected_index`)
+    /// Drop the in-flight move state (`moving` + the selection set)
     /// without touching `anns` — the translation already applied
     /// stays applied.
     fn end_move(&mut self) {
         self.moving = None;
-        self.selected_index = None;
+        self.selected.clear();
     }
 
-    /// Remove the selected annotation (`selected_index`).
+    /// Remove every selected annotation in one pass.
     ///
-    /// Pushes an `anns`-only snapshot onto `undo` (pre-delete state),
-    /// clears `redo`, and drops the selection. Any in-flight move
+    /// Pushes a single `anns`-only snapshot onto `undo` (pre-delete
+    /// state), clears `redo`, and drops the selection — one `Del`,
+    /// one undo entry that restores all members. Any in-flight move
     /// drag ends first (its index dies with the removal). No-op when
-    /// nothing is selected.
+    /// the selection set is empty.
     pub fn delete_selected(&mut self) {
-        let Some(index) = self.selected_index else {
+        if self.selected.is_empty() {
             return;
-        };
+        }
+        // Capture the doomed indices before `end_move` clears the set.
+        let doomed: Vec<usize> = self.selected.clone();
         self.end_move();
         self.undo
             .push(Snapshot::anns_only(self.anns.clone(), self.next_number));
         self.redo.clear();
-        self.anns.remove(index);
-        self.selected_index = None;
+        // Remove back-to-front so live indices below each removal
+        // stay valid (the set is sorted ascending). The bounds guard
+        // makes a stale index a skip, not a panic.
+        for index in doomed.into_iter().rev() {
+            if index < self.anns.len() {
+                self.anns.remove(index);
+            }
+        }
     }
 
     /// Confirm the current selection: crop the editor to the selected
@@ -875,7 +943,7 @@ impl EditorState {
                     self.dispatch_key(*key, *modifiers)
                 }
             }
-            InputEvent::PointerDown { pos } => {
+            InputEvent::PointerDown { pos, modifiers } => {
                 if self.tool == Tool::Select {
                     // Select owns region selection only — a press on a
                     // committed annotation starts a fresh selection
@@ -883,15 +951,12 @@ impl EditorState {
                     // `Tool::Move`).
                     self.begin_selection(*pos);
                 } else if self.tool == Tool::Move {
-                    // A press on a committed annotation grabs it for a
-                    // move; a miss deselects and is otherwise a no-op —
-                    // Move never starts a selection or an annotation.
-                    // See `begin_move` for the degenerate-bbox miss path.
-                    if let Some(index) = self.hit_test(*pos) {
-                        self.begin_move(index, *pos);
-                    } else {
-                        self.selected_index = None;
-                    }
+                    // A press routes through the selection set first
+                    // (Shift toggles, plain replaces, miss clears),
+                    // then grabs the hit annotation for a drag. See
+                    // `route_move_press` for the arm details and the
+                    // degenerate-bbox no-grab path.
+                    self.route_move_press(*pos, modifiers.shift);
                 } else if self.tool == Tool::Number {
                     // Number is click-to-place: a single PointerDown
                     // commits the bubble immediately (no pending, no
@@ -1034,16 +1099,12 @@ impl EditorState {
             // (Flameshot behaviour). If the tool is still Text, a new
             // caret is placed; if the user switched tools via the
             // toolbar, the new tool's drag begins.
-            InputEvent::PointerDown { pos } => {
+            InputEvent::PointerDown { pos, modifiers } => {
                 self.commit_text_draft();
                 if self.tool == Tool::Select {
                     self.begin_selection(*pos);
                 } else if self.tool == Tool::Move {
-                    if let Some(index) = self.hit_test(*pos) {
-                        self.begin_move(index, *pos);
-                    } else {
-                        self.selected_index = None;
-                    }
+                    self.route_move_press(*pos, modifiers.shift);
                 } else if self.tool == Tool::Number {
                     self.place_number(*pos);
                 } else {
@@ -1717,7 +1778,7 @@ mod tests {
         assert_eq!(s.blur_kind, BlurKind::Gaussian);
         assert_eq!(s.font_size, 16.0);
         assert_eq!(s.next_number, 1);
-        assert!(s.selected_index.is_none());
+        assert!(s.selected.is_empty());
         assert!(s.selection.is_none(), "selection rect starts None");
         assert_eq!(s.tool, Tool::Move, "Move is the default tool");
         assert!(!s.flip_to_move, "flip policy defaults off (sticky tools)");
@@ -1901,7 +1962,7 @@ mod tests {
     /// Full pointer drag through the dispatcher with the active tool,
     /// committing a non-degenerate annotation on release.
     fn drag_commit(s: &mut EditorState, from: Point, to: Point) {
-        s.dispatch_input(&InputEvent::PointerDown { pos: from });
+        s.dispatch_input(&down(from));
         s.dispatch_input(&InputEvent::PointerDrag { pos: to });
         s.dispatch_input(&InputEvent::PointerUp);
     }
@@ -1930,9 +1991,7 @@ mod tests {
     fn text_enter_commit_flips_to_move() {
         let mut s = text_state();
         s.flip_to_move = true;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('h'));
         s.dispatch_input(&InputEvent::Key {
             key: Key::Enter,
@@ -1959,9 +2018,7 @@ mod tests {
         // win over the flip.
         let mut s = text_state();
         s.flip_to_move = true;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('h'));
         s.tool = Tool::Rect;
         s.commit_text_draft();
@@ -1973,9 +2030,7 @@ mod tests {
     fn number_placement_does_not_flip() {
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Number;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         assert_eq!(s.anns.len(), 1);
         assert_eq!(s.tool, Tool::Number, "Number never flips");
     }
@@ -1985,9 +2040,7 @@ mod tests {
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Rect;
         // Click without drag → zero-extent → cancel path, no commit.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.anns.is_empty(), "degenerate rect cancels");
         assert_eq!(s.tool, Tool::Rect, "cancel must not flip");
@@ -2205,6 +2258,23 @@ mod tests {
         }
     }
 
+    fn down(pos: Point) -> InputEvent {
+        InputEvent::PointerDown {
+            pos,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    fn shift_down(pos: Point) -> InputEvent {
+        InputEvent::PointerDown {
+            pos,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        }
+    }
+
     #[test]
     fn dispatch_esc_returns_cancel() {
         let mut s = EditorState::new(blank_image());
@@ -2339,9 +2409,7 @@ mod tests {
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Rect;
         assert_eq!(
-            s.dispatch_input(&InputEvent::PointerDown {
-                pos: Point::new(5.0, 5.0)
-            }),
+            s.dispatch_input(&down(Point::new(5.0, 5.0))),
             DispatchOutcome::Continue
         );
         assert!(s.pending.is_some());
@@ -2351,9 +2419,7 @@ mod tests {
     fn dispatch_pointer_down_drag_up_commits_rect() {
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Rect;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 60.0),
         });
@@ -2378,9 +2444,7 @@ mod tests {
         // commit a 0×0 rect. The zero-area filter moved into the
         // dispatcher in Task 10 so all shells inherit it.
         let mut s = EditorState::new(blank_image());
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.pending.is_none(), "pending cancelled, not committed");
         assert_eq!(s.anns.len(), 0, "no annotation committed");
@@ -2412,9 +2476,7 @@ mod tests {
         s.stroke_width = 4.0;
         s.color = Color::rgb(0, 0, 255);
 
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 60.0),
         });
@@ -2452,9 +2514,7 @@ mod tests {
     fn dispatch_arrow_click_without_drag_cancels() {
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Arrow;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.pending.is_none(), "degenerate arrow cancelled");
         assert_eq!(s.anns.len(), 0, "no annotation committed");
@@ -2468,9 +2528,7 @@ mod tests {
     fn dispatch_line_click_without_drag_cancels() {
         let mut s = EditorState::new(blank_image());
         s.tool = Tool::Line;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.pending.is_none(), "degenerate line cancelled");
         assert_eq!(s.anns.len(), 0, "no annotation committed");
@@ -2495,9 +2553,7 @@ mod tests {
     #[test]
     fn dispatch_text_click_places_caret() {
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 40.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 40.0)));
         match &s.pending {
             Some(Annotation::Text { pos, text, .. }) => {
                 assert_eq!(*pos, Point::new(30.0, 40.0), "caret at click position");
@@ -2539,9 +2595,7 @@ mod tests {
         let mut s = text_state();
         s.color = Color::rgb(255, 0, 0);
         s.text_color = Color::rgb(255, 255, 255);
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(5.0, 5.0),
-        });
+        s.dispatch_input(&down(Point::new(5.0, 5.0)));
         match &s.pending {
             Some(Annotation::Text { color, .. }) => {
                 assert_eq!(*color, Color::rgb(255, 255, 255), "uses text_color");
@@ -2553,9 +2607,7 @@ mod tests {
     #[test]
     fn dispatch_text_typing_appends_chars() {
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('h'));
         s.dispatch_input(&InputEvent::TextInput('i'));
         match &s.pending {
@@ -2568,9 +2620,7 @@ mod tests {
     #[test]
     fn dispatch_text_backspace_deletes_last_char() {
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         for ch in "hi!".chars() {
             s.dispatch_input(&InputEvent::TextInput(ch));
         }
@@ -2587,9 +2637,7 @@ mod tests {
     #[test]
     fn dispatch_text_enter_commits_nonempty_draft() {
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         for ch in "hello".chars() {
             s.dispatch_input(&InputEvent::TextInput(ch));
         }
@@ -2616,9 +2664,7 @@ mod tests {
         // Shift+Enter breaks the line instead of committing; a
         // subsequent plain Enter commits the multi-line draft whole.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         for ch in "ab".chars() {
             s.dispatch_input(&InputEvent::TextInput(ch));
         }
@@ -2656,9 +2702,7 @@ mod tests {
         // (second) line, not stay pinned to the first. The cursor
         // (char index) should point just past the '\n'.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         for ch in "ab".chars() {
             s.dispatch_input(&InputEvent::TextInput(ch));
         }
@@ -2684,9 +2728,7 @@ mod tests {
         // Arrow Left retreats the cursor so the next typed char
         // inserts before the last char rather than appending.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         for ch in "abc".chars() {
             s.dispatch_input(&InputEvent::TextInput(ch));
         }
@@ -2710,9 +2752,7 @@ mod tests {
         // Backspace removes the char immediately before the cursor,
         // not always the last char of the draft.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         for ch in "abc".chars() {
             s.dispatch_input(&InputEvent::TextInput(ch));
         }
@@ -2742,9 +2782,7 @@ mod tests {
         // Up/Down preserve the column across lines; Left/Right wrap
         // across '\n'; Home/End jump to the line edges.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         // Build "abc\ndefgh" (line 0 width 3, line 1 width 5).
         for ch in "abc\ndefgh".chars() {
             s.dispatch_input(&InputEvent::TextInput(ch));
@@ -2811,9 +2849,7 @@ mod tests {
         // commit an empty Text annotation — that would litter the
         // annotation list with invisible empties.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::Key {
             key: Key::Enter,
             modifiers: Modifiers::default(),
@@ -2829,9 +2865,7 @@ mod tests {
         // the window). The dispatcher distinguishes via the outcome:
         // Continue here vs Cancel for editor-close.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         for ch in "draft".chars() {
             s.dispatch_input(&InputEvent::TextInput(ch));
         }
@@ -2852,9 +2886,7 @@ mod tests {
         // While editing text, Ctrl+S must not trigger Save (the user
         // is mid-edit; committing the draft first is the user's job).
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('a'));
         assert_eq!(
             s.dispatch_input(&InputEvent::Key {
@@ -2881,9 +2913,7 @@ mod tests {
             fill: None,
         });
         s.tool = Tool::Text;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         assert_eq!(
             s.dispatch_input(&InputEvent::Key {
                 key: Key::Char('z'),
@@ -2908,14 +2938,10 @@ mod tests {
         // caret; that now requires staying on Text via a re-press.
         let mut s = text_state();
         s.flip_to_move = true;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('h'));
         // Click somewhere else while the draft is active.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(50.0, 50.0),
-        });
+        s.dispatch_input(&down(Point::new(50.0, 50.0)));
         assert_eq!(s.anns.len(), 1, "previous draft committed");
         assert!(s.pending.is_none(), "no new caret after the flip");
         assert_eq!(s.tool, Tool::Move, "commit flipped the tool to Move");
@@ -2933,13 +2959,9 @@ mod tests {
         // Clicking elsewhere with an empty draft cancels it (no empty
         // annotation committed) and places a new caret.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         // No text typed — draft is empty.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(50.0, 50.0),
-        });
+        s.dispatch_input(&down(Point::new(50.0, 50.0)));
         assert_eq!(s.anns.len(), 0, "empty draft was cancelled, not committed");
         match &s.pending {
             Some(Annotation::Text { pos, text, .. }) => {
@@ -2955,17 +2977,13 @@ mod tests {
         // User was editing text, switched to Rectangle via toolbar,
         // then clicks: the draft is committed and a Rect drag begins.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('x'));
         // Simulate toolbar tool change.
         s.tool = Tool::Rect;
         // Click to start drawing — this should commit the text and
         // begin a rect annotation.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(20.0, 20.0),
-        });
+        s.dispatch_input(&down(Point::new(20.0, 20.0)));
         assert_eq!(s.anns.len(), 1, "text draft committed");
         match &s.pending {
             Some(Annotation::Rect { rect, .. }) => {
@@ -2981,9 +2999,7 @@ mod tests {
         // (pre-commit anns) — works via the existing snapshot path
         // (Task 7), no extra plumbing.
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('x'));
         s.dispatch_input(&InputEvent::Key {
             key: Key::Enter,
@@ -3185,9 +3201,7 @@ mod tests {
     fn dispatch_select_drag_creates_selection() {
         let mut s = hundred_state();
         s.tool = Tool::Select;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         assert!(s.selection.is_some(), "PointerDown starts selection");
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 60.0),
@@ -3206,9 +3220,7 @@ mod tests {
     fn dispatch_select_up_normalizes_selection() {
         let mut s = hundred_state();
         s.tool = Tool::Select;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(50.0, 60.0),
-        });
+        s.dispatch_input(&down(Point::new(50.0, 60.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(10.0, 10.0),
         });
@@ -3227,9 +3239,7 @@ mod tests {
     fn dispatch_enter_confirms_selection() {
         let mut s = hundred_state();
         s.tool = Tool::Select;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 50.0),
         });
@@ -3303,9 +3313,7 @@ mod tests {
     #[test]
     fn dispatch_number_click_places_bubble_immediately() {
         let mut s = number_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(20.0, 30.0),
-        });
+        s.dispatch_input(&down(Point::new(20.0, 30.0)));
         assert!(s.pending.is_none(), "Number is click-to-place, no pending");
         assert_eq!(s.anns.len(), 1, "exactly one bubble committed");
         assert_eq!(s.next_number, 2, "counter advanced");
@@ -3340,7 +3348,7 @@ mod tests {
             Point::new(30.0, 10.0),
         ];
         for (expected_n, pos) in [1_u32, 2, 3].into_iter().zip(positions) {
-            s.dispatch_input(&InputEvent::PointerDown { pos });
+            s.dispatch_input(&down(pos));
             let idx = usize::try_from(expected_n - 1).expect("non-zero");
             match &s.anns[idx] {
                 Annotation::Number { n, pos: p, .. } => {
@@ -3367,7 +3375,7 @@ mod tests {
             Point::new(20.0, 10.0),
             Point::new(30.0, 10.0),
         ] {
-            s.dispatch_input(&InputEvent::PointerDown { pos });
+            s.dispatch_input(&down(pos));
         }
         assert_eq!(s.next_number, 4);
         assert_eq!(s.anns.len(), 3);
@@ -3379,9 +3387,7 @@ mod tests {
             "counter decremented so the next bubble is 3 again"
         );
         // Re-place: the new bubble is numbered 3, not 4.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(40.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(40.0, 10.0)));
         match &s.anns[2] {
             Annotation::Number { n, .. } => assert_eq!(*n, 3, "counter reused the undone number"),
             other => panic!("expected Number, got {other:?}"),
@@ -3394,9 +3400,7 @@ mod tests {
     #[test]
     fn dispatch_number_redo_reincrements_counter() {
         let mut s = number_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         assert_eq!(s.next_number, 2);
         s.dispatch_input(&ctrl('z'));
         assert_eq!(s.next_number, 1, "undo decremented");
@@ -3410,9 +3414,7 @@ mod tests {
     #[test]
     fn dispatch_number_default_diameter_is_28() {
         let mut s = number_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         match &s.anns[0] {
             Annotation::Number { diameter, .. } => assert_eq!(
                 *diameter, NUMBER_DEFAULT_DIAMETER,
@@ -3430,7 +3432,7 @@ mod tests {
         let mut s = number_state();
         s.number_diameter = 64.0;
         for pos in [Point::new(10.0, 10.0), Point::new(50.0, 10.0)] {
-            s.dispatch_input(&InputEvent::PointerDown { pos });
+            s.dispatch_input(&down(pos));
         }
         for (i, ann) in s.anns.iter().enumerate() {
             match ann {
@@ -3451,9 +3453,7 @@ mod tests {
     #[test]
     fn number_diameter_change_leaves_committed_bubbles_immutable() {
         let mut s = number_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.number_diameter = 96.0;
         match &s.anns[0] {
             Annotation::Number { diameter, .. } => assert_eq!(
@@ -3472,9 +3472,7 @@ mod tests {
     fn dispatch_number_custom_diameter_undo_redo_restores_counter() {
         let mut s = number_state();
         s.number_diameter = 64.0;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&ctrl('z'));
         assert_eq!(s.anns.len(), 0, "undo removed the custom-diameter bubble");
         assert_eq!(s.next_number, 1, "counter decremented");
@@ -3496,9 +3494,7 @@ mod tests {
     #[test]
     fn dispatch_number_drag_and_up_are_noops() {
         let mut s = number_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(20.0, 30.0),
-        });
+        s.dispatch_input(&down(Point::new(20.0, 30.0)));
         // A stray drag (e.g. the user wiggled the mouse before
         // releasing) must not crash or conjure extra annotations.
         s.dispatch_input(&InputEvent::PointerDrag {
@@ -3516,15 +3512,11 @@ mod tests {
     #[test]
     fn dispatch_text_pointer_switches_to_number_tool() {
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('x'));
         // Simulate a toolbar tool change while the draft is open.
         s.tool = Tool::Number;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(50.0, 50.0),
-        });
+        s.dispatch_input(&down(Point::new(50.0, 50.0)));
         // Draft committed + number bubble placed.
         assert_eq!(s.anns.len(), 2);
         assert!(matches!(s.anns[0], Annotation::Text { .. }));
@@ -3565,11 +3557,9 @@ mod tests {
     fn move_press_on_annotation_moves_it() {
         let mut s = move_state();
         // Press at the annotation's centre: grab offset = (20, 15).
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         assert!(s.moving.is_some(), "press on annotation starts a move");
-        assert_eq!(s.selected_index, Some(0));
+        assert_eq!(s.selected, vec![0]);
         assert!(s.selection.is_none(), "move does not start a selection");
         // Drag so the cursor lands at (60, 45): bbox.min follows at
         // cursor − grab offset = (40, 30).
@@ -3586,8 +3576,8 @@ mod tests {
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.moving.is_none(), "release ends the move");
         assert_eq!(
-            s.selected_index,
-            Some(0),
+            s.selected,
+            vec![0],
             "release keeps the selection (persistent selection)"
         );
     }
@@ -3598,9 +3588,7 @@ mod tests {
     #[test]
     fn one_move_gesture_is_one_undo_entry() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         for x in [35.0, 45.0, 55.0] {
             s.dispatch_input(&InputEvent::PointerDrag {
                 pos: Point::new(x, 25.0),
@@ -3629,9 +3617,7 @@ mod tests {
     #[test]
     fn click_without_move_records_no_history() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         // Same-position drag: zero movement, no snapshot.
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(30.0, 25.0),
@@ -3649,9 +3635,7 @@ mod tests {
     #[test]
     fn undo_mid_move_cancels_and_restores() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 45.0),
         });
@@ -3688,9 +3672,7 @@ mod tests {
         let mut s = move_state();
         s.tool = Tool::Select;
         // Off the annotation.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(70.0, 70.0),
-        });
+        s.dispatch_input(&down(Point::new(70.0, 70.0)));
         assert!(s.moving.is_none());
         assert!(s.selection.is_some(), "empty-space press selects");
         // The drag extends the selection, not the annotation.
@@ -3709,9 +3691,7 @@ mod tests {
     fn select_press_on_annotation_starts_selection() {
         let mut s = move_state();
         s.tool = Tool::Select;
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         assert!(s.moving.is_none(), "Select never grabs an annotation");
         assert!(s.selection.is_some(), "press on annotation selects");
         match &s.anns[0] {
@@ -3733,9 +3713,7 @@ mod tests {
         });
         // (50, 12) is 2 px off the segment — inside the 1.5 + 3.0
         // hit radius.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(50.0, 12.0),
-        });
+        s.dispatch_input(&down(Point::new(50.0, 12.0)));
         assert!(s.moving.is_some(), "near-segment press grabs the line");
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 32.0),
@@ -3761,9 +3739,7 @@ mod tests {
             width: 3.0,
         });
         assert!(!s.begin_move(0, Point::new(50.0, 50.0)));
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(50.0, 50.0),
-        });
+        s.dispatch_input(&down(Point::new(50.0, 50.0)));
         assert!(s.moving.is_none());
         assert!(s.selection.is_none(), "Move never starts a selection");
     }
@@ -3773,9 +3749,7 @@ mod tests {
     #[test]
     fn move_press_on_empty_space_is_noop() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(70.0, 70.0),
-        });
+        s.dispatch_input(&down(Point::new(70.0, 70.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(90.0, 80.0),
         });
@@ -3799,14 +3773,12 @@ mod tests {
     #[test]
     fn move_click_keeps_selection_after_release() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.moving.is_none());
         assert_eq!(
-            s.selected_index,
-            Some(0),
+            s.selected,
+            vec![0],
             "click-without-drag leaves the annotation selected"
         );
     }
@@ -3814,34 +3786,24 @@ mod tests {
     #[test]
     fn move_drag_release_keeps_selection() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 45.0),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.moving.is_none());
-        assert_eq!(
-            s.selected_index,
-            Some(0),
-            "post-move release stays selected"
-        );
+        assert_eq!(s.selected, vec![0], "post-move release stays selected");
     }
 
     #[test]
     fn move_miss_press_clears_selection() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected_index, Some(0), "fixture: selected");
+        assert_eq!(s.selected, vec![0], "fixture: selected");
         // A press on empty canvas deselects — and starts nothing.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(70.0, 70.0),
-        });
-        assert!(s.selected_index.is_none(), "miss press clears selection");
+        s.dispatch_input(&down(Point::new(70.0, 70.0)));
+        assert!(s.selected.is_empty(), "miss press clears selection");
         assert!(s.moving.is_none());
         assert!(s.selection.is_none());
     }
@@ -3849,16 +3811,12 @@ mod tests {
     #[test]
     fn move_regrab_replaces_selection_last_click_wins() {
         let mut s = two_ann_move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected_index, Some(0));
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(75.0, 25.0),
-        });
+        assert_eq!(s.selected, vec![0]);
+        s.dispatch_input(&down(Point::new(75.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected_index, Some(1), "last click wins");
+        assert_eq!(s.selected, vec![1], "last click wins");
     }
 
     #[test]
@@ -3866,18 +3824,16 @@ mod tests {
         let mut s = two_ann_move_state();
         // Pre-populate redo to prove delete clears it (new mutation).
         s.redo.push(Snapshot::anns_only(Vec::new(), 1));
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(75.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(75.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected_index, Some(1), "fixture: ann 1 selected");
+        assert_eq!(s.selected, vec![1], "fixture: ann 1 selected");
         s.delete_selected();
         assert_eq!(
             s.anns,
             vec![rect_ann(10.0, 10.0, 50.0, 40.0)],
             "exactly ann 1 removed"
         );
-        assert!(s.selected_index.is_none());
+        assert!(s.selected.is_empty());
         assert_eq!(s.undo.len(), 1);
         assert_eq!(s.undo[0].anns.len(), 2, "pre-delete snapshot carries both");
         assert!(s.redo.is_empty(), "delete clears redo");
@@ -3907,20 +3863,14 @@ mod tests {
     #[test]
     fn delete_selected_preserves_next_number() {
         let mut s = number_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
+        s.dispatch_input(&down(Point::new(30.0, 10.0)));
         assert_eq!(s.next_number, 3);
         s.set_tool(Tool::Move);
         // Click bubble 1's centre to select it, then delete.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected_index, Some(0));
+        assert_eq!(s.selected, vec![0]);
         s.delete_selected();
         assert_eq!(s.anns.len(), 1);
         assert_eq!(
@@ -3938,9 +3888,7 @@ mod tests {
     #[test]
     fn dispatch_del_and_backspace_delete_selected() {
         let mut s = two_ann_move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(75.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(75.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(
             s.dispatch_input(&key(Key::Delete)),
@@ -3948,9 +3896,7 @@ mod tests {
         );
         assert_eq!(s.anns.len(), 1, "Del removed the selection");
         // Backspace aliases Del outside text mode.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(
             s.dispatch_input(&key(Key::Backspace)),
@@ -3978,9 +3924,7 @@ mod tests {
     #[test]
     fn delete_keys_with_modifiers_are_reserved() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
         for key in [Key::Delete, Key::Backspace] {
             assert_eq!(
@@ -3997,8 +3941,8 @@ mod tests {
         assert_eq!(s.anns.len(), 1, "modified chords must not delete");
         assert!(s.undo.is_empty());
         assert_eq!(
-            s.selected_index,
-            Some(0),
+            s.selected,
+            vec![0],
             "reserved chords must not even deselect"
         );
     }
@@ -4008,9 +3952,7 @@ mod tests {
         let mut s = text_state();
         s.anns.push(rect_ann(0.0, 0.0, 5.0, 5.0));
         // Caret away from the committed rect; type two chars.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(50.0, 50.0),
-        });
+        s.dispatch_input(&down(Point::new(50.0, 50.0)));
         s.dispatch_input(&InputEvent::TextInput('a'));
         s.dispatch_input(&InputEvent::TextInput('b'));
         s.dispatch_input(&key(Key::Backspace));
@@ -4031,70 +3973,56 @@ mod tests {
     fn undo_and_redo_clear_selection() {
         let mut s = move_state();
         // A real move gesture so undo has something to pop.
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 45.0),
         });
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected_index, Some(0), "fixture: selected after release");
+        assert_eq!(s.selected, vec![0], "fixture: selected after release");
         s.dispatch_input(&ctrl('z'));
-        assert!(s.selected_index.is_none(), "undo drops the selection");
+        assert!(s.selected.is_empty(), "undo drops the selection");
         s.dispatch_input(&ctrl('y'));
-        assert!(s.selected_index.is_none(), "redo keeps it dropped");
+        assert!(s.selected.is_empty(), "redo keeps it dropped");
         assert_eq!(s.anns.len(), 1);
     }
 
     #[test]
     fn crop_clears_selection() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected_index, Some(0), "fixture: selected");
+        assert_eq!(s.selected, vec![0], "fixture: selected");
         s.crop(Rect::from_xywh(0.0, 0.0, 80.0, 80.0));
-        assert!(s.selected_index.is_none(), "crop drops the selection");
+        assert!(s.selected.is_empty(), "crop drops the selection");
         assert_eq!(s.anns.len(), 1, "fixture: the annotation survived");
     }
 
     #[test]
     fn set_tool_away_from_move_clears_selection() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected_index, Some(0), "fixture: selected");
+        assert_eq!(s.selected, vec![0], "fixture: selected");
         s.set_tool(Tool::Rect);
         assert_eq!(s.tool, Tool::Rect);
-        assert!(s.selected_index.is_none(), "leaving Move deselects");
+        assert!(s.selected.is_empty(), "leaving Move deselects");
         // Switching back, then Move→Move, must never clear.
         s.set_tool(Tool::Move);
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerUp);
-        assert_eq!(s.selected_index, Some(0), "fixture: reselected");
+        assert_eq!(s.selected, vec![0], "fixture: reselected");
         s.set_tool(Tool::Move);
-        assert_eq!(
-            s.selected_index,
-            Some(0),
-            "Move→Move switch keeps the selection"
-        );
+        assert_eq!(s.selected, vec![0], "Move→Move switch keeps the selection");
     }
 
     #[test]
     fn delete_of_dragged_annotation_ends_drag_cleanly() {
         let mut s = move_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(30.0, 25.0),
-        });
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
         assert!(s.moving.is_some(), "fixture: drag in flight");
         s.delete_selected();
         assert!(s.moving.is_none(), "the drag died with the annotation");
-        assert!(s.selected_index.is_none());
+        assert!(s.selected.is_empty());
         assert!(s.anns.is_empty());
         assert_eq!(s.undo.len(), 1, "pre-delete snapshot pushed");
         // A stray drag after the delete must not panic or conjure
@@ -4112,20 +4040,149 @@ mod tests {
         // annotation must still clear a stale selection (the
         // text-mode press branch mirrors the normal one).
         let mut s = text_state();
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(10.0, 10.0),
-        });
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::TextInput('x'));
         s.tool = Tool::Move;
-        s.selected_index = Some(0);
-        s.dispatch_input(&InputEvent::PointerDown {
-            pos: Point::new(70.0, 70.0),
-        });
+        s.selected = vec![0];
+        s.dispatch_input(&down(Point::new(70.0, 70.0)));
         assert_eq!(s.anns.len(), 1, "the draft committed");
         assert!(
-            s.selected_index.is_none(),
+            s.selected.is_empty(),
             "miss press cleared the stale selection"
         );
+    }
+
+    // --- Multi-select routing (multi-select-properties Task 001) ---
+
+    /// Shift+click toggles membership: a press on an unselected
+    /// annotation adds it to the set; a press on a member removes it.
+    #[test]
+    fn shift_click_toggles_membership_in_and_out() {
+        let mut s = two_ann_move_state();
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0, 1], "shift-click adds to the set");
+        s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
+        assert_eq!(s.selected, vec![0], "shift-click on a member removes it");
+    }
+
+    /// Toggling a member out deselects it and starts no drag — the
+    /// pointer-up of that press and any stray drag are no-ops.
+    #[test]
+    fn shift_click_toggle_out_starts_no_drag() {
+        let mut s = move_state();
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&shift_down(Point::new(30.0, 25.0)));
+        assert!(s.selected.is_empty(), "member toggled out");
+        assert!(s.moving.is_none(), "toggle-out starts no drag");
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(60.0, 45.0),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        match &s.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(rect.min, Point::new(10.0, 10.0), "stray drag moved nothing");
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+        assert!(s.undo.is_empty(), "no gesture, no snapshot");
+    }
+
+    /// A plain click on a hit annotation replaces the whole set with
+    /// that single member — last click wins, set semantics.
+    #[test]
+    fn plain_click_replaces_whole_set() {
+        let mut s = two_ann_move_state();
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0, 1], "fixture: two members");
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0], "plain click collapses the set");
+    }
+
+    /// A miss press clears the whole set, shift or not.
+    #[test]
+    fn miss_press_clears_whole_set() {
+        let mut s = two_ann_move_state();
+        s.dispatch_input(&down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&down(Point::new(70.0, 70.0)));
+        assert!(s.selected.is_empty(), "miss press clears the set");
+        s.dispatch_input(&shift_down(Point::new(30.0, 25.0)));
+        assert_eq!(s.selected, vec![0], "fixture: rebuilt one member");
+        s.dispatch_input(&shift_down(Point::new(70.0, 70.0)));
+        assert!(s.selected.is_empty(), "shift miss also clears");
+    }
+
+    /// The set is maintained sorted ascending regardless of the order
+    /// members were toggled in (documented invariant consumers rely
+    /// on for stable iteration).
+    #[test]
+    fn selected_set_stays_sorted() {
+        let mut s = two_ann_move_state();
+        s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&shift_down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0, 1], "sorted ascending, not toggle order");
+    }
+
+    /// `Del` removes every selected annotation in one pass with one
+    /// `anns`-only snapshot; a single undo restores all of them and
+    /// leaves the selection empty (undo never restores the set).
+    #[test]
+    fn delete_selected_removes_all_with_one_snapshot() {
+        let mut s = two_ann_move_state();
+        s.dispatch_input(&shift_down(Point::new(75.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&shift_down(Point::new(30.0, 25.0)));
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert_eq!(s.selected, vec![0, 1], "fixture: both selected");
+        s.delete_selected();
+        assert!(s.anns.is_empty(), "both removed in one pass");
+        assert!(s.selected.is_empty(), "delete drops the set");
+        assert_eq!(s.undo.len(), 1, "one delete gesture = one snapshot");
+        assert_eq!(s.undo[0].anns.len(), 2, "pre-delete snapshot carries both");
+        s.undo();
+        assert_eq!(
+            s.anns,
+            vec![
+                rect_ann(10.0, 10.0, 50.0, 40.0),
+                rect_ann(60.0, 10.0, 90.0, 40.0)
+            ],
+            "one undo restores all members, in draw order"
+        );
+        assert!(s.selected.is_empty(), "undo does not resurrect the set");
+    }
+
+    /// The text-draft commit-then-route press mirrors the normal
+    /// Move routing, Shift included: a shift hit toggles, a shift
+    /// miss clears.
+    #[test]
+    fn text_flush_shift_press_routes_selection() {
+        let mut s = text_state();
+        s.dispatch_input(&down(Point::new(10.0, 10.0)));
+        s.dispatch_input(&InputEvent::TextInput('x'));
+        s.tool = Tool::Move;
+        // Text "x" at (10,10), size 16: coarse bbox (10,10)-(18,26).
+        s.dispatch_input(&shift_down(Point::new(12.0, 18.0)));
+        assert_eq!(s.anns.len(), 1, "the draft committed");
+        assert_eq!(
+            s.selected,
+            vec![0],
+            "shift hit toggles the committed ann in"
+        );
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&shift_down(Point::new(70.0, 70.0)));
+        assert!(s.selected.is_empty(), "shift miss clears the set");
     }
 
     /// `translate` shifts every variant's geometry verbatim.

@@ -93,6 +93,11 @@ pub enum InputEvent {
     PointerDown {
         /// Position in canvas-physical px.
         pos: Point,
+        /// Modifier state at press time. Shift drives the Move
+        /// tool's multi-select toggle; the dispatcher's other arms
+        /// currently ignore it (keyboard chords carry their own
+        /// `Modifiers`).
+        modifiers: Modifiers,
     },
     /// Pointer moved while the primary button is held.
     PointerDrag {

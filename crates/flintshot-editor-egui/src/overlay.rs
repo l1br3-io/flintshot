@@ -623,15 +623,16 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
         {
             action = ToolbarAction::Redo;
         }
-        // Enabled iff an annotation is selected (persistent
-        // selection, task 001); disabled reads greyed / hover-only.
+        // Enabled iff at least one annotation is selected
+        // (persistent selection set, multi-select task 001);
+        // disabled reads greyed / hover-only.
         if panel::chip(
             ui,
             egui::Id::new("overlay_delete"),
             "Delete · Del",
             false,
             panel::g_trash,
-            state.selected_index.is_some(),
+            !state.selected.is_empty(),
         )
         .clicked()
         {
@@ -935,7 +936,7 @@ impl OverlayApp {
     /// interception, gesture-driven selection mutation, and the hover
     /// cursor shape. Split out of `logic()` so each concern stays
     /// readable; runs only when a cached panel rect exists.
-    fn pointer_and_chrome(&mut self, ctx: &Context, panel: egui::Rect) {
+    fn pointer_and_chrome(&mut self, ctx: &Context, panel: egui::Rect, modifiers: Modifiers) {
         let ppp = ctx.pixels_per_point();
         let (pointer, primary_pressed, primary_down, primary_released) = ctx.input(|i| {
             (
@@ -993,7 +994,7 @@ impl OverlayApp {
                 }
                 None if annotation_press_allowed(self.state.tool, self.state.selection, at) => {
                     self.drag_active = true;
-                    Some(InputEvent::PointerDown { pos: at })
+                    Some(InputEvent::PointerDown { pos: at, modifiers })
                 }
                 // Annotation-tool press outside the region (Task 005):
                 // swallow it whole. `drag_active` stays false, so the
@@ -1281,7 +1282,8 @@ impl OverlayApp {
                 i.key_pressed(egui::Key::Enter),
             )
         });
-        if esc && self.state.selected_index.take().is_some() {
+        if esc && !self.state.selected.is_empty() {
+            self.state.selected.clear();
             return;
         }
         if let Some(close) = close_from_input(esc, enter) {
@@ -1386,7 +1388,7 @@ impl OverlayApp {
         // the cached panel rect (the first frame has none — the
         // screenshot isn't visible yet, so no drag can start).
         if let Some(panel) = self.overlay_rect {
-            self.pointer_and_chrome(ctx, panel);
+            self.pointer_and_chrome(ctx, panel, modifiers);
         }
     }
 
@@ -1458,19 +1460,23 @@ impl OverlayApp {
             crate::chrome::paint_move_chrome(&painter, rect, kind);
         }
 
-        // Persistent-selection outline (annotation-delete spec): the
-        // selected annotation's bbox as a dashed forest rect, right
-        // after the move chrome in the overlay's chrome order — the
-        // editor window's ordering. Chrome-only by construction (the
-        // shell's paint pass, never the clipped render / composed
-        // output). A selection with no paintable bbox while Move is
-        // active (degenerate annotation / stale index) deselects
-        // instead of rendering.
-        if let Some(r) = crate::chrome::selected_chrome(&self.state) {
-            let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
-            crate::chrome::paint_selected_chrome(&painter, rect);
-        } else if self.state.tool == Tool::Move && self.state.selected_index.is_some() {
-            self.state.selected_index = None;
+        // Persistent-selection outlines (annotation-delete spec,
+        // pluralized by multi-select-properties): one dashed forest
+        // rect per selected annotation, right after the move chrome
+        // in the overlay's chrome order — the editor window's
+        // ordering. Chrome-only by construction (the shell's paint
+        // pass, never the clipped render / composed output). A
+        // selection with no paintable bbox at all while Move is
+        // active (degenerate annotations / stale indices)
+        // deselects instead of rendering.
+        let selected_rects = crate::chrome::selected_chrome(&self.state);
+        if !selected_rects.is_empty() {
+            for r in selected_rects {
+                let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
+                crate::chrome::paint_selected_chrome(&painter, rect);
+            }
+        } else if self.state.tool == Tool::Move && !self.state.selected.is_empty() {
+            self.state.selected.clear();
         }
 
         // Grab handles: visible only while they're actually
@@ -2747,7 +2753,10 @@ mod tests {
     }
 
     fn press(s: &mut EditorState, at: Point) {
-        let _ = s.dispatch_input(&InputEvent::PointerDown { pos: at });
+        let _ = s.dispatch_input(&InputEvent::PointerDown {
+            pos: at,
+            modifiers: Modifiers::default(),
+        });
     }
 
     fn drag(s: &mut EditorState, at: Point) {
@@ -3066,7 +3075,7 @@ mod tests {
     #[test]
     fn overlay_delete_chip_emits_delete_with_selection() {
         let mut app = move_overlay_app();
-        app.state.selected_index = Some(0);
+        app.state.selected = vec![0];
         assert_eq!(
             overlay_action_after_delete_click(&mut app.state),
             ToolbarAction::Delete,
@@ -3088,7 +3097,7 @@ mod tests {
     fn overlay_delete_action_removes_selected_annotation() {
         let ctx = egui::Context::default();
         let mut app = move_overlay_app();
-        app.state.selected_index = Some(0);
+        app.state.selected = vec![0];
         app.apply_toolbar_action(&ctx, ToolbarAction::Delete);
         assert!(
             app.state.anns.is_empty(),
@@ -3108,10 +3117,10 @@ mod tests {
     fn overlay_del_key_deletes_selected_annotation() {
         let ctx = egui::Context::default();
         let mut app = move_overlay_app();
-        app.state.selected_index = Some(0);
+        app.state.selected = vec![0];
         key_frame(&ctx, &mut app, 0.0, egui::Key::Delete);
         assert!(app.state.anns.is_empty(), "Del through the overlay deletes");
-        assert_eq!(app.state.selected_index, None, "delete drops the selection");
+        assert!(app.state.selected.is_empty(), "delete drops the selection");
         assert!(
             app.state
                 .undo
@@ -3127,7 +3136,7 @@ mod tests {
     fn overlay_backspace_key_deletes_selected_annotation() {
         let ctx = egui::Context::default();
         let mut app = move_overlay_app();
-        app.state.selected_index = Some(0);
+        app.state.selected = vec![0];
         key_frame(&ctx, &mut app, 0.0, egui::Key::Backspace);
         assert!(
             app.state.anns.is_empty(),
@@ -3142,7 +3151,7 @@ mod tests {
     fn overlay_del_key_with_modifier_is_inert() {
         let ctx = egui::Context::default();
         let mut app = move_overlay_app();
-        app.state.selected_index = Some(0);
+        app.state.selected = vec![0];
         // egui tracks the held modifiers as a top-level RawInput
         // field (egui-winit fills it from the OS modifier state);
         // what real Ctrl-hold delivers on Linux — ctrl plus
@@ -3192,7 +3201,7 @@ mod tests {
                 });
                 s.commit_annotation();
                 s.tool = Tool::Move;
-                s.selected_index = Some(0);
+                s.selected = vec![0];
                 s
             },
             &ctx,
@@ -3200,8 +3209,8 @@ mod tests {
             Rc::new(RefCell::new(None)),
         );
         key_frame(&ctx, &mut app, 0.0, egui::Key::Escape);
-        assert_eq!(
-            app.state.selected_index, None,
+        assert!(
+            app.state.selected.is_empty(),
             "first Esc clears the selection"
         );
         assert!(
@@ -3224,11 +3233,11 @@ mod tests {
         // The overlay's selection-first lock: annotation tools arm
         // only with a usable region.
         app.state.selection = Some(Rect::from_xywh(4.0, 4.0, 40.0, 30.0));
-        app.state.selected_index = Some(0);
+        app.state.selected = vec![0];
         key_frame(&ctx, &mut app, 0.0, egui::Key::R);
         assert_eq!(app.state.tool, Tool::Rect, "fixture: R armed Rect");
-        assert_eq!(
-            app.state.selected_index, None,
+        assert!(
+            app.state.selected.is_empty(),
             "leaving Move via hotkey drops the selection"
         );
     }
@@ -3240,12 +3249,12 @@ mod tests {
     fn overlay_selection_survives_frames_and_degenerate_deselects() {
         let ctx = egui::Context::default();
         let mut app = move_overlay_app();
-        app.state.selected_index = Some(0);
+        app.state.selected = vec![0];
         idle_frame(&ctx, &mut app, 0.0);
         idle_frame(&ctx, &mut app, 1.0 / 60.0);
         assert_eq!(
-            app.state.selected_index,
-            Some(0),
+            app.state.selected,
+            vec![0],
             "a healthy selection must persist across frames"
         );
 
@@ -3255,10 +3264,10 @@ mod tests {
             color: flintshot_core::Color::RED,
             width: 2.0,
         };
-        degenerate.state.selected_index = Some(0);
+        degenerate.state.selected = vec![0];
         idle_frame(&ctx, &mut degenerate, 0.0);
-        assert_eq!(
-            degenerate.state.selected_index, None,
+        assert!(
+            degenerate.state.selected.is_empty(),
             "a degenerate bbox deselects at paint time"
         );
     }
@@ -3293,6 +3302,7 @@ mod tests {
         app.state.tool = Tool::Text;
         let _ = app.state.dispatch_input(&InputEvent::PointerDown {
             pos: Point::new(20.0, 20.0),
+            modifiers: Modifiers::default(),
         });
         let _ = app.state.dispatch_input(&InputEvent::TextInput('h'));
         let _ = app.state.dispatch_input(&InputEvent::TextInput('i'));

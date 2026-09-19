@@ -7,13 +7,13 @@
 //! accent-colored outline that tracks the object through the drag.
 //!
 //! Everything here is a read-only query over [`EditorState`] — no
-//! dispatcher events, no history entries, no `selected_index` /
-//! `moving` mutation. The shells gate *when* to ask (pointer on
+//! dispatcher events, no history entries, no `selected` / `moving`
+//! mutation. The shells gate *when* to ask (pointer on
 //! canvas, not over the side panel, no gesture in flight) and own the
 //! physical → logical transform; this module decides *what* the
 //! answer is and how it paints.
 
-use flintshot_core::{EditorState, Point, Rect, Tool};
+use flintshot_core::{Annotation, EditorState, Point, Rect, Tool};
 
 use crate::theme;
 
@@ -78,21 +78,26 @@ pub(crate) fn paint_move_chrome(painter: &egui::Painter, rect: egui::Rect, kind:
     }
 }
 
-/// The persistent-selection chrome (annotation-delete spec): the
-/// selected annotation's bounding box in canvas-physical px.
+/// The persistent-selection chrome (annotation-delete spec): one
+/// bounding box in canvas-physical px **per selected annotation**,
+/// in selection-set order.
 ///
-/// `None` when the tool is not Move, nothing is selected, the index
-/// is stale, or the annotation's bbox is degenerate (nothing to
+/// Empty when the tool is not Move, the set is empty, an index is
+/// stale, or the annotation's bbox is degenerate (nothing to
 /// outline). Read-only like the rest of this module — the shells own
-/// any deselect that follows a `None` (a degenerate selection must
-/// not survive to the next frame).
+/// any deselect that follows an all-degenerate set (a selection with
+/// nothing paintable must not survive to the next frame).
 #[must_use]
-pub(crate) fn selected_chrome(state: &EditorState) -> Option<Rect> {
+pub(crate) fn selected_chrome(state: &EditorState) -> Vec<Rect> {
     if state.tool != Tool::Move {
-        return None;
+        return Vec::new();
     }
-    let index = state.selected_index?;
-    state.anns.get(index)?.bounding_box()
+    state
+        .selected
+        .iter()
+        .filter_map(|&index| state.anns.get(index))
+        .filter_map(Annotation::bounding_box)
+        .collect()
 }
 
 /// Paint the persistent-selection outline (screen-logical,
@@ -300,21 +305,29 @@ mod tests {
     // --- Persistent-selection chrome (annotation-delete Task 003) ---
 
     #[test]
-    fn selected_chrome_returns_selected_bbox_under_move() {
-        let mut s = state_with(Tool::Move, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
-        s.selected_index = Some(0);
-        let rect =
-            selected_chrome(&s).expect("a selected annotation under Move must yield its bbox");
-        assert_eq!(rect.min, Point::new(10.0, 10.0));
-        assert_eq!(rect.max, Point::new(50.0, 40.0));
+    fn selected_chrome_returns_one_bbox_per_member_under_move() {
+        let mut s = state_with(
+            Tool::Move,
+            &[
+                rect_ann(10.0, 10.0, 50.0, 40.0),
+                rect_ann(60.0, 10.0, 90.0, 40.0),
+            ],
+        );
+        s.selected = vec![0, 1];
+        let rects = selected_chrome(&s);
+        assert_eq!(rects.len(), 2, "one rect per selected annotation");
+        assert_eq!(rects[0].min, Point::new(10.0, 10.0));
+        assert_eq!(rects[0].max, Point::new(50.0, 40.0));
+        assert_eq!(rects[1].min, Point::new(60.0, 10.0));
+        assert_eq!(rects[1].max, Point::new(90.0, 40.0));
     }
 
     #[test]
     fn selected_chrome_requires_move_tool() {
         let mut s = state_with(Tool::Rect, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
-        s.selected_index = Some(0);
+        s.selected = vec![0];
         assert!(
-            selected_chrome(&s).is_none(),
+            selected_chrome(&s).is_empty(),
             "non-Move tools get no selection chrome"
         );
     }
@@ -322,11 +335,11 @@ mod tests {
     #[test]
     fn selected_chrome_none_without_selection() {
         let s = state_with(Tool::Move, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
-        assert!(selected_chrome(&s).is_none(), "no selection → no chrome");
+        assert!(selected_chrome(&s).is_empty(), "no selection → no chrome");
     }
 
     #[test]
-    fn selected_chrome_none_for_degenerate_or_stale_selection() {
+    fn selected_chrome_skips_degenerate_or_stale_members() {
         let mut degenerate = blank_state();
         degenerate.tool = Tool::Move;
         degenerate.anns.push(Annotation::Pencil {
@@ -334,14 +347,14 @@ mod tests {
             color: flintshot_core::Color::RED,
             width: 2.0,
         });
-        degenerate.selected_index = Some(0);
+        degenerate.selected = vec![0];
         assert!(
-            selected_chrome(&degenerate).is_none(),
+            selected_chrome(&degenerate).is_empty(),
             "an empty-points polyline has no bbox to outline"
         );
-        degenerate.selected_index = Some(7);
+        degenerate.selected = vec![7];
         assert!(
-            selected_chrome(&degenerate).is_none(),
+            selected_chrome(&degenerate).is_empty(),
             "a stale out-of-range index has no annotation to outline"
         );
     }
