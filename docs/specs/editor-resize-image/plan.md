@@ -55,12 +55,15 @@ Spec: [`spec.md`](spec.md).
 
 ### Phase 3: Ship prep
 
-- [ ] Task 5: Full gates + CHANGELOG + spec success-criteria sweep → `tasks/005-gates-changelog.md`
+- [x] Task 5: Full gates + CHANGELOG + spec success-criteria sweep → `tasks/005-gates-changelog.md`
 
 ### Checkpoint: Complete
 
-- [ ] All spec success criteria checked
-- [ ] Ready for review
+- [x] All spec success criteria checked
+- [x] No ADR needed — no invariant changed; ADR-0015's live-view ==
+      saved-output contract is preserved (resize mutates through
+      `EditorState`, same as crop)
+- [x] Ready for review
 
 Tasks 1 and 2 are independent (parallelizable). 3 depends on both.
 4 depends on 3. 5 depends on 4.

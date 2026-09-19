@@ -200,16 +200,23 @@ All levels are existing repo patterns; no new frameworks.
 
 ## Success criteria
 
-- [ ] 100×80 image with one Rect (stroke 4) + one Text (font 16):
+- [x] 100×80 image with one Rect (stroke 4) + one Text (font 16):
       resize to width 50 ⇒ 50×40 image; stroke 2; font 8; points at
       half coordinates
-- [ ] Undo after resize restores the 100×80 pixels and original
+      (`resize_scales_image_and_annotations`)
+- [x] Undo after resize restores the 100×80 pixels and original
       annotation values bit-for-bit
-- [ ] Any target ≥ current width is a no-op / clamped — no path
+      (`resize_is_undoable_and_redoable`, `resize_twice_then_undo_twice_restores_original`)
+- [x] Any target ≥ current width is a no-op / clamped — no path
       produces a larger image
-- [ ] Editor topbar overflow shows Resize (editor surface only);
+      (`resize_at_or_above_width_is_noop`, `resize_upscale_target_clamps_to_identity`,
+      `resize_popover_refuses_upscale_targets`)
+- [x] Editor topbar overflow shows Resize (editor surface only);
       Home / Settings / Loading and the overlay have no new UI
-- [ ] `cargo fmt --check`, `clippy -D warnings`, both test commands
+      (`overflow_shows_and_fires_resize_on_editor_surface`,
+      `home_overflow_omits_editor_items`, `enable_matrix_matches_the_spec`;
+      `overlay.rs` untouched)
+- [x] `cargo fmt --check`, `clippy -D warnings`, both test commands
       pass
 
 ## Open questions
