@@ -9,6 +9,9 @@
 //!   drives the per-frame render loop.
 //! - `chrome` (private) — the Move-tool hover / grab outline shared
 //!   by the editor window and the overlay (see `crate::chrome`).
+//! - `dblclick` (private) — press-time double-click detection shared
+//!   by the two event pumps, feeding core's `DoubleClick` re-edit
+//!   trigger (see `crate::dblclick`).
 //! - `topbar` (private) — the 44 px forest top bar (flame brand,
 //!   breadcrumb, Capture / Copy / Open heroes, dots overflow) on
 //!   every routed surface and the worker editor window.
@@ -50,6 +53,7 @@
 mod app;
 mod canvas;
 mod chrome;
+mod dblclick;
 mod floating;
 mod home;
 mod magnifier;

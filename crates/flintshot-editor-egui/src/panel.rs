@@ -106,15 +106,27 @@ pub(crate) fn sections_for(tool: Tool) -> &'static [Section] {
     }
 }
 
-/// The panel title for this frame: with a live selection the panel
-/// is a selection inspector (`N selected · Properties`); without,
-/// byte-for-byte today's tool-defaults title. Pure for tests.
+/// The panel title for this frame: with a live Move-tool selection
+/// the panel is a selection inspector (`N selected · Properties`);
+/// without, byte-for-byte the tool-defaults title (the Text tool's
+/// singleton selection keeps the tool-defaults layout). Pure for
+/// tests.
 pub(crate) fn panel_title(state: &EditorState) -> String {
-    if state.selected.is_empty() {
-        format!("{} · Properties", tool_display_name(state.tool))
-    } else {
+    if inspector_mode(state) {
         format!("{} selected · Properties", state.selected.len())
+    } else {
+        format!("{} · Properties", tool_display_name(state.tool))
     }
+}
+
+/// Whether the panel renders as the Move-tool selection inspector.
+/// The Text tool's singleton selection is a different contract — the
+/// tool-defaults panel stays up and the Text surfaces retarget to
+/// the selection in place (see [`effective_text_style`]); the
+/// inspector (intersection sections, `set_selected_*` mutators) is
+/// the Move tool's multi-selection surface alone.
+fn inspector_mode(state: &EditorState) -> bool {
+    state.tool == Tool::Move && !state.selected.is_empty()
 }
 
 /// The inspector's section map: the intersection sections the
@@ -273,7 +285,7 @@ pub(crate) fn show(
     let text_pop_was_live = panel.text_pop_live;
     panel.color_pop_live = false;
     panel.text_pop_live = false;
-    let inspector = !state.selected.is_empty();
+    let inspector = inspector_mode(state);
     let caps = state.selected_capabilities();
     egui::Panel::right("editor_panel")
         .resizable(false)
@@ -418,22 +430,141 @@ fn segmented_chip(ui: &mut egui::Ui, id: egui::Id, label: &str, selected: bool) 
 }
 
 pub(crate) fn text_style_row(ui: &mut egui::Ui, state: &mut EditorState) {
-    if ui.small_button("-").clicked() {
-        state.font_size = (state.font_size - 1.0).max(8.0);
+    // Source order (text-select-edit): re-edit session draft >
+    // Text-tool selection > session defaults. Controls mutate a local
+    // copy; the write-back routes through core's gesture API when a
+    // draft / selection target exists, else the plain defaults writes
+    // of today.
+    let mut st = effective_text_style(state);
+    let before = st;
+    ui.horizontal(|ui| {
+        if segmented_chip(ui, egui::Id::new("text-size-minus"), "−", false) {
+            st.size = (st.size - 1.0).max(8.0);
+        }
+        ui.add_sized(
+            [36.0, 20.0],
+            egui::DragValue::new(&mut st.size)
+                .range(8.0..=72.0)
+                .speed(0.5),
+        );
+        if segmented_chip(ui, egui::Id::new("text-size-plus"), "+", false) {
+            st.size = (st.size + 1.0).min(72.0);
+        }
+    });
+    // Gesture bracketing: a discrete click (or typed value) opens and
+    // closes within the frame — one entry; a `DragValue` drag stays
+    // open across drag frames (`begin` is first-wins) and closes on
+    // the first frame the primary button is up again. The button
+    // state (not this render's `dragged()`) is the close signal —
+    // the section body renders twice per frame (measure probe +
+    // visible) and only one of the two `DragValue` instances owns the
+    // drag interaction.
+    let pointer_down = ui.input(|i| i.pointer.primary_down());
+    if st != before {
+        state.begin_style_gesture();
+        write_text_style(state, &st);
     }
-    ui.add_sized(
-        [36.0, 20.0],
-        egui::DragValue::new(&mut state.font_size)
-            .range(8.0..=72.0)
-            .speed(0.5),
-    );
-    if ui.small_button("+").clicked() {
-        state.font_size = (state.font_size + 1.0).min(72.0);
+    if state.style_gesture_snapshot.is_some() && !pointer_down {
+        state.end_style_gesture();
     }
     let btn = ui.add(egui::Button::new(egui::RichText::new("Aa").strong()));
     egui::Popup::from_toggle_button_response(&btn)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| text_style_popup(ui, state));
+}
+
+/// The Text tool's singleton selected `Text`, if any — the
+/// tool-defaults Text surfaces' restyle target. A Move-tool
+/// selection (singleton or not) is the inspector's domain, never
+/// this path's; a non-Text member is a miss for the Text tool.
+fn text_selection(state: &EditorState) -> Option<&Annotation> {
+    if state.tool != Tool::Text {
+        return None;
+    }
+    match state.selected.as_slice() {
+        [i] => state
+            .anns
+            .get(*i)
+            .filter(|ann| matches!(ann, Annotation::Text { .. })),
+        _ => None,
+    }
+}
+
+/// Whether a restyle target exists: a live re-edit session draft or
+/// the Text tool's singleton selected `Text` annotation. Everything
+/// else (no selection, a non-Text selection, a Move-tool inspector
+/// selection, a *fresh* draft) falls back to the defaults path —
+/// fresh drafts deliberately do not live-restyle (spec open
+/// question default).
+pub(crate) fn has_restyle_target(state: &EditorState) -> bool {
+    if state.text_reedit.is_some() {
+        return true;
+    }
+    text_selection(state).is_some()
+}
+
+/// The style the Text surfaces read this frame: the re-edit session
+/// draft's, else the Text-tool singleton selection's, else the
+/// session defaults. Byte-identical to the pre-selection behaviour
+/// whenever neither draft nor selection exists.
+pub(crate) fn effective_text_style(state: &EditorState) -> flintshot_core::text::TextStyle {
+    if state.text_reedit.is_some() {
+        if let Some(ann) = &state.pending {
+            if let Annotation::Text { .. } = ann {
+                return ann.text_style();
+            }
+        }
+    }
+    if let Some(ann) = text_selection(state) {
+        return ann.text_style();
+    }
+    session_text_style(state)
+}
+
+/// Assemble the session-default style the pre-selection panel showed.
+fn session_text_style(state: &EditorState) -> flintshot_core::text::TextStyle {
+    flintshot_core::text::TextStyle {
+        size: state.font_size,
+        color: state.text_color,
+        family: state.font_family,
+        weight: state.font_weight,
+        style: state.font_style,
+        align: state.text_align,
+        line_spacing: state.line_spacing,
+        outline: state.text_outline,
+        background: state.text_background,
+    }
+}
+
+/// Write a changed style through the right path: core's restyle
+/// (which also syncs the session defaults) when a target exists,
+/// else the direct defaults writes of today.
+fn write_text_style(state: &mut EditorState, st: &flintshot_core::text::TextStyle) {
+    if has_restyle_target(state) {
+        state.restyle_selected_text(*st);
+        return;
+    }
+    state.font_size = st.size;
+    state.text_color = st.color;
+    state.font_family = st.family;
+    state.font_weight = st.weight;
+    state.font_style = st.style;
+    state.text_align = st.align;
+    state.line_spacing = st.line_spacing;
+    state.text_outline = st.outline;
+    state.text_background = st.background;
+}
+
+/// Apply a discrete (one-frame) style change: one begin / write / end
+/// gesture — exactly one undo entry when a target exists, plain
+/// defaults writes otherwise.
+pub(crate) fn commit_text_style_change(
+    state: &mut EditorState,
+    st: flintshot_core::text::TextStyle,
+) {
+    state.begin_style_gesture();
+    write_text_style(state, &st);
+    state.end_style_gesture();
 }
 
 /// Blur kind segmented control; the selected segment inherits the
@@ -461,8 +592,57 @@ pub(crate) fn blur_bay(ui: &mut egui::Ui, state: &mut EditorState) {
 
 /// Typography popover for the Text tool: family / weight / style /
 /// alignment plus the background-highlight and outline toggles.
+/// Reads from / writes to the same source the size row does
+/// (session draft > selection > defaults) via one discrete gesture.
 fn text_style_popup(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.set_min_width(200.0);
+    let mut st = effective_text_style(state);
+    let before = st;
+    typography_grid(ui, &mut st);
+    ui.separator();
+    let mut bg_on = st.background.is_some();
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut bg_on, "Background");
+        if bg_on {
+            let cur = st.background.unwrap_or(Color::rgb(255, 235, 0));
+            let mut rgb = [cur.r, cur.g, cur.b];
+            ui.color_edit_button_srgb(&mut rgb);
+            st.background = Some(Color::rgb(rgb[0], rgb[1], rgb[2]));
+        } else {
+            st.background = None;
+        }
+    });
+    let mut ol_on = st.outline.is_some();
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut ol_on, "Outline");
+        if ol_on {
+            let cur = st.outline.unwrap_or(TextOutline {
+                color: Color::rgb(0, 0, 0),
+                width: 2.0,
+            });
+            let mut rgb = [cur.color.r, cur.color.g, cur.color.b];
+            ui.color_edit_button_srgb(&mut rgb);
+            let mut o = TextOutline {
+                color: Color::rgb(rgb[0], rgb[1], rgb[2]),
+                width: cur.width,
+            };
+            ui.add(egui::Slider::new(&mut o.width, 1.0..=8.0).text("width"));
+            st.outline = Some(o);
+        } else {
+            st.outline = None;
+        }
+    });
+    if st != before {
+        commit_text_style_change(state, st);
+    }
+}
+
+/// The popup's family / weight / style / alignment grid, mutating the
+/// effective style in place.
+fn typography_grid(ui: &mut egui::Ui, st: &mut flintshot_core::text::TextStyle) {
+    let chip = |ui: &mut egui::Ui, id: &str, label: &str, selected: bool| {
+        segmented_chip(ui, egui::Id::new(id), label, selected)
+    };
     egui::Grid::new("text_style")
         .num_columns(2)
         .spacing([10.0, 5.0])
@@ -476,63 +656,88 @@ fn text_style_popup(ui: &mut egui::Ui, state: &mut EditorState) {
             };
             head(ui, "Family");
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut state.font_family, FontFamily::SansSerif, "Sans");
-                ui.selectable_value(&mut state.font_family, FontFamily::Monospace, "Mono");
+                if chip(
+                    ui,
+                    "text-family-sans",
+                    "Sans",
+                    st.family == FontFamily::SansSerif,
+                ) {
+                    st.family = FontFamily::SansSerif;
+                }
+                if chip(
+                    ui,
+                    "text-family-mono",
+                    "Mono",
+                    st.family == FontFamily::Monospace,
+                ) {
+                    st.family = FontFamily::Monospace;
+                }
             });
             ui.end_row();
             head(ui, "Weight");
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut state.font_weight, FontWeight::Normal, "Regular");
-                ui.selectable_value(&mut state.font_weight, FontWeight::Bold, "Bold");
+                if chip(
+                    ui,
+                    "text-weight-normal",
+                    "Regular",
+                    st.weight == FontWeight::Normal,
+                ) {
+                    st.weight = FontWeight::Normal;
+                }
+                if chip(
+                    ui,
+                    "text-weight-bold",
+                    "Bold",
+                    st.weight == FontWeight::Bold,
+                ) {
+                    st.weight = FontWeight::Bold;
+                }
             });
             ui.end_row();
             head(ui, "Style");
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut state.font_style, FontStyle::Normal, "Regular");
-                ui.selectable_value(&mut state.font_style, FontStyle::Italic, "Italic");
+                if chip(
+                    ui,
+                    "text-style-normal",
+                    "Regular",
+                    st.style == FontStyle::Normal,
+                ) {
+                    st.style = FontStyle::Normal;
+                }
+                if chip(
+                    ui,
+                    "text-style-italic",
+                    "Italic",
+                    st.style == FontStyle::Italic,
+                ) {
+                    st.style = FontStyle::Italic;
+                }
             });
             ui.end_row();
             head(ui, "Align");
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut state.text_align, TextAlign::Left, "Left");
-                ui.selectable_value(&mut state.text_align, TextAlign::Center, "Center");
-                ui.selectable_value(&mut state.text_align, TextAlign::Right, "Right");
+                if chip(ui, "text-align-left", "Left", st.align == TextAlign::Left) {
+                    st.align = TextAlign::Left;
+                }
+                if chip(
+                    ui,
+                    "text-align-center",
+                    "Center",
+                    st.align == TextAlign::Center,
+                ) {
+                    st.align = TextAlign::Center;
+                }
+                if chip(
+                    ui,
+                    "text-align-right",
+                    "Right",
+                    st.align == TextAlign::Right,
+                ) {
+                    st.align = TextAlign::Right;
+                }
             });
             ui.end_row();
         });
-    ui.separator();
-    let mut bg_on = state.text_background.is_some();
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut bg_on, "Background");
-        if bg_on {
-            let cur = state.text_background.unwrap_or(Color::rgb(255, 235, 0));
-            let mut rgb = [cur.r, cur.g, cur.b];
-            ui.color_edit_button_srgb(&mut rgb);
-            state.text_background = Some(Color::rgb(rgb[0], rgb[1], rgb[2]));
-        } else {
-            state.text_background = None;
-        }
-    });
-    let mut ol_on = state.text_outline.is_some();
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut ol_on, "Outline");
-        if ol_on {
-            let cur = state.text_outline.unwrap_or(TextOutline {
-                color: Color::rgb(0, 0, 0),
-                width: 2.0,
-            });
-            let mut rgb = [cur.color.r, cur.color.g, cur.color.b];
-            ui.color_edit_button_srgb(&mut rgb);
-            let mut o = TextOutline {
-                color: Color::rgb(rgb[0], rgb[1], rgb[2]),
-                width: cur.width,
-            };
-            ui.add(egui::Slider::new(&mut o.width, 1.0..=8.0).text("width"));
-            state.text_outline = Some(o);
-        } else {
-            state.text_outline = None;
-        }
-    });
 }
 
 /// Contextual hint, soft ink at caption size. A plain wrapping
@@ -925,7 +1130,7 @@ fn stroke_chips(ui: &mut egui::Ui, state: &mut EditorState) {
     }
 }
 
-fn to_color32(c: Color) -> Color32 {
+pub(crate) fn to_color32(c: Color) -> Color32 {
     crate::theme::palette::opaque(c)
 }
 
@@ -1776,5 +1981,217 @@ mod tests {
             ctx.read_response(egui::Id::new("panel-delete")).is_some(),
             "the Selection section always renders"
         );
+    }
+
+    // --- Text section retarget (text-select-edit Task 006) ---
+
+    /// Text-tool state with a selected text annotation at a
+    /// distinctive 23 px / blue style — every read must come from it,
+    /// not the 16 px / red session defaults.
+    fn text_selected_panel_state() -> EditorState {
+        let mut state = panel_state();
+        state.tool = Tool::Text;
+        state.anns.push(Annotation::text(
+            flintshot_core::Point::new(4.0, 4.0),
+            "hi",
+            flintshot_core::text::TextStyle::simple(23.0, Color::rgb(0, 0, 255)),
+        ));
+        state.selected = vec![0];
+        state
+    }
+
+    fn chip_center(ctx: &egui::Context, id: egui::Id) -> egui::Pos2 {
+        ctx.read_response(id)
+            .unwrap_or_else(|| panic!("{id:?} registered"))
+            .rect
+            .center()
+    }
+
+    /// A + click reads the selection's 23, writes 24 back onto it,
+    /// syncs the session defaults, and records exactly one undo entry
+    /// per discrete click.
+    #[test]
+    fn text_size_plus_click_restyles_selection_one_entry_per_click() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = text_selected_panel_state();
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let at = chip_center(&ctx, egui::Id::new("text-size-plus"));
+        draw(&ctx, &mut state, &mut panel, click_events(at));
+        match &state.anns[0] {
+            Annotation::Text {
+                font_size, color, ..
+            } => {
+                assert_eq!(*font_size, 24.0, "reads the selection's 23, writes 24");
+                assert_eq!(
+                    *color,
+                    Color::rgb(0, 0, 255),
+                    "untouched fields survive the write"
+                );
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(state.font_size, 24.0, "defaults synced");
+        assert_eq!(state.undo.len(), 1, "one entry per discrete click");
+        draw(&ctx, &mut state, &mut panel, click_events(at));
+        match &state.anns[0] {
+            Annotation::Text { font_size, .. } => assert_eq!(*font_size, 25.0),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(state.undo.len(), 2, "the second click is a second gesture");
+    }
+
+    /// A `DragValue` drag coalesces: press → several move frames →
+    /// release leaves one undo entry covering the whole drag.
+    #[test]
+    fn text_size_drag_coalesces_into_one_undo_entry() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = text_selected_panel_state();
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let minus = ctx
+            .read_response(egui::Id::new("text-size-minus"))
+            .expect("minus chip registered")
+            .rect;
+        // The DragValue occupies the 36 px slot right of the minus
+        // chip; its centre is a safe drag anchor.
+        let at = egui::pos2(minus.right() + 20.0, minus.center().y);
+        let press = |pos| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        draw(&ctx, &mut state, &mut panel, press(at));
+        draw(
+            &ctx,
+            &mut state,
+            &mut panel,
+            vec![egui::Event::PointerMoved(egui::pos2(at.x + 10.0, at.y))],
+        );
+        assert!(
+            state.undo.is_empty(),
+            "mid-drag the gesture is still open (no entry yet)"
+        );
+        draw(
+            &ctx,
+            &mut state,
+            &mut panel,
+            vec![egui::Event::PointerMoved(egui::pos2(at.x + 20.0, at.y))],
+        );
+        draw(
+            &ctx,
+            &mut state,
+            &mut panel,
+            vec![egui::Event::PointerButton {
+                pos: egui::pos2(at.x + 20.0, at.y),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        match &state.anns[0] {
+            Annotation::Text { font_size, .. } => {
+                assert!(*font_size > 23.0, "the drag grew the size ({font_size})");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(state.undo.len(), 1, "the whole drag is one entry");
+    }
+
+    /// The typography popup's family chips route through the same
+    /// write path: one click restyles the selection + syncs defaults
+    /// with one entry. Driven at the popup-body level (the Aa popup
+    /// hosts these exact widgets).
+    #[test]
+    fn text_popup_family_chip_restyles_selection() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = text_selected_panel_state();
+        let _ = ctx.run_ui(screen(1024.0, 768.0), |ui| {
+            text_style_popup(ui, &mut state);
+        });
+        let at = chip_center(&ctx, egui::Id::new("text-family-mono"));
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: click_events(at),
+                ..screen(1024.0, 768.0)
+            },
+            |ui| {
+                text_style_popup(ui, &mut state);
+            },
+        );
+        match &state.anns[0] {
+            Annotation::Text {
+                family,
+                font_size,
+                color,
+                ..
+            } => {
+                assert_eq!(*family, FontFamily::Monospace, "family written");
+                assert_eq!(*font_size, 23.0, "the read came from the selection");
+                assert_eq!(*color, Color::rgb(0, 0, 255), "untouched fields survive");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(state.font_family, FontFamily::Monospace, "defaults synced");
+        assert_eq!(state.undo.len(), 1);
+    }
+
+    /// Mid-session the surfaces read — and write — the lifted-out
+    /// draft: a + click restyles `pending` and records nothing (the
+    /// session's commit owns the single entry).
+    #[test]
+    fn text_size_plus_mid_session_targets_draft() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = text_selected_panel_state();
+        // Lift the annotation out (the DoubleClick path, driven
+        // directly — the panel only cares that a session is live).
+        state.dispatch_input(&flintshot_core::input::InputEvent::DoubleClick {
+            pos: flintshot_core::Point::new(5.0, 5.0),
+        });
+        assert!(state.text_reedit.is_some(), "fixture: session live");
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let at = chip_center(&ctx, egui::Id::new("text-size-plus"));
+        draw(&ctx, &mut state, &mut panel, click_events(at));
+        match &state.pending {
+            Some(Annotation::Text { font_size, .. }) => {
+                assert_eq!(*font_size, 24.0, "the draft carries the new size");
+            }
+            other => panic!("expected pending draft, got {other:?}"),
+        }
+        assert_eq!(state.font_size, 24.0, "defaults still sync");
+        assert!(state.undo.is_empty(), "no independent entry mid-session");
+    }
+
+    /// No selection, no session: the row keeps today's byte-identical
+    /// defaults path — direct field writes, no history.
+    #[test]
+    fn text_size_plus_without_selection_keeps_defaults_path() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        state.tool = Tool::Text;
+        state.font_size = 16.0;
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let at = chip_center(&ctx, egui::Id::new("text-size-plus"));
+        draw(&ctx, &mut state, &mut panel, click_events(at));
+        assert_eq!(state.font_size, 17.0, "defaults path still works");
+        assert!(state.undo.is_empty(), "defaults writes record no history");
     }
 }
