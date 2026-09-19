@@ -186,7 +186,14 @@ pub fn render<C: Canvas>(
         // typed text will land, because `draw_text` with an empty string
         // (or any string between keystrokes) draws nothing.
         if let Annotation::Text { pos, text, .. } = pending {
-            draw_text_indicators(canvas, *pos, text, state.text_cursor, &pending.text_style());
+            draw_text_indicators(
+                canvas,
+                *pos,
+                text,
+                state.text_cursor,
+                state.text_anchor,
+                &pending.text_style(),
+            );
         }
     }
 
@@ -281,6 +288,15 @@ const TEXT_BBOX_STROKE: Stroke = Stroke::new(Color::rgba(60, 60, 60, 170), 1.0);
 /// indicator, in physical px. Keeps the box from hugging glyph edges
 /// (ascenders / descenders would otherwise touch the outline).
 const TEXT_BBOX_PAD: f32 = 2.0;
+
+/// Translucent tint painted over selected glyphs of an in-flight
+/// text draft. A core const (same pattern as [`TEXT_BBOX_STROKE`])
+/// so every renderer agrees with zero API growth. Blue in the
+/// selection-stroke family (`SELECTION_STROKE`), alpha-tinted to
+/// ~30% so it reads over both bright and dark captures while the
+/// glyphs beneath stay legible — the editor-style over-glyph tint.
+/// Live-view-only, like every text indicator.
+const TEXT_HIGHLIGHT: Color = Color::rgba(0, 120, 215, 76);
 
 /// Width of the thin bar caret, as a fraction of font size and
 /// floored so it stays a visible hairline at small sizes (and on
@@ -506,12 +522,13 @@ pub fn arrow_barbs(a: Point, b: Point, head_size: f32) -> [Point; 2] {
 }
 
 /// Draw the in-flight text indicators: a hollow bounding box around
-/// the laid-out text block and a thin bar caret at the insertion
-/// point (tracked by `cursor`, a char index into `text`).
+/// the laid-out text block, translucent highlight rects over the
+/// selected glyphs (tracked by `anchor` + `cursor`, char indices into
+/// `text`), and a thin bar caret at the insertion point.
 ///
-/// Both are live-view-only — drawn solely for `pending`
+/// All are live-view-only — drawn solely for `pending`
 /// `Annotation::Text` via [`render`]; the saved / copied image excludes
-/// `pending`, so neither reaches disk or the clipboard. Without these
+/// `pending`, so none reach disk or the clipboard. Without these
 /// the user has no feedback where typed text will land, because
 /// `draw_text` with an empty string (or between keystrokes) draws
 /// nothing.
@@ -521,13 +538,15 @@ pub fn arrow_barbs(a: Point, b: Point, head_size: f32) -> [Point; 2] {
 /// sizes the prefix on that line so the caret lands at the right spot
 /// even after a `Shift+Enter` moved it onto a new line, or after an
 /// arrow key moved it mid-string. Alignment shifts the whole line block
-/// so a centred / right-aligned caret still tracks its glyph.
+/// so a centred / right-aligned caret still tracks its glyph; the
+/// highlight segments share that math via [`selection_line_extents`].
 #[allow(clippy::cast_precision_loss, reason = "line count is tiny")]
 fn draw_text_indicators<C: Canvas>(
     canvas: &mut C,
     pos: Point,
     text: &str,
     cursor: usize,
+    anchor: Option<usize>,
     style: &TextStyle,
 ) {
     let metrics = canvas.measure_text(text, style);
@@ -546,6 +565,15 @@ fn draw_text_indicators<C: Canvas>(
         metrics.height + pad * 2.0,
     );
     canvas.draw_rect_outline(bbox, &TEXT_BBOX_STROKE);
+    // Highlight rects over the selected glyphs: one per spanned line,
+    // before the caret so the caret reads on top.
+    if let Some(anchor) = anchor.filter(|&a| a != cursor) {
+        let (start, end) = (anchor.min(cursor), anchor.max(cursor));
+        for (x0, x1, line) in selection_line_extents(text, start, end, canvas, style) {
+            let rect = Rect::from_xywh(pos.x + x0, pos.y + line as f32 * line_h, x1 - x0, line_h);
+            canvas.draw_rect_filled(rect, TEXT_HIGHLIGHT);
+        }
+    }
     // Thin bar caret at the insertion point. Width is in *physical*
     // px — at high `pixels_per_point` it stays a hairline on screen
     // (physical px are what the display shows), never scaling up with
@@ -557,6 +585,41 @@ fn draw_text_indicators<C: Canvas>(
         style.size,
     );
     canvas.draw_rect_filled(caret, style.color);
+}
+
+/// Per-line x-extent (relative to the text origin) of the selection
+/// `start..end` (`start < end`, char indices): one `(x0, x1, line)`
+/// per spanned line, derived from the same prefix + alignment math as
+/// [`caret_coords`] so the highlight tracks the caret exactly on
+/// centre / right-aligned text. A segment ending at a `\n` extends to
+/// that line's full advance — the trailing newline belongs to the
+/// line it closes, never to the next line's start (zero-width
+/// segments are dropped).
+fn selection_line_extents<C: Canvas>(
+    text: &str,
+    start: usize,
+    end: usize,
+    canvas: &mut C,
+    style: &TextStyle,
+) -> Vec<(f32, f32, usize)> {
+    let mut out = Vec::new();
+    let mut line = text.chars().take(start).filter(|&c| c == '\n').count();
+    let mut seg_x0 = caret_coords(text, start, canvas, style).0;
+    for (i, ch) in text.chars().enumerate().take(end).skip(start) {
+        if ch == '\n' {
+            let x1 = caret_coords(text, i, canvas, style).0;
+            if x1 > seg_x0 {
+                out.push((seg_x0, x1, line));
+            }
+            line += 1;
+            seg_x0 = caret_coords(text, i + 1, canvas, style).0;
+        }
+    }
+    let x1 = caret_coords(text, end, canvas, style).0;
+    if x1 > seg_x0 {
+        out.push((seg_x0, x1, line));
+    }
+    out
 }
 
 /// Resolve the caret's horizontal offset from the text origin and its
@@ -2133,6 +2196,190 @@ mod tests {
         assert!(
             has_caret_at_pos,
             "empty draft must still draw the bar caret at pos.x"
+        );
+    }
+
+    /// A collapsed selection (anchor == cursor) paints no highlight —
+    /// output is byte-identical to the anchor-less state (one caret
+    /// fill only).
+    #[test]
+    fn render_collapsed_selection_emits_no_highlight() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 40));
+        let pos = Point::new(10.0, 5.0);
+        let font_size = 16.0;
+        state.pending = Some(Annotation::text(
+            pos,
+            "hello",
+            TextStyle::simple(font_size, Color::RED),
+        ));
+        state.text_cursor = 2;
+        state.text_anchor = Some(2);
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
+
+        let filled = canvas
+            .calls
+            .iter()
+            .filter(|c| matches!(c, DrawCall::DrawRectFilled { .. }))
+            .count();
+        assert_eq!(filled, 1, "only the bar caret, no highlight rects");
+    }
+
+    /// A non-empty selection paints one translucent `TEXT_HIGHLIGHT`
+    /// rect per spanned line — before the bar caret — covering the
+    /// selected chars' advance at full line height.
+    #[test]
+    fn render_selection_highlight_single_line() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 40));
+        let pos = Point::new(10.0, 5.0);
+        let font_size = 16.0;
+        state.pending = Some(Annotation::text(
+            pos,
+            "hello world",
+            TextStyle::simple(font_size, Color::RED),
+        ));
+        state.text_cursor = 5;
+        state.text_anchor = Some(0);
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
+
+        let line_h = font_size * crate::text::DEFAULT_LINE_SPACING;
+        // "hello" = 5 chars * 16 * 0.6 = 48 px advance.
+        let filled: Vec<(Rect, Color)> = canvas
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                DrawCall::DrawRectFilled { rect, color } => Some((*rect, *color)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(filled.len(), 2, "highlight then caret");
+        assert_eq!(
+            filled[0],
+            (Rect::from_xywh(pos.x, pos.y, 48.0, line_h), TEXT_HIGHLIGHT),
+            "highlight covers chars 0..5 at line height"
+        );
+        // The caret fill follows the highlight.
+        assert_eq!(filled[1].0.width(), bar_caret_width(font_size));
+    }
+
+    /// A selection spanning three lines paints three rects: full
+    /// first line (from the selection start), full middle line,
+    /// partial last line (to the selection end).
+    #[test]
+    fn render_selection_highlight_spans_lines() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 80));
+        let pos = Point::new(4.0, 2.0);
+        let font_size = 16.0;
+        state.pending = Some(Annotation::text(
+            pos,
+            "ab\ncdef\nghi",
+            TextStyle::simple(font_size, Color::RED),
+        ));
+        state.text_cursor = 11; // end of draft
+        state.text_anchor = Some(0);
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
+
+        let line_h = font_size * crate::text::DEFAULT_LINE_SPACING;
+        let w = |n: f32| n * font_size * 0.6;
+        let highlights: Vec<Rect> = canvas
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                DrawCall::DrawRectFilled { rect, color } if *color == TEXT_HIGHLIGHT => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        let want = vec![
+            Rect::from_xywh(pos.x, pos.y, w(2.0), line_h),
+            Rect::from_xywh(pos.x, pos.y + line_h, w(4.0), line_h),
+            Rect::from_xywh(pos.x, pos.y + line_h * 2.0, w(3.0), line_h),
+        ];
+        assert_eq!(highlights, want, "one rect per spanned line");
+    }
+
+    /// A selection ending on a trailing `\n` highlights to that
+    /// line's end only — the newline belongs to the line it closes,
+    /// never to the next line's start.
+    #[test]
+    fn render_selection_over_trailing_newline_stops_at_line_end() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 40));
+        let pos = Point::new(10.0, 5.0);
+        let font_size = 16.0;
+        state.pending = Some(Annotation::text(
+            pos,
+            "ab\ncd",
+            TextStyle::simple(font_size, Color::RED),
+        ));
+        state.text_cursor = 3; // includes the '\n'
+        state.text_anchor = Some(0);
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
+
+        let line_h = font_size * crate::text::DEFAULT_LINE_SPACING;
+        let highlights: Vec<Rect> = canvas
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                DrawCall::DrawRectFilled { rect, color } if *color == TEXT_HIGHLIGHT => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            highlights,
+            vec![Rect::from_xywh(pos.x, pos.y, 2.0 * font_size * 0.6, line_h)],
+            "only line 0, full advance"
+        );
+    }
+
+    /// Per-line highlight x accounts for alignment: right-aligned
+    /// lines shift as a block, matching the caret math.
+    #[test]
+    fn render_selection_highlight_respects_alignment() {
+        let mut state = EditorState::new(image::RgbaImage::new(100, 40));
+        let pos = Point::new(10.0, 5.0);
+        let font_size = 16.0;
+        state.pending = Some(Annotation::text(
+            pos,
+            "ab\ncdef",
+            TextStyle {
+                align: crate::text::TextAlign::Right,
+                ..TextStyle::simple(font_size, Color::RED)
+            },
+        ));
+        state.text_cursor = 7; // whole text
+        state.text_anchor = Some(0);
+
+        let mut canvas = MockCanvas::default();
+        let mut bg = None;
+        render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
+
+        let line_h = font_size * crate::text::DEFAULT_LINE_SPACING;
+        let w = |n: f32| n * font_size * 0.6;
+        // max line = "cdef" (38.4); line "ab" right-shifts by 38.4 - 19.2.
+        let highlights: Vec<Rect> = canvas
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                DrawCall::DrawRectFilled { rect, color } if *color == TEXT_HIGHLIGHT => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            highlights,
+            vec![
+                Rect::from_xywh(pos.x + w(4.0) - w(2.0), pos.y, w(2.0), line_h),
+                Rect::from_xywh(pos.x, pos.y + line_h, w(4.0), line_h),
+            ]
         );
     }
 
