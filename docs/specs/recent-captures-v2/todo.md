@@ -1,6 +1,6 @@
 # Recent Captures v2 — task checklist
 
-- [ ] 001-config-save-dir-and-fields
+- [x] 001-config-save-dir-and-fields
 - [ ] 002-core-output-and-recents-limit
 - [ ] 003-editor-copy-persist
 - [ ] 004-capture-copy-persist
