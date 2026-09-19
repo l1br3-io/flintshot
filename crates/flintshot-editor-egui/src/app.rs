@@ -4259,12 +4259,19 @@ mod tests {
         let mut state = move_state_with_ann();
         state.selected = vec![0];
         let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        // Deterministic layout: `ui_impl` re-seeds the animation gate
+        // from the config each frame (the inspector's section stack
+        // must be fully unfolded or the Delete chip's rect is
+        // clipped mid-spring).
+        app.config.ui.animations = false;
         // The panel stacks ~450 px of pods + bay above the bottom
         // cluster; a short screen would clip the Delete chip out of
         // the viewport, where no pointer can reach it. Roomy screen
-        // so the whole panel is visible; positions are still
+        // so the whole panel is visible — the inspector's section
+        // stack (Stroke + Fill + Selection) is taller than the old
+        // Move-tool lone Selection card; positions are still
         // response-derived.
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 768.0));
         let frame = |ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>| {
             let raw = egui::RawInput {
                 screen_rect: Some(screen),
@@ -4299,6 +4306,14 @@ mod tests {
                     modifiers: egui::Modifiers::NONE,
                 },
             ],
+        );
+        eprintln!(
+            "del rect {:?} clicked {:?} anns {}",
+            ctx.read_response(egui::Id::new("panel-delete"))
+                .map(|r| r.rect),
+            ctx.read_response(egui::Id::new("panel-delete"))
+                .map(|r| r.clicked()),
+            app.state.anns.len()
         );
         assert!(
             app.state.anns.is_empty(),

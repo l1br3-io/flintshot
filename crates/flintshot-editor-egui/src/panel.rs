@@ -26,7 +26,7 @@
 //! rect, which egui shrinks past this panel automatically — the
 //! panel's chips can never feed annotation drags.
 
-use flintshot_core::{EditorState, Tool};
+use flintshot_core::{Annotation, EditorState, Tool};
 
 use egui::{Color32, CornerRadius, FontId, Pos2, Sense, Stroke, StrokeKind, Vec2};
 use flintshot_core::{BlurKind, Color, FontFamily, FontStyle, FontWeight, TextAlign, TextOutline};
@@ -55,6 +55,13 @@ const GRAIN_TILE: u32 = 64;
 pub(crate) struct PanelState {
     /// The grain tile, created on first use.
     grain: Option<egui::TextureHandle>,
+    /// Whether the selection inspector's custom-colour popover ran
+    /// this frame — drives `end_property_edit` bracketing when the
+    /// popover closes (a continuous widget's burst must end when
+    /// its popover does).
+    color_pop_live: bool,
+    /// Same bracketing flag for the text-style popover.
+    text_pop_live: bool,
 }
 
 /// The properties panel's contextual sections (spec `SEC_MAP`).
@@ -99,6 +106,42 @@ pub(crate) fn sections_for(tool: Tool) -> &'static [Section] {
     }
 }
 
+/// The panel title for this frame: with a live selection the panel
+/// is a selection inspector (`N selected · Properties`); without,
+/// byte-for-byte today's tool-defaults title. Pure for tests.
+pub(crate) fn panel_title(state: &EditorState) -> String {
+    if state.selected.is_empty() {
+        format!("{} · Properties", tool_display_name(state.tool))
+    } else {
+        format!("{} selected · Properties", state.selected.len())
+    }
+}
+
+/// The inspector's section map: the intersection sections the
+/// selection supports (via [`EditorState::selected_capabilities`]),
+/// in panel order, plus the always-present Selection section. Pure
+/// for tests.
+pub(crate) fn selection_sections(caps: flintshot_core::SelectionCapabilities) -> Vec<Section> {
+    let mut sections = Vec::new();
+    if caps.stroke_color {
+        sections.push(Section::Stroke);
+    }
+    if caps.fill {
+        sections.push(Section::Fill);
+    }
+    if caps.text_style {
+        sections.push(Section::Text);
+    }
+    if caps.effects {
+        sections.push(Section::Effects);
+    }
+    if caps.number_size {
+        sections.push(Section::Number);
+    }
+    sections.push(Section::Selection);
+    sections
+}
+
 /// The section card's title.
 fn section_title(section: Section) -> &'static str {
     match section {
@@ -126,8 +169,9 @@ fn tool_display_name(tool: Tool) -> &'static str {
 }
 
 /// The Selection section's danger Delete: berry-filled with cream
-/// text, disabled (dim, hover-only) without a selection.
-fn delete_button(ui: &mut egui::Ui, enabled: bool) -> bool {
+/// text, disabled (dim, hover-only) without a selection. The label
+/// pluralizes in inspector mode.
+fn delete_button(ui: &mut egui::Ui, enabled: bool, label: &str) -> bool {
     use crate::theme::palette as p;
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
@@ -160,7 +204,7 @@ fn delete_button(ui: &mut egui::Ui, enabled: bool) -> bool {
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        "🗑 Delete annotation",
+        label,
         egui::FontId::proportional(theme::TYPE_SM),
         ink,
     );
@@ -203,9 +247,16 @@ fn number_row(ui: &mut egui::Ui, state: &mut EditorState) {
     });
 }
 
-/// Draw the properties panel: the `{Tool} · Properties` title and
-/// exactly the binding section map's collapsible cards. Returns the
-/// fired history action (the Selection section's Delete).
+/// Draw the properties panel. Two modes (multi-select-properties
+/// spec): with a live selection the panel is a **selection
+/// inspector** — title `N selected · Properties`, the
+/// intersection-of-properties sections, edits routed through the
+/// core mutators (undoable, defaults-syncing). Without a selection
+/// it is byte-for-byte today's tool-defaults panel: the `{Tool} ·
+/// Properties` title and exactly `sections_for(tool)`.
+///
+/// Returns the fired history action (the Selection section's
+/// Delete).
 pub(crate) fn show(
     ui: &mut egui::Ui,
     state: &mut EditorState,
@@ -215,13 +266,22 @@ pub(crate) fn show(
         .fill(theme::palette::PAPER)
         .inner_margin(egui::Margin::same(8));
     let mut action = ToolbarAction::None;
+    // End-of-burst bracketing inputs: which continuous popovers ran
+    // last frame vs. this frame. A popover that ran last frame but
+    // not this one just closed — close its edit burst too.
+    let color_pop_was_live = panel.color_pop_live;
+    let text_pop_was_live = panel.text_pop_live;
+    panel.color_pop_live = false;
+    panel.text_pop_live = false;
+    let inspector = !state.selected.is_empty();
+    let caps = state.selected_capabilities();
     egui::Panel::right("editor_panel")
         .resizable(false)
         .exact_size(PANEL_WIDTH)
         .frame(frame)
         .show(ui, |ui| {
             paint_grain(ui, panel);
-            let title = format!("{} · Properties", tool_display_name(state.tool));
+            let title = panel_title(state);
             let galley = ui.painter().layout_no_wrap(
                 title.to_uppercase(),
                 egui::FontId::proportional(theme::TYPE_SM),
@@ -230,14 +290,21 @@ pub(crate) fn show(
             let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
             ui.painter().galley(rect.min, galley, theme::palette::INK);
             ui.add_space(theme::SPACE_SCALE[1]);
-            for section in sections_for(state.tool) {
-                let id = egui::Id::new(("panel-section", section_title(*section)));
-                let title = section_title(*section);
+            let sections: Vec<Section> = if inspector {
+                selection_sections(caps)
+            } else {
+                sections_for(state.tool).to_vec()
+            };
+            for section in sections {
+                let id = egui::Id::new(("panel-section", section_title(section)));
+                let title = section_title(section);
                 widgets::section(ui, id, title, true, |body| match section {
+                    Section::Stroke if inspector => selection_stroke(body, state, caps, panel),
                     Section::Stroke => {
                         swatch_row(body, &mut state.color);
                         stroke_chips(body, state);
                     }
+                    Section::Fill if inspector => selection_fill(body, state),
                     Section::Fill => {
                         let resp = widgets::switch(
                             body,
@@ -247,13 +314,16 @@ pub(crate) fn show(
                         );
                         state.fill_shapes = resp.on;
                     }
+                    Section::Text if inspector => selection_text(body, state, panel),
                     Section::Text => {
                         text_style_row(body, state);
                         popover::pod_button(body, state, popover::ColorTarget::Text);
                     }
+                    Section::Number if inspector => selection_number(body, state),
                     Section::Number => {
                         number_row(body, state);
                     }
+                    Section::Effects if inspector => selection_effects(body, state),
                     Section::Effects => {
                         blur_bay(body, state);
                     }
@@ -262,13 +332,24 @@ pub(crate) fn show(
                         hint(body, tool_hint(state.tool));
                     }
                     Section::Selection => {
-                        if delete_button(body, !state.selected.is_empty()) {
+                        let clicked = if inspector {
+                            selection_selection_row(body, state)
+                        } else {
+                            delete_button(body, !state.selected.is_empty(), "🗑 Delete annotation")
+                        };
+                        if clicked {
                             action = ToolbarAction::Delete;
                         }
                     }
                 });
             }
         });
+    if color_pop_was_live && !panel.color_pop_live {
+        state.end_property_edit();
+    }
+    if text_pop_was_live && !panel.text_pop_live {
+        state.end_property_edit();
+    }
     action
 }
 
@@ -760,30 +841,19 @@ pub(crate) fn swatch_row(ui: &mut egui::Ui, color: &mut Color) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         for sw in theme::palette::SWATCHES {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
-            let selected = to_color32(*color) == sw;
-            let resp = ui.interact(
-                rect,
-                egui::Id::new(("swatch", sw.r(), sw.g(), sw.b())),
-                Sense::click(),
-            );
-            let ring = if selected {
-                Stroke::new(2.0, theme::palette::FOREST_DEEP)
-            } else {
-                theme::HAIRLINE_STROKE
-            };
-            ui.painter()
-                .rect(rect, CornerRadius::same(4), sw, ring, StrokeKind::Middle);
-            if resp.clicked() {
+            if swatch_chip(ui, sw, to_color32(*color) == sw) {
                 *color = from_color32(sw);
             }
         }
-        custom_color_chip(ui, color);
+        let mut pop_live = false;
+        custom_color_chip(ui, color, &mut pop_live);
     });
 }
 
 /// `+` chip opening a custom-color popup (full sRGB editor).
-fn custom_color_chip(ui: &mut egui::Ui, color: &mut Color) {
+/// `pop_live` reports whether the popup body ran (the inspector's
+/// end-of-burst bracket).
+fn custom_color_chip(ui: &mut egui::Ui, color: &mut Color, pop_live: &mut bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
     let resp = ui
         .interact(rect, egui::Id::new("custom_color"), Sense::click())
@@ -800,6 +870,7 @@ fn custom_color_chip(ui: &mut egui::Ui, color: &mut Color) {
     egui::Popup::from_toggle_button_response(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
+            *pop_live = true;
             ui.set_min_width(140.0);
             ui.label("Custom color");
             ui.color_edit_button_srgb(&mut rgb);
@@ -808,14 +879,16 @@ fn custom_color_chip(ui: &mut egui::Ui, color: &mut Color) {
 }
 
 /// S / M / L stroke presets as dot chips; a dot sized by the preset
-/// communicates the effect faster than numbers. Flows left-to-right
-/// (same wrapper rationale as [`swatch_row`]).
-fn stroke_chips(ui: &mut egui::Ui, state: &mut EditorState) {
+/// communicates the effect faster than numbers. Returns the clicked
+/// preset, if any — the shared core of the tool-defaults and
+/// inspector stroke rows.
+fn stroke_wells(ui: &mut egui::Ui, current: f32) -> Option<f32> {
+    let mut clicked = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         for (i, preset) in theme::STROKE_PRESETS.iter().enumerate() {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
-            let selected = (state.stroke_width - preset).abs() < 0.001;
+            let selected = (current - preset).abs() < 0.001;
             let resp = ui.interact(rect, egui::Id::new(("stroke", i)), Sense::click());
             let fill = if selected || resp.hovered() {
                 theme::palette::PAPER_DIM
@@ -837,10 +910,19 @@ fn stroke_chips(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.painter()
                 .circle(rect.center(), preset / 2.0 + 1.2, dot, Stroke::NONE);
             if resp.clicked() {
-                state.stroke_width = *preset;
+                clicked = Some(*preset);
             }
         }
     });
+    clicked
+}
+
+/// The tool-defaults stroke row (wells bound to the session
+/// `stroke_width`).
+fn stroke_chips(ui: &mut egui::Ui, state: &mut EditorState) {
+    if let Some(preset) = stroke_wells(ui, state.stroke_width) {
+        state.stroke_width = preset;
+    }
 }
 
 fn to_color32(c: Color) -> Color32 {
@@ -849,6 +931,307 @@ fn to_color32(c: Color) -> Color32 {
 
 fn from_color32(c: Color32) -> Color {
     Color::rgb(c.r(), c.g(), c.b())
+}
+
+// ------------------------------------------------------------------
+// Selection inspector (multi-select-properties)
+// ------------------------------------------------------------------
+
+/// The lowest-index selected member — the inspector's representative
+/// for display values (edits still write every member).
+fn first_selected(state: &EditorState) -> Option<&Annotation> {
+    let &index = state.selected.first()?;
+    state.anns.get(index)
+}
+
+/// The representative stroke colour: the first member's opaque
+/// colour (a marker's translucency is display-only).
+fn selection_color(state: &EditorState) -> Color {
+    let raw = match first_selected(state) {
+        Some(
+            Annotation::Rect { stroke, .. }
+            | Annotation::Ellipse { stroke, .. }
+            | Annotation::Line { stroke, .. }
+            | Annotation::Arrow { stroke, .. },
+        ) => stroke.color,
+        Some(
+            Annotation::Marker { color, .. }
+            | Annotation::Pencil { color, .. }
+            | Annotation::Text { color, .. }
+            | Annotation::Number { color, .. },
+        ) => *color,
+        _ => state.color,
+    };
+    Color::rgb(raw.r, raw.g, raw.b)
+}
+
+/// The representative stroke width.
+fn selection_stroke_width(state: &EditorState) -> f32 {
+    match first_selected(state) {
+        Some(
+            Annotation::Rect { stroke, .. }
+            | Annotation::Ellipse { stroke, .. }
+            | Annotation::Line { stroke, .. }
+            | Annotation::Arrow { stroke, .. },
+        ) => stroke.width,
+        Some(Annotation::Marker { width, .. } | Annotation::Pencil { width, .. }) => *width,
+        _ => state.stroke_width,
+    }
+}
+
+/// Whether the representative member carries an interior fill.
+fn selection_fill_on(state: &EditorState) -> bool {
+    matches!(
+        first_selected(state),
+        Some(Annotation::Rect { fill: Some(_), .. } | Annotation::Ellipse { fill: Some(_), .. })
+    )
+}
+
+/// The representative blur kind + strength.
+fn selection_blur(state: &EditorState) -> (BlurKind, u8) {
+    match first_selected(state) {
+        Some(Annotation::Blur { kind, strength, .. }) => (*kind, *strength),
+        _ => (state.blur_kind, 8),
+    }
+}
+
+/// The representative bubble diameter.
+fn selection_number_diameter(state: &EditorState) -> f32 {
+    match first_selected(state) {
+        Some(Annotation::Number { diameter, .. }) => *diameter,
+        _ => state.number_diameter,
+    }
+}
+
+/// One discrete swatch: paint + click detection. Shared by the
+/// tool-defaults swatch row and the inspector's.
+fn swatch_chip(ui: &mut egui::Ui, sw: Color32, selected: bool) -> bool {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
+    let resp = ui.interact(
+        rect,
+        egui::Id::new(("swatch", sw.r(), sw.g(), sw.b())),
+        Sense::click(),
+    );
+    let ring = if selected {
+        Stroke::new(2.0, theme::palette::FOREST_DEEP)
+    } else {
+        theme::HAIRLINE_STROKE
+    };
+    ui.painter()
+        .rect(rect, CornerRadius::same(4), sw, ring, StrokeKind::Middle);
+    resp.clicked()
+}
+
+/// The inspector's Stroke section: the same swatch row + stroke
+/// wells, bound to the selection. Discrete swatch / well clicks
+/// commit and close their burst (one undo entry each); the
+/// custom-colour popover commits continuously under kind-based
+/// coalescing and closes its burst when the popover closes
+/// (bracketed via [`PanelState::color_pop_live`]).
+fn selection_stroke(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    caps: flintshot_core::SelectionCapabilities,
+    panel: &mut PanelState,
+) {
+    let current = selection_color(state);
+    let mut pending = current;
+    let mut pop_live = false;
+    // No early return on a discrete click: skipping the remaining
+    // widgets on the click frame leaves egui's interaction bookkeeping
+    // stale for the next frame's widgets.
+    let mut clicked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        for sw in theme::palette::SWATCHES {
+            if swatch_chip(ui, sw, to_color32(current) == sw) {
+                clicked = Some(sw);
+            }
+        }
+        custom_color_chip(ui, &mut pending, &mut pop_live);
+    });
+    if let Some(sw) = clicked {
+        state.set_selected_color(from_color32(sw));
+        state.end_property_edit();
+    } else if pending != current {
+        state.set_selected_color(pending);
+    }
+    panel.color_pop_live = pop_live;
+    if caps.stroke_width {
+        let width = selection_stroke_width(state);
+        if let Some(preset) = stroke_wells(ui, width) {
+            state.set_selected_stroke_width(preset);
+            state.end_property_edit();
+        }
+    }
+}
+
+/// The inspector's Fill section: the same switch, bound to the
+/// selection's interior fill.
+fn selection_fill(ui: &mut egui::Ui, state: &mut EditorState) {
+    let on = selection_fill_on(state);
+    let resp = widgets::switch(ui, egui::Id::new("fill-switch"), on, false);
+    if resp.on != on {
+        state.set_selected_fill(resp.on);
+        state.end_property_edit();
+    }
+}
+
+/// The inspector's Text section: the size stepper + `Aa` style
+/// popover, bound to the selection's [`TextStyle`]. Size edits
+/// commit continuously (coalesced); the drag / focus loss and the
+/// popover's close each end the burst.
+fn selection_text(ui: &mut egui::Ui, state: &mut EditorState, panel: &mut PanelState) {
+    let Some(mut style) = first_selected(state).and_then(|ann| match ann {
+        Annotation::Text { .. } => Some(ann.text_style()),
+        _ => None,
+    }) else {
+        return;
+    };
+    let before = style;
+    let mut size = style.size;
+    let minus = ui.small_button("-");
+    let dv = ui.add_sized(
+        [36.0, 20.0],
+        egui::DragValue::new(&mut size).range(8.0..=72.0).speed(0.5),
+    );
+    let plus = ui.small_button("+");
+    if minus.clicked() {
+        size = (size - 1.0).max(8.0);
+    }
+    if plus.clicked() {
+        size = (size + 1.0).min(72.0);
+    }
+    style.size = size;
+    if style != before {
+        state.set_selected_text_style(style);
+    }
+    if dv.drag_stopped() || dv.lost_focus() || minus.clicked() || plus.clicked() {
+        state.end_property_edit();
+    }
+    let btn = ui.add(egui::Button::new(egui::RichText::new("Aa").strong()));
+    let mut pop_live = false;
+    egui::Popup::from_toggle_button_response(&btn)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            pop_live = true;
+            text_style_popup_bound(ui, &mut style);
+        });
+    panel.text_pop_live = pop_live;
+    if style != before {
+        state.set_selected_text_style(style);
+    }
+}
+
+/// The text-style popover grid, bound to a [`TextStyle`] local
+/// instead of session defaults (the inspector's twin of
+/// [`text_style_popup`]).
+fn text_style_popup_bound(ui: &mut egui::Ui, style: &mut flintshot_core::TextStyle) {
+    ui.set_min_width(200.0);
+    egui::Grid::new("text_style")
+        .num_columns(2)
+        .spacing([10.0, 5.0])
+        .show(ui, |ui| {
+            let head = |ui: &mut egui::Ui, text: &str| {
+                ui.label(
+                    egui::RichText::new(text)
+                        .size(theme::TYPE_SM)
+                        .color(theme::palette::INK_SOFT),
+                );
+            };
+            head(ui, "Family");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut style.family, FontFamily::SansSerif, "Sans");
+                ui.selectable_value(&mut style.family, FontFamily::Monospace, "Mono");
+            });
+            ui.end_row();
+            head(ui, "Weight");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut style.weight, FontWeight::Normal, "Regular");
+                ui.selectable_value(&mut style.weight, FontWeight::Bold, "Bold");
+            });
+            ui.end_row();
+            head(ui, "Style");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut style.style, FontStyle::Normal, "Regular");
+                ui.selectable_value(&mut style.style, FontStyle::Italic, "Italic");
+            });
+            ui.end_row();
+            head(ui, "Align");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut style.align, TextAlign::Left, "Left");
+                ui.selectable_value(&mut style.align, TextAlign::Center, "Center");
+                ui.selectable_value(&mut style.align, TextAlign::Right, "Right");
+            });
+            ui.end_row();
+        });
+}
+
+/// The inspector's Number section: the Size stepper bound to the
+/// selection's bubbles (the Start-at stepper stays a placement
+/// default — it has no committed-bubble meaning).
+fn selection_number(ui: &mut egui::Ui, state: &mut EditorState) {
+    let mut diameter = selection_number_diameter(state);
+    let dv = ui.add(
+        egui::DragValue::new(&mut diameter)
+            .range(NUMBER_MIN_DIAMETER..=NUMBER_MAX_DIAMETER)
+            .speed(1.0),
+    );
+    if (diameter - selection_number_diameter(state)).abs() > f32::EPSILON {
+        state.set_selected_number_diameter(diameter);
+    }
+    if dv.drag_stopped() || dv.lost_focus() {
+        state.end_property_edit();
+    }
+}
+
+/// The inspector's Effects section: the blur-kind segmented chips
+/// bound to the selection (the member's strength rides along).
+fn selection_effects(ui: &mut egui::Ui, state: &mut EditorState) {
+    let (kind, strength) = selection_blur(state);
+    ui.horizontal(|ui| {
+        if segmented_chip(
+            ui,
+            egui::Id::new("blur-gaussian"),
+            "Gaussian",
+            kind == BlurKind::Gaussian,
+        ) {
+            state.set_selected_blur(BlurKind::Gaussian, strength);
+            state.end_property_edit();
+        }
+        if segmented_chip(
+            ui,
+            egui::Id::new("blur-pixelate"),
+            "Pixelate",
+            kind == BlurKind::Pixelate,
+        ) {
+            state.set_selected_blur(BlurKind::Pixelate, strength);
+            state.end_property_edit();
+        }
+    });
+}
+
+/// The inspector's Selection section: the member count + the
+/// pluralized Delete-all.
+fn selection_selection_row(ui: &mut egui::Ui, state: &mut EditorState) -> bool {
+    let n = state.selected.len();
+    // Painter-drawn (the panel title's idiom), not `ui.label`: a
+    // click-sensed label directly above the delete button steals the
+    // click from it.
+    let galley = ui.painter().layout_no_wrap(
+        format!("{n} annotation{} selected", if n == 1 { "" } else { "s" }),
+        egui::FontId::proportional(theme::TYPE_SM),
+        theme::palette::INK_SOFT,
+    );
+    let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+    ui.painter()
+        .galley(rect.min, galley, theme::palette::INK_SOFT);
+    let label = if n == 1 {
+        "🗑 Delete annotation".to_owned()
+    } else {
+        format!("🗑 Delete {n} annotations")
+    };
+    delete_button(ui, n > 0, &label)
 }
 
 // ------------------------------------------------------------------
@@ -1061,6 +1444,7 @@ mod tests {
 
     fn action_after_delete_click(state: &mut EditorState) -> ToolbarAction {
         let ctx = egui::Context::default();
+        crate::widgets::set_animations(&ctx, false);
         let mut panel = PanelState::default();
         let _ = draw(&ctx, state, &mut panel, vec![]);
         let del = ctx
@@ -1157,6 +1541,240 @@ mod tests {
         assert_eq!(
             state.number_diameter, 200.0,
             "no Size widget renders outside the Number section"
+        );
+    }
+
+    // --- Selection-inspector mode (multi-select-properties Task 004) ---
+
+    /// A committed rect at a known spot, `n` of them selected, tool
+    /// Move (the only tool a selection survives under).
+    fn inspector_state(n_usable: usize) -> EditorState {
+        let mut state = panel_state();
+        state.tool = Tool::Move;
+        state.anns.push(Annotation::Rect {
+            rect: CoreRect::from_xywh(10.0, 10.0, 40.0, 30.0),
+            stroke: CoreStroke::new(Color::RED, 3.0),
+            fill: None,
+        });
+        state.anns.push(Annotation::Rect {
+            rect: CoreRect::from_xywh(10.0, 60.0, 40.0, 30.0),
+            stroke: CoreStroke::new(Color::RED, 3.0),
+            fill: None,
+        });
+        state.selected = (0..n_usable).collect();
+        state
+    }
+
+    #[test]
+    fn panel_title_switches_by_mode() {
+        let mut state = panel_state();
+        assert_eq!(
+            panel_title(&state),
+            format!("{} · Properties", tool_display_name(state.tool)),
+            "no selection: byte-for-byte today's title"
+        );
+        state.selected = vec![0, 1];
+        assert_eq!(panel_title(&state), "2 selected · Properties");
+    }
+
+    fn rect_ann_fixture() -> Annotation {
+        Annotation::Rect {
+            rect: CoreRect::from_xywh(10.0, 10.0, 40.0, 30.0),
+            stroke: CoreStroke::new(Color::RED, 3.0),
+            fill: None,
+        }
+    }
+
+    fn text_ann_fixture() -> Annotation {
+        Annotation::text(
+            flintshot_core::Point::new(5.0, 5.0),
+            "hi",
+            flintshot_core::TextStyle::simple(16.0, Color::RED),
+        )
+    }
+
+    fn line_ann_fixture() -> Annotation {
+        Annotation::Line {
+            a: flintshot_core::Point::new(0.0, 0.0),
+            b: flintshot_core::Point::new(9.0, 9.0),
+            stroke: CoreStroke::new(Color::RED, 3.0),
+        }
+    }
+
+    fn blur_ann_fixture() -> Annotation {
+        Annotation::Blur {
+            rect: CoreRect::from_xywh(0.0, 0.0, 5.0, 5.0),
+            kind: flintshot_core::BlurKind::Gaussian,
+            strength: 8,
+        }
+    }
+
+    fn number_ann_fixture() -> Annotation {
+        Annotation::Number {
+            pos: flintshot_core::Point::new(5.0, 5.0),
+            n: 1,
+            color: Color::RED,
+            diameter: 28.0,
+        }
+    }
+
+    #[test]
+    fn selection_sections_follow_capabilities() {
+        let sections_for_anns = |anns: Vec<Annotation>| {
+            let mut s = panel_state();
+            s.anns = anns;
+            s.selected = (0..s.anns.len()).collect();
+            selection_sections(s.selected_capabilities())
+        };
+        assert_eq!(
+            sections_for_anns(vec![rect_ann_fixture()]),
+            vec![Section::Stroke, Section::Fill, Section::Selection],
+            "a lone rect: the full shape kit"
+        );
+        assert_eq!(
+            sections_for_anns(vec![text_ann_fixture()]),
+            vec![Section::Stroke, Section::Text, Section::Selection],
+            "a lone text: colour + popover"
+        );
+        assert_eq!(
+            sections_for_anns(vec![blur_ann_fixture()]),
+            vec![Section::Effects, Section::Selection],
+            "a lone blur: effects only"
+        );
+        assert_eq!(
+            sections_for_anns(vec![number_ann_fixture()]),
+            vec![Section::Stroke, Section::Number, Section::Selection],
+            "a lone number: colour + size"
+        );
+        assert_eq!(
+            sections_for_anns(vec![rect_ann_fixture(), line_ann_fixture()]),
+            vec![Section::Stroke, Section::Selection],
+            "spec exit criterion 1: rect + line share colour + width only"
+        );
+        assert_eq!(
+            sections_for_anns(vec![rect_ann_fixture(), blur_ann_fixture()]),
+            vec![Section::Selection],
+            "empty intersection: count + delete-only"
+        );
+    }
+
+    #[test]
+    fn swatch_click_edits_selection_with_one_undo_entry() {
+        let ctx = egui::Context::default();
+        crate::widgets::set_animations(&ctx, false);
+        let mut state = inspector_state(1);
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let target = theme::palette::SWATCHES[1];
+        let id = egui::Id::new(("swatch", target.r(), target.g(), target.b()));
+        let rect = ctx
+            .read_response(id)
+            .expect("pass 1 registered the selection-mode swatches")
+            .rect;
+        let action = draw(&ctx, &mut state, &mut panel, click_events(rect.center()));
+        assert_eq!(
+            action,
+            ToolbarAction::None,
+            "a swatch click fires no toolbar action"
+        );
+        match &state.anns[0] {
+            Annotation::Rect { stroke, .. } => {
+                assert_eq!(
+                    stroke.color,
+                    from_color32(target),
+                    "the member recolours live"
+                );
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+        assert_eq!(state.undo.len(), 1, "one discrete click = one undo entry");
+        assert_eq!(
+            state.color,
+            from_color32(target),
+            "the default learns the colour"
+        );
+        state.undo();
+        match &state.anns[0] {
+            Annotation::Rect { stroke, .. } => {
+                assert_eq!(
+                    stroke.color,
+                    Color::RED,
+                    "undo restores the pre-edit colour"
+                );
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn separate_swatch_clicks_are_separate_undo_entries() {
+        let ctx = egui::Context::default();
+        crate::widgets::set_animations(&ctx, false);
+        let mut state = inspector_state(2);
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        for target in [theme::palette::SWATCHES[1], theme::palette::SWATCHES[2]] {
+            let id = egui::Id::new(("swatch", target.r(), target.g(), target.b()));
+            let rect = ctx.read_response(id).expect("swatch registered").rect;
+            let _ = draw(&ctx, &mut state, &mut panel, click_events(rect.center()));
+        }
+        assert_eq!(
+            state.undo.len(),
+            2,
+            "each discrete gesture closes its burst"
+        );
+        for i in 0..2 {
+            match &state.anns[i] {
+                Annotation::Rect { stroke, .. } => {
+                    assert_eq!(stroke.color, from_color32(theme::palette::SWATCHES[2]));
+                }
+                other => panic!("expected Rect, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn inspector_delete_click_fires_delete_for_plural_set() {
+        let mut state = inspector_state(2);
+        assert_eq!(action_after_delete_click(&mut state), ToolbarAction::Delete);
+    }
+
+    #[test]
+    fn inspector_sections_render_for_mixed_set() {
+        // rect + text: Stroke renders, Fill/Text-style stay hidden —
+        // the intersection rule — and the panel still renders + the
+        // delete button stays reachable.
+        let ctx = egui::Context::default();
+        let mut state = panel_state();
+        state.tool = Tool::Move;
+        state.anns.push(Annotation::Rect {
+            rect: CoreRect::from_xywh(10.0, 10.0, 40.0, 30.0),
+            stroke: CoreStroke::new(Color::RED, 3.0),
+            fill: None,
+        });
+        state.anns.push(Annotation::text(
+            flintshot_core::Point::new(5.0, 5.0),
+            "hi",
+            flintshot_core::TextStyle::simple(16.0, Color::RED),
+        ));
+        state.selected = vec![0, 1];
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        // The swatch row (Stroke) registers; the fill switch (Fill
+        // section) must not.
+        let sw = theme::palette::SWATCHES[1];
+        assert!(
+            ctx.read_response(egui::Id::new(("swatch", sw.r(), sw.g(), sw.b())))
+                .is_some(),
+            "the shared Stroke section renders"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new("fill-switch")).is_none(),
+            "the Fill section stays hidden for a mixed rect+text set"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new("panel-delete")).is_some(),
+            "the Selection section always renders"
         );
     }
 }
