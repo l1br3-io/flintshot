@@ -5,3 +5,5 @@
 - [x] Task 3: Shell — PROPERTIES | HISTORY tab header
 - [x] Task 4: Shell — History timeline + click-to-jump
 - [x] Task 5: Polish — stale module docs, CHANGELOG, full gate
+- [x] Follow-up: elapsed time right-aligned on every History row
+      (order stays Photoshop-style oldest-first)

@@ -361,25 +361,22 @@ fn history_body(ui: &mut egui::Ui, state: &mut EditorState) {
         hint(ui, "No edits yet");
         return;
     }
-    // Labels collected up front: the interaction loop must not hold
-    // a borrow over the `restore_to` call it feeds.
-    let past: Vec<String> = state.undo.iter().map(|s| s.kind.to_string()).collect();
-    let future: Vec<String> = state
-        .redo
-        .iter()
-        .rev()
-        .map(|s| s.kind.to_string())
-        .collect();
+    // Labels + times collected up front: the interaction loop must
+    // not hold a borrow over the `restore_to` call it feeds.
+    let row =
+        |s: &flintshot_core::Snapshot| (s.kind.to_string(), flintshot_core::format_elapsed(s.when));
+    let past: Vec<(String, String)> = state.undo.iter().map(row).collect();
+    let future: Vec<(String, String)> = state.redo.iter().rev().map(row).collect();
     let mut jump: Option<usize> = None;
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for (i, label) in past.iter().enumerate() {
-            if history_row(ui, egui::Id::new(("history-row", i)), label, false) {
+        for (i, (label, time)) in past.iter().enumerate() {
+            if history_row(ui, egui::Id::new(("history-row", i)), label, time, false) {
                 jump = Some(i + 1);
             }
         }
         current_marker(ui);
-        for (j, label) in future.iter().enumerate() {
-            if history_row(ui, egui::Id::new(("history-future", j)), label, true) {
+        for (j, (label, time)) in future.iter().enumerate() {
+            if history_row(ui, egui::Id::new(("history-future", j)), label, time, true) {
                 jump = Some(past.len() + j + 1);
             }
         }
@@ -389,16 +386,22 @@ fn history_body(ui: &mut egui::Ui, state: &mut EditorState) {
     }
 }
 
-/// One timeline row. Future rows render dimmed (half-alpha ink) but
+/// One timeline row: the edit's label left, its elapsed time
+/// right-aligned. Future rows render dimmed (half-alpha ink) but
 /// stay clickable. Returns whether the row was clicked.
-fn history_row(ui: &mut egui::Ui, id: egui::Id, label: &str, future: bool) -> bool {
+fn history_row(ui: &mut egui::Ui, id: egui::Id, label: &str, time: &str, future: bool) -> bool {
     let ink = if future {
         theme::palette::INK_SOFT.gamma_multiply(0.5)
     } else {
         theme::palette::INK
     };
-    let galley = ui.painter().layout_no_wrap(
+    let label_galley = ui.painter().layout_no_wrap(
         label.to_owned(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        ink,
+    );
+    let time_galley = ui.painter().layout_no_wrap(
+        time.to_owned(),
         egui::FontId::proportional(theme::TYPE_SM),
         ink,
     );
@@ -413,8 +416,16 @@ fn history_row(ui: &mut egui::Ui, id: egui::Id, label: &str, future: bool) -> bo
             StrokeKind::Middle,
         );
     }
-    let pos = egui::pos2(rect.left() + 2.0, rect.center().y - galley.size().y / 2.0);
-    ui.painter().galley(pos, galley, ink);
+    let label_pos = egui::pos2(
+        rect.left() + 2.0,
+        rect.center().y - label_galley.size().y / 2.0,
+    );
+    ui.painter().galley(label_pos, label_galley, ink);
+    let time_pos = egui::pos2(
+        (rect.right() - 2.0 - time_galley.size().x).max(label_pos.x),
+        rect.center().y - time_galley.size().y / 2.0,
+    );
+    ui.painter().galley(time_pos, time_galley, ink);
     resp.clicked()
 }
 

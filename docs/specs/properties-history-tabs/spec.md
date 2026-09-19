@@ -152,6 +152,13 @@ pub enum EditKind {
   - Current row: an ink-dot marker + "Current" — not clickable.
   - Future rows: dimmed (half-alpha ink) but clickable →
     `restore_to` forward to that boundary.
+  - Every row also shows its **elapsed time since session start**
+    (`m:ss`, `h:mm:ss` past the hour — `format_elapsed` in core)
+    right-aligned; the timestamp mirrors across the undo/redo swap
+    like the label, so a row's time is stable across time travel.
+    Follow-up requested post-plan-review; sort order stays the
+    Photoshop convention (oldest top — stack order *is*
+    chronological order, pinned by a monotonicity test).
   - Empty state (no undo, no redo): a quiet hint line ("No edits
     yet"), mirroring the Crop section's hint styling.
 - The bottom of the panel is untouched: `show()` renders title +
