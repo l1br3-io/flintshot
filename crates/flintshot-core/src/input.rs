@@ -112,6 +112,22 @@ pub enum InputEvent {
     /// committed"). The release position itself is ignored — see
     /// `EditorState::dispatch_input` for details.
     PointerUp,
+    /// The pointer was double-clicked at `pos`.
+    ///
+    /// Emission contract: the shell emits this **in addition to** the
+    /// second press's [`PointerDown`](Self::PointerDown), in the same
+    /// frame, immediately after it. The dispatcher treats that second
+    /// press as a normal press (select / begin annotation) and this
+    /// event as the re-edit trigger — under `Tool::Text`, a hit on a
+    /// committed text lifts it out for re-editing
+    /// (see [`EditorState`](crate::EditorState)'s lift-out session).
+    /// Everywhere else it is a no-op, so shells on toolkits without a
+    /// native double-click signal can simply never emit it and lose
+    /// only the re-edit affordance.
+    DoubleClick {
+        /// Position in canvas-physical px.
+        pos: Point,
+    },
     /// A printable character was typed (text input).
     ///
     /// Only meaningful while a text draft is active (see

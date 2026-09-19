@@ -34,6 +34,23 @@ Categories used below:
   selected member in both the editor window and the overlay, and a
   live multi-drag shows the solid grab outline on each member.
   With no selection, the panel is unchanged (tool-defaults mode).
+- **Committed text is now a live object under the Text tool**
+  (ADR-0062). A single click on a committed text selects it — dashed
+  selection outline, and the properties panel's Text section plus the
+  colour pod show *that annotation's* values instead of session
+  defaults. A double-click re-opens content editing (caret at end;
+  type, arrows, Home/End, Shift+Enter newlines, Backspace). While
+  selected (or mid-re-edit), panel style changes write through to
+  the annotation live — colour, size, family, weight, style, align,
+  line-spacing, outline, background — and also become the defaults
+  for the next placed text; one `Ctrl+Z` reverts a whole re-edit
+  session or one discrete style change (a size-slider drag is a
+  single step). `Del` deletes the selected text from the Text tool
+  (no Move detour); `Esc` deselects without closing the editor, and
+  mid-edit `Esc` reverts the whole edit session. Hovering a
+  committed text shows a dashed affordance + I-beam cursor. Both
+  shells (editor window and overlay) behave identically; fresh
+  drafts and every non-Text tool are unchanged.
 - **Settings is the single preferences surface** (settings-improvement).
   The tray and the COSMIC applet offer a *Settings* item that opens
   (or focuses) the app window directly on its settings page — the

@@ -27,8 +27,11 @@ const POD_ID: &str = "color-stroke-pod";
 /// shows the live color, labeled `Color · Stroke`. Opens the
 /// popover on click.
 pub(crate) fn pod_button(ui: &mut egui::Ui, state: &mut EditorState, target: ColorTarget) {
+    // The pod's chip shows — and the popover edits — the same source
+    // the panel's Text section reads (session draft > selection >
+    // defaults); a colour change applies as one discrete gesture.
     let color = match target {
-        ColorTarget::Text => state.text_color,
+        ColorTarget::Text => panel::effective_text_style(state).color,
     };
     let resp = labeled_color_chip(ui, color, target);
     egui::Popup::from_toggle_button_response(&resp)
@@ -42,12 +45,26 @@ pub(crate) fn pod_button(ui: &mut egui::Ui, state: &mut EditorState, target: Col
                 .stroke(theme::HAIRLINE_STROKE)
                 .show(ui, |ui| {
                     ui.vertical(|ui| match target {
-                        ColorTarget::Text => {
-                            ui.horizontal(|ui| panel::swatch_row(ui, &mut state.text_color));
-                        }
+                        ColorTarget::Text => text_color_bay(ui, state),
                     });
                 });
         });
+}
+
+/// The Text colour bay the pod's popover shows: the shared swatch row
+/// reading from — and writing through to — the same source the panel
+/// edits (session draft > selection > defaults), one discrete gesture
+/// per pick. Split out of `pod_button` so the interaction is drivable
+/// at the root ui (the popup machinery is orthogonal to the retarget).
+pub(crate) fn text_color_bay(ui: &mut egui::Ui, state: &mut EditorState) {
+    let before = panel::effective_text_style(state).color;
+    let mut picked = before;
+    ui.horizontal(|ui| panel::swatch_row(ui, &mut picked));
+    if picked != before {
+        let mut st = panel::effective_text_style(state);
+        st.color = picked;
+        panel::commit_text_style_change(state, st);
+    }
 }
 
 /// The pod chip itself: current-color square + label, galley-sized,
@@ -107,19 +124,28 @@ mod tests {
         EditorState::new(img)
     }
 
-    /// Lay the pod out + settle, then click it — returns the ctx.
-    fn opened_popup(target: ColorTarget) -> egui::Context {
-        let mut s = state();
-        let ctx = egui::Context::default();
-        let screen = || egui::RawInput {
+    fn screen() -> egui::RawInput {
+        egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
                 egui::vec2(1024.0, 768.0),
             )),
             ..egui::RawInput::default()
-        };
+        }
+    }
+
+    /// Lay the pod out + settle, then click it — returns the ctx.
+    fn opened_popup(target: ColorTarget) -> egui::Context {
+        let mut s = state();
+        opened_popup_over(&mut s, target)
+    }
+
+    /// [`opened_popup`] over caller-owned state (the retarget tests
+    /// need a selected text annotation in place).
+    fn opened_popup_over(s: &mut EditorState, target: ColorTarget) -> egui::Context {
+        let ctx = egui::Context::default();
         let _ = ctx.run_ui(screen(), |ui| {
-            pod_button(ui, &mut s, target);
+            pod_button(ui, s, target);
         });
         let pod = ctx
             .read_response(egui::Id::new(POD_ID))
@@ -145,7 +171,7 @@ mod tests {
                 ..screen()
             },
             |ui| {
-                pod_button(ui, &mut s, target);
+                pod_button(ui, s, target);
             },
         );
         ctx
@@ -180,5 +206,78 @@ mod tests {
                 "text target has no stroke row"
             );
         }
+    }
+
+    // --- Selection retarget (text-select-edit Task 006) ---
+
+    /// With a selected text annotation, a swatch click restyles it
+    /// (colour only — the read came from the selection, so every
+    /// other field survives), syncs the defaults, and records one
+    /// undo entry.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the size is assigned verbatim from the fixture, never computed"
+    )]
+    fn text_pod_swatch_click_restyles_selection() {
+        let mut s = state();
+        s.tool = flintshot_core::Tool::Text;
+        s.anns.push(flintshot_core::Annotation::text(
+            flintshot_core::Point::new(4.0, 4.0),
+            "hi",
+            flintshot_core::text::TextStyle::simple(23.0, flintshot_core::Color::rgb(0, 0, 255)),
+        ));
+        s.selected = vec![0];
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(screen(), |ui| {
+            text_color_bay(ui, &mut s);
+        });
+        // A swatch distinct from the annotation's blue.
+        let pick = *theme::palette::SWATCHES
+            .iter()
+            .find(|sw| **sw != panel::to_color32(flintshot_core::Color::rgb(0, 0, 255)))
+            .expect("a non-blue swatch exists");
+        let id = egui::Id::new(("swatch", pick.r(), pick.g(), pick.b()));
+        let at = ctx
+            .read_response(id)
+            .expect("swatch registered")
+            .rect
+            .center();
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::PointerMoved(at), press(at, true)],
+                ..screen()
+            },
+            |ui| {
+                text_color_bay(ui, &mut s);
+            },
+        );
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![press(at, false)],
+                ..screen()
+            },
+            |ui| {
+                text_color_bay(ui, &mut s);
+            },
+        );
+        let want = flintshot_core::Color::rgb(pick.r(), pick.g(), pick.b());
+        match &s.anns[0] {
+            flintshot_core::Annotation::Text {
+                color, font_size, ..
+            } => {
+                assert_eq!(*color, want, "the selection recolours");
+                assert_eq!(*font_size, 23.0, "the read came from the selection");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(s.text_color, want, "defaults synced");
+        assert_eq!(s.undo.len(), 1, "one entry for the discrete click");
     }
 }

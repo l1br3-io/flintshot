@@ -141,6 +141,10 @@ pub(crate) struct EditorApp {
     /// past `canvas_rect.max.x`, but the `contains` gate needs no
     /// axis-specific logic either way.
     canvas_drag_active: bool,
+    /// Press-time double-click detector (text-select-edit): fed
+    /// exactly when a `PointerDown` dispatches, fires the synthesized
+    /// `DoubleClick` right after it. See `crate::dblclick`.
+    dblclick: crate::dblclick::DoubleClickTracker,
     /// Outcome slot shared with the shell. Set on `Esc` or any future
     /// exit path (Save / Copy / …). Defaults to `Ok(Cancelled)` if
     /// the window closes without anything being set (the X button).
@@ -292,6 +296,7 @@ impl EditorApp {
             canvas_rect: None,
             view_zoom: 1.0,
             canvas_drag_active: false,
+            dblclick: crate::dblclick::DoubleClickTracker::default(),
             outcome,
             clipboard: None,
             copied_at: None,
@@ -741,6 +746,19 @@ impl EditorApp {
             // Screen-logical → image-physical, matching `logic_impl`.
             .map(|p| view.logical_to_image(p));
         let Some((rects, kind)) = crate::chrome::move_chrome(&self.state, hover_at) else {
+            // Text-tool hover affordance (text-select-edit): same gate,
+            // same dashed rhythm, Hover kind — one query, one paint
+            // helper, zero new visuals.
+            if let Some(rect) = crate::chrome::text_hover_chrome(&self.state, hover_at) {
+                crate::chrome::paint_move_chrome(
+                    painter,
+                    egui::Rect::from_two_pos(
+                        view.image_to_logical(rect.min),
+                        view.image_to_logical(rect.max),
+                    ),
+                    crate::chrome::MoveChromeKind::Hover,
+                );
+            }
             return;
         };
         for rect in rects {
@@ -761,13 +779,14 @@ impl EditorApp {
     /// output, painted after the move chrome so a grab's solid ember
     /// outline visually wins over the dashed selection outline of
     /// the same annotation. A selection that yields no chrome at
-    /// all while Move is active (degenerate bboxes / stale indices)
-    /// deselects instead of rendering — the selection must never
-    /// point at something unoutlinable.
+    /// all while a selection-owning tool is active (degenerate
+    /// bboxes / stale indices) deselects instead of rendering — the
+    /// selection must never point at something unoutlinable.
     fn paint_selected_chrome_if_any(&mut self, _ctx: &Context, painter: &egui::Painter) {
         let rects = crate::chrome::selected_chrome(&self.state);
         if rects.is_empty() {
-            if self.state.tool == Tool::Move && !self.state.selected.is_empty() {
+            if matches!(self.state.tool, Tool::Move | Tool::Text) && !self.state.selected.is_empty()
+            {
                 self.state.selected.clear();
             }
             return;
@@ -943,27 +962,43 @@ impl EditorApp {
         // an annotation drag. Misses between chips pass through
         // (the pointer-miss passthrough contract).
         let on_floating = self.floating_rects.iter().any(|r| r.contains(pos));
-        let pointer_event = if primary_pressed && canvas_rect.contains(pos) && !on_floating {
-            self.canvas_drag_active = true;
-            Some(InputEvent::PointerDown { pos: at, modifiers })
-        } else if primary_released && self.canvas_drag_active {
-            self.canvas_drag_active = false;
-            Some(InputEvent::PointerUp)
-        } else if primary_down && self.canvas_drag_active {
-            Some(InputEvent::PointerDrag { pos: at })
-        } else {
-            None
-        };
         // Selection-first phase drag gate: a live phase with a
         // non-Select tool skips pointer dispatch entirely — the
         // phase is annotation-proof by drag as well as by chip and
         // hotkey. Unreachable through input today (the rail lock and
         // the hotkey gate above keep the tool Select); this is the
         // backstop for state that got to a non-Select tool by other
-        // means. `canvas_drag_active` above still tracks press /
+        // means. `canvas_drag_active` below still tracks press /
         // release, so no stale drag state survives the gate.
         let annotation_gated = self.phase_active() && self.state.tool != Tool::Select;
-        if let Some(event) = pointer_event.filter(|_| !annotation_gated) {
+        let mut pointer_events: Vec<InputEvent> = Vec::new();
+        if primary_pressed && canvas_rect.contains(pos) && !on_floating {
+            self.canvas_drag_active = true;
+            if !annotation_gated {
+                pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
+                // Double-click synthesis (text-select-edit): fed only
+                // on dispatching presses, fired in the same frame
+                // right after the press — core's ordering contract.
+                let (max_delay, max_dist) = ctx.options(|o| {
+                    (
+                        o.input_options.max_double_click_delay,
+                        o.input_options.max_click_dist,
+                    )
+                });
+                let now = ctx.input(|i| i.time);
+                if self.dblclick.on_press(now, pos, max_delay, max_dist) {
+                    pointer_events.push(InputEvent::DoubleClick { pos: at });
+                }
+            }
+        } else if primary_released && self.canvas_drag_active {
+            self.canvas_drag_active = false;
+            if !annotation_gated {
+                pointer_events.push(InputEvent::PointerUp);
+            }
+        } else if primary_down && self.canvas_drag_active && !annotation_gated {
+            pointer_events.push(InputEvent::PointerDrag { pos: at });
+        }
+        for event in pointer_events {
             // Outcome is always `Continue` for pointer events today
             // (no current tool produces a side-effecting outcome via
             // pointer). Match exhaustively so future outcomes that
@@ -982,6 +1017,10 @@ impl EditorApp {
         let hover_at = (canvas_rect.contains(pos) && !self.canvas_drag_active).then_some(at);
         if crate::chrome::move_chrome(&self.state, hover_at).is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Move);
+        } else if crate::chrome::text_hover_chrome(&self.state, hover_at).is_some() {
+            // Text-tool hover affordance (text-select-edit): the I-beam
+            // announces "click to select / double-click to re-edit".
+            ctx.set_cursor_icon(egui::CursorIcon::Text);
         }
     }
 
@@ -2499,6 +2538,35 @@ mod tests {
             app.logic_impl(ui.ctx());
             app.ui_impl(ui);
         })
+    }
+
+    /// [`editor_frame`] with an explicit input clock — double-click
+    /// detection is time-based, so timing-sensitive tests pin `t`
+    /// instead of relying on the pass-to-pass `predicted_dt` step.
+    fn editor_frame_at(ctx: &egui::Context, app: &mut EditorApp, t: f64, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(640.0, 480.0),
+            )),
+            time: Some(t),
+            events,
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+    }
+
+    /// Primary-button press/release event pair builder at `pos`.
+    fn primary_button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
     }
 
     /// An editor state on the default Move tool with one committed
@@ -4461,6 +4529,132 @@ mod tests {
         assert!(
             app.state.selected.is_empty(),
             "a degenerate bbox deselects instead of rendering"
+        );
+    }
+
+    // --- Double-click synthesis (text-select-edit Task 004) ---
+
+    /// Editor-window state on the Text tool with one committed text
+    /// "hello" at (10,10) — 16 px style, coarse bbox ≈ (10,10)-(50,29).
+    fn text_app() -> (egui::Context, EditorApp) {
+        let ctx = egui::Context::default();
+        let mut state = blank_state(64, 64);
+        state.tool = Tool::Text;
+        state.anns.push(Annotation::text(
+            flintshot_core::Point::new(10.0, 10.0),
+            "hello",
+            flintshot_core::text::TextStyle::simple(16.0, flintshot_core::Color::RED),
+        ));
+        let app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        (ctx, app)
+    }
+
+    /// Image-px point → the screen-logical pos the pump would see.
+    fn screen_point(app: &EditorApp, at: (f32, f32)) -> egui::Pos2 {
+        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+        let logical = app
+            .canvas
+            .view_over(canvas)
+            .image_to_logical(flintshot_core::Point::new(at.0, at.1));
+        egui::pos2(logical.x, logical.y)
+    }
+
+    /// Two rapid presses at the same canvas spot synthesize
+    /// `PointerDown` + `DoubleClick` in the same frame: the first
+    /// press selects the text, the second re-selects and upgrades to
+    /// the lift-out re-edit session.
+    #[test]
+    fn rapid_double_press_opens_reedit_in_editor_window() {
+        let (ctx, mut app) = text_app();
+        editor_frame(&ctx, &mut app, vec![]); // caches canvas_rect
+        editor_frame(&ctx, &mut app, vec![]); // settle Text tool layout
+        let press = screen_point(&app, (20.0, 15.0));
+        editor_frame_at(
+            &ctx,
+            &mut app,
+            1.0,
+            vec![
+                egui::Event::PointerMoved(press),
+                primary_button(press, true),
+            ],
+        );
+        assert_eq!(app.state.selected, vec![0], "first press selects the text");
+        editor_frame_at(&ctx, &mut app, 1.05, vec![primary_button(press, false)]);
+        editor_frame_at(
+            &ctx,
+            &mut app,
+            1.1,
+            vec![
+                egui::Event::PointerMoved(press),
+                primary_button(press, true),
+            ],
+        );
+        assert!(
+            app.state.text_reedit.is_some(),
+            "rapid second press synthesized a DoubleClick and opened the session"
+        );
+        match &app.state.pending {
+            Some(Annotation::Text { text, .. }) => assert_eq!(text, "hello"),
+            other => panic!("expected lifted-out Text, got {other:?}"),
+        }
+    }
+
+    /// Slow presses at the same spot stay a plain re-select — no
+    /// session, no pending.
+    #[test]
+    fn slow_double_press_stays_selection_only() {
+        let (ctx, mut app) = text_app();
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        let press = screen_point(&app, (20.0, 15.0));
+        editor_frame_at(
+            &ctx,
+            &mut app,
+            1.0,
+            vec![
+                egui::Event::PointerMoved(press),
+                primary_button(press, true),
+            ],
+        );
+        editor_frame_at(&ctx, &mut app, 1.05, vec![primary_button(press, false)]);
+        editor_frame_at(
+            &ctx,
+            &mut app,
+            3.0,
+            vec![
+                egui::Event::PointerMoved(press),
+                primary_button(press, true),
+            ],
+        );
+        assert_eq!(app.state.selected, vec![0], "still just selected");
+        assert!(
+            app.state.text_reedit.is_none(),
+            "no session for slow presses"
+        );
+        assert!(app.state.pending.is_none(), "no caret on top of the text");
+    }
+
+    /// Hovering a committed text under the Text tool announces
+    /// selectability: the text cursor icon (the dashed outline paints
+    /// through the shared chrome query on the same gate).
+    #[test]
+    fn text_hover_over_committed_text_sets_text_cursor() {
+        let (ctx, mut app) = text_app();
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        let at = screen_point(&app, (20.0, 15.0));
+        let out = editor_frame_output(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+        assert_eq!(
+            out.platform_output.cursor_icon,
+            egui::CursorIcon::Text,
+            "hover on the text shows the text cursor"
+        );
+        let miss = screen_point(&app, (70.0, 70.0));
+        let out = editor_frame_output(&ctx, &mut app, vec![egui::Event::PointerMoved(miss)]);
+        assert_eq!(
+            out.platform_output.cursor_icon,
+            egui::CursorIcon::Default,
+            "hover on empty canvas shows no affordance"
         );
     }
 }

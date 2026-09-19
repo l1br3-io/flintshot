@@ -759,6 +759,7 @@ pub(crate) struct OverlayApp {
     /// whenever the toolbar is hidden.
     toolbar_rect: Option<egui::Rect>,
     /// This frame's Move-tool object chrome (see [`crate::chrome`]):
+    /// This frame's Move-tool object chrome (see [`crate::chrome`]):
     /// the hovered / grabbed bounding boxes plus the kind, in
     /// canvas-physical px — plural because a live multi-drag
     /// outlines every member of the selection set. Computed at the
@@ -766,6 +767,17 @@ pub(crate) struct OverlayApp {
     /// live), painted by `ui_impl` over the shared render output.
     /// `None` whenever no affordance applies.
     move_chrome: Option<(Vec<Rect>, crate::chrome::MoveChromeKind)>,
+    /// This frame's Text-tool hover affordance (text-select-edit):
+    /// the topmost committed Text under the pointer, dashed-outline
+    /// bbox in canvas-physical px. Computed beside `move_chrome`,
+    /// painted with its `Hover` kind.
+    text_hover: Option<Rect>,
+    /// Press-time double-click detector (text-select-edit): fed
+    /// exactly when a `PointerDown` dispatches (the
+    /// `annotation_press_allowed` fall-through arm), fires the
+    /// synthesized `DoubleClick` right after it. See
+    /// `crate::dblclick`.
+    dblclick: crate::dblclick::DoubleClickTracker,
     /// Last measured toolbar size, fed to [`toolbar_anchor`] for the
     /// flip/clamp decision. Seeded zero (the anchor fn tolerates it);
     /// one frame behind the layout, which is invisible in practice
@@ -821,6 +833,8 @@ impl OverlayApp {
             magnifier: Magnifier::new(),
             toolbar_rect: None,
             move_chrome: None,
+            text_hover: None,
+            dblclick: crate::dblclick::DoubleClickTracker::default(),
             toolbar_size: egui::Vec2::ZERO,
             clipboard: None,
             clipboard_out,
@@ -939,12 +953,13 @@ impl OverlayApp {
     /// readable; runs only when a cached panel rect exists.
     fn pointer_and_chrome(&mut self, ctx: &Context, panel: egui::Rect, modifiers: Modifiers) {
         let ppp = ctx.pixels_per_point();
-        let (pointer, primary_pressed, primary_down, primary_released) = ctx.input(|i| {
+        let (pointer, primary_pressed, primary_down, primary_released, now) = ctx.input(|i| {
             (
                 i.pointer.latest_pos(),
                 i.pointer.primary_pressed(),
                 i.pointer.primary_down(),
                 i.pointer.primary_released(),
+                i.time,
             )
         });
         let Some(pos) = pointer else {
@@ -952,6 +967,7 @@ impl OverlayApp {
             // stand down the hover affordance — the grab variant
             // clears the same way on the drag's release frame.
             self.move_chrome = None;
+            self.text_hover = None;
             return;
         };
         let at = to_canvas_physical(pos, panel, ppp);
@@ -986,59 +1002,67 @@ impl OverlayApp {
         // over the toolbar keeps running (and its release lands).
         let over_toolbar = self.toolbar_rect.is_some_and(|r| r.contains(pos));
 
-        let pointer_event = if primary_pressed && panel.contains(pos) && !over_toolbar {
+        let mut pointer_events: Vec<InputEvent> = Vec::new();
+        if primary_pressed && panel.contains(pos) && !over_toolbar {
             match gesture_for_press(self.state.selection, at, self.state.tool, hit_radius) {
                 Some(gesture) => {
                     self.drag_active = true;
                     self.gesture = gesture;
-                    None
                 }
                 None if annotation_press_allowed(self.state.tool, self.state.selection, at) => {
                     self.drag_active = true;
-                    Some(InputEvent::PointerDown { pos: at, modifiers })
+                    pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
+                    // Double-click synthesis (text-select-edit): fed
+                    // only on dispatching presses, fired in the same
+                    // frame right after the press — core's ordering
+                    // contract.
+                    let (max_delay, max_dist) = ctx.options(|o| {
+                        (
+                            o.input_options.max_double_click_delay,
+                            o.input_options.max_click_dist,
+                        )
+                    });
+                    if self.dblclick.on_press(now, pos, max_delay, max_dist) {
+                        pointer_events.push(InputEvent::DoubleClick { pos: at });
+                    }
                 }
                 // Annotation-tool press outside the region (Task 005):
                 // swallow it whole. `drag_active` stays false, so the
                 // drags and release of this press never reach the
                 // dispatcher either — nothing is drawn on the dimmed
                 // area, matching what the clipped render would show.
-                None => None,
+                None => {}
             }
         } else if primary_released && self.drag_active {
             self.drag_active = false;
             if self.gesture.is_none() {
-                Some(InputEvent::PointerUp)
+                pointer_events.push(InputEvent::PointerUp);
             } else {
                 // Normalize the dragged rect so `min` is top-left —
                 // the same contract the dispatcher's release path
                 // (`finish_selection`) upholds for fresh drags.
                 self.state.selection = self.state.selection.map(Rect::normalized);
                 self.gesture = Gesture::None;
-                None
             }
         } else if primary_down && self.drag_active {
             match self.gesture {
-                Gesture::None => Some(InputEvent::PointerDrag { pos: at }),
+                Gesture::None => pointer_events.push(InputEvent::PointerDrag { pos: at }),
                 Gesture::Move { offset } => {
                     if let Some(sel) = usable_selection(self.state.selection) {
                         self.state.selection = Some(moved_rect(sel, clamped, offset, image_bounds));
                     }
-                    None
                 }
                 Gesture::Resize { handle } => {
                     if let Some(sel) = usable_selection(self.state.selection) {
                         self.state.selection = Some(resize_from(handle, sel, clamped));
                     }
-                    None
                 }
             }
-        } else {
-            None
-        };
+        }
         // Pointer events always return `Continue` today; future
         // pointer-side outcomes (Task 006+) surface as a compile
         // error here rather than silently dropping.
-        if let Some(event) = pointer_event {
+        for event in pointer_events {
             let _ = self.state.dispatch_input(&event);
         }
 
@@ -1070,6 +1094,16 @@ impl OverlayApp {
             && annotation_press_allowed(Tool::Move, self.state.selection, at))
         .then_some(at);
         self.move_chrome = crate::chrome::move_chrome(&self.state, hover_at);
+
+        // Text-tool hover affordance (text-select-edit), gated exactly
+        // like a Text-tool press that would select: the query itself
+        // checks the tool and Text-only hits.
+        let text_hover_at = (!self.drag_active
+            && self.gesture.is_none()
+            && !over_toolbar
+            && annotation_press_allowed(Tool::Text, self.state.selection, at))
+        .then_some(at);
+        self.text_hover = crate::chrome::text_hover_chrome(&self.state, text_hover_at);
     }
 
     /// Cursor icon for the current hover position when no gesture is
@@ -1085,6 +1119,11 @@ impl OverlayApp {
                 .hit_test(at)
                 .is_some()
                 .then_some(egui::CursorIcon::Move);
+        }
+        if self.state.tool == Tool::Text {
+            // Text-tool hover affordance (text-select-edit): the
+            // I-beam announces click-to-select / double-click-to-edit.
+            return self.state.text_hit_test(at).map(|_| egui::CursorIcon::Text);
         }
         if self.state.tool != Tool::Select {
             return None;
@@ -1463,22 +1502,31 @@ impl OverlayApp {
             }
         }
 
+        // Text-tool hover affordance (text-select-edit): dashed
+        // outline on the move chrome's rhythm, same paint helper.
+        if let Some(r) = self.text_hover {
+            let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
+            crate::chrome::paint_move_chrome(&painter, rect, crate::chrome::MoveChromeKind::Hover);
+        }
+
         // Persistent-selection outlines (annotation-delete spec,
         // pluralized by multi-select-properties): one dashed forest
         // rect per selected annotation, right after the move chrome
         // in the overlay's chrome order — the editor window's
         // ordering. Chrome-only by construction (the shell's paint
         // pass, never the clipped render / composed output). A
-        // selection with no paintable bbox at all while Move is
-        // active (degenerate annotations / stale indices)
-        // deselects instead of rendering.
+        // selection with no paintable bbox at all while a
+        // selection-owning tool is active (degenerate annotations /
+        // stale indices) deselects instead of rendering.
         let selected_rects = crate::chrome::selected_chrome(&self.state);
         if !selected_rects.is_empty() {
             for r in selected_rects {
                 let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
                 crate::chrome::paint_selected_chrome(&painter, rect);
             }
-        } else if self.state.tool == Tool::Move && !self.state.selected.is_empty() {
+        } else if matches!(self.state.tool, Tool::Move | Tool::Text)
+            && !self.state.selected.is_empty()
+        {
             self.state.selected.clear();
         }
 
@@ -1855,6 +1903,207 @@ mod tests {
             "chrome tracks the drag"
         );
         assert_eq!(rects[0].max, Point::new(56.0, 44.0));
+    }
+
+    // --- Double-click synthesis (text-select-edit Task 004) ---
+
+    /// A 800×600 variant of `pointer_frame` / `idle_frame`: the
+    /// floating toolbar measures ~687×104 logical px regardless of
+    /// screen size, so on the stock 64×64 harness it blankets the
+    /// whole panel and every press reads as a toolbar click. The
+    /// wide screen gives it somewhere harmless to live.
+    fn wide_frame(
+        ctx: &egui::Context,
+        app: &mut OverlayApp,
+        t: f64,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(800.0, 600.0),
+            )),
+            time: Some(t),
+            events,
+            ..egui::RawInput::default()
+        };
+        ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        })
+    }
+
+    /// Overlay state on the Text tool with one committed text "hello"
+    /// at (10,10) and a usable region covering it. Construction
+    /// forces Select; direct mutation is the fixture pattern (see
+    /// `move_overlay_app`).
+    fn text_overlay_app(ctx: &egui::Context) -> OverlayApp {
+        let mut state = blank_state(64, 64);
+        // Text sits LOW in the region: the floating toolbar anchors
+        // below the selection (or pins to the panel top when there's
+        // no room below), so a high text would sit under the toolbar
+        // and its presses would be swallowed as button clicks.
+        state.anns.push(Annotation::text(
+            Point::new(10.0, 40.0),
+            "hello",
+            flintshot_core::text::TextStyle::simple(16.0, flintshot_core::Color::RED),
+        ));
+        let mut app = OverlayApp::new(
+            state,
+            ctx,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(None)),
+        );
+        app.state.tool = Tool::Text;
+        app.state.selection = Some(Rect::from_xywh(4.0, 34.0, 56.0, 26.0));
+        app
+    }
+
+    /// A context with fonts live: egui creates its font atlas at the
+    /// first pass's `end_pass`, and the Text annotation's paint /
+    /// measure path needs it from frame one.
+    fn prime_fonts() -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        let _ = ctx.end_pass();
+        ctx
+    }
+
+    /// Primary press/release events at `pos`.
+    fn primary_at(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// Two rapid presses inside the region synthesize
+    /// `PointerDown` + `DoubleClick`: select, then lift out for
+    /// re-edit.
+    #[test]
+    fn overlay_rapid_double_press_opens_reedit() {
+        let ctx = prime_fonts();
+        let mut app = text_overlay_app(&ctx);
+        let _ = wide_frame(&ctx, &mut app, 0.0, vec![]);
+        let press = egui::pos2(20.0, 45.0);
+        wide_frame(
+            &ctx,
+            &mut app,
+            1.0,
+            vec![egui::Event::PointerMoved(press), primary_at(press, true)],
+        );
+        assert_eq!(app.state.selected, vec![0], "first press selects");
+        let _ = wide_frame(&ctx, &mut app, 1.05, vec![primary_at(press, false)]);
+        wide_frame(
+            &ctx,
+            &mut app,
+            1.1,
+            vec![egui::Event::PointerMoved(press), primary_at(press, true)],
+        );
+        assert!(
+            app.state.text_reedit.is_some(),
+            "rapid second press opened the re-edit session"
+        );
+        assert!(app.state.anns.is_empty(), "the text is lifted into pending");
+    }
+
+    /// Slow presses stay a plain re-select: no session, no pending.
+    #[test]
+    fn overlay_slow_double_press_stays_selection_only() {
+        let ctx = prime_fonts();
+        let mut app = text_overlay_app(&ctx);
+        let _ = wide_frame(&ctx, &mut app, 0.0, vec![]);
+        let press = egui::pos2(20.0, 45.0);
+        wide_frame(
+            &ctx,
+            &mut app,
+            1.0,
+            vec![egui::Event::PointerMoved(press), primary_at(press, true)],
+        );
+        let _ = wide_frame(&ctx, &mut app, 1.05, vec![primary_at(press, false)]);
+        wide_frame(
+            &ctx,
+            &mut app,
+            3.0,
+            vec![egui::Event::PointerMoved(press), primary_at(press, true)],
+        );
+        assert_eq!(app.state.selected, vec![0], "still just selected");
+        assert!(app.state.text_reedit.is_none(), "slow pair ⇒ no session");
+        assert!(app.state.pending.is_none());
+    }
+
+    /// Presses outside the usable region are swallowed whole — and a
+    /// swallowed press must not count toward a double-click either:
+    /// even a rapid pair outside the region selects nothing and opens
+    /// no session.
+    #[test]
+    fn overlay_swallowed_presses_never_fire_doubleclick() {
+        let ctx = prime_fonts();
+        let mut app = text_overlay_app(&ctx);
+        // Shrink the region so the text hit point falls outside it.
+        app.state.selection = Some(Rect::from_xywh(4.0, 34.0, 10.0, 6.0));
+        let _ = wide_frame(&ctx, &mut app, 0.0, vec![]);
+        let press = egui::pos2(20.0, 45.0);
+        wide_frame(
+            &ctx,
+            &mut app,
+            1.0,
+            vec![egui::Event::PointerMoved(press), primary_at(press, true)],
+        );
+        let _ = wide_frame(&ctx, &mut app, 1.05, vec![primary_at(press, false)]);
+        wide_frame(
+            &ctx,
+            &mut app,
+            1.1,
+            vec![egui::Event::PointerMoved(press), primary_at(press, true)],
+        );
+        assert!(
+            app.state.selected.is_empty(),
+            "swallowed press never selected"
+        );
+        assert!(
+            app.state.text_reedit.is_none(),
+            "no session from swallowed presses"
+        );
+        assert!(app.state.pending.is_none());
+    }
+
+    /// Hovering a committed text under the Text tool shows the text
+    /// cursor (the dashed outline paints through the same query).
+    #[test]
+    fn overlay_text_hover_sets_text_cursor() {
+        let ctx = prime_fonts();
+        let mut app = text_overlay_app(&ctx);
+        let _ = wide_frame(&ctx, &mut app, 0.0, vec![]);
+        let hover_raw = |t: f64, at: egui::Pos2| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(800.0, 600.0),
+            )),
+            time: Some(t),
+            events: vec![egui::Event::PointerMoved(at)],
+            ..egui::RawInput::default()
+        };
+        let out = ctx.run_ui(hover_raw(1.0, egui::pos2(20.0, 45.0)), |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+        assert_eq!(
+            out.platform_output.cursor_icon,
+            egui::CursorIcon::Text,
+            "hover on the text shows the text cursor"
+        );
+        let out = ctx.run_ui(hover_raw(1.1, egui::pos2(500.0, 500.0)), |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+        assert_eq!(
+            out.platform_output.cursor_icon,
+            egui::CursorIcon::Default,
+            "hover on empty canvas shows no affordance"
+        );
     }
 
     #[test]
