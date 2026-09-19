@@ -18,6 +18,21 @@ Categories used below:
 
 ## [Unreleased]
 
+### Changed
+
+- **Tray / applet *Open app window* now routes the open window to its
+  home page** (mirrors the *Settings* ping's choreography). The click
+  always showed + focused an already-running window, but never
+  navigated — a window sitting on the settings page (or an already
+  focused one) made the item look dead. An idle `AppFocus` ping now
+  also arms the route-home intent: the open window swaps home in
+  place, wherever it sat. Mid-capture pings stay fully suppressed
+  (the capture owns the screen; rerouting a closed window's restore
+  home could drop an in-progress editor session). (Pinned by
+  `app_focus_pings_arm_the_route_home_intent`,
+  `app_focus_pings_do_not_route_home_mid_capture`,
+  `route_home_intent_returns_the_settings_route_home`.)
+
 ### Added
 
 - **History tab in the editor panel** (effort
