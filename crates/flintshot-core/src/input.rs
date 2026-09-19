@@ -128,6 +128,20 @@ pub enum InputEvent {
         /// Position in canvas-physical px.
         pos: Point,
     },
+    /// The pointer was triple-clicked at `pos` (three consecutive
+    /// presses within the double-click window and distance).
+    ///
+    /// Emission contract: identical to [`DoubleClick`](Self::DoubleClick)
+    /// — the shell emits this **in addition to** the third press's
+    /// [`PointerDown`](Self::PointerDown), in the same frame,
+    /// immediately after it. While a text draft is being edited, the
+    /// (intercepted) press collapses the cursor onto the click point
+    /// and this event then selects the clicked line; everywhere else
+    /// it is a documented no-op.
+    TripleClick {
+        /// Position in canvas-physical px.
+        pos: Point,
+    },
     /// A printable character was typed (text input).
     ///
     /// Only meaningful while a text draft is active (see
