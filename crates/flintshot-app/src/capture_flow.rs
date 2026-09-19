@@ -247,6 +247,19 @@ pub(crate) fn copy_image_to_clipboard(img: &image::RgbaImage) -> Result<()> {
         .map_err(|e| color_eyre::eyre::eyre!("copying image to clipboard: {e}"))
 }
 
+/// The recents capacity for every routing point (the persisted
+/// `ui.recent-captures-limit`, clamped 1–200; built-in default on a
+/// load failure). One helper so every caller agrees.
+pub(crate) fn recents_limit() -> usize {
+    match flintshot_core::Config::load() {
+        Ok(c) => c.ui.recent_captures_limit_clamped(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load config; using the default recents limit");
+            flintshot_core::recents::DEFAULT_RECENTS_LIMIT
+        }
+    }
+}
+
 /// Per-slot wait for the portal's clipboard write
 /// ([`read_portal_clipboard_grab`]): xdg-desktop-portal-cosmic
 /// spawns the `clipboard:///` D-Bus Response *before* its update

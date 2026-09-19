@@ -1394,7 +1394,7 @@ fn report_editor_outcome(outcome: flintshot_core::EditorOutcome) {
     match outcome {
         EditorOutcome::Saved(p) => {
             tracing::info!(path = %p.display(), "editor saved");
-            flintshot_core::recents::record(&p);
+            flintshot_core::recents::record(&p, crate::capture_flow::recents_limit());
             report_saved_to_daemon(&p);
         }
         EditorOutcome::CopiedToClipboard => {

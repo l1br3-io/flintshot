@@ -20,10 +20,10 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    compose_final, compose_final_region, parse_default_mode, parse_output_format, parse_size_mode,
-    render::render, render_filename_template, BlurCache, Config, DefaultMode, DispatchOutcome,
-    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode,
-    OutputFormat, Rect, SizeMode, Tool,
+    chrono_date, chrono_time, compose_final, compose_final_region, parse_default_mode,
+    parse_output_format, parse_size_mode, render::render, render_filename_template,
+    save_capture_image, BlurCache, Config, DefaultMode, DispatchOutcome, EditorOutcome,
+    EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode, Rect, SizeMode, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -2119,53 +2119,6 @@ fn prompt_png_path() -> Option<std::path::PathBuf> {
         .save_file()
 }
 
-/// The output format's file extension.
-fn output_ext(format: OutputFormat) -> &'static str {
-    if format == OutputFormat::Jpeg {
-        "jpg"
-    } else {
-        "png"
-    }
-}
-
-/// The direct-save target path: `dir/rendered.ext`, or the
-/// filename alone when the configured directory is empty (the
-/// caller falls back to the pictures directory). Pure.
-fn direct_save_path(rendered: &str, dir: &str, format: OutputFormat) -> std::path::PathBuf {
-    let name = format!("{}.{}", rendered, output_ext(format));
-    if dir.is_empty() {
-        std::path::PathBuf::from(name)
-    } else {
-        std::path::PathBuf::from(dir).join(name)
-    }
-}
-
-/// The next free path: `name.ext`, then `name-2.ext`, `name-3.ext`,
-/// … skipping anything that already exists (the collision rule).
-/// Pure modulo the filesystem probe.
-fn next_free_path(path: std::path::PathBuf) -> std::path::PathBuf {
-    if !path.exists() {
-        return path;
-    }
-    let stem = path.file_stem().map_or_else(
-        || "capture".to_owned(),
-        |s| s.to_string_lossy().into_owned(),
-    );
-    let ext = path
-        .extension()
-        .map_or_else(|| "png".to_owned(), |s| s.to_string_lossy().into_owned());
-    let parent = path
-        .parent()
-        .map_or_else(std::path::PathBuf::new, std::path::Path::to_path_buf);
-    for n in 2u32.. {
-        let candidate = parent.join(format!("{stem}-{n}.{ext}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    unreachable!("u32 collisions exhausted")
-}
-
 /// Compose the image a Save writes: selection-aware while the
 /// selection-first phase is live, full-image otherwise.
 ///
@@ -2189,9 +2142,11 @@ fn compose_for_save(selection_aware: bool, state: &EditorState) -> image::RgbaIm
 }
 
 /// The direct-save path: compose, encode per the configured format
-/// (JPEG at the configured quality; PNG otherwise), write to
-/// `dir/template.ext` with `-2`-style collision suffixes. Returns
-/// the written path.
+/// (JPEG at the configured quality; PNG otherwise), write to the
+/// **resolved** save directory ([`OutputConfig::resolve_save_dir`]
+/// — `~/Pictures/Flintshot` when `save-dir` is unset) as
+/// `template.ext` with `-2`-style collision suffixes. The directory
+/// is created on first write. Returns the written path.
 ///
 /// # Errors
 /// Surfaces [`FlintshotError::Image`] if encoding or the
@@ -2208,64 +2163,13 @@ fn save_direct(
         &chrono_time(),
     );
     let format = parse_output_format(&output.format);
-    let path = next_free_path(direct_save_path(&rendered, &output.save_dir, format));
     let image = compose_for_save(selection_aware, state);
-    if format == OutputFormat::Jpeg {
-        let rgb = image::DynamicImage::ImageRgba8(image).to_rgb8();
-        let file = std::fs::File::create(&path)?;
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-            file,
-            u8::try_from(output.jpeg_quality.clamp(1, 100)).unwrap_or(90),
-        );
-        rgb.write_with_encoder(encoder)?;
-    } else {
-        image.save_with_format(&path, image::ImageFormat::Png)?;
-    }
-    Ok(path)
-}
-
-/// `YYYY-MM-DD` for the `{date}` placeholder (local time).
-fn chrono_date() -> String {
-    // No chrono dependency: UTC date via std. Good enough for a
-    // filename stamp; the settings doc says so.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let days = now.as_secs() / 86_400;
-    let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// `HH-MM-SS` for the `{time}` placeholder (UTC, filename-safe).
-fn chrono_time() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs() % 86_400;
-    format!(
-        "{:02}-{:02}-{:02}",
-        secs / 3600,
-        (secs % 3600) / 60,
-        secs % 60
-    )
-}
-
-/// Days-since-epoch → civil `(y, m, d)` (Howard Hinnant's
-/// algorithm; UTC only).
-fn civil_from_days(days: u64) -> (i64, u32, u32) {
-    let z = i64::try_from(days).unwrap_or(0) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap_or(1);
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (
-        if m <= 2 { y + 1 } else { y },
-        u32::try_from(m).unwrap_or(1),
-        d,
+    save_capture_image(
+        &output.resolve_save_dir(),
+        &rendered,
+        &image,
+        format,
+        output.jpeg_quality,
     )
 }
 
@@ -4906,37 +4810,8 @@ mod tests {
     }
 
     /// The direct-save path composes dir + rendered template + ext.
-    #[test]
-    fn direct_save_path_composes_dir_name_ext() {
-        use flintshot_core::render_filename_template;
-        let rendered =
-            render_filename_template("{app}-{date}", "flintshot", "2026-09-18", "12-30-00");
-        assert_eq!(rendered, "flintshot-2026-09-18");
-        let with_dir = direct_save_path(&rendered, "/tmp/shots", OutputFormat::Png);
-        assert_eq!(
-            with_dir,
-            std::path::PathBuf::from("/tmp/shots/flintshot-2026-09-18.png")
-        );
-        let no_dir = direct_save_path(&rendered, "", OutputFormat::Jpeg);
-        assert_eq!(no_dir, std::path::PathBuf::from("flintshot-2026-09-18.jpg"));
-    }
-
     /// Collision handling: the second save at the same target gets
     /// a `-2` suffix before the extension.
-    #[test]
-    fn next_free_path_appends_collision_suffix() {
-        let dir = std::env::temp_dir().join("flintshot-collision-probe");
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let first = dir.join("shot.png");
-        std::fs::write(&first, b"x").expect("seed");
-        let second = next_free_path(first.clone());
-        std::fs::write(&second, b"x").expect("seed 2");
-        let third = next_free_path(first.clone());
-        assert_eq!(second, dir.join("shot-2.png"), "first collision gets -2");
-        assert_eq!(third, dir.join("shot-3.png"), "second collision gets -3");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     /// `ui.show-statusbar = false` hides the footer: the central
     /// panel reaches the window bottom.
     #[test]

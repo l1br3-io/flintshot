@@ -27,6 +27,7 @@ pub mod image_ops;
 pub mod input;
 pub mod inspector;
 pub mod ipc;
+pub mod output;
 pub mod recents;
 pub mod render;
 pub mod serde_util;
@@ -58,6 +59,10 @@ pub use image_ops::{blur, crop_region};
 pub use input::{DispatchOutcome, InputEvent, Modifiers};
 pub use inspector::{PropertyEditKind, SelectionCapabilities};
 pub use ipc::{socket_path, Event as IpcEvent, Request as IpcRequest};
+pub use output::{
+    chrono_date, chrono_time, clipboard_copy_stem, next_free_path, output_ext,
+    persist_clipboard_copy, save_capture_image,
+};
 pub use render::{
     arrow_barbs, compose_final, compose_final_region, render, render_ann, BlurCache, Canvas,
     DrawCall, MockCanvas,
