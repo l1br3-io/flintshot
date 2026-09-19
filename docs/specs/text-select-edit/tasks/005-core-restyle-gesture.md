@@ -23,21 +23,21 @@ by restyle; the bbox grows with font size.
 
 **Acceptance criteria:**
 
-- [ ] Selected-not-editing: one gesture (any number of `restyle`
+- [x] Selected-not-editing: one gesture (any number of `restyle`
       calls between begin/end) restyles the annotation, syncs
       defaults (the next placed text inherits them), and pushes
       **exactly one** undo entry; `Ctrl+Z` restores the prior
       style.
-- [ ] Mid-session: restyle retargets the draft, stages nothing;
+- [x] Mid-session: restyle retargets the draft, stages nothing;
       session commit still pushes exactly one entry covering
       content + style.
-- [ ] No selection (and no session): all three calls are no-ops.
+- [x] No selection (and no session): all three calls are no-ops.
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-core` (gesture semantics, defaults
+- [x] `cargo test -p flintshot-core` (gesture semantics, defaults
       sync, mid-session absorption, no-op guards)
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
 
 **Dependencies:** Task 003
 
