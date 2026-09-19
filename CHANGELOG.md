@@ -18,6 +18,23 @@ Categories used below:
 
 ## [Unreleased]
 
+### Fixed
+
+- **Settings page no longer paints red duplicate-id debug overlays
+  over the rows and the topbar while scrolling.** The section
+  widget's invisible measure pass used to run 10 000 px offscreen,
+  so every row's widget id registered at two distant rects per
+  frame — and egui's duplicate-id detector (debug builds only)
+  answered with a red stroke around each control plus a red
+  "🔥 First/Second use of widget ID" label painted on the unclipped
+  debug layer, which read as page elements floating over the topbar
+  while the page scrolled. The probe now lays out at the real
+  body's position, so both registrations share the same rects and
+  the detector stays quiet. Also drops a leftover `eprintln!` from
+  the settings link widget.
+  (Pinned by
+  `settings_page_never_trips_eguis_duplicate_id_paint`.)
+
 ### Changed
 
 - **Tool palette remapped to Select / Crop / Hand**
