@@ -1,6 +1,9 @@
 //! The docked side panel — the editor's control home.
 //!
-//! Right-docked, grain-textured cream paper, and **collapsible** to
+//! Right-docked, grain-textured cream paper, with a
+//! `PROPERTIES | HISTORY` tab header as its first row (segmented
+//! chips; the Properties tab is today's panel body, the History tab
+//! the edit timeline). The panel is **collapsible** to
 //! a glyph rail (the `«` toggle in the action row; the rail's `»`
 //! restores it). Top → bottom: the action row (`+` capture chip,
 //! collapse toggle), **one** white cutout card holding the five
@@ -49,10 +52,34 @@ const GRAIN_SEED: u64 = 0x5EED_C0DE;
 /// scale.
 const GRAIN_TILE: u32 = 64;
 
-/// Panel state that persists across frames: the collapse flag and
-/// the (lazily created) grain texture handle.
+/// Which panel tab is active. Per-window state living in
+/// [`PanelState`] like the other live flags — deliberately not
+/// persisted to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum PanelTab {
+    /// Tool defaults / selection inspector (today's panel body).
+    #[default]
+    Properties,
+    /// The edit-history timeline.
+    History,
+}
+
+impl PanelTab {
+    /// The header chip's uppercase label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Properties => "PROPERTIES",
+            Self::History => "HISTORY",
+        }
+    }
+}
+
+/// Panel state that persists across frames: the active tab, the
+/// collapse flag, and the (lazily created) grain texture handle.
 #[derive(Default)]
 pub(crate) struct PanelState {
+    /// The active tab (Properties by default).
+    tab: PanelTab,
     /// The grain tile, created on first use.
     grain: Option<egui::TextureHandle>,
     /// Whether the selection inspector's custom-colour popover ran
@@ -280,7 +307,6 @@ pub(crate) fn show(
     let frame = egui::Frame::new()
         .fill(theme::palette::PAPER)
         .inner_margin(egui::Margin::same(8));
-    let mut action = ToolbarAction::None;
     // End-of-burst bracketing inputs: which continuous popovers ran
     // last frame vs. this frame. A popover that ran last frame but
     // not this one just closed — close its edit burst too.
@@ -290,73 +316,23 @@ pub(crate) fn show(
     panel.text_pop_live = false;
     let inspector = inspector_mode(state);
     let caps = state.selected_capabilities();
+    let mut action = ToolbarAction::None;
     egui::Panel::right("editor_panel")
         .resizable(false)
         .exact_size(PANEL_WIDTH)
         .frame(frame)
         .show(ui, |ui| {
             paint_grain(ui, panel);
-            let title = panel_title(state);
-            let galley = ui.painter().layout_no_wrap(
-                title.to_uppercase(),
-                egui::FontId::proportional(theme::TYPE_SM),
-                theme::palette::INK,
-            );
-            let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
-            ui.painter().galley(rect.min, galley, theme::palette::INK);
-            ui.add_space(theme::SPACE_SCALE[1]);
-            let sections: Vec<Section> = if inspector {
-                selection_sections(caps)
-            } else {
-                sections_for(state.tool).to_vec()
-            };
-            for section in sections {
-                let id = egui::Id::new(("panel-section", section_title(section)));
-                let title = section_title(section);
-                widgets::section(ui, id, title, true, |body| match section {
-                    Section::Stroke if inspector => selection_stroke(body, state, caps, panel),
-                    Section::Stroke => {
-                        swatch_row(body, &mut state.color);
-                        stroke_chips(body, state);
-                    }
-                    Section::Fill if inspector => selection_fill(body, state),
-                    Section::Fill => {
-                        let resp = widgets::switch(
-                            body,
-                            egui::Id::new("fill-switch"),
-                            state.fill_shapes,
-                            false,
-                        );
-                        state.fill_shapes = resp.on;
-                    }
-                    Section::Text if inspector => selection_text(body, state, panel),
-                    Section::Text => {
-                        text_style_row(body, state);
-                        popover::pod_button(body, state, popover::ColorTarget::Text);
-                    }
-                    Section::Number if inspector => selection_number(body, state),
-                    Section::Number => {
-                        number_row(body, state);
-                    }
-                    Section::Effects if inspector => selection_effects(body, state),
-                    Section::Effects => {
-                        blur_bay(body, state);
-                    }
-                    Section::Crop => {
-                        select_bay(body, state);
-                        hint(body, tool_hint(state.tool));
-                    }
-                    Section::Selection => {
-                        let clicked = if inspector {
-                            selection_selection_row(body, state)
-                        } else {
-                            delete_button(body, !state.selected.is_empty(), "🗑 Delete annotation")
-                        };
-                        if clicked {
-                            action = ToolbarAction::Delete;
-                        }
-                    }
-                });
+            tab_header(ui, panel);
+            match panel.tab {
+                PanelTab::Properties => {
+                    action = properties_body(ui, state, panel, inspector, caps);
+                }
+                PanelTab::History => {
+                    // Task 004 replaces this placeholder with the
+                    // timeline; the empty-state copy is final.
+                    hint(ui, "No edits yet");
+                }
             }
         });
     if color_pop_was_live && !panel.color_pop_live {
@@ -364,6 +340,97 @@ pub(crate) fn show(
     }
     if text_pop_was_live && !panel.text_pop_live {
         state.end_property_edit();
+    }
+    action
+}
+
+/// The PROPERTIES | HISTORY tab header: two segmented chips in the
+/// panel's first row (cutout at rest, ink-filled when active — the
+/// blur-kind control's idiom).
+fn tab_header(ui: &mut egui::Ui, panel: &mut PanelState) {
+    ui.horizontal(|ui| {
+        for tab in [PanelTab::Properties, PanelTab::History] {
+            if segmented_chip(
+                ui,
+                egui::Id::new(("panel-tab", tab)),
+                tab.label(),
+                panel.tab == tab,
+            ) {
+                panel.tab = tab;
+            }
+        }
+    });
+    ui.add_space(theme::SPACE_SCALE[1]);
+}
+
+/// The Properties tab's body: the contextual title plus exactly the
+/// section map. Byte-for-byte today's panel content beneath the
+/// header.
+fn properties_body(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    panel: &mut PanelState,
+    inspector: bool,
+    caps: flintshot_core::SelectionCapabilities,
+) -> ToolbarAction {
+    let title = panel_title(state);
+    let galley = ui.painter().layout_no_wrap(
+        title.to_uppercase(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        theme::palette::INK,
+    );
+    let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+    ui.painter().galley(rect.min, galley, theme::palette::INK);
+    ui.add_space(theme::SPACE_SCALE[1]);
+    let mut action = ToolbarAction::None;
+    let sections: Vec<Section> = if inspector {
+        selection_sections(caps)
+    } else {
+        sections_for(state.tool).to_vec()
+    };
+    for section in sections {
+        let id = egui::Id::new(("panel-section", section_title(section)));
+        let title = section_title(section);
+        widgets::section(ui, id, title, true, |body| match section {
+            Section::Stroke if inspector => selection_stroke(body, state, caps, panel),
+            Section::Stroke => {
+                swatch_row(body, &mut state.color);
+                stroke_chips(body, state);
+            }
+            Section::Fill if inspector => selection_fill(body, state),
+            Section::Fill => {
+                let resp =
+                    widgets::switch(body, egui::Id::new("fill-switch"), state.fill_shapes, false);
+                state.fill_shapes = resp.on;
+            }
+            Section::Text if inspector => selection_text(body, state, panel),
+            Section::Text => {
+                text_style_row(body, state);
+                popover::pod_button(body, state, popover::ColorTarget::Text);
+            }
+            Section::Number if inspector => selection_number(body, state),
+            Section::Number => {
+                number_row(body, state);
+            }
+            Section::Effects if inspector => selection_effects(body, state),
+            Section::Effects => {
+                blur_bay(body, state);
+            }
+            Section::Crop => {
+                select_bay(body, state);
+                hint(body, tool_hint(state.tool));
+            }
+            Section::Selection => {
+                let clicked = if inspector {
+                    selection_selection_row(body, state)
+                } else {
+                    delete_button(body, !state.selected.is_empty(), "🗑 Delete annotation")
+                };
+                if clicked {
+                    action = ToolbarAction::Delete;
+                }
+            }
+        });
     }
     action
 }
@@ -2226,5 +2293,93 @@ mod tests {
         draw(&ctx, &mut state, &mut panel, click_events(at));
         assert_eq!(state.font_size, 17.0, "defaults path still works");
         assert!(state.undo.is_empty(), "defaults writes record no history");
+    }
+
+    // --- Tab header (properties-history-tabs Task 003) ---
+
+    /// The header registers both tab chips; the Properties tab is the
+    /// default and its tool sections render beneath it.
+    #[test]
+    fn tab_header_registers_and_defaults_to_properties() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        state.tool = Tool::Rect;
+        let mut panel = PanelState::default();
+        assert_eq!(panel.tab, PanelTab::Properties, "default tab");
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        for tab in [PanelTab::Properties, PanelTab::History] {
+            assert!(
+                ctx.read_response(egui::Id::new(("panel-tab", tab)))
+                    .is_some(),
+                "{tab:?} chip registers"
+            );
+        }
+        let delete = ctx
+            .read_response(egui::Id::new("panel-delete"))
+            .expect("the Properties body renders the tool sections");
+        let header = ctx
+            .read_response(egui::Id::new(("panel-tab", PanelTab::Properties)))
+            .expect("header chip")
+            .rect;
+        assert!(
+            delete.rect.top() > header.bottom(),
+            "section content renders beneath the header"
+        );
+    }
+
+    /// Clicking HISTORY swaps the body (tool sections gone, the
+    /// placeholder visible), the choice persists across frames, and
+    /// clicking PROPERTIES restores the sections.
+    #[test]
+    fn clicking_history_swaps_body_and_persists() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        state.tool = Tool::Rect;
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let history = chip_center(&ctx, egui::Id::new(("panel-tab", PanelTab::History)));
+        let _ = draw(&ctx, &mut state, &mut panel, click_events(history));
+        assert_eq!(panel.tab, PanelTab::History, "the click selects the tab");
+        // Settle pass: read_response falls back to the previous
+        // pass's widget map, so absence needs one clean redraw.
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        assert_eq!(panel.tab, PanelTab::History);
+        assert!(
+            ctx.read_response(egui::Id::new("panel-delete")).is_none(),
+            "the History body stays up and the tool sections are gone"
+        );
+        // Clicking PROPERTIES restores the sections.
+        let props = chip_center(&ctx, egui::Id::new(("panel-tab", PanelTab::Properties)));
+        let _ = draw(&ctx, &mut state, &mut panel, click_events(props));
+        assert_eq!(panel.tab, PanelTab::Properties);
+        assert!(
+            ctx.read_response(egui::Id::new("panel-delete")).is_some(),
+            "the Properties sections return"
+        );
+    }
+
+    /// The inspector mode's contextual title also renders beneath the
+    /// header (`N selected · Properties` path unchanged).
+    #[test]
+    fn inspector_body_still_renders_beneath_the_header() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = inspector_state(2);
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let header = ctx
+            .read_response(egui::Id::new(("panel-tab", PanelTab::Properties)))
+            .expect("header chip")
+            .rect;
+        let delete = ctx
+            .read_response(egui::Id::new("panel-delete"))
+            .expect("the inspector body renders")
+            .rect;
+        assert!(delete.top() > header.bottom());
     }
 }
