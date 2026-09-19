@@ -421,7 +421,7 @@ For each tool: select it from the toolbar, draw on the canvas, then
 | Line     | `／ Line`    | drag → release → click near the line           | thin line; click-near selects (tolerance-based)   |
 | Marker   | `🖍 Marker`  | drag over text                                 | translucent highlight; text visible through stroke |
 | Pencil   | `✏ Pencil`   | draw a freehand squiggle                       | smooth opaque curve (Catmull-Rom), no jaggies     |
-| Number   | `# Number`   | click 3× in different spots → `Ctrl+Z`         | `1`, `2`, `3` bubbles; undo decrements to `2`     |
+| Number   | `# Number`   | click 3× in different spots → `Ctrl+Z`         | `1`, `2`, `3` bubbles; undo decrements to `2`; digits centered |
 
 **Magnifier** (hold-trigger, toolkit-owned):
 
@@ -453,6 +453,8 @@ what you saw live.
 | Marker: translucent highlight, background text visible through stroke | |  |    |    |    |    |    |    |    |
 | Pencil: smooth opaque freehand (Catmull-Rom, no jagged polyline) | |  |    |    |    |    |    |    |    |
 | Number: click places `1`,`2`,`3` bubbles; undo decrements counter | |  |    |    |    |    |    |    |    |
+| Number: digit centered in its bubble (1- and 2-digit), live view and saved PNG (number-tool effort) | | | | | | | | | |
+| Number: panel Size stepper (16–96, default 28) drives the *next* placement; committed bubbles unchanged; typing 8/200 clamps to 16/96 | | | | | | | | | |
 | Magnifier: hold `Space` (default) shows 4× inset; release hides |    |    |    |    |    |    |    |    |    |
 | Magnifier: `[ui] magnifier-always-on = true` stays up while drawing | |  |    |    |    |    |    |    |    |
 | Magnifier: `[ui] magnifier-modifier = "<key>"` swaps the hold key | |  |    |    |    |    |    |    |    |
