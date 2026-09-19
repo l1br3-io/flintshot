@@ -156,6 +156,12 @@ pub(crate) struct EditorApp {
     /// past `canvas_rect.max.x`, but the `contains` gate needs no
     /// axis-specific logic either way.
     canvas_drag_active: bool,
+    /// Whether the active drag began as an intercepted in-text press
+    /// (text-selection-highlight): drags then feed
+    /// `text_drag_to_char` instead of dispatching `PointerDrag`, and
+    /// the release clears the flag without a `PointerUp` (the
+    /// selection persists). Cleared on every non-intercepted press.
+    drag_in_pending_text: bool,
     /// Press-time double-click detector (text-select-edit): fed
     /// exactly when a `PointerDown` dispatches, fires the synthesized
     /// `DoubleClick` right after it. See `crate::dblclick`.
@@ -342,6 +348,7 @@ impl EditorApp {
             pan_drag: None,
             canvas_drag_active: false,
             dblclick: crate::dblclick::DoubleClickTracker::default(),
+            drag_in_pending_text: false,
             outcome,
             clipboard: None,
             copied_at: None,
@@ -1044,6 +1051,12 @@ impl EditorApp {
         // while the user is typing.
         if self.state.is_editing_text() {
             dispatch_text_input(&mut self.state, ctx, modifiers);
+            // Pointer input stays live mid-edit (text-selection-highlight):
+            // the pump intercepts in-text presses for the selection
+            // APIs and dispatches outside presses into the modal
+            // commit-and-move-on arm. Everything else (shortcuts,
+            // tool keys, pan) stays suppressed by this early return.
+            self.handle_pointer_input(ctx);
             return;
         }
 
@@ -1105,6 +1118,71 @@ impl EditorApp {
             }
         }
 
+        self.handle_pointer_input(ctx);
+    }
+
+    /// In-text press interception (text-selection-highlight): resolve
+    /// `at` against the pending text draft and, on a hit, reposition
+    /// the caret via [`EditorState::text_press_at_char`] instead of
+    /// dispatching `PointerDown`. Returns `true` when the press was
+    /// consumed. The tracker is still fed (on the logical press
+    /// position) so consecutive in-text clicks count — a double-click
+    /// then dispatches [`InputEvent::DoubleClick`] into the modal
+    /// path, which selects the word around the just-collapsed cursor;
+    /// count 3 likewise selects the line.
+    fn intercept_text_press(
+        &mut self,
+        ctx: &Context,
+        view: crate::canvas::CanvasView,
+        at: flintshot_core::Point,
+        pointer_events: &mut Vec<InputEvent>,
+    ) -> bool {
+        let Some(idx) = crate::texthit::pending_text_hit(&self.state, ctx, view, at) else {
+            return false;
+        };
+        self.state.text_press_at_char(idx);
+        self.drag_in_pending_text = true;
+        let (max_delay, max_dist) = ctx.options(|o| {
+            (
+                o.input_options.max_double_click_delay,
+                o.input_options.max_click_dist,
+            )
+        });
+        let now = ctx.input(|i| i.time);
+        let logical = view.image_to_logical(at);
+        match self.dblclick.on_press(now, logical, max_delay, max_dist) {
+            2 => pointer_events.push(InputEvent::DoubleClick { pos: at }),
+            3 => pointer_events.push(InputEvent::TripleClick { pos: at }),
+            _ => {}
+        }
+        true
+    }
+
+    /// Extend the selection to the drag position, clamped to the
+    /// block edge when the pointer leaves the text (dragging off the
+    /// block extends to its boundary, never cancels). No-op when the
+    /// draft vanished mid-drag (a stray synthetic drag).
+    fn drag_pending_text_to(
+        &mut self,
+        ctx: &Context,
+        view: crate::canvas::CanvasView,
+        at: flintshot_core::Point,
+    ) {
+        let idx = crate::texthit::pending_text_hit_or_edge(&self.state, ctx, view, at);
+        self.state.text_drag_to_char(idx);
+    }
+
+    /// Pointer dispatch: the pump that translates egui's screen-
+    /// logical pointer state into canvas-physical [`InputEvent`]s for
+    /// the dispatcher — plus the in-text press interception and
+    /// drag-select routing while a text draft is being edited
+    /// (text-selection-highlight). Extracted from `logic_impl` so the
+    /// text-editing modal branch can run it too: pointer input is the
+    /// one input class that stays live mid-edit (caret placement,
+    /// selection gestures, click-away commit), while shortcuts, tool
+    /// keys, and view pan stay suppressed.
+    fn handle_pointer_input(&mut self, ctx: &Context) {
+        let modifiers = translate_modifiers(ctx.input(|i| i.modifiers));
         // Pointer dispatch: translate egui's screen-logical coords to
         // canvas-physical and feed the state machine. `canvas_rect` is
         // cached by the previous frame's `ui()`; on the first frame
@@ -1178,29 +1256,46 @@ impl EditorApp {
             } else {
                 self.canvas_drag_active = true;
                 if !annotation_gated {
-                    pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
-                    // Double-click synthesis (text-select-edit): fed only
-                    // on dispatching presses, fired in the same frame
-                    // right after the press — core's ordering contract.
-                    let (max_delay, max_dist) = ctx.options(|o| {
-                        (
-                            o.input_options.max_double_click_delay,
-                            o.input_options.max_click_dist,
-                        )
-                    });
-                    let now = ctx.input(|i| i.time);
-                    if self.dblclick.on_press(now, pos, max_delay, max_dist) {
-                        pointer_events.push(InputEvent::DoubleClick { pos: at });
+                    // Press-interception contract (text-selection-highlight):
+                    // while a text draft is being edited, a press the
+                    // resolver maps inside the pending text is consumed
+                    // here — no `PointerDown` dispatches, so the
+                    // commit-and-move-on path is bypassed and the caret
+                    // repositions instead. Presses resolving outside
+                    // behave exactly as before.
+                    if !self.intercept_text_press(ctx, view, at, &mut pointer_events) {
+                        self.drag_in_pending_text = false;
+                        pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
+                        // Double-click synthesis (text-select-edit): fed only
+                        // on dispatching presses, fired in the same frame
+                        // right after the press — core's ordering contract.
+                        let (max_delay, max_dist) = ctx.options(|o| {
+                            (
+                                o.input_options.max_double_click_delay,
+                                o.input_options.max_click_dist,
+                            )
+                        });
+                        let now = ctx.input(|i| i.time);
+                        match self.dblclick.on_press(now, pos, max_delay, max_dist) {
+                            2 => pointer_events.push(InputEvent::DoubleClick { pos: at }),
+                            3 => pointer_events.push(InputEvent::TripleClick { pos: at }),
+                            _ => {}
+                        }
                     }
                 }
             }
         } else if primary_released && self.canvas_drag_active {
             self.canvas_drag_active = false;
+            self.drag_in_pending_text = false;
             if !annotation_gated {
                 pointer_events.push(InputEvent::PointerUp);
             }
         } else if primary_down && self.canvas_drag_active && !annotation_gated {
-            pointer_events.push(InputEvent::PointerDrag { pos: at });
+            if self.drag_in_pending_text {
+                self.drag_pending_text_to(ctx, view, at);
+            } else {
+                pointer_events.push(InputEvent::PointerDrag { pos: at });
+            }
         }
         for event in pointer_events {
             // Outcome is always `Continue` for pointer events today
@@ -5337,6 +5432,274 @@ mod tests {
             out.platform_output.cursor_icon,
             egui::CursorIcon::Default,
             "hover on empty canvas shows no affordance"
+        );
+    }
+
+    // --- In-text gestures (text-selection-highlight Task 009) ---
+
+    /// A 200×200 editor on the Text tool with nothing committed —
+    /// drafts open mid-canvas, away from both floating clusters.
+    fn draft_app() -> (egui::Context, EditorApp) {
+        let ctx = egui::Context::default();
+        let mut state = blank_state(200, 200);
+        state.tool = Tool::Text;
+        let app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        (ctx, app)
+    }
+
+    /// Open a fresh draft at image point `at` through the real pump
+    /// (miss press + release), then type `text`.
+    fn open_draft_via_pump(
+        ctx: &egui::Context,
+        app: &mut EditorApp,
+        at: (f32, f32),
+        text: &str,
+        t: f64,
+    ) {
+        let p = screen_point(app, at);
+        editor_frame_at(
+            ctx,
+            app,
+            t,
+            vec![egui::Event::PointerMoved(p), primary_button(p, true)],
+        );
+        editor_frame_at(ctx, app, t + 0.05, vec![primary_button(p, false)]);
+        editor_frame(ctx, app, vec![egui::Event::Text(text.to_string())]);
+    }
+
+    /// Advance width (image px) of `prefix` at the session's default
+    /// 16 px annotation font — computed with the exact measurer the
+    /// pump resolves hits through, so test targets can't drift from
+    /// what the wiring resolves.
+    fn boundary_x(ctx: &egui::Context, app: &EditorApp, prefix: &str) -> f32 {
+        let view = app
+            .canvas
+            .view_over(app.canvas_rect.expect("fixture: canvas rect cached"));
+        crate::texthit::egui_measurer(ctx, view, 16.0)(prefix)
+    }
+
+    /// Press (and hold) at image point `at` at time `t`.
+    fn press_at(ctx: &egui::Context, app: &mut EditorApp, at: (f32, f32), t: f64) {
+        let p = screen_point(app, at);
+        editor_frame_at(
+            ctx,
+            app,
+            t,
+            vec![egui::Event::PointerMoved(p), primary_button(p, true)],
+        );
+    }
+
+    /// Drag the held pointer to image point `at`.
+    fn drag_to(ctx: &egui::Context, app: &mut EditorApp, at: (f32, f32)) {
+        let p = screen_point(app, at);
+        editor_frame(ctx, app, vec![egui::Event::PointerMoved(p)]);
+    }
+
+    /// Release the held pointer at image point `at` at time `t`.
+    fn release_at(ctx: &egui::Context, app: &mut EditorApp, at: (f32, f32), t: f64) {
+        let p = screen_point(app, at);
+        editor_frame_at(ctx, app, t, vec![primary_button(p, false)]);
+    }
+
+    fn pending_text_of(app: &EditorApp) -> String {
+        match &app.state.pending {
+            Some(Annotation::Text { text, .. }) => text.clone(),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn intext_press_repositions_caret_without_commit() {
+        let (ctx, mut app) = draft_app();
+        editor_frame(&ctx, &mut app, vec![]); // caches canvas_rect
+        editor_frame(&ctx, &mut app, vec![]); // settle layout
+        open_draft_via_pump(&ctx, &mut app, (100.0, 100.0), "hello", 1.0);
+        assert!(app.state.is_editing_text(), "fixture: draft open");
+
+        // Press just right of the third boundary (between 'l' and 'l').
+        let bx = 100.0 + boundary_x(&ctx, &app, "hel") + 2.0;
+        press_at(&ctx, &mut app, (bx, 105.0), 2.0);
+        release_at(&ctx, &mut app, (bx, 105.0), 2.05);
+        assert_eq!(
+            app.state.text_cursor, 3,
+            "caret moved to the press boundary"
+        );
+        assert_eq!(app.state.text_anchor, None, "a plain press selects nothing");
+        assert!(
+            app.state.is_editing_text(),
+            "the press never committed the draft"
+        );
+        assert!(app.state.anns.is_empty(), "no commit, no new draft");
+        assert!(!app.drag_in_pending_text, "flag cleared on release");
+    }
+
+    #[test]
+    fn intext_drag_selects_and_release_keeps_selection() {
+        let (ctx, mut app) = draft_app();
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (100.0, 100.0), "hello", 1.0);
+
+        press_at(&ctx, &mut app, (101.0, 105.0), 2.0);
+        assert_eq!(app.state.text_cursor, 0, "press collapsed onto boundary 0");
+        assert!(app.drag_in_pending_text, "drag marked as in-text");
+
+        let x4 = 100.0 + boundary_x(&ctx, &app, "hell") + 1.0;
+        drag_to(&ctx, &mut app, (x4, 105.0));
+        assert_eq!(
+            app.state.selection_range(),
+            Some(0..4),
+            "selection grew live under the drag"
+        );
+
+        let x2 = 100.0 + boundary_x(&ctx, &app, "he") + 1.0;
+        drag_to(&ctx, &mut app, (x2, 105.0));
+        assert_eq!(
+            app.state.selection_range(),
+            Some(0..2),
+            "anchor stays pinned"
+        );
+
+        release_at(&ctx, &mut app, (x2, 105.0), 2.2);
+        assert_eq!(
+            app.state.selection_range(),
+            Some(0..2),
+            "release keeps the selection"
+        );
+        assert!(!app.drag_in_pending_text);
+
+        editor_frame(&ctx, &mut app, vec![egui::Event::Text("X".to_string())]);
+        assert_eq!(
+            pending_text_of(&app),
+            "Xllo",
+            "typing replaces the selection"
+        );
+    }
+
+    #[test]
+    fn intext_drag_off_the_block_clamps_to_its_edge() {
+        let (ctx, mut app) = draft_app();
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (100.0, 100.0), "hello", 1.0);
+
+        press_at(&ctx, &mut app, (101.0, 105.0), 2.0);
+        drag_to(&ctx, &mut app, (190.0, 105.0));
+        assert_eq!(
+            app.state.selection_range(),
+            Some(0..5),
+            "drag past the block's right edge selects to the end"
+        );
+        drag_to(&ctx, &mut app, (150.0, 190.0));
+        assert_eq!(
+            app.state.selection_range(),
+            Some(0..5),
+            "drag below the block stays clamped at the end"
+        );
+        drag_to(&ctx, &mut app, (5.0, 105.0));
+        assert_eq!(
+            app.state.text_cursor, 0,
+            "drag far left clamps to the boundary char"
+        );
+        assert_eq!(
+            app.state.selection_range(),
+            None,
+            "collapsing onto the anchor empties the selection"
+        );
+    }
+
+    #[test]
+    fn intext_double_and_triple_click_select_word_then_line() {
+        let (ctx, mut app) = draft_app();
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (100.0, 100.0), "hello world", 1.0);
+
+        // Click inside "world".
+        let wx = 100.0 + boundary_x(&ctx, &app, "hello w") + 2.0;
+        press_at(&ctx, &mut app, (wx, 105.0), 1.5);
+        release_at(&ctx, &mut app, (wx, 105.0), 1.55);
+        press_at(&ctx, &mut app, (wx, 105.0), 1.6);
+        assert_eq!(
+            app.state.selection_range(),
+            Some(6..11),
+            "double-click selects the word under the cursor"
+        );
+        release_at(&ctx, &mut app, (wx, 105.0), 1.65);
+        press_at(&ctx, &mut app, (wx, 105.0), 1.7);
+        assert_eq!(
+            app.state.selection_range(),
+            Some(0..11),
+            "triple-click selects the (whole single) line"
+        );
+        release_at(&ctx, &mut app, (wx, 105.0), 1.75);
+    }
+
+    #[test]
+    fn press_outside_text_while_editing_commits_and_moves_on() {
+        let (ctx, mut app) = draft_app();
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        open_draft_via_pump(&ctx, &mut app, (100.0, 100.0), "hello", 1.0);
+
+        // A press above the block (outside it) is NOT intercepted.
+        press_at(&ctx, &mut app, (100.0, 20.0), 2.0);
+        release_at(&ctx, &mut app, (100.0, 20.0), 2.05);
+        assert_eq!(app.state.anns.len(), 1, "the draft committed");
+        match &app.state.pending {
+            Some(Annotation::Text { pos, text, .. }) => {
+                assert_eq!(
+                    *pos,
+                    flintshot_core::Point::new(100.0, 20.0),
+                    "fresh caret placed"
+                );
+                assert!(text.is_empty());
+            }
+            other => panic!("expected fresh pending Text, got {other:?}"),
+        }
+        assert_eq!(app.state.text_cursor, 0);
+        assert!(!app.drag_in_pending_text);
+    }
+
+    /// Re-edit sessions share the pending path, so the gestures work
+    /// there too: drag-select inside a lifted-out text.
+    #[test]
+    fn drag_select_works_inside_a_reedit_session() {
+        let (ctx, mut app) = text_app();
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        let press = screen_point(&app, (20.0, 15.0));
+        editor_frame_at(
+            &ctx,
+            &mut app,
+            1.0,
+            vec![
+                egui::Event::PointerMoved(press),
+                primary_button(press, true),
+            ],
+        );
+        editor_frame_at(&ctx, &mut app, 1.05, vec![primary_button(press, false)]);
+        editor_frame_at(
+            &ctx,
+            &mut app,
+            1.1,
+            vec![
+                egui::Event::PointerMoved(press),
+                primary_button(press, true),
+            ],
+        );
+        assert!(app.state.text_reedit.is_some(), "fixture: session open");
+
+        // Press near the start of the lifted-out "hello" and drag to
+        // its end.
+        press_at(&ctx, &mut app, (11.0, 15.0), 2.0);
+        let end_x = 10.0 + boundary_x(&ctx, &app, "hello") - 1.0;
+        drag_to(&ctx, &mut app, (end_x, 15.0));
+        release_at(&ctx, &mut app, (end_x, 15.0), 2.2);
+        assert_eq!(
+            app.state.selection_range(),
+            Some(0..5),
+            "drag-select inside a re-edit session"
         );
     }
 }
