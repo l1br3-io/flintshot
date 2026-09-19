@@ -243,6 +243,26 @@ pub struct AnnotationDrag {
     pub moved: bool,
 }
 
+/// A lift-out re-edit session over a committed text (text-select-edit
+/// spec).
+///
+/// A double-clicked `Annotation::Text` moves out of
+/// [`EditorState::anns`] into [`EditorState::pending`], reusing the
+/// entire fresh-draft modal path (cursor ops, key suppression,
+/// commit / cancel). This record is what makes the session exact-once
+/// undoable: commit pushes a single snapshot containing `original`,
+/// and Esc reverts to it with no history touch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextReeditSession {
+    /// Index the annotation occupied in `anns` before lift-out. The
+    /// slot is vacant for the session's duration; commit / revert
+    /// splice back here.
+    pub index: usize,
+    /// The annotation as it was before lift-out — the revert target
+    /// and the undo snapshot's payload.
+    pub original: Annotation,
+}
+
 /// Full editor state: source image + committed annotations + history +
 /// active tool settings.
 ///
@@ -347,6 +367,12 @@ pub struct EditorState {
     /// / Home / End keys. The renderer reads this to place the block
     /// caret on the correct line and column.
     pub text_cursor: usize,
+    /// Active lift-out re-edit session, if any. Set when a Text-tool
+    /// `DoubleClick` lifts a committed text into `pending`; cleared by
+    /// commit / revert / the defensive guards in `crop` / `undo` /
+    /// `redo`. While set, `pending` holds the text being re-edited and
+    /// its slot in `anns` is vacant.
+    pub text_reedit: Option<TextReeditSession>,
 }
 
 impl EditorState {
@@ -380,6 +406,7 @@ impl EditorState {
             moving: None,
             selected_index: None,
             text_cursor: 0,
+            text_reedit: None,
         }
     }
 
@@ -731,6 +758,9 @@ impl EditorState {
         if cw == 0 || ch == 0 {
             return;
         }
+        // Shell-direct entry (the Crop button): close any live re-edit
+        // session first so the crop sees the pre-session anns.
+        self.restore_active_reedit();
         let snapshot = Snapshot::full(self.anns.clone(), self.image.clone(), self.next_number);
         self.image = new_image;
         self.anns.retain_mut(|ann| ann.crop_and_translate(n));
@@ -753,6 +783,9 @@ impl EditorState {
     /// pushed onto `redo` before the swap. No-op when `undo` is empty.
     pub fn undo(&mut self) {
         self.pending = None;
+        // Shell-direct undo mid-session must not splice against the
+        // session's vacant slot — restore the original first.
+        self.restore_active_reedit();
         self.end_move();
         let Some(prev) = self.undo.pop() else {
             return;
@@ -784,6 +817,8 @@ impl EditorState {
     /// the case immediately after a commit or crop, since both clear
     /// `redo`).
     pub fn redo(&mut self) {
+        // Same mid-session guard as `undo`: restore before swapping.
+        self.restore_active_reedit();
         self.end_move();
         let Some(next) = self.redo.pop() else {
             return;
@@ -971,6 +1006,19 @@ impl EditorState {
             // be robust against a TextInput arriving when no draft is
             // active — e.g. a race between placement and the next frame.)
             InputEvent::TextInput(_) => DispatchOutcome::Continue,
+            // Double-click owns exactly one behavior: re-edit. Only
+            // the Text tool reacts, and only when the accompanying
+            // second PointerDown didn't just start / continue a draft
+            // (mid-edit arrivals no-op in `dispatch_text_event`) and
+            // something text-shaped is actually under the pointer.
+            InputEvent::DoubleClick { pos } => {
+                if self.tool == Tool::Text && self.pending.is_none() {
+                    if let Some(index) = self.text_hit_test(*pos) {
+                        self.begin_text_reedit(index);
+                    }
+                }
+                DispatchOutcome::Continue
+            }
         }
     }
 
@@ -1001,7 +1049,13 @@ impl EditorState {
             InputEvent::Key {
                 key: Key::Escape, ..
             } => {
-                self.cancel_annotation();
+                // Mid-session Esc reverts the whole edit (the re-edit
+                // analog of cancel-draft); a fresh draft just cancels.
+                if let Some(session) = self.text_reedit.take() {
+                    self.revert_text_reedit(session);
+                } else {
+                    self.cancel_annotation();
+                }
                 DispatchOutcome::Continue
             }
             InputEvent::Key {
@@ -1189,10 +1243,21 @@ impl EditorState {
     /// a zero-content `Text` would litter `anns` with invisible
     /// annotations and skew the undo history.
     ///
+    /// When a lift-out re-edit session is active, the session branch
+    /// runs instead: unchanged text splices back silently, an edit (of
+    /// content or style) splices back with exactly one undo entry
+    /// carrying the original, and an edited-to-empty text is removed
+    /// (same single entry) — fresh drafts never commit empty, and
+    /// neither do re-edited ones.
+    ///
     /// Public so the shell can flush a pending draft when the user
     /// switches tools via the toolbar (the tool change bypasses the
     /// dispatcher, so the draft would otherwise stay modal forever).
     pub fn commit_text_draft(&mut self) {
+        if let Some(session) = self.text_reedit.take() {
+            self.finish_text_reedit(session);
+            return;
+        }
         let nonempty = matches!(
             &self.pending,
             Some(Annotation::Text { text, .. }) if !text.is_empty()
@@ -1201,6 +1266,92 @@ impl EditorState {
             self.commit_annotation();
         } else {
             self.cancel_annotation();
+        }
+    }
+
+    /// Lift `anns[index]` (a committed Text) out into `pending` and
+    /// open a re-edit session over it.
+    ///
+    /// The caret lands at the end of the text (v1; caret-from-click
+    /// needs shell-side glyph metrics). The selection is vacated for
+    /// the session's duration — its slot in `anns` is gone, so a
+    /// lingering `selected_index` would point `delete_selected` at
+    /// the wrong annotation — and restored on commit / revert.
+    fn begin_text_reedit(&mut self, index: usize) {
+        let char_count = match self.anns.get(index) {
+            Some(Annotation::Text { text, .. }) => text.chars().count(),
+            _ => return,
+        };
+        let original = self.anns.remove(index);
+        self.text_reedit = Some(TextReeditSession {
+            index,
+            original: original.clone(),
+        });
+        self.pending = Some(original);
+        self.text_cursor = char_count;
+        self.selected_index = None;
+    }
+
+    /// Close a re-edit session by committing `pending`.
+    ///
+    /// Three outcomes, all history-exact:
+    /// - pending missing or unchanged → splice the original back
+    ///   silently (a no-op edit never records history);
+    /// - changed → snapshot the pre-edit state (current `anns` with
+    ///   `original` spliced at `index`) onto `undo`, clear `redo`,
+    ///   then splice the edited text back at `index`;
+    /// - edited to empty → the annotation is removed outright (same
+    ///   single snapshot; nothing spliced back).
+    fn finish_text_reedit(&mut self, session: TextReeditSession) {
+        let edited = self.pending.take();
+        let unchanged = edited.as_ref().is_none_or(|ann| *ann == session.original);
+        let survives = matches!(&edited, Some(Annotation::Text { text, .. }) if !text.is_empty());
+        let index = session.index;
+        if unchanged {
+            let at = index.min(self.anns.len());
+            self.anns.insert(at, session.original);
+            self.selected_index = Some(at);
+            return;
+        }
+        // Snapshot-before-mutate: pre-edit state is `anns` with the
+        // original back in its slot — one entry covers content and
+        // any style changes made mid-session (lift-out invariant).
+        let mut pre = self.anns.clone();
+        pre.insert(index.min(pre.len()), session.original);
+        self.undo.push(Snapshot::anns_only(pre, self.next_number));
+        self.redo.clear();
+        if survives {
+            if let Some(edited) = edited {
+                let at = index.min(self.anns.len());
+                self.anns.insert(at, edited);
+                self.selected_index = Some(at);
+            }
+        } else {
+            self.selected_index = None;
+        }
+    }
+
+    /// Close a re-edit session by reverting: splice the original back
+    /// at its index, drop `pending`, restore the selection. No
+    /// history touch — revert is a return to the pre-session state,
+    /// not a mutation of it.
+    fn revert_text_reedit(&mut self, session: TextReeditSession) {
+        self.pending = None;
+        let index = session.index.min(self.anns.len());
+        self.anns.insert(index, session.original);
+        self.selected_index = Some(index);
+    }
+
+    /// Defensive guard for shell-direct mutations (`crop` / `undo` /
+    /// `redo` bypass the modal dispatcher): restore the session's
+    /// original into `anns` and drop the session + pending before the
+    /// mutation runs, so it operates on the pre-session state instead
+    /// of splicing against a vacant slot. Selection is left to the
+    /// caller — all three guard users clear it themselves.
+    fn restore_active_reedit(&mut self) {
+        if let Some(session) = self.text_reedit.take() {
+            self.revert_text_reedit(session);
+            self.selected_index = None;
         }
     }
 
@@ -3236,6 +3387,288 @@ mod tests {
         assert_eq!(s.anns.len(), 2, "the draft was committed");
         assert!(s.pending.is_none(), "no new caret on top of the text");
         assert_eq!(s.selected_index, Some(0), "the committed text is selected");
+    }
+
+    // --- Double-click lift-out re-edit session (text-select-edit) ---
+
+    /// Helper: like `text_select_state` but with a distinctive style so
+    /// undo-exactness tests can tell content + style restoration apart.
+    fn reedit_state() -> EditorState {
+        let mut s = hundred_state();
+        s.tool = Tool::Text;
+        s.anns.push(Annotation::text(
+            Point::new(10.0, 10.0),
+            "hello",
+            crate::text::TextStyle {
+                size: 24.0,
+                color: Color::rgb(1, 2, 3),
+                ..crate::text::TextStyle::simple(24.0, Color::RED)
+            },
+        ));
+        s
+    }
+
+    fn dblclick(s: &mut EditorState, pos: Point) {
+        s.dispatch_input(&InputEvent::DoubleClick { pos });
+    }
+
+    /// Double-click on a committed Text lifts it out of `anns` into
+    /// `pending` with the caret at the end and the selection vacated
+    /// (its slot in `anns` is gone for the session's duration).
+    #[test]
+    fn doubleclick_enters_reedit_caret_at_end() {
+        let mut s = reedit_state();
+        s.selected_index = Some(0);
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        assert!(s.anns.is_empty(), "the text left anns for the session");
+        match &s.pending {
+            Some(Annotation::Text { text, .. }) => assert_eq!(text, "hello"),
+            other => panic!("expected pending Text, got {other:?}"),
+        }
+        assert_eq!(s.text_cursor, 5, "caret lands at the end of the text");
+        assert!(s.selected_index.is_none(), "selection vacated mid-session");
+        assert!(s.is_editing_text(), "the modal path is live");
+    }
+
+    /// Edit + Enter commits the session: edited text back at its index,
+    /// exactly one undo entry, `Ctrl+Z` restoring content *and* style.
+    /// No flip-to-move — the annotation is not new.
+    #[test]
+    fn reedit_enter_commits_one_undo_entry() {
+        let mut s = reedit_state();
+        s.flip_to_move = true;
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        for ch in " world".chars() {
+            s.dispatch_input(&InputEvent::TextInput(ch));
+        }
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.anns.len(), 1, "spliced back, not appended");
+        match &s.anns[0] {
+            Annotation::Text {
+                text, font_size, ..
+            } => {
+                assert_eq!(text, "hello world");
+                assert_eq!(*font_size, 24.0, "style carried through the session");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(s.undo.len(), 1, "exactly one undo entry");
+        assert!(s.redo.is_empty());
+        assert_eq!(s.tool, Tool::Text, "re-edit commit never flips tools");
+        assert_eq!(s.selected_index, Some(0), "selection restored on commit");
+        s.dispatch_input(&ctrl('z'));
+        match &s.anns[0] {
+            Annotation::Text {
+                text,
+                font_size,
+                color,
+                ..
+            } => {
+                assert_eq!(text, "hello", "content restored");
+                assert_eq!(*font_size, 24.0, "style restored");
+                assert_eq!(*color, Color::rgb(1, 2, 3), "colour restored");
+            }
+            other => panic!("expected restored Text, got {other:?}"),
+        }
+    }
+
+    /// Esc mid-session reverts to the original with zero history
+    /// entries and restores the selection.
+    #[test]
+    fn reedit_esc_reverts_without_history() {
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        s.dispatch_input(&InputEvent::TextInput('!'));
+        s.dispatch_input(&InputEvent::TextInput('!'));
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Escape,
+            modifiers: Modifiers::default(),
+        });
+        match &s.anns[0] {
+            Annotation::Text { text, .. } => assert_eq!(text, "hello", "original restored"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert!(s.undo.is_empty(), "revert touches no history");
+        assert!(s.pending.is_none());
+        assert_eq!(s.selected_index, Some(0), "selection restored on revert");
+    }
+
+    /// Opening and immediately committing a session without changes
+    /// leaves history untouched (no-op edit ⇒ no entry).
+    #[test]
+    fn reedit_noop_edit_pushes_no_history() {
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        match &s.anns[0] {
+            Annotation::Text { text, .. } => assert_eq!(text, "hello"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert!(s.undo.is_empty(), "no-op edit ⇒ no undo entry");
+        assert!(s.pending.is_none());
+    }
+
+    /// Editing down to the empty string removes the annotation (fresh
+    /// drafts never commit empty) with exactly one undo entry; undo
+    /// restores it at its original index.
+    #[test]
+    fn reedit_edited_to_empty_removes_with_one_entry() {
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        for _ in 0..5 {
+            s.dispatch_input(&InputEvent::Key {
+                key: Key::Backspace,
+                modifiers: Modifiers::default(),
+            });
+        }
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert!(s.anns.is_empty(), "edited-to-empty text is removed");
+        assert!(s.selected_index.is_none(), "nothing left to select");
+        assert_eq!(s.undo.len(), 1, "the removal is one undo entry");
+        s.dispatch_input(&ctrl('z'));
+        match &s.anns[0] {
+            Annotation::Text { text, .. } => assert_eq!(text, "hello", "undo restores it"),
+            other => panic!("expected restored Text, got {other:?}"),
+        }
+    }
+
+    /// `DoubleClick` is inert everywhere except a Text-tool hit on a
+    /// committed Text: misses, non-Text tools, and mid-edit arrivals
+    /// (the accompanying second `PointerDown` already did the work).
+    #[test]
+    fn doubleclick_noops_miss_other_tools_and_mid_edit() {
+        // Miss under Text.
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(80.0, 80.0));
+        assert_eq!(s.anns.len(), 1);
+        assert!(s.pending.is_none());
+
+        // Non-Text tool over a text hit.
+        let mut s = reedit_state();
+        s.tool = Tool::Move;
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        assert_eq!(s.anns.len(), 1, "Move treats DoubleClick as noise");
+        assert!(s.pending.is_none());
+
+        // Mid-edit (fresh draft active): modal path swallows it.
+        let mut s = reedit_state();
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(60.0, 60.0),
+        });
+        s.dispatch_input(&InputEvent::TextInput('x'));
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        match &s.pending {
+            Some(Annotation::Text { text, .. }) => {
+                assert_eq!(text, "x", "the fresh draft is untouched");
+            }
+            other => panic!("expected pending draft, got {other:?}"),
+        }
+        assert_eq!(s.anns.len(), 1, "lift-out did not fire mid-edit");
+        assert!(s.text_reedit.is_none());
+    }
+
+    /// Clicking away mid-session commits the edit and starts the new
+    /// action at the click point — the Flameshot flow preserved.
+    #[test]
+    fn reedit_clickaway_commits_then_starts_new_action() {
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        s.dispatch_input(&InputEvent::TextInput('!'));
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(70.0, 70.0),
+        });
+        match &s.anns[0] {
+            Annotation::Text { text, .. } => assert_eq!(text, "hello!", "session committed"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &s.pending {
+            Some(Annotation::Text { pos, text, .. }) => {
+                assert_eq!(*pos, Point::new(70.0, 70.0), "fresh caret at the click");
+                assert!(text.is_empty());
+            }
+            other => panic!("expected fresh pending Text, got {other:?}"),
+        }
+        assert_eq!(s.undo.len(), 1, "one entry for the session");
+        assert!(s.text_reedit.is_none(), "session closed");
+    }
+
+    /// The splice-back keeps the annotation at its original index —
+    /// neighbours on both sides stay put.
+    #[test]
+    fn reedit_splice_back_index_is_stable() {
+        let mut s = hundred_state();
+        s.tool = Tool::Text;
+        s.anns.push(rect_ann(0.0, 0.0, 5.0, 5.0));
+        s.anns.push(Annotation::text(
+            Point::new(10.0, 10.0),
+            "mid",
+            crate::text::TextStyle::simple(16.0, Color::RED),
+        ));
+        s.anns.push(rect_ann(60.0, 60.0, 90.0, 90.0));
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        assert_eq!(s.anns.len(), 2, "fixture: the text is lifted out");
+        s.dispatch_input(&InputEvent::TextInput('!'));
+        s.dispatch_input(&InputEvent::Key {
+            key: Key::Enter,
+            modifiers: Modifiers::default(),
+        });
+        assert_eq!(s.anns.len(), 3);
+        assert!(matches!(s.anns[0], Annotation::Rect { .. }));
+        match &s.anns[1] {
+            Annotation::Text { text, .. } => assert_eq!(text, "mid!", "back at index 1"),
+            other => panic!("expected Text at index 1, got {other:?}"),
+        }
+        assert!(matches!(s.anns[2], Annotation::Rect { .. }));
+    }
+
+    /// Shell-direct `crop` / `undo` / `redo` mid-session restore the
+    /// original safely: no lost text, no wrong-index splice, no
+    /// zombie session.
+    #[test]
+    fn direct_crop_undo_redo_mid_session_restore_original() {
+        // Crop: the toolbar's Crop button bypasses the dispatcher.
+        let mut s = reedit_state();
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        s.crop(Rect::from_xywh(0.0, 0.0, 80.0, 80.0));
+        assert!(s.pending.is_none(), "guard closed the session");
+        assert!(s.text_reedit.is_none());
+        match &s.anns[0] {
+            Annotation::Text { text, pos, .. } => {
+                assert_eq!(text, "hello", "original restored, not the edited pending");
+                assert_eq!(*pos, Point::new(10.0, 10.0));
+            }
+            other => panic!("expected restored Text, got {other:?}"),
+        }
+
+        // Undo / redo with live history to swap.
+        let mut s = reedit_state();
+        s.anns.clear();
+        s.anns.push(Annotation::text(
+            Point::new(10.0, 10.0),
+            "first",
+            crate::text::TextStyle::simple(16.0, Color::RED),
+        ));
+        s.undo.push(Snapshot::anns_only(Vec::new(), s.next_number));
+        dblclick(&mut s, Point::new(20.0, 15.0));
+        s.dispatch_input(&InputEvent::TextInput('!'));
+        s.undo();
+        assert!(s.anns.is_empty(), "undo swapped in the pre-commit state");
+        assert!(s.text_reedit.is_none(), "guard dropped the session");
+        s.redo();
+        assert_eq!(s.anns.len(), 1, "redo swapped the committed state back");
+        match &s.anns[0] {
+            Annotation::Text { text, .. } => assert_eq!(text, "first"),
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 
     // --- Task 14: Select / crop region tool tests ---

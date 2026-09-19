@@ -34,24 +34,24 @@ Key mechanics:
 
 **Acceptance criteria:**
 
-- [ ] Session lifecycle: begin leaves `anns` without the text,
+- [x] Session lifecycle: begin leaves `anns` without the text,
       `pending` holding it, caret at end; click-away commits then
       starts the new action (existing Flameshot flow preserved).
-- [ ] Edit + Enter (or click-away): edited text back at its index,
+- [x] Edit + Enter (or click-away): edited text back at its index,
       **exactly one** undo entry; `Ctrl+Z` restores original content
       *and* style. Esc: original restored, zero entries. No-op edit
       (open + commit without changes): zero entries.
-- [ ] Edited-to-empty + commit: annotation removed, one entry,
+- [x] Edited-to-empty + commit: annotation removed, one entry,
       undo restores. `DoubleClick` no-ops under non-Text tools, on
       miss, and mid-edit.
-- [ ] Direct `crop` / `undo` / `redo` calls mid-session restore the
+- [x] Direct `crop` / `undo` / `redo` calls mid-session restore the
       original safely (no lost text, no wrong-index splice).
 
 **Verification:**
 
-- [ ] `cargo test -p flintshot-core` (session lifecycle, undo
+- [x] `cargo test -p flintshot-core` (session lifecycle, undo
       exactness, guards, DoubleClick routing)
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
 
 **Dependencies:** Task 001
 

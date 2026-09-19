@@ -2,7 +2,7 @@
 
 - [x] 001 Core — Text-tool click-to-select state machine
 - [x] 002 egui — selection chrome under Text
-- [ ] 003 Core — DoubleClick + lift-out re-edit session
+- [x] 003 Core — DoubleClick + lift-out re-edit session
 - [ ] 004 egui — double-click plumbing in both shells
 - [ ] 005 Core — restyle API + gesture bracketing
 - [ ] 006 egui — style surfaces retarget (panel + popover)
