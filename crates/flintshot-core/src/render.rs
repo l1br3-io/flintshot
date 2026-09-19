@@ -178,7 +178,7 @@ pub fn render<C: Canvas>(
 
     if let Some(pending) = &state.pending {
         render_ann(canvas, pending, &state.image);
-        // Text indicators (bounding box + block caret) for an in-flight
+        // Text indicators (bounding box + bar caret) for an in-flight
         // `Tool::Text` draft. Only drawn for `pending` (never for
         // committed `anns`), so the saved/copied output via
         // `compose_final` — which doesn't go through this path — never
@@ -282,11 +282,13 @@ const TEXT_BBOX_STROKE: Stroke = Stroke::new(Color::rgba(60, 60, 60, 170), 1.0);
 /// (ascenders / descenders would otherwise touch the outline).
 const TEXT_BBOX_PAD: f32 = 2.0;
 
-/// Width of the solid block caret, as a fraction of font size and
-/// clamped so it stays visible at small sizes. Terminal-style: a filled
-/// rectangle the user reads as the insertion point.
-fn block_caret_width(size: f32) -> f32 {
-    (size * 0.12).max(2.0)
+/// Width of the thin bar caret, as a fraction of font size and
+/// floored so it stays a visible hairline at small sizes (and on
+/// empty drafts, where no glyphs sit next to it for scale).
+/// Industry-standard insertion point: a thin vertical bar, like every
+/// desktop text editor.
+fn bar_caret_width(size: f32) -> f32 {
+    (size / 24.0).max(1.5)
 }
 
 /// Outline drawn around blur regions in the live editor view so the
@@ -504,7 +506,7 @@ pub fn arrow_barbs(a: Point, b: Point, head_size: f32) -> [Point; 2] {
 }
 
 /// Draw the in-flight text indicators: a hollow bounding box around
-/// the laid-out text block and a solid block caret at the insertion
+/// the laid-out text block and a thin bar caret at the insertion
 /// point (tracked by `cursor`, a char index into `text`).
 ///
 /// Both are live-view-only — drawn solely for `pending`
@@ -530,13 +532,13 @@ fn draw_text_indicators<C: Canvas>(
 ) {
     let metrics = canvas.measure_text(text, style);
     let pad = TEXT_BBOX_PAD;
-    let block_w = block_caret_width(style.size);
+    let bar_w = bar_caret_width(style.size);
     // Caret offset from `pos` (text origin) and 0-based line index.
     let (caret_dx, caret_line) = caret_coords(text, cursor, canvas, style);
     let line_h = style.size * style.line_spacing;
     // Bounding box: spans the widest line, extended to cover the caret
     // (which sits just past the cursor's column on its line).
-    let bbox_w = metrics.width.max(caret_dx + block_w);
+    let bbox_w = metrics.width.max(caret_dx + bar_w);
     let bbox = Rect::from_xywh(
         pos.x - pad,
         pos.y - pad,
@@ -544,11 +546,14 @@ fn draw_text_indicators<C: Canvas>(
         metrics.height + pad * 2.0,
     );
     canvas.draw_rect_outline(bbox, &TEXT_BBOX_STROKE);
-    // Solid block caret at the insertion point.
+    // Thin bar caret at the insertion point. Width is in *physical*
+    // px — at high `pixels_per_point` it stays a hairline on screen
+    // (physical px are what the display shows), never scaling up with
+    // the zoom.
     let caret = Rect::from_xywh(
         pos.x + caret_dx,
         pos.y + caret_line as f32 * line_h,
-        block_w,
+        bar_w,
         style.size,
     );
     canvas.draw_rect_filled(caret, style.color);
@@ -2023,9 +2028,10 @@ mod tests {
     }
 
     /// A pending `Annotation::Text` renders the text run followed by
-    /// a single `DrawLine` for the caret indicator. The caret's x
-    /// equals `pos.x + measure_text(text, font_size)`, so it sits at
-    /// the visible end of the typed run. Locks the caret contract:
+    /// the bounding-box outline and a single `DrawRectFilled` bar
+    /// caret at the insertion point. The caret's x equals
+    /// `pos.x + measure_text(text, font_size)`, so it sits at the
+    /// visible end of the typed run. Locks the caret contract:
     /// without this `Tool::Text` shows no feedback where the typed
     /// text will land (regression flagged against the Task 012
     /// acceptance "Clicking with `Tool::Text` places a text input caret").
@@ -2047,7 +2053,7 @@ mod tests {
         let mut bg = None;
         render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
-        // Upload + blit + DrawText (the run) + DrawLine (the caret).
+        // Upload + blit + DrawText (the run) + bbox + bar caret.
         let mut it = canvas.calls.iter();
         assert!(matches!(it.next(), Some(DrawCall::UploadImage)));
         assert!(matches!(it.next(), Some(DrawCall::DrawImage { .. })));
@@ -2067,14 +2073,14 @@ mod tests {
         // MockCanvas::measure_text returns `len * size * 0.6`, so
         // advance for "hi" at size 16.0 = 19.2 px.
         let advance = 19.2_f32;
-        let block_w = block_caret_width(font_size);
+        let bar_w = bar_caret_width(font_size);
         // Bounding-box outline around the laid-out text block.
         match it.next() {
             Some(DrawCall::DrawRectOutline { rect, stroke }) => {
                 let want = Rect::from_xywh(
                     pos.x - TEXT_BBOX_PAD,
                     pos.y - TEXT_BBOX_PAD,
-                    advance + block_w + TEXT_BBOX_PAD * 2.0,
+                    advance + bar_w + TEXT_BBOX_PAD * 2.0,
                     font_size * crate::text::DEFAULT_LINE_SPACING + TEXT_BBOX_PAD * 2.0,
                 );
                 assert_eq!(*rect, want, "bbox geometry");
@@ -2082,14 +2088,15 @@ mod tests {
             }
             other => panic!("expected DrawRectOutline bbox, got {other:?}"),
         }
-        // Solid block caret at the insertion point.
+        // Thin bar caret at the insertion point: full line height,
+        // hairline width, text colour.
         match it.next() {
             Some(DrawCall::DrawRectFilled { rect, color: c }) => {
-                let want = Rect::from_xywh(pos.x + advance, pos.y, block_w, font_size);
-                assert_eq!(*rect, want, "block caret geometry");
+                let want = Rect::from_xywh(pos.x + advance, pos.y, bar_w, font_size);
+                assert_eq!(*rect, want, "bar caret geometry");
                 assert_eq!(*c, color, "caret uses text colour");
             }
-            other => panic!("expected DrawRectFilled block caret, got {other:?}"),
+            other => panic!("expected DrawRectFilled bar caret, got {other:?}"),
         }
         assert!(it.next().is_none(), "no further draw calls");
     }
@@ -2097,7 +2104,8 @@ mod tests {
     /// An empty pending text draft still emits a caret — at `pos.x`
     /// (advance is 0). This is the just-clicked-before-typing state,
     /// and is precisely the case where the user needs the indicator
-    /// most, since there's no visible text yet to anchor against.
+    /// most, since there's no visible text yet to anchor against. The
+    /// bar's floor width keeps it visible with no text.
     #[test]
     fn render_pending_empty_text_emits_caret_at_pos() {
         let mut state = EditorState::new(image::RgbaImage::new(100, 40));
@@ -2114,17 +2122,17 @@ mod tests {
         render(&state, &mut canvas, &mut bg, &mut BlurCache::default()).expect("render");
 
         // The empty run still emits a DrawText (the dispatcher doesn't
-        // special-case it), followed by a block caret at pos.x (advance 0).
-        let block_w = block_caret_width(font_size);
+        // special-case it), followed by a bar caret at pos.x (advance 0).
+        let bar_w = bar_caret_width(font_size);
         let has_caret_at_pos = canvas.calls.iter().any(|c| match c {
             DrawCall::DrawRectFilled { rect, .. } => {
-                *rect == Rect::from_xywh(pos.x, pos.y, block_w, font_size)
+                *rect == Rect::from_xywh(pos.x, pos.y, bar_w, font_size)
             }
             _ => false,
         });
         assert!(
             has_caret_at_pos,
-            "empty draft must still draw block caret at pos.x"
+            "empty draft must still draw the bar caret at pos.x"
         );
     }
 
@@ -2161,7 +2169,7 @@ mod tests {
                 .calls
                 .iter()
                 .any(|c| matches!(c, DrawCall::DrawRectFilled { .. })),
-            "committed text must not emit a block caret"
+            "committed text must not emit a caret"
         );
         assert!(
             !canvas
