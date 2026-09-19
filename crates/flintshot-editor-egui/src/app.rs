@@ -123,9 +123,24 @@ pub(crate) struct EditorApp {
     /// either, so no drags can start).
     canvas_rect: Option<egui::Rect>,
     /// User view-zoom multiplier over the fit scale (the floating
-    /// +/− chips step it; 1.0 = fit-to-view). See
-    /// [`VIEW_ZOOM_MIN`] / [`VIEW_ZOOM_MAX`].
+    /// +/− chips and the mouse wheel step it; 1.0 = fit-to-view).
+    /// See [`VIEW_ZOOM_MIN`] / [`VIEW_ZOOM_MAX`].
     view_zoom: f32,
+    /// View pan offset (screen-logical px) over the fit letterbox —
+    /// the hand-tool / middle-drag / wheel-anchor state. Composed
+    /// into the canvas's `content_offset` as `letterbox + pan` by
+    /// [`Self::update_fit`] each frame.
+    ///
+    /// GOTCHA: never set the canvas's `content_offset` directly
+    /// outside that composition — the pointer mapping, the chrome,
+    /// and the magnifier all read it, and a stale pan would skew
+    /// every mapping site. Mutate this field instead (clamped via
+    /// [`crate::canvas::clamp_pan`]); the fit pass re-composes.
+    pan: egui::Vec2,
+    /// An in-flight pan drag (middle button from any tool, or a
+    /// primary drag under Hand): the press anchor and the pan at
+    /// press, so the drag moves the view by the pointer delta.
+    pan_drag: Option<PanDrag>,
     /// Whether the current primary-button press began inside the
     /// canvas. Set when `PointerDown` fires (which only happens on
     /// canvas hits), cleared on `PointerUp`. Without this guard,
@@ -239,6 +254,17 @@ pub(crate) const VIEW_ZOOM_MAX: f32 = 4.0;
 /// 1.0 stays exact in f32 and the "back to 100%" path is lossless.
 const VIEW_ZOOM_STEP: f32 = 0.25;
 
+/// An in-flight view-pan drag: the pointer anchor and the pan value
+/// captured at press, so the drag applies `start_pan + (pointer −
+/// anchor)` each frame.
+#[derive(Debug, Clone, Copy)]
+struct PanDrag {
+    /// Press position (screen-logical).
+    anchor: egui::Pos2,
+    /// Pan offset at press.
+    start_pan: egui::Vec2,
+}
+
 impl EditorApp {
     /// Construct the app. The canvas captures a clone of the
     /// [`Context`] for texture loading outside the per-frame `ui` call.
@@ -303,6 +329,8 @@ impl EditorApp {
             img_dims,
             canvas_rect: None,
             view_zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            pan_drag: None,
             canvas_drag_active: false,
             dblclick: crate::dblclick::DoubleClickTracker::default(),
             outcome,
@@ -483,6 +511,145 @@ impl EditorApp {
         }
     }
 
+    /// The view-pan + wheel-zoom input pass (any tool): the wheel
+    /// steps the view zoom one quantized step anchored at the
+    /// cursor, a middle-button drag pans, and a live pan drag
+    /// (started by middle or by Hand's primary press) follows the
+    /// pointer. Pure math lives in [`crate::canvas`]
+    /// (`zoom_anchored_topleft`, `clamp_pan`, `letterbox_offset`);
+    /// this owns only the input translation and the pan/zoom state.
+    fn handle_view_input(&mut self, ctx: &Context) {
+        // Wheel zoom: one notch = one step, toward the cursor. Only
+        // over the canvas — the side panel / toolbar keep their own
+        // scroll semantics.
+        let wheel = ctx.input(|i| {
+            i.raw.events.iter().rev().find_map(|e| match e {
+                egui::Event::MouseWheel { delta, .. } => Some(*delta),
+                _ => None,
+            })
+        });
+        if let (Some(delta), Some(cursor), Some(rect)) = (
+            wheel,
+            ctx.input(|i| i.pointer.latest_pos()),
+            self.canvas_rect,
+        ) {
+            if rect.contains(cursor) && delta.y != 0.0 {
+                let step = if delta.y > 0.0 {
+                    VIEW_ZOOM_STEP
+                } else {
+                    -VIEW_ZOOM_STEP
+                };
+                self.zoom_at_cursor(step, cursor, rect, ctx.pixels_per_point());
+            }
+        }
+
+        // Middle-button pan (any tool): press anchors, drag applies
+        // `start_pan + (pointer − anchor)`, release ends — applying
+        // the final position first, so a press-move-release flick
+        // with no intermediate frame still lands the delta.
+        let (middle_pressed, middle_down, middle_released) = ctx.input(|i| {
+            (
+                i.pointer.button_pressed(egui::PointerButton::Middle),
+                i.pointer.button_down(egui::PointerButton::Middle),
+                i.pointer.button_released(egui::PointerButton::Middle),
+            )
+        });
+        let cursor = ctx.input(|i| i.pointer.latest_pos());
+        if middle_pressed && cursor.is_some_and(|c| self.canvas_rect.is_some_and(|r| r.contains(c)))
+        {
+            let pos = cursor.unwrap_or_default();
+            self.pan_drag = Some(PanDrag {
+                anchor: pos,
+                start_pan: self.pan,
+            });
+        }
+        // A live pan drag is the middle button held, or a Hand
+        // primary press held (the press itself is intercepted in the
+        // dispatch block below).
+        let (primary_down, primary_released) =
+            ctx.input(|i| (i.pointer.primary_down(), i.pointer.primary_released()));
+        let pan_live = middle_down || primary_down;
+        let pan_ended = middle_released || primary_released;
+        if (pan_ended || pan_live) && self.pan_drag.is_some() {
+            if let (Some(drag), Some(pos)) = (self.pan_drag, cursor) {
+                self.apply_pan(drag.start_pan + (pos - drag.anchor), ctx);
+            }
+        }
+        if pan_ended || !pan_live {
+            // Release — or the button vanishing without one (focus
+            // loss): the drag ends after the final apply above.
+            self.pan_drag = None;
+        }
+    }
+
+    /// Step the view zoom by `step` (signed), keeping the image
+    /// point under `cursor` fixed. Returning to the 1.0 fit zoom
+    /// resets pan to zero (the image fits again; the worker resize
+    /// policy's trigger stays exact). No-op at the clamp bounds.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "image dims ≤ 2^24 are exact in f32"
+    )]
+    fn zoom_at_cursor(&mut self, step: f32, cursor: egui::Pos2, rect: egui::Rect, ppp: f32) {
+        let new_zoom = (self.view_zoom + step).clamp(VIEW_ZOOM_MIN, VIEW_ZOOM_MAX);
+        // The 0.25 steps are powers-of-two fractions — exact in f32 —
+        // so equality is the quantization contract, not drift.
+        #[expect(clippy::float_cmp, reason = "0.25-stepped zoom values are f32-exact")]
+        let at_bound = new_zoom == self.view_zoom;
+        if at_bound {
+            return;
+        }
+        if (new_zoom - 1.0).abs() < f32::EPSILON {
+            self.view_zoom = new_zoom;
+            self.pan = egui::Vec2::ZERO;
+            return;
+        }
+        // Recover the fit from the live scale so the anchor math
+        // matches what `update_fit` will compose next frame.
+        let fit = self.canvas.scale() / self.view_zoom;
+        let scale_before = self.canvas.scale();
+        let scale_after = fit * new_zoom;
+        let (w, h) = self.state.image.dimensions();
+        let (w, h) = (w as f32, h as f32);
+        // Cursor + current image top-left in canvas-local logical
+        // px; scales convert to logical-per-image-px.
+        let topleft_before = self.canvas.content_offset();
+        let cursor_local = cursor - rect.min;
+        let topleft_after = crate::canvas::zoom_anchored_topleft(
+            cursor_local,
+            topleft_before,
+            scale_before / ppp,
+            scale_after / ppp,
+        );
+        // The letterbox `update_fit` will compute at the new scale,
+        // so pan lands as (anchored top-left − letterbox).
+        let ring_l_after = CANVAS_RING * scale_after / ppp;
+        let img_after = egui::vec2(w * scale_after / ppp, h * scale_after / ppp);
+        let box_after = img_after + egui::vec2(2.0 * ring_l_after, 2.0 * ring_l_after);
+        let pad_l = CANVAS_PAD / ppp;
+        let letterbox_after =
+            crate::canvas::letterbox_offset(rect.size(), box_after, pad_l, ring_l_after + pad_l);
+        self.view_zoom = new_zoom;
+        self.pan =
+            crate::canvas::clamp_pan(topleft_after - letterbox_after, img_after, rect.size());
+    }
+
+    /// Set the pan (clamped to keep the image intersecting the
+    /// viewport) — the single write path for drag-driven pans.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "image dims ≤ 2^24 are exact in f32"
+    )]
+    fn apply_pan(&mut self, pan: egui::Vec2, ctx: &Context) {
+        let Some(rect) = self.canvas_rect else {
+            return;
+        };
+        let (w, h) = self.state.image.dimensions();
+        let scale = self.canvas.scale() / ctx.pixels_per_point();
+        let img_logical = egui::vec2(w as f32 * scale, h as f32 * scale);
+        self.pan = crate::canvas::clamp_pan(pan, img_logical, rect.size());
+    }
+
     /// The worker window's image-sized viewport policy (unchanged,
     /// spec: out of scope): at the 1.0 view zoom, resize until the
     /// panel exactly fits the image; any other zoom belongs to
@@ -570,22 +737,24 @@ impl EditorApp {
         let ring_l = CANVAS_RING * scale / ppp;
         let img_logical = egui::vec2(w as f32 * scale / ppp, h as f32 * scale / ppp);
         let box_logical = img_logical + egui::vec2(2.0 * ring_l, 2.0 * ring_l);
-        // Center the ring box in the padded viewport; a zoomed-in
-        // box (bigger than the viewport) clamps to zero slack and
-        // anchors at the ring + pad inset (the panel clips the
-        // overflow).
-        let offset = egui::vec2(
-            ((rect.width() - 2.0 * pad_l - box_logical.x) / 2.0).max(0.0) + ring_l + pad_l,
-            ((rect.height() - 2.0 * pad_l - box_logical.y) / 2.0).max(0.0) + ring_l + pad_l,
-        );
+        // Pan composes over the letterbox: the fit centers (or
+        // anchors) the ring box, pan slides it. Clamped every frame
+        // so a window resize or a zoom change can never strand the
+        // image off-viewport; at the 1.0 fit zoom the image always
+        // fits, so the clamp pins pan at zero (the resize policy's
+        // trigger stays exact).
+        self.pan = crate::canvas::clamp_pan(self.pan, img_logical, rect.size());
+        let offset =
+            crate::canvas::letterbox_offset(rect.size(), box_logical, pad_l, ring_l + pad_l);
         // "Changed" tolerates float jitter: sub-epsilon drift must
         // not request repaints every frame, and a quarter-pixel
         // letterbox shift is invisible.
         let scale_drifted = (scale - self.canvas.scale()).abs() > 1e-4;
-        let offset_drifted = (offset - self.canvas.content_offset()).length_sq() > 0.25_f32 * 0.25;
+        let offset_drifted =
+            (offset + self.pan - self.canvas.content_offset()).length_sq() > 0.25_f32 * 0.25;
         if scale_drifted || offset_drifted {
             self.canvas.set_scale(scale);
-            self.canvas.set_content_offset(offset);
+            self.canvas.set_content_offset(offset + self.pan);
             // The correcting frame must come immediately (window
             // resizes and crop landings otherwise wait for input).
             ctx.request_repaint();
@@ -896,6 +1065,10 @@ impl EditorApp {
         // mask never paints on the crop's own frame.
         self.end_phase_on_crop();
 
+        // View pan + wheel zoom (any tool; Hand's primary drag pans —
+        // the shell owns panning and never dispatches Hand presses).
+        self.handle_view_input(ctx);
+
         // Single-key tool selection: unmodified S R E A L M P T B N
         // switch tools (advertised in the rail tooltips). Guarded on
         // the *event's own* modifiers so Ctrl+S / Ctrl+Shift+Z chords
@@ -973,31 +1146,42 @@ impl EditorApp {
         // (the pointer-miss passthrough contract).
         let on_floating = self.floating_rects.iter().any(|r| r.contains(pos));
         // Selection-first phase drag gate: a live phase with a
-        // non-Select tool skips pointer dispatch entirely — the
+        // non-Crop tool skips pointer dispatch entirely — the
         // phase is annotation-proof by drag as well as by chip and
         // hotkey. Unreachable through input today (the rail lock and
-        // the hotkey gate above keep the tool Select); this is the
-        // backstop for state that got to a non-Select tool by other
+        // the hotkey gate above keep the tool Crop); this is the
+        // backstop for state that got to a non-Crop tool by other
         // means. `canvas_drag_active` below still tracks press /
         // release, so no stale drag state survives the gate.
         let annotation_gated = self.phase_active() && self.state.tool != Tool::Crop;
         let mut pointer_events: Vec<InputEvent> = Vec::new();
         if primary_pressed && canvas_rect.contains(pos) && !on_floating {
-            self.canvas_drag_active = true;
-            if !annotation_gated {
-                pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
-                // Double-click synthesis (text-select-edit): fed only
-                // on dispatching presses, fired in the same frame
-                // right after the press — core's ordering contract.
-                let (max_delay, max_dist) = ctx.options(|o| {
-                    (
-                        o.input_options.max_double_click_delay,
-                        o.input_options.max_click_dist,
-                    )
+            if self.state.tool == Tool::Hand {
+                // Pan-only contract: a Hand press starts a view pan —
+                // no `PointerDown` ever reaches the dispatcher, so
+                // annotations are untouchable under Hand (core no-ops
+                // them defensively for synthetic state).
+                self.pan_drag = Some(PanDrag {
+                    anchor: pos,
+                    start_pan: self.pan,
                 });
-                let now = ctx.input(|i| i.time);
-                if self.dblclick.on_press(now, pos, max_delay, max_dist) {
-                    pointer_events.push(InputEvent::DoubleClick { pos: at });
+            } else {
+                self.canvas_drag_active = true;
+                if !annotation_gated {
+                    pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
+                    // Double-click synthesis (text-select-edit): fed only
+                    // on dispatching presses, fired in the same frame
+                    // right after the press — core's ordering contract.
+                    let (max_delay, max_dist) = ctx.options(|o| {
+                        (
+                            o.input_options.max_double_click_delay,
+                            o.input_options.max_click_dist,
+                        )
+                    });
+                    let now = ctx.input(|i| i.time);
+                    if self.dblclick.on_press(now, pos, max_delay, max_dist) {
+                        pointer_events.push(InputEvent::DoubleClick { pos: at });
+                    }
                 }
             }
         } else if primary_released && self.canvas_drag_active {
@@ -1018,12 +1202,35 @@ impl EditorApp {
             let _ = self.state.dispatch_input(&event);
         }
 
-        // Select-tool hover / grab cursor: the editor window's first
-        // hover cursor (prominent-move spec). Follows the same
-        // condition as the chrome paint — a hover hit or a live move
-        // drag — so cursor and outline can never disagree. Empty
-        // canvas under Select sets nothing (egui falls back to the
-        // default arrow for the frame).
+        self.set_hover_cursors(ctx, canvas_rect, pos, at, on_floating);
+    }
+
+    /// The frame's hover / drag cursor icons: Hand's pan affordance
+    /// (grab on hover, grabbing mid-drag) and the Select-tool hover /
+    /// grab cursor (prominent-move spec — same condition as the
+    /// chrome paint, so cursor and outline can never disagree; empty
+    /// canvas under Select sets nothing and egui falls back to the
+    /// default arrow for the frame).
+    fn set_hover_cursors(
+        &self,
+        ctx: &Context,
+        canvas_rect: egui::Rect,
+        pos: egui::Pos2,
+        at: flintshot_core::Point,
+        on_floating: bool,
+    ) {
+        // Hand cursor: the pan affordance — grab on hover, grabbing
+        // mid-drag (over the canvas; the default arrow elsewhere).
+        if self.state.tool == Tool::Hand && canvas_rect.contains(pos) && !on_floating {
+            ctx.set_cursor_icon(if self.pan_drag.is_some() {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
+        } else if self.pan_drag.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+
         let hover_at = (canvas_rect.contains(pos) && !self.canvas_drag_active).then_some(at);
         if crate::chrome::move_chrome(&self.state, hover_at).is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Move);
@@ -3332,6 +3539,317 @@ mod tests {
         assert!(
             !inner_size_command_issued(&full),
             "a zoomed worker view must not chase the image-sized window"
+        );
+    }
+
+    // --- View pan + wheel zoom (select-crop-hand Task 005) ---
+
+    /// An editor app over an 800×600 image in a 600×380 canvas (the
+    /// fit scales down; zooming in overflows the viewport so pan has
+    /// room). The fixture pins `canvas_rect` and never runs the ui
+    /// pass (it would re-cache the rect from the synthetic 640×480
+    /// screen), so input frames drive `logic_impl` only and the fit
+    /// composes on demand via `settle_fit`.
+    fn pannable_app() -> (egui::Context, EditorApp) {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(800, 600),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        app.canvas_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 380.0),
+        ));
+        app.update_fit(&ctx);
+        (ctx, app)
+    }
+
+    /// One logic-only frame over the pinned canvas (the events a
+    /// real pointer would deliver), then the fit composition.
+    fn logic_frame(ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(600.0, 380.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        app.update_fit(ctx);
+    }
+
+    fn wheel_up(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 50.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            },
+        ]
+    }
+
+    fn wheel_down(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -50.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+            },
+        ]
+    }
+
+    /// Wheel notches step the zoom a quantized 0.25 each and keep
+    /// the image point under the cursor fixed wherever pan is free
+    /// (the pan absorbs the difference); at a zoom where the image
+    /// overflows the viewport on both axes, the composed view maps
+    /// the cursor to the same image pixel before and after.
+    #[test]
+    fn wheel_zoom_steps_and_keeps_cursor_anchored() {
+        let (ctx, mut app) = pannable_app();
+        let canvas = app.canvas_rect.expect("fixture");
+        let cursor = canvas.min + egui::vec2(300.0, 190.0);
+        logic_frame(&ctx, &mut app, wheel_up(cursor));
+        assert!(
+            (app.view_zoom - 1.25).abs() < 1e-6,
+            "one wheel notch steps to 1.25×, got {}",
+            app.view_zoom
+        );
+        // Settle, then snapshot the anchor. From here the image
+        // overflows the viewport enough that the second notch (1.5×)
+        // has pan free on both axes — the regime where the anchor
+        // contract is exact (a clamped axis recenters instead).
+        logic_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(cursor)]);
+        let anchor = app.canvas.view_over(canvas).logical_to_image(cursor);
+        logic_frame(&ctx, &mut app, wheel_up(cursor));
+        assert!(
+            (app.view_zoom - 1.5).abs() < 1e-6,
+            "the second notch steps to 1.5×, got {}",
+            app.view_zoom
+        );
+        // Settle one frame so the fit pass composes the new pan.
+        logic_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(cursor)]);
+        let mapped = app.canvas.view_over(canvas).logical_to_image(cursor);
+        assert!(
+            ((mapped.x - anchor.x).abs() < 1e-2) && ((mapped.y - anchor.y).abs() < 1e-2),
+            "cursor anchor drifted: before {anchor:?} after {mapped:?}"
+        );
+    }
+
+    /// Zooming back to the 1.0 fit zoom resets the pan to zero —
+    /// the image fits again and the worker resize policy's trigger
+    /// (`at_fit_zoom`) stays exact.
+    #[test]
+    fn zoom_back_to_fit_resets_pan() {
+        let (ctx, mut app) = pannable_app();
+        let canvas = app.canvas_rect.expect("fixture");
+        let cursor = canvas.min + egui::vec2(300.0, 190.0);
+        logic_frame(&ctx, &mut app, wheel_up(cursor));
+        logic_frame(&ctx, &mut app, vec![]);
+        assert!(app.view_zoom > 1.0, "fixture: zoomed in");
+        // Force a non-zero pan and confirm the clamp allows it here.
+        assert!(
+            app.pan != egui::Vec2::ZERO || app.canvas.content_offset() != egui::Vec2::ZERO,
+            "fixture: the zoomed view moved the offset"
+        );
+        logic_frame(&ctx, &mut app, wheel_down(cursor));
+        assert!((app.view_zoom - 1.0).abs() < 1e-6, "back at the fit zoom");
+        assert_eq!(
+            app.pan,
+            egui::Vec2::ZERO,
+            "returning to the fit zoom resets pan"
+        );
+        assert!(app.at_fit_zoom(), "at_fit_zoom is exact again");
+    }
+
+    /// A middle-button drag pans from any tool — here Rect, an
+    /// annotation tool — and never dispatches a pointer event (no
+    /// draft starts).
+    #[test]
+    fn middle_drag_pans_from_any_tool() {
+        let (ctx, mut app) = pannable_app();
+        app.state.set_tool(Tool::Rect);
+        let canvas = app.canvas_rect.expect("fixture");
+        let from = canvas.min + egui::vec2(300.0, 190.0);
+        let to = canvas.min + egui::vec2(250.0, 170.0);
+        // Zoom in twice so the image overflows the viewport on both
+        // axes (pan has room).
+        logic_frame(&ctx, &mut app, wheel_up(from));
+        logic_frame(&ctx, &mut app, wheel_up(from));
+        logic_frame(&ctx, &mut app, vec![]);
+        let start_pan = app.pan;
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(from),
+                egui::Event::PointerButton {
+                    pos: from,
+                    button: egui::PointerButton::Middle,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(to),
+                egui::Event::PointerButton {
+                    pos: to,
+                    button: egui::PointerButton::Middle,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        // The delta applies and the clamp bounds it (both pinned by
+        // the pure-fn tests; here the wiring is the contract).
+        let scale = app.canvas.scale();
+        let img_logical = egui::vec2(800.0 * scale, 600.0 * scale);
+        let expected = crate::canvas::clamp_pan(
+            start_pan + egui::vec2(-50.0, -20.0),
+            img_logical,
+            canvas.size(),
+        );
+        assert!(
+            ((app.pan.x - expected.x).abs() < 1e-3) && ((app.pan.y - expected.y).abs() < 1e-3),
+            "middle drag applies start_pan + delta (clamped), got {:?} want {expected:?}",
+            app.pan
+        );
+        assert!(app.pan != start_pan, "the drag moved the view");
+        assert!(
+            app.state.pending.is_none() && app.state.anns.is_empty(),
+            "the middle drag never reaches the dispatcher"
+        );
+        assert!(app.pan_drag.is_none(), "release ends the pan drag");
+    }
+
+    /// A Hand primary drag pans — the press never dispatches (the
+    /// pan-only contract; annotations are untouchable under Hand) —
+    /// and a committed annotation stays exactly where it was.
+    #[test]
+    fn hand_primary_drag_pans_and_never_touches_annotations() {
+        let (ctx, mut app) = pannable_app();
+        app.state.set_tool(Tool::Hand);
+        app.state.anns.push(Annotation::Rect {
+            rect: flintshot_core::Rect::from_xywh(10.0, 10.0, 40.0, 30.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+            fill: None,
+        });
+        let canvas = app.canvas_rect.expect("fixture");
+        let from = canvas.min + egui::vec2(300.0, 190.0);
+        let to = canvas.min + egui::vec2(260.0, 150.0);
+        logic_frame(&ctx, &mut app, wheel_up(from));
+        logic_frame(&ctx, &mut app, wheel_up(from));
+        logic_frame(&ctx, &mut app, vec![]);
+        let start_pan = app.pan;
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(from),
+                egui::Event::PointerButton {
+                    pos: from,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(
+            app.pan_drag.is_some(),
+            "a Hand press starts a pan, not a dispatcher drag"
+        );
+        assert!(
+            app.state.selected.is_empty() && app.state.moving.is_none(),
+            "the Hand press never routes selection state"
+        );
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(to),
+                egui::Event::PointerButton {
+                    pos: to,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let scale = app.canvas.scale();
+        let img_logical = egui::vec2(800.0 * scale, 600.0 * scale);
+        let expected = crate::canvas::clamp_pan(
+            start_pan + egui::vec2(-40.0, -40.0),
+            img_logical,
+            canvas.size(),
+        );
+        assert!(
+            ((app.pan.x - expected.x).abs() < 1e-3) && ((app.pan.y - expected.y).abs() < 1e-3),
+            "the Hand drag applies start_pan + delta (clamped), got {:?} want {expected:?}",
+            app.pan
+        );
+        assert!(app.pan != start_pan, "the drag moved the view");
+        match &app.state.anns[0] {
+            Annotation::Rect { rect, .. } => {
+                assert_eq!(rect.min, flintshot_core::Point::new(10.0, 10.0));
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+        assert!(app.state.undo.is_empty(), "panning records no history");
+        assert!(app.pan_drag.is_none(), "release ends the pan drag");
+    }
+
+    /// The Hand cursor is the pan affordance: `Grab` on hover,
+    /// `Grabbing` mid-drag.
+    #[test]
+    fn hand_cursor_is_grab_then_grabbing() {
+        let (ctx, mut app) = pannable_app();
+        app.state.set_tool(Tool::Hand);
+        let hover = cursor_after_hover(&ctx, &mut app, (300.0, 190.0));
+        assert_eq!(hover, egui::CursorIcon::Grab, "hover shows the open hand");
+        let canvas = app.canvas_rect.expect("fixture");
+        let from = canvas.min + egui::vec2(300.0, 190.0);
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(from),
+                egui::Event::PointerButton {
+                    pos: from,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let mut icon = egui::CursorIcon::Default;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(600.0, 380.0),
+            )),
+            events: vec![egui::Event::PointerMoved(from)],
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            icon = ui.ctx().output(|o| o.cursor_icon);
+        });
+        assert_eq!(
+            icon,
+            egui::CursorIcon::Grabbing,
+            "mid-drag shows the closed hand"
         );
     }
 
