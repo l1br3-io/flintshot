@@ -764,6 +764,11 @@ pub(crate) struct OverlayApp {
     /// painted by `ui_impl` over the shared render output. `None`
     /// whenever no affordance applies.
     move_chrome: Option<(Rect, crate::chrome::MoveChromeKind)>,
+    /// This frame's Text-tool hover affordance (text-select-edit):
+    /// the topmost committed Text under the pointer, dashed-outline
+    /// bbox in canvas-physical px. Computed beside `move_chrome`,
+    /// painted with its `Hover` kind.
+    text_hover: Option<Rect>,
     /// Press-time double-click detector (text-select-edit): fed
     /// exactly when a `PointerDown` dispatches (the
     /// `annotation_press_allowed` fall-through arm), fires the
@@ -825,6 +830,7 @@ impl OverlayApp {
             magnifier: Magnifier::new(),
             toolbar_rect: None,
             move_chrome: None,
+            text_hover: None,
             dblclick: crate::dblclick::DoubleClickTracker::default(),
             toolbar_size: egui::Vec2::ZERO,
             clipboard: None,
@@ -958,6 +964,7 @@ impl OverlayApp {
             // stand down the hover affordance — the grab variant
             // clears the same way on the drag's release frame.
             self.move_chrome = None;
+            self.text_hover = None;
             return;
         };
         let at = to_canvas_physical(pos, panel, ppp);
@@ -1084,6 +1091,16 @@ impl OverlayApp {
             && annotation_press_allowed(Tool::Move, self.state.selection, at))
         .then_some(at);
         self.move_chrome = crate::chrome::move_chrome(&self.state, hover_at);
+
+        // Text-tool hover affordance (text-select-edit), gated exactly
+        // like a Text-tool press that would select: the query itself
+        // checks the tool and Text-only hits.
+        let text_hover_at = (!self.drag_active
+            && self.gesture.is_none()
+            && !over_toolbar
+            && annotation_press_allowed(Tool::Text, self.state.selection, at))
+        .then_some(at);
+        self.text_hover = crate::chrome::text_hover_chrome(&self.state, text_hover_at);
     }
 
     /// Cursor icon for the current hover position when no gesture is
@@ -1099,6 +1116,11 @@ impl OverlayApp {
                 .hit_test(at)
                 .is_some()
                 .then_some(egui::CursorIcon::Move);
+        }
+        if self.state.tool == Tool::Text {
+            // Text-tool hover affordance (text-select-edit): the
+            // I-beam announces click-to-select / double-click-to-edit.
+            return self.state.text_hit_test(at).map(|_| egui::CursorIcon::Text);
         }
         if self.state.tool != Tool::Select {
             return None;
@@ -1472,6 +1494,13 @@ impl OverlayApp {
         if let Some((r, kind)) = self.move_chrome {
             let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
             crate::chrome::paint_move_chrome(&painter, rect, kind);
+        }
+
+        // Text-tool hover affordance (text-select-edit): dashed
+        // outline on the move chrome's rhythm, same paint helper.
+        if let Some(r) = self.text_hover {
+            let rect = egui::Rect::from_two_pos(to_logical(r.min), to_logical(r.max));
+            crate::chrome::paint_move_chrome(&painter, rect, crate::chrome::MoveChromeKind::Hover);
         }
 
         // Persistent-selection outline (annotation-delete spec): the
@@ -1860,7 +1889,12 @@ mod tests {
     /// screen size, so on the stock 64×64 harness it blankets the
     /// whole panel and every press reads as a toolbar click. The
     /// wide screen gives it somewhere harmless to live.
-    fn wide_frame(ctx: &egui::Context, app: &mut OverlayApp, t: f64, events: Vec<egui::Event>) {
+    fn wide_frame(
+        ctx: &egui::Context,
+        app: &mut OverlayApp,
+        t: f64,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -1870,10 +1904,10 @@ mod tests {
             events,
             ..egui::RawInput::default()
         };
-        let _ = ctx.run_ui(raw, |ui| {
+        ctx.run_ui(raw, |ui| {
             app.logic_impl(ui.ctx());
             app.ui_impl(ui);
-        });
+        })
     }
 
     /// Overlay state on the Text tool with one committed text "hello"
@@ -1929,7 +1963,7 @@ mod tests {
     fn overlay_rapid_double_press_opens_reedit() {
         let ctx = prime_fonts();
         let mut app = text_overlay_app(&ctx);
-        wide_frame(&ctx, &mut app, 0.0, vec![]);
+        let _ = wide_frame(&ctx, &mut app, 0.0, vec![]);
         let press = egui::pos2(20.0, 45.0);
         wide_frame(
             &ctx,
@@ -1938,7 +1972,7 @@ mod tests {
             vec![egui::Event::PointerMoved(press), primary_at(press, true)],
         );
         assert_eq!(app.state.selected_index, Some(0), "first press selects");
-        wide_frame(&ctx, &mut app, 1.05, vec![primary_at(press, false)]);
+        let _ = wide_frame(&ctx, &mut app, 1.05, vec![primary_at(press, false)]);
         wide_frame(
             &ctx,
             &mut app,
@@ -1957,7 +1991,7 @@ mod tests {
     fn overlay_slow_double_press_stays_selection_only() {
         let ctx = prime_fonts();
         let mut app = text_overlay_app(&ctx);
-        wide_frame(&ctx, &mut app, 0.0, vec![]);
+        let _ = wide_frame(&ctx, &mut app, 0.0, vec![]);
         let press = egui::pos2(20.0, 45.0);
         wide_frame(
             &ctx,
@@ -1965,7 +1999,7 @@ mod tests {
             1.0,
             vec![egui::Event::PointerMoved(press), primary_at(press, true)],
         );
-        wide_frame(&ctx, &mut app, 1.05, vec![primary_at(press, false)]);
+        let _ = wide_frame(&ctx, &mut app, 1.05, vec![primary_at(press, false)]);
         wide_frame(
             &ctx,
             &mut app,
@@ -1987,7 +2021,7 @@ mod tests {
         let mut app = text_overlay_app(&ctx);
         // Shrink the region so the text hit point falls outside it.
         app.state.selection = Some(Rect::from_xywh(4.0, 34.0, 10.0, 6.0));
-        wide_frame(&ctx, &mut app, 0.0, vec![]);
+        let _ = wide_frame(&ctx, &mut app, 0.0, vec![]);
         let press = egui::pos2(20.0, 45.0);
         wide_frame(
             &ctx,
@@ -1995,7 +2029,7 @@ mod tests {
             1.0,
             vec![egui::Event::PointerMoved(press), primary_at(press, true)],
         );
-        wide_frame(&ctx, &mut app, 1.05, vec![primary_at(press, false)]);
+        let _ = wide_frame(&ctx, &mut app, 1.05, vec![primary_at(press, false)]);
         wide_frame(
             &ctx,
             &mut app,
@@ -2011,6 +2045,42 @@ mod tests {
             "no session from swallowed presses"
         );
         assert!(app.state.pending.is_none());
+    }
+
+    /// Hovering a committed text under the Text tool shows the text
+    /// cursor (the dashed outline paints through the same query).
+    #[test]
+    fn overlay_text_hover_sets_text_cursor() {
+        let ctx = prime_fonts();
+        let mut app = text_overlay_app(&ctx);
+        let _ = wide_frame(&ctx, &mut app, 0.0, vec![]);
+        let hover_raw = |t: f64, at: egui::Pos2| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(800.0, 600.0),
+            )),
+            time: Some(t),
+            events: vec![egui::Event::PointerMoved(at)],
+            ..egui::RawInput::default()
+        };
+        let out = ctx.run_ui(hover_raw(1.0, egui::pos2(20.0, 45.0)), |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+        assert_eq!(
+            out.platform_output.cursor_icon,
+            egui::CursorIcon::Text,
+            "hover on the text shows the text cursor"
+        );
+        let out = ctx.run_ui(hover_raw(1.1, egui::pos2(500.0, 500.0)), |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+        assert_eq!(
+            out.platform_output.cursor_icon,
+            egui::CursorIcon::Default,
+            "hover on empty canvas shows no affordance"
+        );
     }
 
     #[test]

@@ -861,21 +861,20 @@ impl EditorState {
             .find_map(|(i, ann)| ann.contains(point).then_some(i))
     }
 
-    /// Index of the topmost **`Annotation::Text`** containing `point`.
+    /// Index of the topmost annotation containing `point`, when that
+    /// annotation is a `Text`.
     ///
-    /// The Text tool's select-before-draft gate: non-Text annotations
-    /// are transparent to it, so a press on a shape is a miss and the
-    /// fresh-caret behaviour is byte-for-byte what it was before
-    /// selection existed (spec assumption: only Text is selectable
-    /// under `Tool::Text`).
+    /// The Text tool's select-before-draft gate (shared by the
+    /// dispatcher and the shells' hover affordances): the hit is
+    /// resolved against *every* annotation kind first — a non-Text
+    /// annotation on top of a Text is a miss, exactly like a click on
+    /// empty canvas (the fresh-caret behaviour stays byte-for-byte
+    /// what it was before selection existed; spec assumption: only
+    /// Text is selectable under `Tool::Text`).
     #[must_use]
-    fn text_hit_test(&self, point: Point) -> Option<usize> {
-        self.anns
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, ann)| matches!(ann, Annotation::Text { .. }) && ann.contains(point))
-            .map(|(i, _)| i)
+    pub fn text_hit_test(&self, point: Point) -> Option<usize> {
+        self.hit_test(point)
+            .filter(|&i| matches!(self.anns.get(i), Some(Annotation::Text { .. })))
     }
 
     /// Text-tool `PointerDown` routing: a press on a committed Text
