@@ -1446,27 +1446,47 @@ impl EditorState {
     /// Arrow / Home / End motion while editing text, as a table:
     /// Shift chords extend the selection (anchor seeded on the first
     /// press via [`extend_by`](Self::extend_by)), modifier-free
-    /// presses move and collapse the selection. Other modifier combos
-    /// (word-wise chords, a later task) and non-motion keys no-op.
+    /// presses move and collapse the selection, and the horizontal
+    /// arrows additionally take Ctrl word-wise chords (Ctrl+arrow
+    /// moves word-by-word, Ctrl+Shift+arrow extends word-wise). Other
+    /// modifier combos and non-motion keys no-op.
     fn dispatch_text_motion(&mut self, key: crate::geom::Key, modifiers: crate::input::Modifiers) {
         use crate::geom::Key;
-        let mv: Option<fn(&mut Self)> = match key {
-            Key::ArrowLeft => Some(Self::cursor_left),
-            Key::ArrowRight => Some(Self::cursor_right),
-            Key::ArrowUp => Some(Self::cursor_up),
-            Key::ArrowDown => Some(Self::cursor_down),
-            Key::Home => Some(Self::cursor_home),
-            Key::End => Some(Self::cursor_end),
+        type Motion = fn(&mut EditorState);
+        let motions: Option<(Motion, Option<Motion>)> = match key {
+            Key::ArrowLeft => Some((Self::cursor_left, Some(Self::cursor_word_left))),
+            Key::ArrowRight => Some((Self::cursor_right, Some(Self::cursor_word_right))),
+            Key::ArrowUp => Some((Self::cursor_up, None)),
+            Key::ArrowDown => Some((Self::cursor_down, None)),
+            Key::Home => Some((Self::cursor_home, None)),
+            Key::End => Some((Self::cursor_end, None)),
             _ => None,
         };
-        let Some(mv) = mv else {
+        let Some((plain, word)) = motions else {
             return;
         };
-        if modifiers.shift {
-            self.extend_by(mv);
-        } else if modifiers == crate::input::Modifiers::default() {
+        // Chord resolution, most-specific first: Ctrl+Shift extends
+        // word-wise, Ctrl moves word-wise and collapses, Shift extends
+        // char-wise, plain moves char-wise and collapses. Anything
+        // else (Alt / Super combos) no-ops.
+        let extend: Option<Motion> = if modifiers.ctrl_shift() {
+            word
+        } else if modifiers.ctrl_only() {
+            let mv = word.unwrap_or(plain);
             mv(self);
             self.text_anchor = None;
+            return;
+        } else if modifiers.shift {
+            Some(plain)
+        } else if modifiers == crate::input::Modifiers::default() {
+            plain(self);
+            self.text_anchor = None;
+            return;
+        } else {
+            None
+        };
+        if let Some(mv) = extend {
+            self.extend_by(mv);
         }
     }
 
@@ -1548,6 +1568,21 @@ impl EditorState {
     fn cursor_down(&mut self) {
         if let Some(Annotation::Text { text, .. }) = &self.pending {
             self.text_cursor = cursor_down(text, self.text_cursor);
+        }
+    }
+
+    /// Move the cursor to the start of the current/previous word
+    /// (Ctrl+Left). Pure mover, like its char-wise siblings.
+    fn cursor_word_left(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            self.text_cursor = word_left(text, self.text_cursor);
+        }
+    }
+
+    /// Move the cursor to the start of the next word (Ctrl+Right).
+    fn cursor_word_right(&mut self) {
+        if let Some(Annotation::Text { text, .. }) = &self.pending {
+            self.text_cursor = word_right(text, self.text_cursor);
         }
     }
 
@@ -2297,6 +2332,104 @@ fn cursor_line_end(text: &str, char_idx: usize) -> usize {
         }
     }
     text.chars().count()
+}
+
+// --- Word-motion helpers (char-index based) ---
+//
+// The classic two-class word model: every non-whitespace char is
+// either alphanumeric (word class) or not (punctuation class), and a
+// "word" is a maximal run of one class. This is the boundary rule
+// every desktop editor uses — Ctrl+Left stops at `foo|,` because the
+// comma is a one-char word of the other class — and it keeps
+// punctuation-adjacent double-clicks (Task 007) intuitive.
+
+/// Word class of `c`: `true` = alphanumeric, `false` = punctuation.
+/// Whitespace is neither — callers guard it out before classing.
+fn word_class(c: char) -> bool {
+    c.is_alphanumeric()
+}
+
+/// Char index of the start of the word at / before `char_idx`
+/// (Ctrl+Left): skip any whitespace leftward, then the maximal
+/// same-class run. Clamps at 0.
+fn word_left(text: &str, char_idx: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = char_idx.min(chars.len());
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    if i > 0 {
+        let class = word_class(chars[i - 1]);
+        while i > 0 && !chars[i - 1].is_whitespace() && word_class(chars[i - 1]) == class {
+            i -= 1;
+        }
+    }
+    i
+}
+
+/// Char index of the start of the next word at / after `char_idx`
+/// (Ctrl+Right): skip the same-class run under the cursor (if any),
+/// then any trailing whitespace — i.e. land on the next word's start
+/// or the text end. Mirrors [`word_left`]'s clamps.
+fn word_right(text: &str, char_idx: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = char_idx.min(chars.len());
+    if i < chars.len() && !chars[i].is_whitespace() {
+        let class = word_class(chars[i]);
+        while i < chars.len() && !chars[i].is_whitespace() && word_class(chars[i]) == class {
+            i += 1;
+        }
+    }
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Maximal word span `(start, end)` (char indices, `end` exclusive)
+/// containing or adjacent to `idx` — the double-click payload. A
+/// boundary directly after a word resolves to that word; a boundary
+/// in a whitespace run resolves to the nearest word (backward
+/// preference). Empty text yields `(0, 0)`.
+#[allow(dead_code, reason = "consumed by Task 007's select_word arm")]
+fn word_bounds_around(text: &str, idx: usize) -> (usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    let idx = idx.min(chars.len());
+    let at = |i: usize| chars.get(i).copied();
+    let anchor = if at(idx).is_some_and(|c| !c.is_whitespace()) {
+        idx
+    } else if idx > 0 && at(idx - 1).is_some_and(|c| !c.is_whitespace()) {
+        idx - 1
+    } else {
+        // Inside a whitespace run: nearest non-whitespace, backward
+        // preferred (a click in the gap after a word reads as it).
+        let mut j = idx;
+        while j > 0 && at(j - 1).is_some_and(char::is_whitespace) {
+            j -= 1;
+        }
+        if j > 0 {
+            j - 1
+        } else {
+            let mut k = idx;
+            while at(k).is_some_and(char::is_whitespace) {
+                k += 1;
+            }
+            return (k, k);
+        }
+    };
+    let class = word_class(chars[anchor]);
+    let mut a = anchor;
+    while a > 0 && !chars[a - 1].is_whitespace() && word_class(chars[a - 1]) == class {
+        a -= 1;
+    }
+    let mut b = anchor + 1;
+    while b < chars.len() && !chars[b].is_whitespace() && word_class(chars[b]) == class {
+        b += 1;
+    }
+    (a, b)
 }
 
 /// Move `char_idx` up one line, preserving the column. Clamps to 0
@@ -4244,6 +4377,27 @@ mod tests {
         }
     }
 
+    fn ctrl_key(k: Key) -> InputEvent {
+        InputEvent::Key {
+            key: k,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        }
+    }
+
+    fn ctrl_shift_key(k: Key) -> InputEvent {
+        InputEvent::Key {
+            key: k,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+        }
+    }
+
     fn pending_text(s: &EditorState) -> &str {
         match &s.pending {
             Some(Annotation::Text { text, .. }) => text,
@@ -4569,6 +4723,90 @@ mod tests {
         });
         assert!(s.pending.is_none(), "Ctrl+Enter commits like plain Enter");
         assert_eq!(s.anns.len(), 1);
+    }
+
+    // --- Word motion (text-selection-highlight Task 005) ---
+
+    #[test]
+    fn word_left_right_boundary_table() {
+        // "hello world": h0 e1 l2 l3 o4 ' '5 w6 o7 r8 l9 d10.
+        assert_eq!(word_left("hello world", 8), 6);
+        assert_eq!(word_right("hello world", 8), 11);
+        // Cursor at the space: left = start of "hello", right = start
+        // of "world" (whitespace consumed, the word not).
+        assert_eq!(word_left("hello world", 5), 0);
+        assert_eq!(word_right("hello world", 5), 6);
+        // Word start falls back to the previous word.
+        assert_eq!(word_left("hello world", 6), 0);
+        // Punctuation is its own word class: "foo, bar" f0 o1 o2 ,3.
+        assert_eq!(word_left("foo, bar", 4), 3, "comma is a one-char word");
+        assert_eq!(word_right("foo, bar", 2), 3, "stops at the class boundary");
+        assert_eq!(word_right("foo bar", 2), 4, "run then trailing space");
+        assert_eq!(word_right("foo, bar", 3), 5, "punct run then space");
+        assert_eq!(word_left("foo, bar", 7), 5);
+        // Clamps.
+        assert_eq!(word_left("hello", 0), 0);
+        assert_eq!(word_right("hello", 5), 5);
+        assert_eq!(word_left("", 0), 0);
+        assert_eq!(word_right("", 0), 0);
+        // Multi-byte: an emoji is one char, never split.
+        assert_eq!(word_right("🙂 b", 0), 2);
+        assert_eq!(word_left("🙂 b", 3), 2);
+    }
+
+    #[test]
+    fn word_bounds_around_table() {
+        assert_eq!(word_bounds_around("hello world", 7), (6, 11));
+        // At a space: the word ending at the boundary wins.
+        assert_eq!(word_bounds_around("hello world", 5), (0, 5));
+        assert_eq!(word_bounds_around("hello world", 6), (6, 11));
+        assert_eq!(word_bounds_around("", 0), (0, 0));
+        // Punctuation forms its own word span.
+        assert_eq!(word_bounds_around("foo, bar", 3), (3, 4));
+    }
+
+    #[test]
+    fn ctrl_shift_arrows_extend_word_wise() {
+        let mut s = text_state();
+        type_draft(&mut s, "foo bar baz");
+        s.dispatch_input(&key(Key::Home));
+        assert_eq!(s.text_cursor, 0, "fixture: cursor at start");
+        // Ctrl+Shift+Right x2: word+space, then word+space — cursor
+        // lands at the start of "baz".
+        s.dispatch_input(&ctrl_shift_key(Key::ArrowRight));
+        assert_eq!(s.text_cursor, 4, "first press: word + space");
+        assert_eq!(s.text_anchor, Some(0), "anchor seeded on first press");
+        s.dispatch_input(&ctrl_shift_key(Key::ArrowRight));
+        assert_eq!(s.text_cursor, 8, "second press: start of the next word");
+        assert_eq!(s.text_anchor, Some(0), "anchor never reseeds");
+
+        // Backwards: from the end, Ctrl+Shift+Left x2 walks to word
+        // starts ("baz" -> "bar").
+        let mut s = text_state();
+        type_draft(&mut s, "foo bar baz");
+        s.dispatch_input(&ctrl_shift_key(Key::ArrowLeft));
+        assert_eq!(s.text_cursor, 8, "start of 'baz'");
+        s.dispatch_input(&ctrl_shift_key(Key::ArrowLeft));
+        assert_eq!(s.text_cursor, 4, "start of 'bar'");
+        assert_eq!(s.text_anchor, Some(11));
+        assert_eq!(s.selection_range(), Some(4..11));
+    }
+
+    #[test]
+    fn ctrl_arrows_move_word_wise_and_collapse() {
+        let mut s = text_state();
+        type_draft(&mut s, "hello world");
+        s.dispatch_input(&key(Key::ArrowLeft));
+        s.dispatch_input(&key(Key::ArrowLeft));
+        s.dispatch_input(&key(Key::ArrowLeft));
+        assert_eq!(s.text_cursor, 8, "fixture: mid 'world'");
+        s.dispatch_input(&ctrl('r')); // any ctrl_only key: no-op
+        s.dispatch_input(&ctrl_key(Key::ArrowRight));
+        assert_eq!(s.text_cursor, 11, "Ctrl+Right jumps to text end");
+        s.text_anchor = Some(0);
+        s.dispatch_input(&ctrl_key(Key::ArrowLeft));
+        assert_eq!(s.text_cursor, 6, "Ctrl+Left to word start");
+        assert_eq!(s.text_anchor, None, "plain word move collapses");
     }
 
     // --- Gesture-bracketed restyle (text-select-edit Task 005) ---
