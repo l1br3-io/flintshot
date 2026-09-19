@@ -47,12 +47,12 @@ proven `open_settings_from_worker` seam end to end. Spec:
 
 ### Checkpoint: Code complete
 
-- [ ] `cargo fmt --all --check` clean
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean
-- [ ] `cargo test --workspace --all-targets` green
-- [ ] `cargo test --doc -p flintshot-core -p flintshot-editor-egui` green
-- [ ] Manual matrix (if a session is available): tray capture → Home link → app window on Home, worker editor closed; running-app case focuses it; no-daemon case spawns
-- [ ] Review with human before docs
+- [x] `cargo fmt --all --check` clean
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean
+- [x] `cargo test --workspace --all-targets` green
+- [x] `cargo test --doc -p flintshot-core -p flintshot-editor-egui` green
+- [ ] Manual matrix (if a session is available): tray capture → Home link → app window on Home, worker editor closed; running-app case focuses it; no-daemon case spawns — deferred: no interactive graphical session in this run; handler contract pinned by Task 001 unit tests
+- [ ] Review with human before docs — docs landed with the /build auto run; final review happens at the PR
 
 ### Phase 3: Record
 
@@ -60,8 +60,8 @@ proven `open_settings_from_worker` seam end to end. Spec:
 
 ### Checkpoint: Complete
 
-- [ ] All spec acceptance criteria met
-- [ ] Ready for review / PR
+- [ ] All spec acceptance criteria met — 4–6 regression-pinned; 1–3 await the manual matrix (graphical session)
+- [x] Ready for review / PR
 
 ## Risks and Mitigations
 
