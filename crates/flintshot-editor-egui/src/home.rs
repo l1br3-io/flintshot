@@ -24,7 +24,7 @@
 //! flowing even when idle.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::App;
@@ -113,6 +113,25 @@ pub trait HomeBridge {
     fn recent_images(&mut self) -> Vec<PathBuf> {
         Vec::new()
     }
+
+    // -- Recents card actions (recent-captures-v2; defaults keep
+    //    test doubles compiling; the app crate's real bridge
+    //    overrides these) --
+
+    /// Copy a recent capture's file to the clipboard (the card's
+    /// **Copy** hover chip). The implementation honors the Wayland
+    /// fresh-handle rule and keeps the X11 selection alive for the
+    /// window's lifetime. Default: no-op.
+    fn copy_recent(&mut self, _path: &Path) {}
+
+    /// Reveal a recent capture's parent folder in the platform file
+    /// manager (the **Reveal** chip). Default: no-op.
+    fn reveal_recent(&mut self, _path: &Path) {}
+
+    /// Delete a recent capture permanently: remove the file from
+    /// disk and drop it from the recents index (the **Delete**
+    /// chip, after its on-chip "Sure?" confirm). Default: no-op.
+    fn delete_recent(&mut self, _path: &Path) {}
 
     // -- Settings-route plumbing (defaults keep test doubles
     //    compiling; the app crate's real bridge overrides these) --
