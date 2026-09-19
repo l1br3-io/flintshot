@@ -46,7 +46,7 @@ undo/redo chips and key chords are untouched. Spec:
 
 ### Phase 2: Shell tabs
 - [x] Task 3: `PROPERTIES | HISTORY` tab header → `tasks/003-shell-tab-header.md`
-- [ ] Task 4: History timeline + click-to-jump → `tasks/004-shell-timeline.md`
+- [x] Task 4: History timeline + click-to-jump → `tasks/004-shell-timeline.md`
 
 ### Checkpoint: Shell
 - [ ] Manual: `cargo run -- app` → annotate, crop, recolor, then
