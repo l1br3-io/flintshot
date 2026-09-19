@@ -101,12 +101,57 @@ pub(crate) fn char_at_hit(
     Some(line_start + idx)
 }
 
+/// [`char_at_hit`], but a miss resolves to the nearest block edge
+/// instead of `None` — the drag-select rule: dragging off the block
+/// extends the selection to its boundary (a line's start / end
+/// horizontally, the text's ends vertically), never cancels it.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "line index derives from a non-negative y delta over a positive line height; line counts fit f32"
+)]
+pub(crate) fn char_at_hit_or_edge(
+    text: &str,
+    style: &TextStyle,
+    text_pos: Point,
+    hit: Point,
+    line_height: f32,
+    measure: impl Fn(&str) -> f32,
+) -> usize {
+    if let Some(idx) = char_at_hit(text, style, text_pos, hit, line_height, &measure) {
+        return idx;
+    }
+    if line_height <= 0.0 {
+        return 0;
+    }
+    if hit.y < text_pos.y {
+        return 0;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let block_h = lines.len() as f32 * line_height;
+    if hit.y - text_pos.y >= block_h {
+        return text.chars().count();
+    }
+    let line = ((hit.y - text_pos.y) / line_height) as usize;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "line counts fit usize"
+    )]
+    let line_start: usize = lines[..line].iter().map(|l| l.chars().count() + 1).sum();
+    if hit.x < text_pos.x {
+        line_start
+    } else {
+        line_start + lines[line].chars().count()
+    }
+}
+
 /// Build the real measurement closure the pumps pass to
 /// [`char_at_hit`] — the drift guard: the same `FAMILY_ANNOTATION`
 /// font and `view.len` / `image_len` logical↔image conversion as
 /// `EguiCanvas::measure_text`, so hit resolution always agrees with
 /// the drawn glyphs (zoom and alignment included).
-#[allow(dead_code, reason = "consumed by the pump wiring (Tasks 009/010)")]
 pub(crate) fn egui_measurer(
     ctx: &egui::Context,
     view: crate::canvas::CanvasView,
