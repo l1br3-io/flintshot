@@ -28,31 +28,48 @@ pub(crate) enum MoveChromeKind {
     Grab,
 }
 
-/// This frame's move chrome, if any: the annotation's bounding box
-/// in canvas-physical px plus its kind.
+/// This frame's move chrome: bounding boxes in canvas-physical px
+/// plus the kind.
 ///
-/// Priority: a live [`EditorState::moving`] drag wins (its grabbed
-/// annotation renders the `Grab` outline regardless of where the
-/// pointer is now). Otherwise, `hover_at` — a position the shell has
-/// already gated — hit-tests against `anns`; a hit yields the
-/// `Hover` outline. `None` when the tool is not Move (and no drag is
-/// live), the pointer misses, or the hit annotation has no extent
+/// Priority: a live [`EditorState::moving`] drag wins — a multi-drag
+/// translates the whole selection set, so **every member** renders
+/// the `Grab` outline regardless of where the pointer is now.
+/// Otherwise, `hover_at` — a position the shell has already gated —
+/// hit-tests against `anns`; a hit yields a single-rect `Hover`
+/// outline. `None` when the tool is not Move (and no drag is live),
+/// the pointer misses, or the hit annotation has no extent
 /// (degenerate bbox).
 #[must_use]
 pub(crate) fn move_chrome(
     state: &EditorState,
     hover_at: Option<Point>,
-) -> Option<(Rect, MoveChromeKind)> {
+) -> Option<(Vec<Rect>, MoveChromeKind)> {
     if let Some(drag) = state.moving {
-        let ann = state.anns.get(drag.index)?;
-        return ann.bounding_box().map(|r| (r, MoveChromeKind::Grab));
+        // The set is what moves; outline every member. (`moving`
+        // without a set is unreachable through the dispatcher — the
+        // routing writes the set before the grab — but fall back to
+        // the pressed annotation so any synthetic state still
+        // outlines something.)
+        let mut indices = state.selected.clone();
+        if indices.is_empty() {
+            indices.push(drag.index);
+        }
+        let rects: Vec<Rect> = indices
+            .iter()
+            .filter_map(|&index| state.anns.get(index))
+            .filter_map(Annotation::bounding_box)
+            .collect();
+        if rects.is_empty() {
+            return None;
+        }
+        return Some((rects, MoveChromeKind::Grab));
     }
     if state.tool != Tool::Move {
         return None;
     }
     let at = hover_at?;
     let ann = state.anns.get(state.hit_test(at)?)?;
-    ann.bounding_box().map(|r| (r, MoveChromeKind::Hover))
+    ann.bounding_box().map(|r| (vec![r], MoveChromeKind::Hover))
 }
 
 /// Paint a chrome rect (screen-logical, shell-transformed) in its
@@ -182,11 +199,12 @@ mod tests {
     #[test]
     fn hover_chrome_tracks_hit_annotation_bbox() {
         let s = state_with(Tool::Move, &[rect_ann(10.0, 10.0, 50.0, 40.0)]);
-        let (rect, kind) = move_chrome(&s, Some(Point::new(30.0, 25.0)))
+        let (rects, kind) = move_chrome(&s, Some(Point::new(30.0, 25.0)))
             .expect("hover inside the rect must yield chrome");
         assert_eq!(kind, MoveChromeKind::Hover);
-        assert_eq!(rect.min, Point::new(10.0, 10.0));
-        assert_eq!(rect.max, Point::new(50.0, 40.0));
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].min, Point::new(10.0, 10.0));
+        assert_eq!(rects[0].max, Point::new(50.0, 40.0));
     }
 
     #[test]
@@ -215,10 +233,11 @@ mod tests {
         let s = state_with(Tool::Move, &[line]);
         // On the line (within hit tolerance) → chrome; the bbox spans
         // both endpoints even though the line has zero height.
-        let (rect, _) = move_chrome(&s, Some(Point::new(30.0, 21.0)))
+        let (rects, _) = move_chrome(&s, Some(Point::new(30.0, 21.0)))
             .expect("distance hit on the line must yield chrome");
-        assert_eq!(rect.min, Point::new(10.0, 20.0));
-        assert_eq!(rect.max, Point::new(50.0, 20.0));
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].min, Point::new(10.0, 20.0));
+        assert_eq!(rects[0].max, Point::new(50.0, 20.0));
         // Far off the line → nothing.
         assert!(move_chrome(&s, Some(Point::new(30.0, 40.0))).is_none());
     }
@@ -230,21 +249,50 @@ mod tests {
             rect_ann(40.0, 40.0, 60.0, 60.0),
         ];
         let mut s = state_with(Tool::Move, &anns);
+        s.selected = vec![1];
         s.moving = Some(AnnotationDrag {
             index: 1,
             last_pos: Point::new(1.0, 1.0),
             moved: true,
         });
         // Hover points at ann 0; the live drag on ann 1 must win.
-        let (rect, kind) =
+        let (rects, kind) =
             move_chrome(&s, Some(Point::new(20.0, 20.0))).expect("live drag must yield chrome");
         assert_eq!(kind, MoveChromeKind::Grab);
-        assert_eq!(rect.min, Point::new(40.0, 40.0));
-        assert_eq!(rect.max, Point::new(60.0, 60.0));
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].min, Point::new(40.0, 40.0));
+        assert_eq!(rects[0].max, Point::new(60.0, 60.0));
         // And without any hover position at all (mid-drag pointer
         // state is the shell's concern).
-        let (rect, _) = move_chrome(&s, None).expect("grab ignores hover position");
-        assert_eq!(rect.min, Point::new(40.0, 40.0));
+        let (rects, _) = move_chrome(&s, None).expect("grab ignores hover position");
+        assert_eq!(rects[0].min, Point::new(40.0, 40.0));
+    }
+
+    /// A multi-drag renders the grab outline on every member of the
+    /// set, in selection order.
+    #[test]
+    fn multi_drag_grab_covers_every_member() {
+        let anns = [
+            rect_ann(10.0, 10.0, 30.0, 30.0),
+            rect_ann(40.0, 40.0, 60.0, 60.0),
+        ];
+        let mut s = state_with(Tool::Move, &anns);
+        s.selected = vec![0, 1];
+        s.moving = Some(AnnotationDrag {
+            index: 0,
+            last_pos: Point::new(1.0, 1.0),
+            moved: false,
+        });
+        let (rects, kind) = move_chrome(&s, None).expect("a live drag yields grab chrome");
+        assert_eq!(kind, MoveChromeKind::Grab);
+        assert_eq!(
+            rects,
+            vec![
+                flintshot_core::Rect::new(Point::new(10.0, 10.0), Point::new(30.0, 30.0)),
+                flintshot_core::Rect::new(Point::new(40.0, 40.0), Point::new(60.0, 60.0)),
+            ],
+            "every member outlines, in selection order"
+        );
     }
 
     #[test]
@@ -252,6 +300,7 @@ mod tests {
         // tool_for_key writes `state.tool` directly and can fire
         // mid-drag; the grab outline keys off `moving`, not `tool`.
         let mut s = state_with(Tool::Rect, &[rect_ann(10.0, 10.0, 30.0, 30.0)]);
+        s.selected = vec![0];
         s.moving = Some(AnnotationDrag {
             index: 0,
             last_pos: Point::new(1.0, 1.0),
