@@ -1611,6 +1611,51 @@ mod tests {
         )
     }
 
+    /// The section measure-probe must not double-register widget ids:
+    /// egui's duplicate-id detector paints red "🔥 First/Second use of
+    /// widget ID" strokes + labels on the debug layer (topmost,
+    /// unclipped) whenever one id is used at two rects in a frame —
+    /// which read as page elements floating over the topbar while the
+    /// settings page scrolled (the probe used to run `10_000` px
+    /// offscreen, so every row tripped it).
+    #[test]
+    fn settings_page_never_trips_eguis_duplicate_id_paint() {
+        let mut app = settings_app_with_directives(Vec::new());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 480.0));
+        for frame in 0..4u16 {
+            let events = if frame == 2 {
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -240.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                }]
+            } else {
+                vec![]
+            };
+            let full = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..egui::RawInput::default()
+                },
+                |ui| app.ui_impl(ui),
+            );
+            for clipped in &full.shapes {
+                if let egui::Shape::Text(text) = &clipped.shape {
+                    let body = text.galley.text();
+                    assert!(
+                        !body.contains("use of widget ID"),
+                        "frame {frame}: egui painted a duplicate-id debug label \
+                         ({body:?}) — a widget id was registered at two rects"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn settings_body_never_paints_under_the_topbar() {
         let mut app = settings_app_with_directives(Vec::new());

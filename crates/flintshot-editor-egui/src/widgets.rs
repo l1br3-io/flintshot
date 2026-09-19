@@ -329,18 +329,24 @@ pub(crate) fn section(
 
     let mut body_height = 0.0;
     if open || eased > 0.0 {
-        // Measure the body offscreen and invisible; the spring then
-        // unfolds the visible allocation toward that height.
+        // Measure the body with an invisible probe laid out at the
+        // real position, then draw it clipped to the animated fold.
+        // GOTCHA: the probe must share the real pass's origin, width,
+        // and layout — it registers the same widget ids as the visible
+        // pass, and egui's duplicate-id detector only stays quiet
+        // when both registrations land on the same rects (an
+        // offscreen probe paints red "used twice" overlays on every
+        // row in debug builds, unclipped, over the topbar).
         let avail_w = ui.available_width();
-        let measure_rect = egui::Rect::from_min_size(
-            egui::pos2(ui.max_rect().left(), ui.max_rect().bottom() + 10_000.0),
-            egui::vec2(avail_w, 0.0),
+        let probe_rect = egui::Rect::from_min_max(
+            ui.cursor().min,
+            egui::pos2(ui.max_rect().right(), ui.max_rect().bottom()),
         );
         let mut probe = ui.new_child(
             egui::UiBuilder::new()
-                .max_rect(measure_rect)
+                .max_rect(probe_rect)
                 .invisible()
-                .layout(egui::Layout::top_down_justified(egui::Align::LEFT)),
+                .layout(*ui.layout()),
         );
         body(&mut probe);
         let measured = probe.min_rect().height().max(1.0);
