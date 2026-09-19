@@ -11,16 +11,16 @@ late-appearing listener is accepted within the window. The stream-EOF
 promptly).
 
 **Acceptance criteria:**
-- [ ] RED first: seam-level test — a watch pointed at a socket path whose listener appears ~after the first connect attempt does NOT mark gone within the window (current one-shot code marks gone immediately → RED)
-- [ ] Absent path / refused connect retried within the window, then marked gone (bounded — total watch failure ≤ window + one interval)
-- [ ] A successful connect followed by stream end still marks gone immediately (no retry after EOF — daemon death stays prompt)
-- [ ] Connect-retry parameters (window ~2 s, interval ~100–250 ms) named consts; every wait bounded; no unbounded loops
-- [ ] Testable seam: the watch body (connect → subscribe → park) extracted so tests can drive it against a tempdir socket with a late-bound listener (fake-server pattern; try headless, `#[ignore]` + run instruction only if proven flaky)
+- [x] RED first: seam-level test — a watch pointed at a socket path whose listener appears ~after the first connect attempt does NOT mark gone within the window (current one-shot code marks gone immediately → RED)
+- [x] Absent path / refused connect retried within the window, then marked gone (bounded — total watch failure ≤ window + one interval)
+- [x] A successful connect followed by stream end still marks gone immediately (no retry after EOF — daemon death stays prompt)
+- [x] Connect-retry parameters (window ~2 s, interval ~100–250 ms) named consts; every wait bounded; no unbounded loops
+- [x] Testable seam: the watch body (connect → subscribe → park) extracted so tests can drive it against a tempdir socket with a late-bound listener (fake-server pattern; try headless, `#[ignore]` + run instruction only if proven flaky)
 
 **Verification:**
-- [ ] `cargo test -p flintshot-app -q tray` green
-- [ ] Full gate (four commands, quiet)
-- [ ] Manual check deferred to the manual matrix / diagnostic log kit (no rapid "tray helper spawned" repetition)
+- [x] `cargo test -p flintshot-app -q tray` green
+- [x] Full gate (four commands, quiet)
+- [x] Manual check deferred to the manual matrix / diagnostic log kit (no rapid "tray helper spawned" repetition)
 
 **Dependencies:** None (conceptually pairs with Task 005 — together
 they close mechanism A3; code-independent)
