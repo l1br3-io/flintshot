@@ -52,6 +52,19 @@ Categories used below:
 
 ### Fixed
 
+- **The worker editor's Home breadcrumb link now navigates instead
+  of closing the window** (ADR-0065). From a tray capture (or any
+  worker fallback editor), clicking the topbar's `Home › Editor`
+  breadcrumb published `Cancelled` and killed the window — a close
+  in navigation clothing. The link now delegates the daemon's
+  `OpenApp` choreography: an already-running app window focuses
+  (keeping its current route); otherwise the daemon spawns
+  `flintshot app` on Home, and with no daemon at all the worker
+  spawns it itself. The worker editor then closes via the standing
+  Esc contract. The app window's own Home routing is unchanged.
+  Plumbing: `EguiShell::with_open_home` mirrors `with_open_settings`
+  (`EditorApp` fires it on the Home action before the close).
+
 - **The topbar overflow's Settings entry now works from worker editor
   windows** (`flintshot capture` / `flintshot open`). It rendered but
   was a dead no-op there — worker windows never route to Settings

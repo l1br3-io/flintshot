@@ -74,3 +74,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0062 | [Committed-annotation write-through via lift-out sessions](ADR-0062-text-write-through.md) |
 | ADR-0063 | [App workers carry `--standalone`](ADR-0063-app-workers-carry-standalone.md) |
 | ADR-0064 | [The Select / Crop / Hand tool remap](ADR-0064-select-crop-hand-tool-remap.md) |
+| ADR-0065 | [The worker editor's Home link delegates to the app window](ADR-0065-worker-home-delegates-to-app-window.md) |
