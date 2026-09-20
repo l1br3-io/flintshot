@@ -226,9 +226,6 @@ pub trait HomeBridge {
     fn request_rebind(&mut self) {}
 }
 
-/// Recents per grid row — the mockup's 4-column layout.
-const RECENTS_PER_ROW: usize = 4;
-
 /// The adaptive grid's column cap — past it, wider windows keep
 /// 8 columns instead of growing postage stamps.
 const MAX_GRID_COLUMNS: usize = 8;
@@ -610,6 +607,11 @@ pub(crate) fn recents_header_caption(count: usize, limit: usize) -> String {
     format!("{count} of {limit}")
 }
 
+/// The session header's count term — the bare count. Pure for tests.
+pub(crate) fn session_header_caption(count: usize) -> String {
+    count.to_string()
+}
+
 impl HomeApp {
     /// Headless-callable core of [`App::logic`]: directive polling and
     /// keyboard accelerators. Lives in `logic` (not `ui`) because
@@ -910,34 +912,46 @@ impl HomeApp {
     }
 
     /// The "This session" grid: resumable unsaved captures, above
-    /// the recents. Hidden entirely when the store is empty; the
-    /// list refreshes every frame (editor round-trips file and
-    /// graduate entries between renders, and the bridge answers
-    /// from an in-memory index — a small Vec clone). Scrolls like
-    /// the recents grid once rows overflow the window.
+    /// the recents, on the same adaptive grid (columns floor-fill
+    /// the width; cards stretch). The header carries the live count.
+    /// Hidden entirely when the store is empty; the list refreshes
+    /// every frame (editor round-trips file and graduate entries
+    /// between renders, and the bridge answers from an in-memory
+    /// index — a small Vec clone). Scrolls like the recents grid
+    /// once rows overflow the window.
     fn session_section(&mut self, ui: &mut egui::Ui) {
+        use crate::theme::palette as p;
         self.session = self.bridge.session_captures();
         if self.session.is_empty() {
             return;
         }
-        ui.label(
-            egui::RichText::new("THIS SESSION")
-                .size(crate::theme::TYPE_SM)
-                .color(crate::theme::palette::GOLD_DEEP),
-        );
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("THIS SESSION")
+                    .size(crate::theme::TYPE_SM)
+                    .color(p::GOLD_DEEP),
+            );
+            ui.label(
+                egui::RichText::new(format!("· {}", session_header_caption(self.session.len())))
+                    .size(crate::theme::TYPE_XS)
+                    .color(p::INK_SOFT),
+            );
+        });
         ui.add_space(crate::theme::SPACE_SCALE[1]);
+        let gap = crate::theme::SPACE_SCALE[2];
+        let cols = columns_for_width(ui.available_width(), MIN_CARD_WIDTH, gap);
+        let size = recent_card_size(column_width(ui.available_width(), cols, gap));
         let mut pending_png = false;
         egui::ScrollArea::vertical()
             .id_salt("session-scroll")
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 let session = self.session.clone();
-                for row in session.chunks(RECENTS_PER_ROW) {
+                for row in session.chunks(cols) {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing =
-                            egui::vec2(crate::theme::SPACE_SCALE[2], crate::theme::SPACE_SCALE[2]);
+                        ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                         for card in row {
-                            if self.session_card(ui, card) {
+                            if self.session_card(ui, card, size) {
                                 pending_png = true;
                             }
                         }
@@ -958,7 +972,7 @@ impl HomeApp {
     /// Delete-chip pattern). A body click resumes the capture
     /// through the bridge. Returns whether the thumbnail's PNG had
     /// not landed yet (the section's repaint hint).
-    fn session_card(&mut self, ui: &mut egui::Ui, card: &SessionCard) -> bool {
+    fn session_card(&mut self, ui: &mut egui::Ui, card: &SessionCard, size: egui::Vec2) -> bool {
         use crate::theme::palette as p;
         let Some(thumb) = self.thumbnail(ui.ctx(), &card.png_path) else {
             return true;
@@ -968,7 +982,7 @@ impl HomeApp {
         let id_key = card.id.raw();
         let armed = self.discard_armed == Some(card.id);
 
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(112.0, 148.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
         let resp = ui
             .interact(
                 rect,
@@ -988,11 +1002,14 @@ impl HomeApp {
             egui::StrokeKind::Middle,
         );
 
+        // Letterbox into the card's thumb box (same geometry as
+        // the recent cards).
+        let box_side = rect.width() - 16.0;
         let (tw, th) = (tsize.x, tsize.y);
-        let scale = 74.0 / tw.max(th);
-        let size = egui::vec2(tw * scale, th * scale);
-        let thumb_center = egui::pos2(rect.center().x, rect.top() + 50.0);
-        let img_rect = egui::Rect::from_center_size(thumb_center, size);
+        let scale = box_side / tw.max(th);
+        let img_size = egui::vec2(tw * scale, th * scale);
+        let thumb_center = egui::pos2(rect.center().x, rect.top() + 8.0 + box_side / 2.0);
+        let img_rect = egui::Rect::from_center_size(thumb_center, img_size);
         ui.painter().image(
             texture_id,
             img_rect,
@@ -2383,6 +2400,102 @@ mod tests {
     }
 
     // --- Adaptive recents grid (home-capture-grids Task 003) ---
+    /// The session header's count term (home-capture-grids Task 006).
+    #[test]
+    fn session_header_caption_is_the_bare_count() {
+        assert_eq!(session_header_caption(0), "0");
+        assert_eq!(session_header_caption(3), "3");
+    }
+
+    /// The session grid reflows with the window, like recents.
+    #[test]
+    fn session_grid_adapts_columns_to_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cards = Vec::new();
+        for i in 0..12u64 {
+            let png = dir.path().join(format!("{i}.png"));
+            image::RgbaImage::from_pixel(40, 30, image::Rgba([40, 90, 200, 255]))
+                .save(&png)
+                .unwrap();
+            cards.push(SessionCard {
+                id: flintshot_core::SessionId::from_raw(i),
+                png_path: png,
+                dims: (40, 30),
+                created_at: i,
+            });
+        }
+        std::mem::forget(dir);
+        let bridge = RecordingBridge {
+            sessions: Arc::new(Mutex::new(cards.clone())),
+            ..RecordingBridge::default()
+        };
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let ids: Vec<egui::Id> = cards
+            .iter()
+            .map(|c| egui::Id::new(("session", c.id.raw())))
+            .collect();
+        for _ in 0..2 {
+            let _ = welcome_frame_sized(&mut app, &ctx, vec![], egui::vec2(800.0, 900.0));
+        }
+        let narrow = row_mates(&ctx, &ids, ids[0]).len();
+        for _ in 0..2 {
+            let _ = welcome_frame_sized(&mut app, &ctx, vec![], egui::vec2(1600.0, 900.0));
+        }
+        let wide = row_mates(&ctx, &ids, ids[0]).len();
+        assert!(
+            wide > narrow,
+            "1600 px lays {wide} session cards per row, 800 px lays {narrow}"
+        );
+    }
+
+    /// An empty session store leaves no orphan gap: the distance
+    /// from the secondary cards to the recents section stays at the
+    /// single inter-section spacing — a doubled gap (an extra
+    /// `SPACE_SCALE[3]`) would overflow these bounds
+    /// (home-capture-grids Task 006).
+    #[test]
+    fn empty_session_store_leaves_no_orphan_gap() {
+        // (a) no recents: the next content is the empty card.
+        let mut app = HomeApp::new(Box::new(RecordingBridge::default()), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        for _ in 0..2 {
+            let _ = welcome_frame(&mut app, &ctx, vec![]);
+        }
+        let paste = ctx
+            .read_response(egui::Id::new("home-paste"))
+            .expect("the Paste chip renders")
+            .rect;
+        let empty = ctx
+            .read_response(egui::Id::new("recents-empty"))
+            .expect("the empty card renders")
+            .rect;
+        let gap_a = empty.top() - paste.bottom();
+        assert!((40.0..=70.0).contains(&gap_a), "empty-recents gap {gap_a}");
+
+        // (b) one recent: the next content is its card (header row
+        // + TODAY eyebrow between).
+        let (bridge, _rec, png) = one_recent();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        for _ in 0..2 {
+            let _ = welcome_frame(&mut app, &ctx, vec![]);
+        }
+        let paste = ctx
+            .read_response(egui::Id::new("home-paste"))
+            .expect("the Paste chip renders")
+            .rect;
+        let card = ctx
+            .read_response(egui::Id::new(("recent", png.to_string_lossy().to_string())))
+            .expect("the recent card renders")
+            .rect;
+        let gap_b = card.top() - paste.bottom();
+        assert!((60.0..=100.0).contains(&gap_b), "one-recent gap {gap_b}");
+    }
+
     /// The header count term: `N of LIMIT` (home-capture-grids
     /// Task 005).
     #[test]
@@ -2828,8 +2941,8 @@ mod tests {
             .expect("clipped session cards still lay out")
             .rect;
         assert!(
-            first.bottom() <= 420.0,
-            "the first row stays inside the viewport"
+            first.top() < 420.0,
+            "the session grid starts inside the viewport (the section is bounded, not pushing the page)"
         );
         assert!(
             last.top() > 420.0,
