@@ -225,6 +225,14 @@ impl SessionStore {
         summaries
     }
 
+    /// The on-disk PNG path for `id` — the thumbnail source for
+    /// Home's session cards. Advisory: the background write may
+    /// still be in flight or may have failed (memory-only entry).
+    #[must_use]
+    pub fn png_path(&self, id: SessionId) -> PathBuf {
+        png_path(&self.dir, id)
+    }
+
     /// Rebuild one capture for resume: decode the PNG, parse the
     /// sidecar. A corrupt or missing sidecar degrades to empty
     /// annotations (advisory); a missing or unreadable PNG means

@@ -1628,7 +1628,6 @@ impl HomeBridge for Bridge {
     fn request_capture(&mut self) {
         self.shared.set_pending_capture(PumpCommand::Capture);
     }
-
     fn open_session_capture(&mut self, id: flintshot_core::SessionId) -> bool {
         match self.shared.session.load(id) {
             Some(cap) => {
@@ -1642,6 +1641,25 @@ impl HomeBridge for Bridge {
             }
             None => false,
         }
+    }
+
+    fn session_captures(&mut self) -> Vec<flintshot_editor_egui::SessionCard> {
+        self.shared
+            .session
+            .list()
+            .into_iter()
+            .map(|s| flintshot_editor_egui::SessionCard {
+                id: s.id,
+                png_path: self.shared.session.png_path(s.id),
+                dims: (s.width, s.height),
+                created_at: s.created_at,
+            })
+            .collect()
+    }
+
+    fn discard_session_capture(&mut self, id: flintshot_core::SessionId) {
+        tracing::info!(id = id.raw(), "session capture discarded");
+        self.shared.session.remove(id);
     }
 
     // -- Settings-route plumbing (the real config handle) --

@@ -77,7 +77,7 @@ mod widgets;
 mod window;
 
 pub use canvas::{CanvasView, EguiCanvas, EguiTexture};
-pub use home::{HomeBridge, HomeDirective};
+pub use home::{HomeBridge, HomeDirective, SessionCard};
 pub use magnifier::{sample_zoomed_region, Magnifier};
 pub use shell::{CloseHandle, EditorPageBridge, EguiShell};
 pub use window::{Route, RouteHost, RoutedEditor, WindowExit, WindowStart};

@@ -114,6 +114,17 @@ pub trait HomeBridge {
         false
     }
 
+    /// Session cards for the "This session" section, newest first.
+    /// Default: none — test doubles and minimal bridges.
+    fn session_captures(&mut self) -> Vec<SessionCard> {
+        Vec::new()
+    }
+
+    /// Discard one session capture (the card's Discard chip, after
+    /// its two-step confirm): the entry and its files go. Default:
+    /// no-op.
+    fn discard_session_capture(&mut self, _id: flintshot_core::SessionId) {}
+
     /// Take one pending directive, oldest first. Called every
     /// frame (see [`REPOLL_INTERVAL`]).
     fn poll_directive(&mut self) -> Option<HomeDirective>;
@@ -210,6 +221,21 @@ pub(crate) struct RecentThumb {
     bytes: u64,
 }
 
+/// One resumable session capture for the "This session" grid —
+/// the home bridge's face of a `SessionStore` entry.
+#[derive(Debug, Clone)]
+pub struct SessionCard {
+    /// The store entry's id (resume and discard address it).
+    pub id: flintshot_core::SessionId,
+    /// The on-disk PNG backing the card (thumbnail source; the
+    /// store's advisory write may briefly lag the entry).
+    pub png_path: PathBuf,
+    /// Original image dimensions (the caption's first term).
+    pub dims: (u32, u32),
+    /// Unix-seconds arrival time (the caption's age term).
+    pub created_at: u64,
+}
+
 /// The eframe app for the home window. Owns no IPC state — see
 /// [`HomeBridge`].
 pub(crate) struct HomeApp {
@@ -249,6 +275,13 @@ pub(crate) struct HomeApp {
     /// The card whose Delete chip is in the "Sure?" confirm step.
     /// `None` = no armed delete; any click elsewhere disarms.
     delete_armed: Option<PathBuf>,
+    /// Session cards for the "This session" grid (refreshed per
+    /// frame — entries come and go with editor round-trips, and
+    /// the bridge answers from an in-memory index).
+    session: Vec<SessionCard>,
+    /// The session card whose Discard chip is in the "Sure?"
+    /// confirm step. `None` = none armed.
+    discard_armed: Option<flintshot_core::SessionId>,
 }
 
 /// Pure UI state of the home window — the part directives mutate.
@@ -276,6 +309,7 @@ impl HomeApp {
     /// touched until the first `update`.
     pub(crate) fn new(mut bridge: Box<dyn HomeBridge>, initial_status: String) -> Self {
         let recent = bridge.recent_images();
+        let session = bridge.session_captures();
         Self {
             ui: HomeUiState {
                 status: initial_status,
@@ -292,6 +326,8 @@ impl HomeApp {
             capture_clicked_at: None,
             close_watchdog_warned: false,
             delete_armed: None,
+            session,
+            discard_armed: None,
         }
     }
 
@@ -406,6 +442,15 @@ pub(crate) fn card_stem(path: &Path) -> String {
 
 /// Seconds since `path` was last modified. `None` when the file is
 /// gone or its mtime predates the epoch's representable range.
+/// A session card's age, from the store's arrival timestamp (not
+/// file mtime — the PNG write lands off-thread).
+fn session_age_secs(created_at: u64) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .saturating_sub(created_at)
+}
+
 fn age_seconds(path: &std::path::Path) -> Option<u64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let age = std::time::SystemTime::now().duration_since(modified).ok()?;
@@ -564,15 +609,17 @@ impl HomeApp {
         let _ = panel;
     }
 
-    /// The welcome body: hero, secondaries, recents grid / empty
-    /// card, and the bottom status line (ADR-0047's watchdog
-    /// contract lives above this in `logic_impl`).
+    /// The welcome body: hero, secondaries, the session grid, the
+    /// recents grid / empty card, and the bottom status line
+    /// (ADR-0047's watchdog contract lives above this in
+    /// `logic_impl`).
     fn welcome_body(&mut self, ui: &mut egui::Ui) {
         ui.add_space(crate::theme::SPACE_SCALE[2]);
         self.hero_card(ui);
         ui.add_space(crate::theme::SPACE_SCALE[2]);
         self.secondary_cards(ui);
         ui.add_space(crate::theme::SPACE_SCALE[3]);
+        self.session_section(ui);
         self.recents_section(ui);
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
             ui.label(
@@ -753,6 +800,237 @@ impl HomeApp {
                 }
             }
         });
+    }
+
+    /// The "This session" grid: resumable unsaved captures, above
+    /// the recents. Hidden entirely when the store is empty; the
+    /// list refreshes every frame (editor round-trips file and
+    /// graduate entries between renders, and the bridge answers
+    /// from an in-memory index — a small Vec clone). Scrolls like
+    /// the recents grid once rows overflow the window.
+    fn session_section(&mut self, ui: &mut egui::Ui) {
+        self.session = self.bridge.session_captures();
+        if self.session.is_empty() {
+            return;
+        }
+        ui.label(
+            egui::RichText::new("THIS SESSION")
+                .size(crate::theme::TYPE_SM)
+                .color(crate::theme::palette::GOLD_DEEP),
+        );
+        ui.add_space(crate::theme::SPACE_SCALE[1]);
+        let mut pending_png = false;
+        egui::ScrollArea::vertical()
+            .id_salt("session-scroll")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let session = self.session.clone();
+                for row in session.chunks(RECENTS_PER_ROW) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing =
+                            egui::vec2(crate::theme::SPACE_SCALE[2], crate::theme::SPACE_SCALE[2]);
+                        for card in row {
+                            if self.session_card(ui, card) {
+                                pending_png = true;
+                            }
+                        }
+                    });
+                }
+            });
+        ui.add_space(crate::theme::SPACE_SCALE[3]);
+        if pending_png {
+            // A card's arrival PNG is still landing (the store
+            // writes off-thread) — poll until it decodes.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// One session card: the recent-card language with an "unsaved"
+    /// caption and a single hover Discard chip (two-step, the
+    /// Delete-chip pattern). A body click resumes the capture
+    /// through the bridge. Returns whether the thumbnail's PNG had
+    /// not landed yet (the section's repaint hint).
+    fn session_card(&mut self, ui: &mut egui::Ui, card: &SessionCard) -> bool {
+        use crate::theme::palette as p;
+        let Some(thumb) = self.thumbnail(ui.ctx(), &card.png_path) else {
+            return true;
+        };
+        let (texture_id, tsize, bytes) =
+            (thumb.texture.id(), thumb.texture.size_vec2(), thumb.bytes);
+        let id_key = card.id.raw();
+        let armed = self.discard_armed == Some(card.id);
+
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(112.0, 148.0), egui::Sense::hover());
+        let resp = ui
+            .interact(
+                rect,
+                egui::Id::new(("session", id_key)),
+                egui::Sense::click(),
+            )
+            .on_hover_text("Resume this capture — unsaved");
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS),
+            p::PAPER_CREAM,
+            if resp.hovered() {
+                egui::Stroke::new(1.25, p::GOLD_DEEP)
+            } else {
+                crate::theme::HAIRLINE_STROKE
+            },
+            egui::StrokeKind::Middle,
+        );
+
+        let (tw, th) = (tsize.x, tsize.y);
+        let scale = 74.0 / tw.max(th);
+        let size = egui::vec2(tw * scale, th * scale);
+        let thumb_center = egui::pos2(rect.center().x, rect.top() + 50.0);
+        let img_rect = egui::Rect::from_center_size(thumb_center, size);
+        ui.painter().image(
+            texture_id,
+            img_rect,
+            egui::Rect {
+                min: egui::pos2(0.0, 0.0),
+                max: egui::pos2(1.0, 1.0),
+            },
+            p::PAPER_CREAM,
+        );
+
+        // Two caption lines: the unsaved affordance over metadata.
+        let name_galley = ui.painter().layout_no_wrap(
+            "Unsaved".to_owned(),
+            egui::FontId::proportional(crate::theme::TYPE_XS),
+            p::GOLD_DEEP,
+        );
+        let meta_galley = ui.painter().layout_no_wrap(
+            metadata_caption(card.dims, bytes, session_age_secs(card.created_at)),
+            egui::FontId::proportional(crate::theme::TYPE_XS),
+            p::INK_SOFT,
+        );
+        ui.painter().galley(
+            egui::pos2(
+                rect.center().x - name_galley.size().x / 2.0,
+                rect.bottom() - 34.0,
+            ),
+            name_galley,
+            p::GOLD_DEEP,
+        );
+        ui.painter().galley(
+            egui::pos2(
+                rect.center().x - meta_galley.size().x / 2.0,
+                rect.bottom() - 17.0,
+            ),
+            meta_galley,
+            p::INK_SOFT,
+        );
+
+        let chip_clicked = self.session_discard_chip(
+            ui,
+            rect,
+            id_key,
+            resp.hovered() || resp.contains_pointer(),
+            armed,
+        );
+
+        if resp.clicked() && !chip_clicked {
+            self.discard_armed = None;
+            if self.bridge.open_session_capture(card.id) {
+                self.session = self.bridge.session_captures();
+            }
+        }
+        if armed && !resp.contains_pointer() {
+            self.discard_armed = None;
+        }
+        false
+    }
+
+    /// The session card's single hover chip: Discard, two-step —
+    /// first click arms ("Sure?", gold fill), second commits via
+    /// the bridge. Returns whether this chip consumed the click.
+    fn session_discard_chip(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        id_key: u64,
+        show: bool,
+        armed: bool,
+    ) -> bool {
+        use crate::theme::palette as p;
+        if !show {
+            return false;
+        }
+        let label = if armed { "Sure?" } else { "Discard" };
+        let galley = ui.painter().layout_no_wrap(
+            label.to_owned(),
+            egui::FontId::proportional(crate::theme::TYPE_XS),
+            p::INK,
+        );
+        let w = galley.size().x + 14.0;
+        let chip_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.center().x - w / 2.0, rect.top() + 8.0),
+            egui::vec2(w, 22.0),
+        );
+        let chip = ui
+            .interact(
+                chip_rect,
+                egui::Id::new(("session-discard", id_key)),
+                egui::Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let radius = egui::CornerRadius::same(crate::theme::POD_RADIUS);
+        ui.painter().add(if chip.hovered() || armed {
+            crate::theme::SHADOW_LIFT.as_shape(chip_rect, radius)
+        } else {
+            crate::theme::SHADOW_RESTING.as_shape(chip_rect, radius)
+        });
+        ui.painter().rect(
+            chip_rect,
+            radius,
+            if armed {
+                p::with_alpha(p::GOLD, 60)
+            } else {
+                p::PAPER_CREAM
+            },
+            egui::Stroke::NONE,
+            egui::StrokeKind::Middle,
+        );
+        let inner = chip_rect.shrink(2.0);
+        ui.painter().rect(
+            inner,
+            radius,
+            p::PAPER_CREAM,
+            egui::Stroke::new(1.5, p::PAPER),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().galley(
+            egui::pos2(
+                chip_rect.center().x - galley.size().x / 2.0,
+                chip_rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            p::INK,
+        );
+        if chip.clicked() {
+            if armed {
+                let id = flintshot_core::SessionId::from_raw(id_key);
+                self.discard_armed = None;
+                let path = self
+                    .session
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.png_path.clone());
+                self.bridge.discard_session_capture(id);
+                self.session = self.bridge.session_captures();
+                if let Some(path) = path {
+                    self.thumbs.remove(&path);
+                }
+            } else {
+                self.discard_armed = Some(flintshot_core::SessionId::from_raw(id_key));
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// The recents grid (with thumbnails decoded + downscaled on
@@ -1246,6 +1524,9 @@ mod tests {
         copied: Vec<PathBuf>,
         revealed: Vec<PathBuf>,
         deleted: Vec<PathBuf>,
+        /// Session-card targets: resume clicks and discards.
+        resumed: Vec<flintshot_core::SessionId>,
+        discarded: Vec<flintshot_core::SessionId>,
     }
 
     /// Bridge double that records requests and replays directives.
@@ -1254,6 +1535,7 @@ mod tests {
         rec: Recording,
         pending: Arc<Mutex<VecDeque<HomeDirective>>>,
         recents: Arc<Mutex<Vec<PathBuf>>>,
+        sessions: Arc<Mutex<Vec<SessionCard>>>,
     }
 
     impl HomeBridge for RecordingBridge {
@@ -1312,6 +1594,25 @@ mod tests {
                 .lock()
                 .expect("recents mutex")
                 .retain(|p| p != path);
+        }
+
+        fn session_captures(&mut self) -> Vec<SessionCard> {
+            self.sessions.lock().expect("sessions mutex").clone()
+        }
+
+        fn open_session_capture(&mut self, id: flintshot_core::SessionId) -> bool {
+            self.rec.0.lock().expect("recorder mutex").resumed.push(id);
+            true
+        }
+
+        fn discard_session_capture(&mut self, id: flintshot_core::SessionId) {
+            let mut rec = self.rec.0.lock().expect("recorder mutex");
+            rec.discarded.push(id);
+            // The real bridge's store removal, mirrored.
+            self.sessions
+                .lock()
+                .expect("sessions mutex")
+                .retain(|c| c.id != id);
         }
     }
 
@@ -1814,6 +2115,155 @@ mod tests {
             ctx.read_response(egui::Id::new(("recent", "/nonexistent/shot.png")))
                 .is_none(),
             "an undecodable recent renders no card"
+        );
+    }
+
+    /// One session fixture: a real decodable png + the bridge wired
+    /// with a card over it. Returns (bridge, recorder, id).
+    fn one_session() -> (RecordingBridge, Recording, flintshot_core::SessionId) {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("1.png");
+        image::RgbaImage::from_pixel(40, 30, image::Rgba([40, 90, 200, 255]))
+            .save(&png)
+            .unwrap();
+        // keep the tempdir alive for the test's lifetime
+        std::mem::forget(dir);
+        let id = flintshot_core::SessionId::from_raw(1);
+        let bridge = RecordingBridge {
+            sessions: Arc::new(Mutex::new(vec![SessionCard {
+                id,
+                png_path: png.clone(),
+                dims: (40, 30),
+                created_at: 0,
+            }])),
+            ..RecordingBridge::default()
+        };
+        let rec = bridge.rec.clone();
+        (bridge, rec, id)
+    }
+
+    /// An empty session store renders no section at all.
+    #[test]
+    fn empty_session_store_renders_no_section() {
+        let mut app = HomeApp::new(Box::new(RecordingBridge::default()), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new(("session", 0u64)))
+                .is_none(),
+            "no store entries, no session cards"
+        );
+        assert!(app.session.is_empty());
+    }
+
+    /// Session cards render with live thumbnails; a body click
+    /// resumes through the bridge.
+    #[test]
+    fn session_cards_render_and_click_resumes() {
+        let (bridge, rec, id) = one_session();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let card = ctx
+            .read_response(egui::Id::new(("session", id.raw())))
+            .expect("a decodable session entry renders its card");
+
+        // The thumb's center — below the chip row.
+        let at = egui::pos2(card.rect.center().x, card.rect.top() + 60.0);
+        let _ = welcome_frame(&mut app, &ctx, click_at(at));
+        assert_eq!(
+            rec.0.lock().expect("recorder mutex").resumed,
+            vec![id],
+            "clicking a session card resumes it"
+        );
+    }
+
+    /// The session Discard chip is two-step: the first click arms
+    /// ("Sure?"), the second commits and the card leaves the grid.
+    #[test]
+    fn session_discard_chip_requires_the_sure_step() {
+        let (bridge, rec, id) = one_session();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let card = ctx
+            .read_response(egui::Id::new(("session", id.raw())))
+            .expect("the card registers")
+            .rect;
+
+        // Settle the hover, then arm — no discard yet.
+        let chip_at = |card: egui::Rect| egui::pos2(card.center().x, card.top() + 8.0 + 11.0);
+        let _ = welcome_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(card.center())],
+        );
+        let _ = welcome_frame(&mut app, &ctx, click_at(chip_at(card)));
+        assert_eq!(app.discard_armed, Some(id), "the first click arms the chip");
+        assert!(
+            rec.0.lock().expect("recorder mutex").discarded.is_empty(),
+            "one click must not discard"
+        );
+
+        // Step two: commit.
+        let _ = welcome_frame(&mut app, &ctx, click_at(chip_at(card)));
+        let guard = rec.0.lock().expect("recorder mutex");
+        assert_eq!(guard.discarded, vec![id], "the second click commits");
+        drop(guard);
+        assert_eq!(app.discard_armed, None, "committed: disarmed");
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            app.session.is_empty(),
+            "the discarded capture left the grid on the refresh"
+        );
+    }
+
+    /// The session section scrolls like the recents grid: on a
+    /// short viewport the first row stays visible and the
+    /// below-the-fold cards sit beyond it.
+    #[test]
+    fn session_overflow_scrolls_the_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cards = Vec::new();
+        for i in 0..12u64 {
+            let png = dir.path().join(format!("{i}.png"));
+            image::RgbaImage::from_pixel(40, 30, image::Rgba([40, 90, 200, 255]))
+                .save(&png)
+                .unwrap();
+            cards.push(SessionCard {
+                id: flintshot_core::SessionId::from_raw(i),
+                png_path: png,
+                dims: (40, 30),
+                created_at: i,
+            });
+        }
+        let bridge = RecordingBridge {
+            sessions: Arc::new(Mutex::new(cards)),
+            ..RecordingBridge::default()
+        };
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame_sized(&mut app, &ctx, vec![], egui::vec2(1024.0, 420.0));
+
+        let first = ctx
+            .read_response(egui::Id::new(("session", 0u64)))
+            .expect("the first session card lays out")
+            .rect;
+        let last = ctx
+            .read_response(egui::Id::new(("session", 11u64)))
+            .expect("clipped session cards still lay out")
+            .rect;
+        assert!(
+            first.bottom() <= 420.0,
+            "the first row stays inside the viewport"
+        );
+        assert!(
+            last.top() > 420.0,
+            "the below-the-fold card sits beyond the viewport"
         );
     }
 
