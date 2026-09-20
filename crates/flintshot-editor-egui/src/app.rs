@@ -1858,9 +1858,10 @@ impl EditorApp {
     /// Poll the page bridge's directives (single-window page mode
     /// only). `Hide` closes the window — the external-capture seam
     /// (the daemon's pre-grab handshake; the page must never be in a
-    /// shot); `Show` is the focus ping; `SetStatus` drains quietly
-    /// (the editor page shows no status line — the home page owns
-    /// one when the window routes back).
+    /// shot); `Quit` closes with user-quit semantics (the tray
+    /// toggle's hide direction); `Show` is the focus ping;
+    /// `SetStatus` drains quietly (the editor page shows no status
+    /// line — the home page owns one when the window routes back).
     fn poll_page_directives(&mut self, ctx: &Context) {
         let Some(bridge) = self.page.clone() else {
             return;
@@ -1870,7 +1871,7 @@ impl EditorApp {
         ctx.request_repaint_after(crate::home::REPOLL_INTERVAL);
         while let Some(directive) = bridge.borrow_mut().poll_directive() {
             match directive {
-                HomeDirective::Hide => {
+                HomeDirective::Hide | HomeDirective::Quit => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 HomeDirective::Show => {
@@ -4526,7 +4527,7 @@ mod tests {
     fn page_hide_directive_issues_close_command() {
         // The external-capture seam: the daemon's HideForCapture
         // handshake arrives as a Hide directive; the page closes so
-        // it is never in the shot.
+        // it is never in a shot.
         let bridge = RecordingPageBridge::default();
         bridge
             .pending
@@ -4539,6 +4540,31 @@ mod tests {
         assert!(
             close_command_issued(&full),
             "a Hide directive must close the page window"
+        );
+        assert!(
+            bridge.pending.lock().expect("pending mutex").is_empty(),
+            "the directive was consumed"
+        );
+    }
+
+    #[test]
+    fn page_quit_directive_issues_close_command() {
+        // The tray toggle's hide direction (tray-show-hide-toggle):
+        // the page closes with user-quit semantics — the outer loop
+        // exits the process, mid-editor session discarding exactly as
+        // an X-close.
+        let bridge = RecordingPageBridge::default();
+        bridge
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .push_back(HomeDirective::Quit);
+        let mut app = page_app(bridge.clone());
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| app.logic_impl(ui.ctx()));
+        assert!(
+            close_command_issued(&full),
+            "a Quit directive must close the page window"
         );
         assert!(
             bridge.pending.lock().expect("pending mutex").is_empty(),

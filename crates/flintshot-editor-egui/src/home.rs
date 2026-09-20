@@ -75,6 +75,13 @@ pub enum HomeDirective {
     /// hid the window. The outer loop distinguishes this close from
     /// a user quit and reopens on the session's end.
     Hide,
+    /// The window must close now with **user-quit semantics**: the
+    /// process exits, the daemon is unaffected, and a mid-editor
+    /// session discards exactly as an X / Alt+F4 would — the tray
+    /// toggle's hide direction (tray-show-hide-toggle). The outer
+    /// loop classifies this close as a plain user quit (no reopen
+    /// wait).
+    Quit,
     /// Replace the status line text (daemon/connection state).
     SetStatus(String),
 }
@@ -468,6 +475,7 @@ impl HomeApp {
         while let Some(directive) = self.bridge.poll_directive() {
             let focus = matches!(directive, HomeDirective::Show);
             let hide = matches!(directive, HomeDirective::Hide);
+            let quit = matches!(directive, HomeDirective::Quit);
             if focus {
                 // Re-focus is the cheap refresh point: captures the
                 // saves that happened while the editor page was up.
@@ -478,6 +486,12 @@ impl HomeApp {
                 // Not-in-the-shot for externally triggered captures:
                 // the same close the self-trigger path performs, on
                 // the daemon's pre-grab say-so (ADR-0047 gap).
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+            if quit {
+                // The tray toggle's hide direction: the same viewport
+                // close, but the outer loop classifies it as a user
+                // quit (the process exits; no reopen wait).
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
             if focus {
@@ -1139,6 +1153,36 @@ mod tests {
         let mut ui = ui_state();
         ui.apply(&HomeDirective::Hide);
         assert_eq!(ui.status, "connected");
+    }
+
+    #[test]
+    fn quit_directive_leaves_display_state_alone() {
+        let mut ui = ui_state();
+        ui.apply(&HomeDirective::Quit);
+        assert_eq!(ui.status, "connected");
+    }
+
+    #[test]
+    fn quit_directive_closes_the_window_headlessly() {
+        // The tray toggle's hide direction
+        // (tray-show-hide-toggle): the same close the Hide path
+        // performs — the outer loop classifies it with user-quit
+        // semantics (process exits).
+        let bridge = RecordingBridge::default();
+        bridge
+            .pending
+            .lock()
+            .expect("pending mutex")
+            .push_back(HomeDirective::Quit);
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        app.logic_impl(&ctx);
+        // The directive was consumed (not skipped as unknown).
+        assert!(
+            app.bridge.poll_directive().is_none(),
+            "the Quit directive was consumed by the frame"
+        );
     }
 
     #[test]

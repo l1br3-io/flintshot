@@ -216,6 +216,13 @@ struct SharedInner {
     /// The window closed for a hide directive (not a user quit): the
     /// outer loop must wait for the reopen instead of exiting.
     hide_requested: bool,
+    /// The window closed for a quit directive (the tray toggle's
+    /// hide direction): user-quit semantics — the outer loop exits
+    /// rather than waiting for a reopen. Ordered *below* a pending
+    /// capture and a hide request in [`close_reason`]: a capture in
+    /// progress owns the screen and the close, and a hide owes the
+    /// user a reopen.
+    quit_requested: bool,
     /// Whether a window currently exists, per the outer loop
     /// (set open before an epoch runs, closed after it returns).
     /// **State, not a one-shot mark**: the pump's hide-ack
@@ -241,22 +248,24 @@ struct SharedInner {
 impl Shared {
     /// Push one directive for the (open) window and/or the outer
     /// loop. `Show` additionally arms the reopen flag — and drains
-    /// any stale `Hide` (one queued while the window was closed by
-    /// the very capture this Show ends; left in, it would close the
-    /// freshly reopened window). `Hide` arms the outer loop's
-    /// wait-for-reopen. `SetStatus` updates the remembered status a
-    /// reopened window starts from.
+    /// any stale `Hide`/`Quit` (one queued while the window was
+    /// closed by the very capture this Show ends; left in, it would
+    /// close the freshly reopened window). `Hide` arms the outer
+    /// loop's wait-for-reopen; `Quit` arms its exit. `SetStatus`
+    /// updates the remembered status a reopened window starts from.
     fn push_directive(&self, directive: HomeDirective) {
         let mut guard = self.lock();
         match &directive {
             HomeDirective::Show => {
                 guard.should_open = true;
                 guard.hide_requested = false;
+                guard.quit_requested = false;
                 guard
                     .directives
-                    .retain(|d| !matches!(d, HomeDirective::Hide));
+                    .retain(|d| !matches!(d, HomeDirective::Hide | HomeDirective::Quit));
             }
             HomeDirective::Hide => guard.hide_requested = true,
+            HomeDirective::Quit => guard.quit_requested = true,
             HomeDirective::SetStatus(text) => guard.status.clone_from(text),
         }
         guard.directives.push_back(directive);
@@ -345,6 +354,11 @@ impl Shared {
     /// Take the hide request (the outer loop's close classification).
     fn take_hide_requested(&self) -> bool {
         std::mem::take(&mut self.lock().hide_requested)
+    }
+
+    /// Take the quit request (the outer loop's close classification).
+    fn take_quit_requested(&self) -> bool {
+        std::mem::take(&mut self.lock().quit_requested)
     }
 
     /// The outer loop's window-state updates: open before a
@@ -500,6 +514,19 @@ impl HomeCore {
             // this Show fires) — rerouting a closed window's
             // restore home could drop an in-progress editor session.
             IpcEvent::AppFocus | IpcEvent::SettingsFocus => self.app_focus(),
+            // The tray toggle (tray-show-hide-toggle): the daemon
+            // forwards this only when a window is present — resolve
+            // it from our own surface state, never the daemon's.
+            // Capture-hidden → the focus-ping show path (suppressed
+            // while a capture owns the screen, exactly like
+            // `AppFocus`); visible → a quit with X-close semantics.
+            IpcEvent::AppToggle => {
+                if self.hidden {
+                    self.app_focus()
+                } else {
+                    Some(HomeDirective::Quit)
+                }
+            }
             _ => None,
         }
     }
@@ -1089,7 +1116,12 @@ enum CloseReason {
 }
 
 /// Classify a window close: a pending capture command wins, then a
-/// hide request; else the user quit. Consumes exactly one flag.
+/// hide request, then a quit request; else the user quit. Consumes
+/// exactly one flag of whichever kind won. A capture in progress
+/// owns the screen *and* the close (Replace policy); a hide owes the
+/// user a reopen; a quit request — like no flag at all — exits with
+/// user-quit semantics, but is still consumed so the request never
+/// outlives the close it asked for.
 fn close_reason(shared: &Shared) -> CloseReason {
     if let Some(command) = shared.take_pending_capture() {
         return CloseReason::CaptureIntent(command);
@@ -1097,6 +1129,7 @@ fn close_reason(shared: &Shared) -> CloseReason {
     if shared.take_hide_requested() {
         return CloseReason::HiddenByEvent;
     }
+    let _ = shared.take_quit_requested();
     CloseReason::UserQuit
 }
 
@@ -2282,6 +2315,104 @@ mod tests {
         assert!(
             !shared.take_hide_requested(),
             "the second close after one hide is a real user quit"
+        );
+    }
+
+    #[test]
+    fn quit_request_is_taken_exactly_once() {
+        let shared = Shared::default();
+        shared.push_directive(HomeDirective::Quit);
+        assert!(shared.take_quit_requested());
+        assert!(
+            !shared.take_quit_requested(),
+            "the second close after one quit request is a plain close"
+        );
+    }
+
+    /// The close classification's full ordering
+    /// (tray-show-hide-toggle): a pending capture beats a hide beats
+    /// a quit request — a capture in progress owns the screen *and*
+    /// the close; a hide owes the user a reopen; only a lone quit
+    /// request exits with user-quit semantics.
+    #[test]
+    fn close_reason_orders_capture_over_hide_over_quit() {
+        let shared = Shared::default();
+        shared.push_directive(HomeDirective::Quit);
+        shared.push_directive(HomeDirective::Hide);
+        shared.set_pending_capture(PumpCommand::Capture);
+        assert!(matches!(
+            close_reason(&shared),
+            CloseReason::CaptureIntent(PumpCommand::Capture)
+        ));
+        // The weaker flags survived that close; hide outranks quit:
+        assert!(matches!(close_reason(&shared), CloseReason::HiddenByEvent));
+        // The quit alone remains: user-quit semantics, and the close
+        // consumes it —
+        assert!(matches!(close_reason(&shared), CloseReason::UserQuit));
+        assert!(
+            !shared.take_quit_requested(),
+            "the close consumed the quit request"
+        );
+    }
+
+    #[test]
+    fn show_drops_stale_quit_directives_and_flags() {
+        // A quit queued while the window was closed (the toggle raced
+        // the window's exit) must not close the freshly reopened
+        // window: Show — which ends every hide cycle — drains it,
+        // exactly as it drains a stale Hide.
+        let shared = Shared::default();
+        shared.push_directive(HomeDirective::Quit);
+        shared.push_directive(HomeDirective::SetStatus("mid-capture".into()));
+        shared.push_directive(HomeDirective::Show);
+        let mut drained = Vec::new();
+        while let Some(d) = shared.poll_directive() {
+            drained.push(d);
+        }
+        assert!(
+            !drained.contains(&HomeDirective::Quit),
+            "stale Quit dropped on Show: {drained:?}"
+        );
+        assert!(!shared.take_quit_requested(), "and the quit flag cleared");
+    }
+
+    #[test]
+    fn app_toggle_on_a_visible_window_directs_a_quit() {
+        // The daemon only forwards the toggle when this window is
+        // present; visible means the user asked to hide it — X-close
+        // semantics (the process exits).
+        let mut core = HomeCore::default();
+        assert_eq!(
+            core.on_event(&IpcEvent::AppToggle),
+            Some(HomeDirective::Quit)
+        );
+    }
+
+    #[test]
+    fn app_toggle_on_a_capture_hidden_window_shows_when_idle() {
+        // Capture-hidden (surface closed, pump waiting on a Show):
+        // the toggle means *show* — the existing process reopens, no
+        // exit, no respawn.
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        assert_eq!(
+            core.on_event(&IpcEvent::AppToggle),
+            Some(HomeDirective::Show)
+        );
+    }
+
+    #[test]
+    fn app_toggle_is_suppressed_while_a_capture_owns_the_screen() {
+        // Same gate as the focus pings: a capture in progress owns
+        // the screen — the toggle must not reopen the window into the
+        // grab. The window reopens on `SessionEnded` anyway.
+        let mut core = HomeCore::default();
+        core.capture_requested();
+        core.on_event(&IpcEvent::CaptureStarted);
+        assert_eq!(
+            core.on_event(&IpcEvent::AppToggle),
+            None,
+            "the toggle is a dead click while a capture flies"
         );
     }
 

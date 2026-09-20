@@ -360,14 +360,15 @@ impl WindowApp {
     /// The page-level directive poll for routes without a route app
     /// that polls them itself (Loading, Settings): the router owns
     /// the queue there — `Hide` still closes (the not-in-the-shot
-    /// guarantee holds on every route) and `Show` is the focus ping;
+    /// guarantee holds on every route), `Quit` closes with user-quit
+    /// semantics (the tray toggle), and `Show` is the focus ping;
     /// the status line stays home's. Without this poll, a capture
     /// started while the Settings page was open would leave the
     /// window on screen — in the shot.
     fn poll_page_directives(&mut self, ctx: &Context) {
         while let Some(directive) = self.home.poll_directive() {
             match directive {
-                crate::home::HomeDirective::Hide => {
+                crate::home::HomeDirective::Hide | crate::home::HomeDirective::Quit => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 crate::home::HomeDirective::Show => {
@@ -981,6 +982,23 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, egui::ViewportCommand::Close)),
             "Hide closes even while the capture delivers"
+        );
+    }
+
+    /// The tray toggle's hide direction (tray-show-hide-toggle):
+    /// a Quit directive closes from the Loading route too.
+    #[test]
+    fn loading_quit_directive_closes_the_window() {
+        let mut app = loading_app_with_directives(vec![HomeDirective::Quit]);
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            transition_commands(&full)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "Quit closes even while the capture delivers"
         );
     }
 
@@ -1626,6 +1644,23 @@ mod tests {
             "Show focuses; it never closes"
         );
         assert!(commands.contains(&egui::ViewportCommand::Focus));
+    }
+
+    /// The tray toggle's hide direction from the settings page
+    /// (tray-show-hide-toggle): Quit closes there too.
+    #[test]
+    fn quit_directive_on_settings_closes_the_window() {
+        let mut app = settings_app_with_directives(vec![HomeDirective::Quit]);
+        let ctx = egui::Context::default();
+        let full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        assert!(
+            transition_commands(&full)
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "Quit closes the window from the settings page"
+        );
     }
 
     /// A settings-route window fed directives (the router owns the
