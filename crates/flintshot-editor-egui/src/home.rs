@@ -234,6 +234,15 @@ const MAX_GRID_COLUMNS: usize = 8;
 /// window gets fewer columns, never a squeezed card.
 const MIN_CARD_WIDTH: f32 = 150.0;
 
+/// Conservative average pixels per caption character at
+/// `TYPE_XS` — the truncation budget's unit of measure (the
+/// proportional face runs narrower; rounding down is safe).
+const CAPTION_CHAR_PIXELS: f32 = 6.0;
+
+/// The caption budget's floor — tiny cards still show a readable
+/// head of the name.
+const MIN_CAPTION_CHARS: usize = 8;
+
 /// Adaptive grid columns for `available` logical px: floor-fill at
 /// `min_card` (the most whole cards that fit, gap-separated),
 /// clamped so a narrow window gets fewer columns and a huge one
@@ -610,6 +619,54 @@ pub(crate) fn recents_header_caption(count: usize, limit: usize) -> String {
 /// The session header's count term — the bare count. Pure for tests.
 pub(crate) fn session_header_caption(count: usize) -> String {
     count.to_string()
+}
+
+/// A caption's character budget for a card of `width` px, at the
+/// conservative per-char estimate; floored so tiny cards keep a
+/// readable head. Pure; unit-tested.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a floor of a positive width is the definition; the floor keeps the budget usable"
+)]
+fn caption_max_chars(width: f32) -> usize {
+    ((width / CAPTION_CHAR_PIXELS) as usize).max(MIN_CAPTION_CHARS)
+}
+
+/// Middle ellipsis: keeps head + tail around `…`
+/// (`flintshot-2026-…-10-00-00`) so template timestamps stay
+/// identifiable. Budgets below 2 collapse to the bare ellipsis;
+/// the ellipsis counts toward `max_chars`; strings at or under the
+/// budget pass through untouched. Pure; unit-tested.
+fn truncate_middle(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_owned();
+    }
+    if max_chars <= 1 {
+        return "…".to_owned();
+    }
+    let keep = max_chars - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let head_s: String = s.chars().take(head).collect();
+    let tail_s: String = s.chars().skip(count - tail).collect();
+    format!("{head_s}…{tail_s}")
+}
+
+/// The caption galley for `text` on a card of `width`: budgeted,
+/// so long names and metadata ellipsize instead of overflowing.
+fn caption_galley(
+    ui: &egui::Ui,
+    text: &str,
+    width: f32,
+    color: egui::Color32,
+) -> std::sync::Arc<egui::Galley> {
+    ui.painter().layout_no_wrap(
+        truncate_middle(text, caption_max_chars(width)),
+        egui::FontId::proportional(crate::theme::TYPE_XS),
+        color,
+    )
 }
 
 impl HomeApp {
@@ -1026,9 +1083,10 @@ impl HomeApp {
             egui::FontId::proportional(crate::theme::TYPE_XS),
             p::GOLD_DEEP,
         );
-        let meta_galley = ui.painter().layout_no_wrap(
-            metadata_caption(card.dims, bytes, session_age_secs(card.created_at)),
-            egui::FontId::proportional(crate::theme::TYPE_XS),
+        let meta_galley = caption_galley(
+            ui,
+            &metadata_caption(card.dims, bytes, session_age_secs(card.created_at)),
+            rect.width(),
             p::INK_SOFT,
         );
         ui.painter().galley(
@@ -1399,15 +1457,13 @@ impl HomeApp {
             p::PAPER_CREAM,
         );
 
-        // Two caption lines: filename over metadata.
-        let name_galley = ui.painter().layout_no_wrap(
-            card_stem(path),
-            egui::FontId::proportional(crate::theme::TYPE_XS),
-            p::INK,
-        );
-        let meta_galley = ui.painter().layout_no_wrap(
-            metadata_caption(dims, bytes, unix_now().saturating_sub(mtime)),
-            egui::FontId::proportional(crate::theme::TYPE_XS),
+        // Two caption lines: filename over metadata, budgeted to
+        // the card width.
+        let name_galley = caption_galley(ui, &card_stem(path), rect.width(), p::INK);
+        let meta_galley = caption_galley(
+            ui,
+            &metadata_caption(dims, bytes, unix_now().saturating_sub(mtime)),
+            rect.width(),
             p::INK_SOFT,
         );
         ui.painter().galley(
@@ -2400,6 +2456,54 @@ mod tests {
     }
 
     // --- Adaptive recents grid (home-capture-grids Task 003) ---
+    /// `truncate_middle` keeps head + tail around the ellipsis
+    /// (home-capture-grids Task 007).
+    #[test]
+    fn truncate_middle_keeps_head_and_tail() {
+        assert_eq!(truncate_middle("shot", 10), "shot", "short: unchanged");
+        assert_eq!(truncate_middle("abcdef", 6), "abcdef", "exact: unchanged");
+        let out = truncate_middle("flintshot-2026-09-20-10-00-00", 15);
+        assert!(out.chars().count() <= 15, "bounded: {out}");
+        let (head, tail) = out
+            .split_once('…')
+            .expect("a truncated string has one ellipsis");
+        let stem = "flintshot-2026-09-20-10-00-00";
+        assert!(stem.starts_with(head), "head is a real prefix: {out}");
+        assert!(stem.ends_with(tail), "tail is a real suffix: {out}");
+        assert!(!head.is_empty() && !tail.is_empty(), "both sides kept");
+    }
+
+    /// Degenerate budgets never panic: 0 and 1 collapse to the bare
+    /// ellipsis; unicode stems count chars, not bytes.
+    #[test]
+    fn truncate_middle_degenerate_budgets_are_safe() {
+        assert_eq!(truncate_middle("abcdef", 1), "…");
+        assert_eq!(truncate_middle("abcdef", 0), "…");
+        let out = truncate_middle("héllo-wörld-🙂-end", 9);
+        assert!(out.chars().count() <= 9, "char-counted: {out}");
+    }
+
+    /// The caption budget scales with the card and never overflows
+    /// it at the conservative per-char estimate.
+    #[test]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the budget is ≤ width/6 — far below f32's exact range"
+    )]
+    fn caption_max_chars_stays_within_the_card() {
+        for width in [150.0, 155.3, 185.5, 312.0, 1568.0] {
+            let budget = caption_max_chars(width);
+            assert!(
+                budget as f32 * CAPTION_CHAR_PIXELS <= width,
+                "at width {width}, budget {budget} must fit"
+            );
+        }
+        assert!(
+            caption_max_chars(1.0) >= MIN_CAPTION_CHARS,
+            "tiny cards keep a readable floor"
+        );
+    }
+
     /// The session header's count term (home-capture-grids Task 006).
     #[test]
     fn session_header_caption_is_the_bare_count() {
