@@ -143,6 +143,16 @@ pub trait HomeBridge {
         Vec::new()
     }
 
+    /// The recents capacity the header's count promises
+    /// (`ui.recent-captures-limit`). Default: the built-in default.
+    fn recents_limit(&mut self) -> usize {
+        flintshot_core::recents::DEFAULT_RECENTS_LIMIT
+    }
+
+    /// Open the recents save folder in the platform file manager
+    /// (the header's **Open folder** chip). Default: no-op.
+    fn open_recents_folder(&mut self) {}
+
     // -- Recents card actions (recent-captures-v2; defaults keep
     //    test doubles compiling; the app crate's real bridge
     //    overrides these) --
@@ -593,6 +603,11 @@ pub(crate) fn metadata_caption(dims: (u32, u32), bytes: u64, age_secs: u64) -> S
         format_size(bytes),
         age_label(age_secs)
     )
+}
+
+/// The recents header's count term — `12 of 50`. Pure for tests.
+pub(crate) fn recents_header_caption(count: usize, limit: usize) -> String {
+    format!("{count} of {limit}")
 }
 
 impl HomeApp {
@@ -1136,11 +1151,6 @@ impl HomeApp {
     /// pinned).
     fn recents_section(&mut self, ui: &mut egui::Ui) {
         use crate::theme::palette as p;
-        ui.label(
-            egui::RichText::new("RECENT CAPTURES")
-                .size(crate::theme::TYPE_SM)
-                .color(p::INK_SOFT),
-        );
         // Decode pass: one thumbnail lookup per path (cache hit on
         // the common frame; the decode itself stats only on first
         // sight). Idempotent per frame — egui holds no recents
@@ -1154,6 +1164,24 @@ impl HomeApp {
                     .map(|thumb| (path, thumb.mtime))
             })
             .collect();
+        let limit = self.bridge.recents_limit();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("RECENT CAPTURES")
+                    .size(crate::theme::TYPE_SM)
+                    .color(p::INK_SOFT),
+            );
+            ui.label(
+                egui::RichText::new(format!("· {}", recents_header_caption(pairs.len(), limit)))
+                    .size(crate::theme::TYPE_XS)
+                    .color(p::INK_SOFT),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if Self::header_text_chip(ui, "recents-open-folder", "Open folder") {
+                    self.bridge.open_recents_folder();
+                }
+            });
+        });
         if pairs.is_empty() {
             Self::recents_empty_card(ui);
             return;
@@ -1239,6 +1267,53 @@ impl HomeApp {
             4.0,
             3.0,
         ));
+    }
+
+    /// A text cutout chip in the section-header row — the card
+    /// chips' material language, label-sized. Returns whether it
+    /// was clicked.
+    fn header_text_chip(ui: &mut egui::Ui, id: &'static str, label: &str) -> bool {
+        use crate::theme::palette as p;
+        let galley = ui.painter().layout_no_wrap(
+            label.to_owned(),
+            egui::FontId::proportional(crate::theme::TYPE_XS),
+            p::INK,
+        );
+        let w = galley.size().x + 14.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::hover());
+        let resp = ui
+            .interact(rect, egui::Id::new(id), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let radius = egui::CornerRadius::same(crate::theme::POD_RADIUS);
+        ui.painter().add(if resp.hovered() {
+            crate::theme::SHADOW_LIFT.as_shape(rect, radius)
+        } else {
+            crate::theme::SHADOW_RESTING.as_shape(rect, radius)
+        });
+        ui.painter().rect(
+            rect,
+            radius,
+            p::PAPER_CREAM,
+            egui::Stroke::NONE,
+            egui::StrokeKind::Middle,
+        );
+        let inner = rect.shrink(2.0);
+        ui.painter().rect(
+            inner,
+            radius,
+            p::PAPER_CREAM,
+            egui::Stroke::new(1.5, p::PAPER),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().galley(
+            egui::pos2(
+                rect.center().x - galley.size().x / 2.0,
+                rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            p::INK,
+        );
+        resp.clicked()
     }
 
     /// One recent's card: letterboxed thumbnail on cream, the
@@ -1721,6 +1796,8 @@ mod tests {
         /// Session-card targets: resume clicks and discards.
         resumed: Vec<flintshot_core::SessionId>,
         discarded: Vec<flintshot_core::SessionId>,
+        /// Open-folder chip clicks.
+        opened_folder: usize,
     }
 
     /// Bridge double that records requests and replays directives.
@@ -1730,6 +1807,8 @@ mod tests {
         pending: Arc<Mutex<VecDeque<HomeDirective>>>,
         recents: Arc<Mutex<Vec<PathBuf>>>,
         sessions: Arc<Mutex<Vec<SessionCard>>>,
+        /// The capacity `recents_limit` answers with.
+        limit: usize,
     }
 
     impl HomeBridge for RecordingBridge {
@@ -1759,6 +1838,14 @@ mod tests {
 
         fn recent_images(&mut self) -> Vec<PathBuf> {
             self.recents.lock().expect("recents mutex").clone()
+        }
+
+        fn recents_limit(&mut self) -> usize {
+            self.limit
+        }
+
+        fn open_recents_folder(&mut self) {
+            self.rec.0.lock().expect("recorder mutex").opened_folder += 1;
         }
 
         fn copy_recent(&mut self, path: &Path) {
@@ -2296,6 +2383,35 @@ mod tests {
     }
 
     // --- Adaptive recents grid (home-capture-grids Task 003) ---
+    /// The header count term: `N of LIMIT` (home-capture-grids
+    /// Task 005).
+    #[test]
+    fn recents_header_caption_composes_the_count() {
+        assert_eq!(recents_header_caption(0, 50), "0 of 50");
+        assert_eq!(recents_header_caption(12, 50), "12 of 50");
+        assert_eq!(recents_header_caption(50, 50), "50 of 50");
+    }
+
+    /// The header's Open folder chip routes exactly one
+    /// `open_recents_folder` — and does not open the image.
+    #[test]
+    fn open_folder_chip_routes_to_the_bridge() {
+        let (bridge, rec, png) = one_recent();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let chip = ctx
+            .read_response(egui::Id::new("recents-open-folder"))
+            .expect("the Open folder chip renders")
+            .rect;
+        let _ = welcome_frame(&mut app, &ctx, click_at(chip.center()));
+        let guard = rec.0.lock().expect("recorder mutex");
+        assert_eq!(guard.opened_folder, 1, "the chip routed once");
+        assert!(guard.opened.is_empty(), "the chip must not open the image");
+        let _ = png;
+    }
+
     /// Group ordering through the real render path: three files
     /// seeded to now / 25 h ago / 8 days ago must lay out top-to-
     /// bottom in calendar order (home-capture-grids Task 004).

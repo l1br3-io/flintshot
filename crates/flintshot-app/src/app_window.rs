@@ -1904,6 +1904,55 @@ impl HomeBridge for Bridge {
         }
     }
 
+    fn recents_limit(&mut self) -> usize {
+        crate::capture_flow::recents_limit()
+    }
+
+    /// GOTCHA (opener zombie): mirror `reveal_recent`'s spawn +
+    /// reaper-thread pattern — the opener must never linger as a
+    /// zombie, and a naive `status()` on the UI thread stalls the
+    /// window.
+    fn open_recents_folder(&mut self) {
+        let dir = match flintshot_core::Config::load() {
+            Ok(cfg) => cfg.output.resolve_save_dir(),
+            Err(e) => {
+                tracing::warn!(error = %e, "resolving the save dir for the Open folder chip");
+                self.shared.push_directive(HomeDirective::SetStatus(
+                    "could not resolve the captures folder".into(),
+                ));
+                return;
+            }
+        };
+        match std::process::Command::new(opener_for_reveal())
+            .arg(&dir)
+            .spawn()
+        {
+            Ok(child) => {
+                let mut child = child;
+                let spawned = std::thread::Builder::new()
+                    .name("flintshot-open-folder-reaper".into())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    });
+                if let Err(e) = spawned {
+                    tracing::warn!(error = %e, "spawning the open-folder reaper");
+                }
+                tracing::info!(dir = %dir.display(), "opened the captures folder");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    opener = opener_for_reveal(),
+                    "opening the captures folder"
+                );
+                self.shared.push_directive(HomeDirective::SetStatus(format!(
+                    "could not open the folder: {}",
+                    dir.display()
+                )));
+            }
+        }
+    }
+
     fn delete_recent(&mut self, path: &std::path::Path) {
         if !delete_recent_file(path) {
             self.shared.push_directive(HomeDirective::SetStatus(format!(
