@@ -203,7 +203,8 @@ pub struct Snapshot {
     /// Annotation list at capture time (pre-mutation).
     pub anns: Vec<Annotation>,
     /// Source image at capture time. `None` when the action did not
-    /// touch the image (annotation commit); `Some` when it did (crop).
+    /// touch the image (annotation commit); `Some` when it did (crop,
+    /// resize).
     pub image: Option<image::RgbaImage>,
     /// `next_number` at capture time. Captured so undoing a Number
     /// placement decrements the counter back to the pre-placement
@@ -235,7 +236,7 @@ impl Snapshot {
     }
 
     /// Construct a full snapshot capturing image, anns, and counter.
-    /// Used by [`EditorState::crop`].
+    /// Used by [`EditorState::crop`] and [`EditorState::resize`].
     #[must_use]
     pub fn full(
         kind: EditKind,
@@ -1057,6 +1058,63 @@ impl EditorState {
         );
         self.image = new_image;
         self.anns.retain_mut(|ann| ann.crop_and_translate(n));
+        self.pending = None;
+        self.text_anchor = None;
+        self.end_move();
+        self.undo.push(snapshot);
+        self.redo.clear();
+        self.last_edit_kind = None;
+    }
+
+    /// Resize the image to `target_w` px wide, deriving the height
+    /// from the aspect ratio (`h * new_w / w`, rounded, min 1), and
+    /// scale every annotation by the applied factor so the rendered
+    /// composition is unchanged, just smaller.
+    ///
+    /// Mirrors [`crop`](Self::crop)'s exact sequence: close any live
+    /// re-edit session, push a [`Snapshot::full`] (pre-resize image +
+    /// anns), swap in the resized image via
+    /// [`crate::image_ops::resize`], scale the anns, clear `pending` /
+    /// text session / move, then clear `redo`. Never upscales:
+    /// `target_w` clamps to `[1, width]`; at the current width it is a
+    /// no-op (no snapshot pushed). Indices are stable (nothing is
+    /// dropped), but the selection still clears via `end_move`, like
+    /// crop — a stale in-flight move drag must not survive the
+    /// coordinate change.
+    ///
+    /// Interaction with the app-shell selection-phase latch (which
+    /// keys off image-carrying undo snapshots) is safe: the latch is
+    /// one-way by design, so a resize mid-phase behaves exactly like a
+    /// crop mid-phase.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "aspect-derived height is rounded and min-clamped before the u32 cast; factor uses the clamped target; dims ≤ 2^24"
+    )]
+    pub fn resize(&mut self, target_w: u32) {
+        let (w, h) = self.image.dimensions();
+        if w == 0 || h == 0 {
+            return;
+        }
+        let new_w = target_w.clamp(1, w);
+        if new_w == w {
+            return;
+        }
+        let new_h = ((h as f32) * (new_w as f32) / (w as f32)).round().max(1.0) as u32;
+        let factor = (new_w as f32) / (w as f32);
+        self.restore_active_reedit();
+        let snapshot = Snapshot::full(
+            EditKind::Resize,
+            self.elapsed(),
+            self.anns.clone(),
+            self.image.clone(),
+            self.next_number,
+        );
+        self.image = crate::image_ops::resize(&self.image, (new_w, new_h));
+        for ann in &mut self.anns {
+            ann.scale(factor);
+        }
         self.pending = None;
         self.text_anchor = None;
         self.end_move();
@@ -2207,6 +2265,32 @@ fn is_flip_eligible(tool: Tool) -> bool {
     )
 }
 
+/// Multiply a point's coordinates by `factor` in place.
+///
+/// Private helper for [`Annotation::scale`]; `factor` validity is the
+/// caller's contract.
+fn scale_point(p: &mut Point, factor: f32) {
+    p.x *= factor;
+    p.y *= factor;
+}
+
+/// Multiply a rect's corners by `factor` in place.
+fn scale_rect(rect: &mut Rect, factor: f32) {
+    scale_point(&mut rect.min, factor);
+    scale_point(&mut rect.max, factor);
+}
+
+/// Scale a blur strength (u8) by `factor`, rounded and clamped to
+/// ≥ 1 so a blur keeps a visible relative size at any downscale.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "scaled strength rounds to the nearest u8 and clamps to ≥ 1 before the cast"
+)]
+fn scale_strength(strength: u8, factor: f32) -> u8 {
+    (f32::from(strength) * factor).round().clamp(1.0, 255.0) as u8
+}
+
 impl Annotation {
     /// Build the [`crate::text::TextStyle`] describing how a `Text`
     /// variant should be rendered.
@@ -2358,6 +2442,72 @@ impl Annotation {
             Annotation::Text { pos, .. } | Annotation::Number { pos, .. } => {
                 pos.x += dx;
                 pos.y += dy;
+            }
+        }
+    }
+
+    /// Scale every geometry field and px magnitude by `factor` so the
+    /// rendered composition is unchanged at a new image size. Used by
+    /// [`EditorState::resize`].
+    ///
+    /// Per variant: points / rect corners / polyline points multiply,
+    /// as do stroke widths, font sizes, arrow head sizes, marker and
+    /// pencil widths, number diameters, and [`crate::text::TextOutline`]
+    /// widths; blur `strength` (u8) scales rounded and clamped to ≥ 1.
+    /// Dimensionless multipliers (`line_spacing`) and content (`text`,
+    /// `n`, `kind`) stay untouched. A non-finite or ≤ 0 `factor` is a
+    /// no-op (matches how [`EditorState::crop`](Self::crop_and_translate)
+    /// guards degenerates — assert-free).
+    pub fn scale(&mut self, factor: f32) {
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        match self {
+            Annotation::Rect { rect, stroke, .. } | Annotation::Ellipse { rect, stroke, .. } => {
+                scale_rect(rect, factor);
+                stroke.width *= factor;
+            }
+            Annotation::Blur { rect, strength, .. } => {
+                scale_rect(rect, factor);
+                *strength = scale_strength(*strength, factor);
+            }
+            Annotation::Line { a, b, stroke } => {
+                scale_point(a, factor);
+                scale_point(b, factor);
+                stroke.width *= factor;
+            }
+            Annotation::Arrow {
+                a,
+                b,
+                stroke,
+                head_size,
+            } => {
+                scale_point(a, factor);
+                scale_point(b, factor);
+                stroke.width *= factor;
+                *head_size *= factor;
+            }
+            Annotation::Marker { points, width, .. } | Annotation::Pencil { points, width, .. } => {
+                for p in points {
+                    scale_point(p, factor);
+                }
+                *width *= factor;
+            }
+            Annotation::Text {
+                pos,
+                font_size,
+                outline,
+                ..
+            } => {
+                scale_point(pos, factor);
+                *font_size *= factor;
+                if let Some(o) = outline {
+                    o.width *= factor;
+                }
+            }
+            Annotation::Number { pos, diameter, .. } => {
+                scale_point(pos, factor);
+                *diameter *= factor;
             }
         }
     }
@@ -5602,6 +5752,150 @@ mod tests {
         assert!(s.undo.is_empty(), "no snapshot pushed");
     }
 
+    // --- Resize tests ---
+
+    /// Helper: 100×80 state with a Rect (stroke 4) at (20,10)–(80,70)
+    /// and a Text (font 16) at (10, 20).
+    fn resize_state() -> EditorState {
+        let mut s = EditorState::new(image::RgbaImage::new(100, 80));
+        s.anns.push(Annotation::Rect {
+            rect: Rect::new(Point::new(20.0, 10.0), Point::new(80.0, 70.0)),
+            stroke: Stroke::new(Color::RED, 4.0),
+            fill: None,
+        });
+        s.anns.push(Annotation::Text {
+            pos: Point::new(10.0, 20.0),
+            text: "hi".into(),
+            font_size: 16.0,
+            color: Color::RED,
+            family: crate::text::FontFamily::default(),
+            weight: crate::text::FontWeight::default(),
+            style: crate::text::FontStyle::default(),
+            align: crate::text::TextAlign::default(),
+            line_spacing: crate::text::DEFAULT_LINE_SPACING,
+            outline: None,
+            background: None,
+        });
+        s
+    }
+
+    /// Resize halves the image and scales every annotation — geometry
+    /// and magnitudes — by the exact applied factor.
+    #[test]
+    fn resize_scales_image_and_annotations() {
+        let mut s = resize_state();
+        s.resize(50);
+        assert_eq!(s.image.dimensions(), (50, 40), "aspect-derived height");
+        match &s.anns[0] {
+            Annotation::Rect { rect, stroke, .. } => {
+                assert_eq!(rect.min, Point::new(10.0, 5.0));
+                assert_eq!(rect.max, Point::new(40.0, 35.0));
+                assert_eq!(stroke.width, 2.0, "stroke scales by factor");
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+        match &s.anns[1] {
+            Annotation::Text { pos, font_size, .. } => {
+                assert_eq!(*pos, Point::new(5.0, 10.0));
+                assert_eq!(*font_size, 8.0, "font size scales by factor");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    /// Undo restores the original pixels and annotation values
+    /// bit-for-bit; redo replays the resize.
+    #[test]
+    fn resize_is_undoable_and_redoable() {
+        let mut s = resize_state();
+        let original_image = s.image.clone();
+        let original_anns = s.anns.clone();
+        s.resize(50);
+        assert_eq!(s.undo.len(), 1, "one full snapshot pushed");
+        s.undo();
+        assert_eq!(s.image.dimensions(), (100, 80), "dims restored");
+        assert_eq!(
+            s.image.as_raw(),
+            original_image.as_raw(),
+            "pixels bit-for-bit"
+        );
+        assert_eq!(s.anns, original_anns, "annotation values bit-for-bit");
+        s.redo();
+        assert_eq!(s.image.dimensions(), (50, 40), "redo replays the resize");
+        match &s.anns[0] {
+            Annotation::Rect { stroke, .. } => assert_eq!(stroke.width, 2.0),
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// Targets at or above the current width are no-ops: no snapshot,
+    /// no mutation.
+    #[test]
+    fn resize_at_or_above_width_is_noop() {
+        let mut s = resize_state();
+        let before = s.clone();
+        s.resize(100);
+        assert_eq!(s.undo.len(), 0, "current width: no snapshot");
+        s.resize(150);
+        assert_eq!(s.undo.len(), 0, "wider than image: no snapshot");
+        assert_eq!(s.image.dimensions(), before.image.dimensions());
+        assert_eq!(s.anns, before.anns);
+    }
+
+    /// A zero target clamps to 1 px wide; anns scale by 1/w.
+    #[test]
+    fn resize_zero_width_clamps_to_one() {
+        let mut s = resize_state();
+        s.resize(0);
+        assert_eq!(s.image.dimensions(), (1, 1), "1 px wide, derived height");
+        let factor = 1.0_f32 / 100.0;
+        match &s.anns[0] {
+            Annotation::Rect { rect, stroke, .. } => {
+                assert!((rect.min.x - 20.0 * factor).abs() < 1e-6, "scaled by 1/w");
+                assert!((rect.min.y - 10.0 * factor).abs() < 1e-6);
+                assert!((stroke.width - 4.0 * factor).abs() < 1e-6);
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    /// In-flight pending annotation, selection, and move drag are
+    /// cleared — same guarantees as crop.
+    #[test]
+    fn resize_clears_pending_selection_and_move() {
+        let mut s = move_state(); // committed rect at (10,10)–(50,40)
+        s.tool = Tool::Rect;
+        s.begin_annotation(Point::new(5.0, 5.0)); // pending draft
+        s.tool = Tool::Select;
+        s.dispatch_input(&down(Point::new(30.0, 25.0))); // select the rect
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(35.0, 30.0),
+        }); // in-flight move
+        assert!(s.pending.is_some());
+        assert!(!s.selected.is_empty());
+        s.resize(50);
+        assert!(s.pending.is_none(), "pending cleared");
+        assert!(s.selected.is_empty(), "selection cleared");
+        assert!(s.moving.is_none(), "move ended");
+        assert_eq!(s.image.dimensions(), (50, 50));
+    }
+
+    /// Two successive resizes followed by two undos returns the
+    /// original image and annotations.
+    #[test]
+    fn resize_twice_then_undo_twice_restores_original() {
+        let mut s = resize_state();
+        let original_image = s.image.clone();
+        let original_anns = s.anns.clone();
+        s.resize(50);
+        s.resize(25);
+        assert_eq!(s.image.dimensions(), (25, 20));
+        s.undo();
+        s.undo();
+        assert_eq!(s.image.as_raw(), original_image.as_raw());
+        assert_eq!(s.anns, original_anns);
+    }
+
     /// Crop tool: `PointerDown` starts a region; `PointerDrag` extends it.
     #[test]
     fn dispatch_crop_drag_creates_region() {
@@ -6891,9 +7185,13 @@ mod tests {
         s.delete_selected();
         assert_eq!(s.undo.last().unwrap().kind, EditKind::Delete { count: 1 });
 
-        // crop → Crop (the only Snapshot::full site).
+        // crop → Crop (a Snapshot::full site).
         s.crop(Rect::from_xywh(0.0, 0.0, 50.0, 50.0));
         assert_eq!(s.undo.last().unwrap().kind, EditKind::Crop);
+
+        // resize → Resize (the other Snapshot::full site).
+        s.resize(25);
+        assert_eq!(s.undo.last().unwrap().kind, EditKind::Resize);
     }
 
     /// A changed re-edit session commits with `EditText`; an
@@ -7121,5 +7419,198 @@ mod tests {
         assert_eq!(jumped.anns, stepped.anns);
         assert!(jumped.text_reedit.is_none() && stepped.text_reedit.is_none());
         assert_eq!(jumped.undo.len(), stepped.undo.len());
+    }
+
+    /// `scale` multiplies geometry and px magnitudes by the factor
+    /// (0.5 here); content (`kind`) stays untouched. Shape variants.
+    #[test]
+    fn scale_halves_shape_variants() {
+        let cases: Vec<(Annotation, Annotation)> = vec![
+            (
+                Annotation::Rect {
+                    rect: Rect::new(Point::new(1.0, 2.0), Point::new(30.0, 40.0)),
+                    stroke: Stroke::new(Color::RED, 4.0),
+                    fill: None,
+                },
+                Annotation::Rect {
+                    rect: Rect::new(Point::new(0.5, 1.0), Point::new(15.0, 20.0)),
+                    stroke: Stroke::new(Color::RED, 2.0),
+                    fill: None,
+                },
+            ),
+            (
+                Annotation::Ellipse {
+                    rect: Rect::new(Point::new(2.0, 4.0), Point::new(20.0, 10.0)),
+                    stroke: Stroke::new(Color::RED, 3.0),
+                    fill: Some(Color::rgb(0, 0, 255)),
+                },
+                Annotation::Ellipse {
+                    rect: Rect::new(Point::new(1.0, 2.0), Point::new(10.0, 5.0)),
+                    stroke: Stroke::new(Color::RED, 1.5),
+                    fill: Some(Color::rgb(0, 0, 255)),
+                },
+            ),
+            (
+                Annotation::Line {
+                    a: Point::new(1.0, 2.0),
+                    b: Point::new(30.0, 4.0),
+                    stroke: Stroke::new(Color::RED, 2.0),
+                },
+                Annotation::Line {
+                    a: Point::new(0.5, 1.0),
+                    b: Point::new(15.0, 2.0),
+                    stroke: Stroke::new(Color::RED, 1.0),
+                },
+            ),
+            (
+                Annotation::Arrow {
+                    a: Point::new(1.0, 2.0),
+                    b: Point::new(30.0, 4.0),
+                    stroke: Stroke::new(Color::RED, 2.0),
+                    head_size: 10.0,
+                },
+                Annotation::Arrow {
+                    a: Point::new(0.5, 1.0),
+                    b: Point::new(15.0, 2.0),
+                    stroke: Stroke::new(Color::RED, 1.0),
+                    head_size: 5.0,
+                },
+            ),
+            (
+                Annotation::Blur {
+                    rect: Rect::new(Point::new(1.0, 2.0), Point::new(30.0, 40.0)),
+                    kind: BlurKind::Pixelate,
+                    strength: 3,
+                },
+                Annotation::Blur {
+                    rect: Rect::new(Point::new(0.5, 1.0), Point::new(15.0, 20.0)),
+                    kind: BlurKind::Pixelate,
+                    strength: 2,
+                },
+            ),
+        ];
+        assert_eq!(cases.len(), 5, "every shape variant is covered");
+        for (mut before, after) in cases {
+            before.scale(0.5);
+            assert_eq!(before, after);
+        }
+    }
+
+    /// `scale` multiplies geometry and px magnitudes by the factor
+    /// (0.5 here); content (`text`, `n`) and dimensionless multipliers
+    /// (`line_spacing`) stay untouched. Stroke and text variants.
+    #[test]
+    fn scale_halves_stroke_and_text_variants() {
+        let text = |pos: Point, font_size: f32, outline_width: f32| Annotation::Text {
+            pos,
+            text: "hi".into(),
+            font_size,
+            color: Color::RED,
+            family: crate::text::FontFamily::default(),
+            weight: crate::text::FontWeight::default(),
+            style: crate::text::FontStyle::default(),
+            align: crate::text::TextAlign::default(),
+            line_spacing: crate::text::DEFAULT_LINE_SPACING,
+            outline: Some(crate::text::TextOutline {
+                color: Color::rgb(0, 0, 0),
+                width: outline_width,
+            }),
+            background: None,
+        };
+        let cases: Vec<(Annotation, Annotation)> = vec![
+            (
+                Annotation::Marker {
+                    points: vec![Point::new(2.0, 4.0), Point::new(6.0, 8.0)],
+                    color: Color::RED,
+                    width: 8.0,
+                },
+                Annotation::Marker {
+                    points: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)],
+                    color: Color::RED,
+                    width: 4.0,
+                },
+            ),
+            (
+                Annotation::Pencil {
+                    points: vec![Point::new(2.0, 4.0), Point::new(6.0, 8.0)],
+                    color: Color::RED,
+                    width: 6.0,
+                },
+                Annotation::Pencil {
+                    points: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)],
+                    color: Color::RED,
+                    width: 3.0,
+                },
+            ),
+            (
+                text(Point::new(2.0, 4.0), 16.0, 3.0),
+                text(Point::new(1.0, 2.0), 8.0, 1.5),
+            ),
+            (
+                Annotation::Number {
+                    pos: Point::new(2.0, 4.0),
+                    n: 7,
+                    color: Color::RED,
+                    diameter: 28.0,
+                },
+                Annotation::Number {
+                    pos: Point::new(1.0, 2.0),
+                    n: 7,
+                    color: Color::RED,
+                    diameter: 14.0,
+                },
+            ),
+        ];
+        assert_eq!(cases.len(), 4, "every stroke/text variant is covered");
+        for (mut before, after) in cases {
+            before.scale(0.5);
+            assert_eq!(before, after);
+        }
+    }
+
+    /// Factor 1.0 is an identity for every variant.
+    #[test]
+    fn scale_unit_factor_is_identity() {
+        let mut ann = Annotation::Arrow {
+            a: Point::new(1.0, 2.0),
+            b: Point::new(30.0, 4.0),
+            stroke: Stroke::new(Color::RED, 2.5),
+            head_size: 9.0,
+        };
+        let before = ann.clone();
+        ann.scale(1.0);
+        assert_eq!(ann, before);
+    }
+
+    /// Non-finite and non-positive factors are a documented no-op.
+    #[test]
+    fn scale_invalid_factors_are_noop() {
+        let mut ann = Annotation::Number {
+            pos: Point::new(2.0, 4.0),
+            n: 3,
+            color: Color::RED,
+            diameter: 28.0,
+        };
+        let before = ann.clone();
+        for f in [f32::NAN, f32::INFINITY, 0.0, -0.5] {
+            ann.scale(f);
+        }
+        assert_eq!(ann, before);
+    }
+
+    /// Blur strength scales rounded and never drops below 1 — a blur
+    /// keeps a visible relative size even at 25%.
+    #[test]
+    fn scale_blur_strength_clamps_to_one() {
+        let mut ann = Annotation::Blur {
+            rect: Rect::new(Point::new(0.0, 0.0), Point::new(100.0, 100.0)),
+            kind: BlurKind::Gaussian,
+            strength: 1,
+        };
+        ann.scale(0.25);
+        let Annotation::Blur { strength, .. } = ann else {
+            panic!("expected Blur");
+        };
+        assert_eq!(strength, 1);
     }
 }

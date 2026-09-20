@@ -503,7 +503,11 @@ impl WindowApp {
             .editor
             .as_ref()
             .is_some_and(|e| e.copied_visible(ui.input(|i| i.time)));
-        let topbar_action = crate::topbar::show(ui, surface, status.as_deref(), enable, copied);
+        // The Resize item is live only on a shrinkable image (the
+        // editor route; other surfaces render no editor items).
+        let resize_live = self.editor.as_ref().is_some_and(EditorApp::can_resize);
+        let topbar_action =
+            crate::topbar::show(ui, surface, status.as_deref(), enable, copied, resize_live);
         // Route the fired action: editor pages forward everything to
         // the editor's dispatcher; Home dispatches Capture / Open to
         // the home app's own paths; Loading is fully disabled and
