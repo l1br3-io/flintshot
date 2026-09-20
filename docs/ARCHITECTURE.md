@@ -308,31 +308,49 @@ caches the toolkit-specific handle on its side. Core never sees it.
 ### Config
 ```toml
 # ~/.config/flintshot/config.toml
+# (kebab-case keys; the embedded, fully-commented asset is
+# crates/flintshot-core/src/config.default.toml, pinned equal to
+# Config::default by test)
 
 [ui]
-default_color = "#ff0000"
-default_stroke_width = 3.0
-default_font_size = 16.0
-interaction_mode = "editor"  # or "overlay" (Phase 5)
+default-color = "#ff0000"
+default-text-color = "#ff0000"
+default-stroke-width = 3.0
+default-font-size = 16.0
+magnifier-modifier = "Space"
+magnifier-always-on = false
+interaction-mode = "editor"      # or "overlay" (Phase 5)
+flip-to-select = false
+show-statusbar = true
+statusbar-size-mode = "heuristic" # or "exact-png"
+animations = true
+recent-captures-limit = 50       # clamped 1-200 at use
 
 [capture]
-include_cursor = true
-default_delay_ms = 0
-backend = "auto"  # auto | xcap | portal (Linux)
-after_grab = "editor"  # editor | clipboard | upload (native path only)
+include-cursor = true
+default-delay-ms = 0
+backend = "auto"      # auto | xcap | portal (Linux)
+after-grab = "editor" # editor | clipboard | upload (native path only)
+default-mode = "region" # region | fullscreen | window
 
 [hotkeys]
 capture = "Ctrl+Shift+PrintScreen"
 
 [upload]
-default_backend = "imgur"
+default-backend = "imgur"
 
-[ipc]
-socket_path = ""  # empty = platform default
+[output]
+format = "png"           # png | jpeg
+jpeg-quality = 90        # jpeg only
+filename-template = ""   # empty = dialog-first Save
+save-dir = ""            # empty = ~/Pictures/Flintshot (resolved)
+save-clipboard-copies = true
 ```
 
-Loaded via `serde` + `toml_edit`. Hot-reloaded via `notify` file
-watcher in the daemon.
+Loaded via `serde` + `toml_edit` (comments survive re-saves; the
+merge writes every known `[ui]`/`[capture]`/`[hotkeys]`/
+`[upload]`/`[output]` key). Hot-reloaded via `notify` file
+watcher in the daemon. `[ipc]` lands with its phase.
 
 ### Capture: `Capturer` trait + backend registry
 

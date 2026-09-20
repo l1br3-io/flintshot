@@ -20,9 +20,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{FlintshotError, Result};
 
-/// How many entries the index keeps. Most recent first; anything
-/// past the cap drops off the back.
-pub const MAX_RECENTS: usize = 20;
+/// How many entries the index keeps by default (`ui.recent-captures-
+/// limit` overrides per call; clamped 1–200 by the config accessor).
+/// Most recent first; anything past the cap drops off the back.
+pub const DEFAULT_RECENTS_LIMIT: usize = 50;
 
 /// One recents entry: an image path plus its last-recorded
 /// modification time (unix seconds).
@@ -93,9 +94,12 @@ impl Recents {
     }
 
     /// Record `path`: dedupe (an existing entry moves to the
-    /// front), refresh its mtime, cap at [`MAX_RECENTS`]. Pure
+    /// front), refresh its mtime, cap at `limit` (a zero limit is
+    /// defensively treated as 1 — an empty index is never the
+    /// intent). Load does **not** truncate, so a legacy index
+    /// shorter than the new limit grows on the next record. Pure
     /// except for the mtime metadata read.
-    pub fn record(&mut self, path: &Path) {
+    pub fn record(&mut self, path: &Path, limit: usize) {
         self.entries.retain(|e| e.path != path);
         self.entries.insert(
             0,
@@ -104,7 +108,16 @@ impl Recents {
                 mtime: mtime_secs(path),
             },
         );
-        self.entries.truncate(MAX_RECENTS);
+        self.entries.truncate(limit.max(1));
+    }
+
+    /// Drop `path`'s entry (the card Delete's index half).
+    /// Returns whether an entry existed. Order of the rest is
+    /// preserved.
+    pub fn remove(&mut self, path: &Path) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|e| e.path != path);
+        self.entries.len() != before
     }
 
     /// The recorded paths, most recent first.
@@ -165,21 +178,41 @@ fn mtime_secs(path: &Path) -> u64 {
 /// Record `path` into the index stored at `index_path`
 /// (load → record → save). Failures warn and vanish — recents are
 /// advisory; a routing point must never fail over them.
-pub fn record_into(index_path: &Path, path: &Path) {
+pub fn record_into(index_path: &Path, path: &Path, limit: usize) {
     let mut recents = Recents::load_from(index_path);
-    recents.record(path);
+    recents.record(path, limit);
     if let Err(e) = recents.save_to(index_path) {
         tracing::warn!(error = %e, "updating the recents index; ignoring");
     }
 }
 
 /// Record `path` into the index at the platform location.
-pub fn record(path: &Path) {
+pub fn record(path: &Path, limit: usize) {
     if let Some(index_path) = recents_path() {
-        record_into(&index_path, path);
+        record_into(&index_path, path, limit);
     } else {
         tracing::warn!("no platform config_dir available; recents not recorded");
     }
+}
+
+/// Drop `path`'s entry from the index stored at `index_path`
+/// (load → remove → save). Returns whether an entry existed; save
+/// failures warn (advisory data, same rule as [`record_into`]).
+pub fn remove_from(index_path: &Path, path: &Path) -> bool {
+    let mut recents = Recents::load_from(index_path);
+    let removed = recents.remove(path);
+    if removed {
+        if let Err(e) = recents.save_to(index_path) {
+            tracing::warn!(error = %e, "updating the recents index; ignoring");
+        }
+    }
+    removed
+}
+
+/// Drop `path`'s entry from the index at the platform location.
+#[must_use]
+pub fn remove(path: &Path) -> bool {
+    recents_path().is_some_and(|index_path| remove_from(&index_path, path))
 }
 
 /// Resolve `<config_dir>/flintshot/recents.toml`, or `None` where
@@ -216,8 +249,8 @@ mod tests {
         let b = existing_png(dir.path(), "b.png");
 
         let mut r = Recents::new();
-        r.record(&a);
-        r.record(&b);
+        r.record(&a, DEFAULT_RECENTS_LIMIT);
+        r.record(&b, DEFAULT_RECENTS_LIMIT);
         r.save_to(&index).unwrap();
 
         let back = Recents::load_from(&index);
@@ -231,30 +264,116 @@ mod tests {
         let b = existing_png(dir.path(), "b.png");
 
         let mut r = Recents::new();
-        r.record(&a);
-        r.record(&b);
-        r.record(&a);
+        r.record(&a, DEFAULT_RECENTS_LIMIT);
+        r.record(&b, DEFAULT_RECENTS_LIMIT);
+        r.record(&a, DEFAULT_RECENTS_LIMIT);
 
         assert_eq!(r.paths(), vec![a.as_path(), b.as_path()]);
         assert_eq!(r.entries.len(), 2, "the re-record must not duplicate");
     }
 
     #[test]
-    fn cap_drops_off_the_back_at_twenty() {
+    fn record_truncates_at_the_configured_limit() {
         let dir = tempdir().unwrap();
         let mut r = Recents::new();
-        for i in 0..25 {
+        for i in 0..5 {
             let p = existing_png(dir.path(), &format!("shot-{i}.png"));
-            r.record(&p);
+            r.record(&p, 3);
         }
-        assert_eq!(r.entries.len(), MAX_RECENTS);
-        let newest = existing_png(dir.path(), "shot-24.png");
+        assert_eq!(r.entries.len(), 3, "the configured limit caps the index");
+        let newest = existing_png(dir.path(), "shot-4.png");
         assert_eq!(r.paths().first(), Some(&newest.as_path()));
         let oldest = existing_png(dir.path(), "shot-0.png");
         assert!(
             !r.paths().contains(&oldest.as_path()),
             "the oldest entries fall off the back"
         );
+    }
+
+    #[test]
+    fn record_at_the_default_limit_caps_at_fifty() {
+        let dir = tempdir().unwrap();
+        let mut r = Recents::new();
+        for i in 0..55 {
+            let p = existing_png(dir.path(), &format!("shot-{i}.png"));
+            r.record(&p, DEFAULT_RECENTS_LIMIT);
+        }
+        assert_eq!(r.entries.len(), DEFAULT_RECENTS_LIMIT);
+        assert_eq!(DEFAULT_RECENTS_LIMIT, 50, "the shipped default");
+    }
+
+    /// Acceptance 5: a legacy 20-entry index loads unchanged and
+    /// grows to the new limit on the next record.
+    #[test]
+    fn legacy_twenty_index_grows_to_the_new_limit_on_record() {
+        let dir = tempdir().unwrap();
+        let index = dir.path().join("recents.toml");
+        let mut legacy = Recents::new();
+        for i in 0..20 {
+            let p = existing_png(dir.path(), &format!("old-{i}.png"));
+            legacy.record(&p, 20);
+        }
+        legacy.save_to(&index).unwrap();
+
+        let loaded = Recents::load_from(&index);
+        assert_eq!(loaded.entries.len(), 20, "loads unchanged, no truncation");
+
+        let mut grown = loaded;
+        let fresh = existing_png(dir.path(), "new.png");
+        grown.record(&fresh, DEFAULT_RECENTS_LIMIT);
+        assert_eq!(
+            grown.entries.len(),
+            21,
+            "the next record grows past the legacy cap"
+        );
+    }
+
+    /// Acceptance 6: an index written by any prior version (path +
+    /// mtime only, this schema forever) loads with zero migration.
+    #[test]
+    fn prior_version_index_fixture_loads_unchanged() {
+        let dir = tempdir().unwrap();
+        let alive = existing_png(dir.path(), "shot-a.png");
+        let index = dir.path().join("recents.toml");
+        let fixture = format!(
+            "[[entries]]\npath = \"{}\"\nmtime = 1758000000\n",
+            alive.display()
+        );
+        fs::write(&index, fixture).unwrap();
+        let loaded = Recents::load_from(&index);
+        assert_eq!(loaded.paths(), vec![alive.as_path()]);
+        assert_eq!(loaded.entries[0].mtime, 1_758_000_000);
+    }
+
+    #[test]
+    fn remove_drops_exactly_the_entry_and_keeps_order() {
+        let dir = tempdir().unwrap();
+        let a = existing_png(dir.path(), "a.png");
+        let b = existing_png(dir.path(), "b.png");
+        let c = existing_png(dir.path(), "c.png");
+
+        let mut r = Recents::new();
+        r.record(&a, DEFAULT_RECENTS_LIMIT);
+        r.record(&b, DEFAULT_RECENTS_LIMIT);
+        r.record(&c, DEFAULT_RECENTS_LIMIT);
+
+        assert!(r.remove(&b));
+        assert_eq!(r.paths(), vec![c.as_path(), a.as_path()]);
+        assert!(!r.remove(&b), "a second remove is a no-op");
+    }
+
+    #[test]
+    fn remove_from_updates_the_index_file() {
+        let dir = tempdir().unwrap();
+        let index = dir.path().join("recents.toml");
+        let a = existing_png(dir.path(), "a.png");
+        let b = existing_png(dir.path(), "b.png");
+        record_into(&index, &a, DEFAULT_RECENTS_LIMIT);
+        record_into(&index, &b, DEFAULT_RECENTS_LIMIT);
+
+        assert!(remove_from(&index, &b));
+        let back = Recents::load_from(&index);
+        assert_eq!(back.paths(), vec![a.as_path()], "b is gone, a stays");
     }
 
     #[test]
@@ -265,8 +384,8 @@ mod tests {
         let dead = dir.path().join("moved-away.png");
 
         let mut r = Recents::new();
-        r.record(&alive);
-        r.record(&dead);
+        r.record(&alive, DEFAULT_RECENTS_LIMIT);
+        r.record(&dead, DEFAULT_RECENTS_LIMIT);
         fs::remove_file(&dead).ok();
         r.save_to(&index).unwrap();
 
@@ -287,7 +406,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let a = existing_png(dir.path(), "a.png");
         let mut r = Recents::new();
-        r.record(&a);
+        r.record(&a, DEFAULT_RECENTS_LIMIT);
         let mtime = r.entries.first().unwrap().mtime;
         assert!(mtime > 0, "a freshly written file has a real mtime");
     }
@@ -299,8 +418,8 @@ mod tests {
         let a = existing_png(dir.path(), "a.png");
         let b = existing_png(dir.path(), "b.png");
 
-        record_into(&index, &a);
-        record_into(&index, &b);
+        record_into(&index, &a, DEFAULT_RECENTS_LIMIT);
+        record_into(&index, &b, DEFAULT_RECENTS_LIMIT);
 
         let back = Recents::load_from(&index);
         assert_eq!(back.paths(), vec![b.as_path(), a.as_path()]);
