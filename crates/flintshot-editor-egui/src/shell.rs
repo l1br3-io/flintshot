@@ -152,6 +152,14 @@ pub trait EditorPageBridge {
     /// image and replace the page's image. Same contract as
     /// [`Self::open_image`].
     fn request_paste(&mut self) -> bool;
+
+    /// Committed annotations changed this frame (tool commit,
+    /// delete, move, crop confirm, history restore — anything that
+    /// mutated `state.anns`, whichever pass caused it). The host
+    /// rewrites the session sidecar here so annotations are
+    /// crash-safe between route changes. Default no-op: only the
+    /// app window's page bridge has a session store behind it.
+    fn annotations_committed(&mut self, _anns: &[flintshot_core::Annotation]) {}
 }
 
 /// Shared handle to the boxed [`EditorPageBridge`]: the shell keeps

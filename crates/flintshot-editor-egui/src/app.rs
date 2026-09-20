@@ -212,6 +212,10 @@ pub(crate) struct EditorApp {
     /// the page stays; see [`EditorPageBridge`]). `None` = the worker
     /// window lifecycle of every pre-single-window path.
     page: Option<crate::shell::PageBridgeSlot>,
+    /// The annotations as of the last `annotations_committed` call —
+    /// the diff baseline for the per-commit flush. Content equality
+    /// (not a mutation hook) is the commit detector.
+    flushed_anns: Vec<flintshot_core::Annotation>,
     /// Worker-window seam for the topbar overflow's **Settings**
     /// entry: worker windows never route to Settings in-window (spec
     /// §Settings route — there is no home behind a worker), so the
@@ -339,6 +343,7 @@ impl EditorApp {
         let cfg = Config::load().unwrap_or_default();
         let magnifier_always_on = cfg.ui.magnifier_always_on;
         let magnifier_key = parse_magnifier_key(&cfg.ui.magnifier_modifier);
+        let flushed_anns = state.anns.clone();
         Self {
             statusbar_size: None,
             config: cfg.clone(),
@@ -373,6 +378,7 @@ impl EditorApp {
             rail: rail::RailState::default(),
             floating_rects: Vec::new(),
             resize_menu: topbar::ResizeMenu::default(),
+            flushed_anns,
         }
     }
 
@@ -1139,6 +1145,26 @@ impl EditorApp {
         }
 
         self.handle_pointer_input(ctx);
+        self.flush_committed_annotations();
+    }
+
+    /// Per-commit flush: hand newly committed annotations to the
+    /// page bridge in the frame they land — tool commits, deletes,
+    /// moves, crop confirms, history restores, panel edits; every
+    /// origin mutates `state.anns` before a pass ends. Runs at the
+    /// tail of both `logic_impl` and `ui_impl` so whichever pass
+    /// carried the mutation flushes within the same frame; the
+    /// equality guard makes the second call free. Annotation sets
+    /// are small (tens), so the per-frame compare is negligible.
+    fn flush_committed_annotations(&mut self) {
+        let Some(bridge) = self.page.clone() else {
+            return;
+        };
+        if self.state.anns == self.flushed_anns {
+            return;
+        }
+        self.flushed_anns.clone_from(&self.state.anns);
+        bridge.borrow_mut().annotations_committed(&self.state.anns);
     }
 
     /// In-text press interception (text-selection-highlight): resolve
@@ -1742,6 +1768,7 @@ impl EditorApp {
             // the panel today — the topbar owns them.
             _ => {}
         }
+        self.flush_committed_annotations();
     }
 }
 
@@ -3507,6 +3534,8 @@ mod tests {
         /// Chrome-open calls (path, routed).
         opened: Vec<(PathBuf, bool)>,
         pastes: usize,
+        /// Per-commit flush calls (one entry per changed frame).
+        committed: Vec<Vec<flintshot_core::Annotation>>,
     }
 
     /// Bridge double: records reports/statuses, replays directives.
@@ -3554,6 +3583,14 @@ mod tests {
             rec.pastes += 1;
             true
         }
+
+        fn annotations_committed(&mut self, anns: &[flintshot_core::Annotation]) {
+            self.rec
+                .lock()
+                .expect("recorder mutex")
+                .committed
+                .push(anns.to_vec());
+        }
     }
 
     /// A page-mode `EditorApp` over a recording bridge.
@@ -3566,6 +3603,35 @@ mod tests {
             false,
             slot,
         )
+    }
+
+    /// The per-commit flush: annotations that land mid-edit reach
+    /// the bridge within the same frame's logic pass, and stay
+    /// quiet while unchanged.
+    #[test]
+    fn committed_annotations_flush_through_the_page_bridge() {
+        let bridge = RecordingPageBridge::default();
+        let mut app = page_app(bridge.clone());
+        let ctx = egui::Context::default();
+
+        app.state_mut().anns.push(flintshot_core::Annotation::Line {
+            a: flintshot_core::Point::new(1.0, 1.0),
+            b: flintshot_core::Point::new(9.0, 9.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 2.0),
+        });
+        app.logic_impl(&ctx);
+
+        let rec = bridge.rec.lock().expect("recorder mutex");
+        assert_eq!(rec.committed.len(), 1, "the change flushed this frame");
+        assert_eq!(rec.committed[0].len(), 1);
+        drop(rec);
+
+        app.logic_impl(&ctx);
+        assert_eq!(
+            bridge.rec.lock().expect("recorder mutex").committed.len(),
+            1,
+            "an unchanged frame flushes nothing"
+        );
     }
 
     // --- Stable viewport fit (editor-capture-ux Task 004) ---

@@ -393,6 +393,28 @@ impl Shared {
         }
     }
 
+    /// The per-commit flush: rewrite the tracked entry's sidecar
+    /// with the just-committed annotations (crash-safety between
+    /// route changes). No binding — an untracked fallback editor or
+    /// a saved-and-kept-editing capture — is a no-op here; the
+    /// leave-flush files those with their image.
+    fn commit_active_annotations(&self, anns: &[flintshot_core::Annotation]) {
+        if let Some(id) = self.lock().active_session {
+            self.session.update_anns(id, anns);
+        }
+    }
+
+    /// A save graduates the tracked capture into recents: the
+    /// session entry (and its files) go. The binding is dropped too
+    /// — if the user keeps editing the now-saved image, the next
+    /// leave-flush files those edits as a fresh unsaved capture
+    /// instead of resurrecting the graduated entry.
+    fn graduate_active_session(&self) {
+        if let Some(id) = self.lock().active_session.take() {
+            self.session.remove(id);
+        }
+    }
+
     /// Take the route-home intent, if one waits.
     fn take_route_home(&self) -> bool {
         std::mem::take(&mut self.lock().route_home)
@@ -1896,6 +1918,11 @@ impl EditorPageBridge for PageBridge {
         // self-reports; a copy has nothing to track).
         if let EditorOutcome::Saved(path) = outcome {
             flintshot_core::recents::record(path, crate::capture_flow::recents_limit());
+            // The capture graduated to recents — its session scratch
+            // space goes. Uploads / copies / cancels deliberately
+            // keep the entry (spec lifecycle: only save or an
+            // explicit discard removes).
+            self.shared.graduate_active_session();
             match crate::ipc_client::delegate_to(None, &Request::ReportSaved { path: path.clone() })
             {
                 Ok(_) => tracing::debug!(path = %path.display(), "reported the page's save"),
@@ -1904,6 +1931,10 @@ impl EditorPageBridge for PageBridge {
                 }
             }
         }
+    }
+
+    fn annotations_committed(&mut self, anns: &[flintshot_core::Annotation]) {
+        self.shared.commit_active_annotations(anns);
     }
 
     fn set_status(&mut self, status: &str) {
@@ -3558,6 +3589,90 @@ mod tests {
         match page {
             Page::Editor(p) => assert_eq!(p.session_id, Some(id)),
             other => panic!("editor restores as editor, got {other:?}"),
+        }
+    }
+
+    /// Saving graduates the tracked capture into recents — the
+    /// session entry goes.
+    #[test]
+    fn saving_graduates_the_active_session_entry() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (shared, _dir) = shared_with_session();
+        shared.arm_editor(fixture_png_state((2, 2)), false, None);
+        let id = shared.session.list()[0].id;
+        shared.set_active_session(Some(id));
+        let shared = std::sync::Arc::new(shared);
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::clone(&shared),
+        };
+
+        bridge.report_outcome(&EditorOutcome::Saved(std::path::PathBuf::from(
+            "/tmp/graduated.png",
+        )));
+
+        assert!(
+            shared.session.list().is_empty(),
+            "the entry graduated; only recents holds the capture now"
+        );
+    }
+
+    /// Uploads, copies, and cancels deliberately keep the entry
+    /// (spec lifecycle: no disk file is guaranteed for an upload; a
+    /// copy is not a save; Esc is not a discard).
+    #[test]
+    fn upload_copy_and_cancel_keep_the_active_session_entry() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (shared, _dir) = shared_with_session();
+        shared.arm_editor(fixture_png_state((2, 2)), false, None);
+        shared.set_active_session(Some(shared.session.list()[0].id));
+        let shared = std::sync::Arc::new(shared);
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::clone(&shared),
+        };
+
+        for outcome in [
+            EditorOutcome::Uploaded(String::new()),
+            EditorOutcome::CopiedToClipboard,
+            EditorOutcome::Cancelled,
+        ] {
+            bridge.report_outcome(&outcome);
+            assert_eq!(
+                shared.session.list().len(),
+                1,
+                "{outcome:?} keeps the session entry"
+            );
+        }
+    }
+
+    /// The per-commit flush rewrites the sidecar through the page
+    /// bridge — annotation crash-safety between route changes.
+    #[test]
+    fn annotations_committed_rewrites_the_sidecar_same_frame() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (shared, _dir) = shared_with_session();
+        shared.arm_editor(fixture_png_state((2, 2)), false, None);
+        let id = shared.session.list()[0].id;
+        shared.set_active_session(Some(id));
+        let shared = std::sync::Arc::new(shared);
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::clone(&shared),
+        };
+
+        let anns = vec![test_line_ann()];
+        bridge.annotations_committed(&anns);
+        // The sidecar rewrite is synchronous: read it back through
+        // the store's own disk mirror.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(cap) = shared.session.load(id) {
+                assert_eq!(cap.anns, anns, "the committed annotation is on disk");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the PNG never landed");
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
