@@ -6,4 +6,4 @@
 - [x] 004 Save graduation + per-commit annotation flush
 - [x] 005 Resume path + reopen-restore rebuild
 - [x] 006 Home "This session" section
-- [ ] 007 Docs — CHANGELOG, ADR, AGENTS row
+- [x] 007 Docs — CHANGELOG, ADR, AGENTS row
