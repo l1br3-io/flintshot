@@ -1083,11 +1083,18 @@ impl OverlayApp {
                 }
             }
         }
-        // Pointer events always return `Continue` today; future
-        // pointer-side outcomes (Task 006+) surface as a compile
-        // error here rather than silently dropping.
         for event in pointer_events {
-            let _ = self.state.dispatch_input(&event);
+            // The overlay's answer to FocusProperties: none — there
+            // is no properties panel to bring forward (the compact
+            // rail + accept row are the whole chrome). The gesture's
+            // core effects (selection + tool flip) have already
+            // landed; the comparison exists to document that this
+            // outcome is expected and intentionally side-effect-free
+            // here. Every other pointer-born outcome is still
+            // `Continue`.
+            if self.state.dispatch_input(&event) == DispatchOutcome::FocusProperties {
+                // Intentionally empty.
+            }
         }
 
         self.update_pointer_chrome(ctx, panel, pos, at, hit_radius, over_toolbar);
@@ -3944,5 +3951,49 @@ mod tests {
         drag_to(&ctx, &mut app, (end_x, 65.0), 3.1);
         release_at(&ctx, &mut app, (end_x, 65.0), 3.2);
         assert_eq!(app.state.selection_range(), Some(0..5));
+    }
+
+    // --- Double-click quick-select (dblclick-select-properties) ---
+
+    /// Overlay fixture on the Rect tool with a usable region and a
+    /// committed arrow inside it — the quick-select target. The
+    /// outcome slots are kept by the test so side effects are
+    /// observable.
+    fn shape_gesture_overlay_app() -> (egui::Context, OverlayApp, OutcomeSlot) {
+        let ctx = egui::Context::default();
+        let mut s = blank_state(320, 320);
+        s.crop_region = Some(Rect::from_xywh(10.0, 10.0, 190.0, 190.0));
+        s.anns.push(Annotation::Arrow {
+            a: Point::new(30.0, 30.0),
+            b: Point::new(100.0, 100.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+            head_size: 10.0,
+        });
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let mut app = OverlayApp::new(s, &ctx, Rc::clone(&outcome), Rc::new(RefCell::new(None)));
+        app.state.tool = Tool::Rect;
+        (ctx, app, outcome)
+    }
+
+    /// The quick-select route lands through the overlay pump —
+    /// selection + tool flip are core-side — and the
+    /// `FocusProperties` outcome is a documented no-op here: the
+    /// overlay has no properties panel, and nothing publishes or
+    /// closes as a side effect.
+    #[test]
+    fn overlay_doubleclick_quick_selects_without_side_effects() {
+        let (ctx, mut app, outcome) = shape_gesture_overlay_app();
+        gesture_frame(&ctx, &mut app, 0.0, vec![]);
+        gesture_frame(&ctx, &mut app, 0.1, vec![]);
+        press_at(&ctx, &mut app, (60.0, 60.0), 1.0);
+        release_at(&ctx, &mut app, (60.0, 60.0), 1.05);
+        press_at(&ctx, &mut app, (60.0, 60.0), 1.1);
+        assert_eq!(app.state.selected, vec![0], "quick-select landed");
+        assert_eq!(app.state.tool, Tool::Select, "flipped to Select");
+        assert!(app.state.pending.is_none(), "press-begun draft canceled");
+        assert!(
+            outcome.borrow().is_none(),
+            "the FocusProperties no-op publishes nothing"
+        );
     }
 }

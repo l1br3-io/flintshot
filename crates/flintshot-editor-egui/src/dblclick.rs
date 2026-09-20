@@ -1,10 +1,12 @@
 //! Double-click synthesis for the two event pumps.
 //!
-//! Core's [`InputEvent::DoubleClick`] re-edit trigger needs the shell
+//! Core's [`InputEvent::DoubleClick`] gesture route needs the shell
 //! to detect the gesture and emit the event **in addition to** the
 //! second press's [`InputEvent::PointerDown`], in the same frame,
 //! immediately after it — the dispatcher relies on that ordering
-//! (select, then upgrade to a re-edit session).
+//! (the press selects / begins the annotation, then the
+//! double-click upgrades it: re-edit on a text hit, quick-select +
+//! `FocusProperties` on any other hit).
 //!
 //! egui 0.35 classifies clicks on *release*
 //! (`PointerEvent::Released { click }`), which is both later than

@@ -20,6 +20,30 @@ Categories used below:
 
 ### Added
 
+- **Double-click selects + focuses Properties** (effort
+  `dblclick-select-properties`). A double-click on the canvas now
+  follows Snagit-style semantics instead of being a Text-tool-only
+  re-edit trigger:
+  - On a committed **text** annotation (from any tool, including
+    Select): lift-out re-edit session — unchanged editor convention,
+    now reachable everywhere. The armed drag-grab is neutralized so
+    the session opens clean.
+  - On any **other** committed annotation (Rect, Ellipse, Line,
+    Arrow, Marker, Pencil, Blur, Number): quick-select — the hit
+    becomes the live selection, the tool flips to Select, and the
+    app window's right panel flips to its PROPERTIES tab (new
+    `DispatchOutcome::FocusProperties`; a hidden panel stays
+    hidden). Draw with the Rect tool, double-click the arrow,
+    restyle / drag / `Del` it without a toolbar trip.
+  - On a text-tool caret over a non-text annotation: the fresh
+    caret diverts to quick-select (mid-composition drafts keep
+    word-select).
+  - On **empty space**: byte-for-byte today's no-op.
+  - The overlay's compact editor has no properties panel; the
+    outcome is a documented no-op there (selection + tool flip
+    still land). Selection and tool flips are chrome — no undo
+    history entries.
+
 - **Home capture grids rework** (effort `home-capture-grids`). The
   home page's two capture sections get a sharper, more informative
   layout:
