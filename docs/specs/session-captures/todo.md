@@ -1,6 +1,6 @@
 # Session Captures — task status (single source; flip per completed task)
 
-- [ ] 001 Core `SessionStore` + temp-dir persistence
+- [x] 001 Core `SessionStore` + temp-dir persistence
 - [ ] 002 App ownership, lifecycle, insert-on-arrival
 - [ ] 003 Flush-on-leave + active-session plumbing
 - [ ] 004 Save graduation + per-commit annotation flush
