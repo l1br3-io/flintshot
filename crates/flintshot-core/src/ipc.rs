@@ -171,6 +171,16 @@ pub enum Request {
     /// worker with `--route settings` (which exits promptly when the
     /// app instance lock is held — the broadcast did the real work).
     OpenSettings,
+    // tray-show-hide-toggle effort — appended (postcard variant-index
+    // rule):
+    /// Client → daemon: toggle the app window (tray *Show/Hide
+    /// flintshot*). Pairs with [`Event::AppToggle`]. The daemon
+    /// resolves the direction from window presence: no window → the
+    /// [`Request::OpenApp`] choreography (broadcast + app-worker
+    /// spawn); window present → broadcast [`Event::AppToggle`] only
+    /// and spawn nothing — the window resolves it from its own
+    /// surface state.
+    ToggleWindow,
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -294,6 +304,14 @@ pub enum Event {
     /// its settings page — the Settings analogue of
     /// [`Event::AppFocus`].
     SettingsFocus,
+    // tray-show-hide-toggle effort — appended (postcard variant-index
+    // rule):
+    /// Broadcast on [`Request::ToggleWindow`] only when the presence
+    /// oracle says an app window is live (the daemon never spawns on
+    /// this path). The window resolves it from its own surface state:
+    /// visible → graceful exit (X-close semantics), capture-hidden →
+    /// reopen.
+    AppToggle,
 }
 
 /// One entry of an [`Event::ShortcutsBound`] reply: a bound shortcut's
@@ -405,6 +423,8 @@ mod tests {
             },
             // settings-improvement — appended (postcard variant-index rule)
             Request::OpenSettings,
+            // tray-show-hide-toggle — appended (postcard variant-index rule)
+            Request::ToggleWindow,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");
@@ -455,6 +475,8 @@ mod tests {
             },
             // settings-improvement — appended (postcard variant-index rule)
             Event::SettingsFocus,
+            // tray-show-hide-toggle — appended (postcard variant-index rule)
+            Event::AppToggle,
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode event");

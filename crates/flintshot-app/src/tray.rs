@@ -1,12 +1,16 @@
 //! System tray menu (`tray-icon` + `muda`), behind the `tray` feature.
 //!
-//! The menu offers *Open app window*, one **Capture** item (the
+//! The menu offers *Show/Hide flintshot*, one **Capture** item (the
 //! single Capture action, native-capture-ux), *Settings*, and
-//! *Quit*. The former *Open config* and *Bind shortcuts…* items were
-//! removed with the settings-improvement effort — the settings page
-//! is the single preferences surface now (*Edit config file* /
-//! *Rebind shortcuts…* live there), and their ids are pinned dead by
-//! test. Since ADR-0042 this icon is
+//! *Quit*. The toggle is one static label — the Telegram/Discord
+//! tray convention — because the daemon (not the tray) resolves the
+//! direction from window presence (`Request::ToggleWindow`; a live
+//! label would need a daemon→helper reverse feed). The former *Open
+//! app window* item retired with this swap and its `flintshot.app`
+//! id is pinned dead by test, joining the earlier *Open config* /
+//! *Bind shortcuts…* retirements (settings-improvement — the
+//! settings page is the single preferences surface). Since ADR-0042
+//! this icon is
 //! built by the **tray helper** process (`flintshot tray`,
 //! [`crate::tray_helper`]), spawned and supervised by the daemon:
 //! the helper's process-exit is the only causal SNI unregistration,
@@ -24,7 +28,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 // Stable string ids — `MenuEvent::id` is matched against these. Kept
 // short and namespaced so they don't collide with any muda defaults.
-const ID_OPEN_APP: &str = "flintshot.app";
+const ID_TOGGLE_WINDOW: &str = "flintshot.toggle-window";
 const ID_CAPTURE: &str = "flintshot.capture";
 const ID_SETTINGS: &str = "flintshot.settings";
 const ID_QUIT: &str = "flintshot.quit";
@@ -45,12 +49,12 @@ pub(crate) enum TrayAction {
 
 /// Map a menu event to the action it should trigger, or `None` for an
 /// unknown id (e.g. events not from our menu — including the retired
-/// *Open config* / *Bind shortcuts…* ids, which are pinned dead by
-/// test and must never be reused).
+/// *Open app window* / *Open config* / *Bind shortcuts…* ids, which
+/// are pinned dead by test and must never be reused).
 #[must_use]
 pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
     match event.id.as_ref() {
-        ID_OPEN_APP => Some(TrayAction::Request(Request::OpenApp)),
+        ID_TOGGLE_WINDOW => Some(TrayAction::Request(Request::ToggleWindow)),
         ID_CAPTURE => Some(TrayAction::Request(Request::Capture { delay_ms: 0 })),
         ID_SETTINGS => Some(TrayAction::Request(Request::OpenSettings)),
         ID_QUIT => Some(TrayAction::Request(Request::Quit)),
@@ -58,7 +62,7 @@ pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
     }
 }
 
-/// Build the tray icon with its context menu: *Open app window* /
+/// Build the tray icon with its context menu: *Show/Hide flintshot* /
 /// *Capture* / *Settings* / *Quit*. The returned [`TrayIcon`] must
 /// be held alive for the daemon's **whole** lifetime — exactly one
 /// registration per process (a dropped handle never unregisters the
@@ -77,13 +81,13 @@ pub(crate) fn build() -> eyre::Result<TrayIcon> {
     }
 
     let menu = Menu::new();
-    let open_app = MenuItem::with_id(ID_OPEN_APP, "Open app window", true, None);
+    let toggle_window = MenuItem::with_id(ID_TOGGLE_WINDOW, "Show/Hide flintshot", true, None);
     let capture = MenuItem::with_id(ID_CAPTURE, "Capture", true, None);
     let settings = MenuItem::with_id(ID_SETTINGS, "Settings", true, None);
     let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
 
     if let Err(e) = menu
-        .append(&open_app)
+        .append(&toggle_window)
         .and_then(|()| menu.append(&capture))
         .and_then(|()| menu.append(&settings))
         .and_then(|()| menu.append(&PredefinedMenuItem::separator()))
@@ -153,10 +157,12 @@ mod tests {
     }
 
     #[test]
-    fn open_app_maps_to_request() {
+    fn toggle_window_maps_to_request() {
+        // The single static toggle item (tray-show-hide-toggle): the
+        // daemon resolves the direction; the label never flips.
         assert!(matches!(
-            action_for(&event(ID_OPEN_APP)),
-            Some(TrayAction::Request(Request::OpenApp))
+            action_for(&event(ID_TOGGLE_WINDOW)),
+            Some(TrayAction::Request(Request::ToggleWindow))
         ));
     }
 
@@ -219,9 +225,17 @@ mod tests {
     /// features moved to the settings page, and the ids are dead,
     /// never to be reused (the `legacy_capture_ids_are_gone`
     /// precedent).
+    ///
+    /// Pinned (tray-show-hide-toggle): `flintshot.app` — the retired
+    /// *Open app window* item — joins the dead list; the toggle
+    /// (`flintshot.toggle-window`) replaced it.
     #[test]
     fn legacy_config_and_bind_ids_are_gone() {
-        for legacy in ["flintshot.open-config", "flintshot.bind-shortcuts"] {
+        for legacy in [
+            "flintshot.open-config",
+            "flintshot.bind-shortcuts",
+            "flintshot.app",
+        ] {
             assert!(
                 action_for(&event(legacy)).is_none(),
                 "legacy id `{legacy}` must not resolve anymore"

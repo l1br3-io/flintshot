@@ -266,6 +266,10 @@ mod tests {
             // `OpenApp`'s implicit case).
             Request::OpenApp,
             Request::OpenSettings,
+            // tray-show-hide-toggle: the toggle never grabs the
+            // screen in either direction — no popup to close, the
+            // helper stays.
+            Request::ToggleWindow,
         ];
         for request in &staying {
             assert!(!exits_after_action(request), "{request:?} must stay");
