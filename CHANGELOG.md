@@ -18,6 +18,39 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- **Session captures: unsaved captures survive navigation until app
+  exit** (effort `session-captures`; ADR-0067). Every capture that
+  lands in the app window's editor is tracked — image plus committed
+  annotations — in a temp-dir session store
+  (`$XDG_RUNTIME_DIR/flintshot/session/`, advisory, swept on startup,
+  cleared on graceful exit, never resumed across restarts).
+  - *Navigate away, come back*: going Home (or Settings, or an
+    external capture superseding the editor) no longer loses
+    in-session annotations — Home shows a **"This session"** section
+    above the recents grid with resumable cards (live thumbnails,
+    "Unsaved" caption); clicking one reopens the editor with every
+    committed annotation intact (undo/redo history resets by
+    design). Mid-edit supersedes stash the outgoing capture as a
+    card instead of discarding it.
+  - *Lifecycle*: annotations flush per-commit (crash-safe sidecar
+    rewrites) and at every editor end (route swaps, image
+    replacements, window-closing exits); **saving** graduates the
+    capture into recents and removes its card; **uploads, copies,
+    and Esc deliberately keep it** (no disk file is guaranteed for
+    an upload); the card's two-step **Discard** chip is the only
+    user destroy; closing the app clears the scratch dir.
+  - *Hidden-close restores now keep annotations* when the store
+    entry lives (the documented "Replace policy's loss" is gone);
+    the bare pre-edit stash remains only as the store-miss fallback.
+  - New surface: `flintshot_core::{SessionStore, SessionId,
+    SessionCapture, SessionSummary, session_dir}`,
+    `RouteHost::editor_route_left`,
+    `EditorPageBridge::annotations_committed`,
+    `HomeBridge::{open_session_capture, session_captures,
+    discard_session_capture}`, `SessionCard`.
+
 ### Changed
 
 - **Tray / applet *Open app window* now routes the open window to its
