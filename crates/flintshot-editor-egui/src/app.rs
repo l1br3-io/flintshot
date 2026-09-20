@@ -1009,6 +1009,21 @@ impl EditorApp {
 }
 
 impl EditorApp {
+    /// The live editor state — the only non-stale copy once the
+    /// user has edited (the window router reads it for the
+    /// leave-route annotation flush).
+    pub(crate) fn state(&self) -> &EditorState {
+        &self.state
+    }
+
+    /// Test-only: mutate the live state, proving the router's
+    /// leave-flush reads the editor app, not a construction
+    /// snapshot.
+    #[cfg(test)]
+    pub(crate) fn state_mut(&mut self) -> &mut EditorState {
+        &mut self.state
+    }
+
     /// Headless-callable core of [`App::logic`](EditorApp) — the
     /// `eframe::Frame` parameter is unused, so the split (mirroring
     /// `OverlayApp`'s) lets the shell-side event translation be

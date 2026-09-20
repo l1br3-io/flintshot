@@ -86,6 +86,10 @@ pub struct RoutedEditor {
     pub state: EditorState,
     /// Whether the editor route opens selection-first.
     pub selection_first: bool,
+    /// The session-store entry tracking this capture, when armed
+    /// through the app's choke point (`None` for untracked
+    /// fallbacks — a bare-stash restore whose store entry is gone).
+    pub session_id: Option<flintshot_core::SessionId>,
 }
 
 /// What a window generation opens on (the app crate's outer loop
@@ -135,7 +139,17 @@ pub trait RouteHost {
 
     /// The editor route went live (the daemon report parity: one
     /// `EditorOpened` per editor session, wherever the editor lives).
-    fn editor_route_opened(&mut self);
+    /// `session_id` names the session-store entry tracking the
+    /// capture, so the host can bind its active-editor state.
+    fn editor_route_opened(&mut self, session_id: Option<flintshot_core::SessionId>);
+
+    /// The editor route is being left (an in-window route swap or a
+    /// same-route image replacement) **with the live editor state**
+    /// — not the route slot's construction snapshot, which went
+    /// stale the moment the user edited. The host flushes the
+    /// committed annotations into the session store here; this is
+    /// the seam that ends the old annotation loss.
+    fn editor_route_left(&mut self, state: &EditorState);
 
     /// Take a pending "route home" intent, if one waits (a failed or
     /// quiet grab while the window was open on the Loading route —
@@ -313,11 +327,19 @@ impl WindowApp {
     /// route) replace the editor app without touching the window.
     pub(crate) fn request_route(&mut self, ctx: &Context, route: Route) {
         let kind_changed = std::mem::discriminant(&self.route) != std::mem::discriminant(&route);
+        // GOTCHA: flush from the live EditorApp, never from the
+        // route payload — `self.route`'s copy is the construction
+        // snapshot and predates every annotation the user made.
+        // Covers both kind changes away from Editor and same-kind
+        // image replacements (an outgoing editor ends either way).
+        if matches!(self.route, Route::Editor(..)) {
+            if let Some(editor) = self.editor.as_ref() {
+                self.host.editor_route_left(editor.state());
+            }
+        }
         match &route {
             Route::Editor(routed) => {
-                if kind_changed {
-                    self.host.editor_route_opened();
-                }
+                self.host.editor_route_opened(routed.session_id);
                 self.editor = Some(Self::build_editor(
                     routed,
                     ctx,
@@ -601,6 +623,22 @@ impl WindowApp {
     }
 }
 
+impl Drop for WindowApp {
+    /// Window death while the editor is live (a `NewCapture` close,
+    /// a hidden-by-event capture close, user quit): the live state
+    /// dies with the window, so this is the last hand-off point —
+    /// route swaps already flushed through `request_route` (the
+    /// editor slot is `None` / the route has moved on, so there is
+    /// no double flush).
+    fn drop(&mut self) {
+        if matches!(self.route, Route::Editor(..)) {
+            if let Some(editor) = self.editor.as_ref() {
+                self.host.editor_route_left(editor.state());
+            }
+        }
+    }
+}
+
 /// The Loading route's body: a centered spinner over the status
 /// line — the editor's stable geometry, so the image swap into place
 /// moves nothing.
@@ -851,6 +889,7 @@ mod tests {
             WindowStart::Editor(Box::new(RoutedEditor {
                 state: editor_state(),
                 selection_first: false,
+                session_id: None,
             })),
             StubPageBridge::default(),
             RecordingHost::default(),
@@ -913,6 +952,7 @@ mod tests {
             WindowStart::Editor(Box::new(RoutedEditor {
                 state: editor_state(),
                 selection_first: false,
+                session_id: None,
             })),
             StubPageBridge::default(),
             RecordingHost::default(),
@@ -1040,6 +1080,8 @@ mod tests {
     struct RecordingInner {
         queued: std::collections::VecDeque<RoutedEditor>,
         opened: usize,
+        opened_sessions: Vec<Option<flintshot_core::SessionId>>,
+        left: Vec<Vec<flintshot_core::Annotation>>,
         route_home: Option<()>,
         route_settings: Option<()>,
     }
@@ -1049,8 +1091,14 @@ mod tests {
             self.inner.borrow_mut().queued.pop_front()
         }
 
-        fn editor_route_opened(&mut self) {
-            self.inner.borrow_mut().opened += 1;
+        fn editor_route_opened(&mut self, session_id: Option<flintshot_core::SessionId>) {
+            let mut inner = self.inner.borrow_mut();
+            inner.opened += 1;
+            inner.opened_sessions.push(session_id);
+        }
+
+        fn editor_route_left(&mut self, state: &EditorState) {
+            self.inner.borrow_mut().left.push(state.anns.clone());
         }
 
         fn take_route_home(&mut self) -> bool {
@@ -1066,6 +1114,160 @@ mod tests {
         let img = image::RgbaImage::from_raw(4, 4, vec![255; 4 * 4 * 4])
             .expect("raw buffer matches 4*4*4");
         EditorState::new(img)
+    }
+
+    fn line_ann_fixture() -> flintshot_core::Annotation {
+        flintshot_core::Annotation::Line {
+            a: flintshot_core::Point::new(0.0, 0.0),
+            b: flintshot_core::Point::new(9.0, 9.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+        }
+    }
+
+    /// An editor start whose live state carries one committed
+    /// annotation — the state a user leaves behind mid-edit.
+    fn annotated_editor_start() -> WindowStart {
+        let mut state = editor_state();
+        state.anns.push(line_ann_fixture());
+        WindowStart::Editor(Box::new(RoutedEditor {
+            state,
+            selection_first: false,
+            session_id: None,
+        }))
+    }
+
+    /// Editor → Home: the leave-flush hands the host the live
+    /// editor's annotations — the construction snapshot's empty
+    /// list must not win (the documented loss this effort fixes).
+    #[test]
+    fn leaving_the_editor_flushes_live_annotations() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        // Start clean, then annotate *after* construction so the
+        // route payload and the live state provably differ.
+        let (mut app, _bridge, host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+                session_id: None,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        app.editor
+            .as_mut()
+            .expect("editor start builds the editor app")
+            .state_mut()
+            .anns
+            .push(line_ann_fixture());
+
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.request_route(ui.ctx(), Route::Home);
+        });
+
+        let left = host.inner.borrow().left.clone();
+        assert_eq!(left.len(), 1, "one flush per editor session end");
+        assert_eq!(
+            left[0].len(),
+            1,
+            "the flush carries the live annotation, not the snapshot's"
+        );
+    }
+
+    /// Window death with the editor live (`NewCapture` /
+    /// hidden-by-event closes): Drop is the last hand-off point.
+    #[test]
+    fn drop_flushes_the_live_editor_at_window_death() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, _bridge, host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+                session_id: None,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        app.editor
+            .as_mut()
+            .expect("editor start builds the editor app")
+            .state_mut()
+            .anns
+            .push(line_ann_fixture());
+        drop(app);
+
+        let left = host.inner.borrow().left.clone();
+        assert_eq!(left.len(), 1, "window death flushes exactly once");
+        assert_eq!(left[0].len(), 1);
+    }
+
+    /// The editor route opening reports the session-store id it is
+    /// bound to, so the host can track the active entry.
+    #[test]
+    fn editor_route_opened_carries_the_session_id() {
+        let ctx = egui::Context::default();
+        let (mut app, _bridge, host) = window_app_start(
+            annotated_editor_start(),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        let id = flintshot_core::SessionId::from_raw(7);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.request_route(
+                ui.ctx(),
+                Route::Editor(Box::new(RoutedEditor {
+                    state: editor_state(),
+                    selection_first: false,
+                    session_id: Some(id),
+                })),
+            );
+        });
+        let sessions = host.inner.borrow().opened_sessions.clone();
+        assert_eq!(
+            sessions,
+            vec![Some(id)],
+            "the host sees which store entry went live"
+        );
+    }
+
+    /// A same-kind image replacement ends the outgoing editor too —
+    /// its annotations flush before the replacement arms.
+    #[test]
+    fn replacing_the_editor_image_flushes_the_outgoing_annotations() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, _bridge, host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+                session_id: None,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        app.editor
+            .as_mut()
+            .expect("editor start builds the editor app")
+            .state_mut()
+            .anns
+            .push(line_ann_fixture());
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.request_route(
+                ui.ctx(),
+                Route::Editor(Box::new(RoutedEditor {
+                    state: editor_state(),
+                    selection_first: false,
+                    session_id: None,
+                })),
+            );
+        });
+        let left = host.inner.borrow().left.clone();
+        assert_eq!(
+            left.len(),
+            1,
+            "the outgoing editor flushes even without a kind change"
+        );
     }
 
     fn window_app() -> WindowApp {
@@ -1114,6 +1316,7 @@ mod tests {
         let g = route_geometry(&Route::Editor(Box::new(RoutedEditor {
             state: editor_state(),
             selection_first: false,
+            session_id: None,
         })));
         assert_eq!(g.size, egui::vec2(1024.0, 640.0));
         assert!(g.resizable);
@@ -1129,6 +1332,7 @@ mod tests {
             route_geometry(&Route::Editor(Box::new(RoutedEditor {
                 state: editor_state(),
                 selection_first: true,
+                session_id: None,
             })))
         );
     }
@@ -1154,6 +1358,7 @@ mod tests {
                 Route::Editor(Box::new(RoutedEditor {
                     state: editor_state(),
                     selection_first: false,
+                    session_id: None,
                 })),
             );
         });
@@ -1183,6 +1388,7 @@ mod tests {
             WindowStart::Editor(Box::new(RoutedEditor {
                 state: editor_state(),
                 selection_first: false,
+                session_id: None,
             })),
             StubPageBridge::default(),
             RecordingHost::default(),
@@ -1193,6 +1399,7 @@ mod tests {
                 Route::Editor(Box::new(RoutedEditor {
                     state: editor_state(),
                     selection_first: true,
+                    session_id: None,
                 })),
             );
         });
@@ -1241,6 +1448,7 @@ mod tests {
         host.inner.borrow_mut().queued.push_back(RoutedEditor {
             state: editor_state(),
             selection_first: false,
+            session_id: None,
         });
         let full = ctx.run_ui(egui::RawInput::default(), |ui| {
             app.logic_impl(ui.ctx());
@@ -1266,6 +1474,7 @@ mod tests {
             WindowStart::Editor(Box::new(RoutedEditor {
                 state: editor_state(),
                 selection_first: false,
+                session_id: None,
             })),
             StubPageBridge::default(),
             RecordingHost::default(),
@@ -1297,6 +1506,7 @@ mod tests {
             WindowStart::Editor(Box::new(RoutedEditor {
                 state: editor_state(),
                 selection_first: false,
+                session_id: None,
             })),
             bridge,
             RecordingHost::default(),
@@ -1333,6 +1543,7 @@ mod tests {
             WindowStart::Editor(Box::new(RoutedEditor {
                 state: editor_state(),
                 selection_first: false,
+                session_id: None,
             })),
             StubPageBridge::default(),
             RecordingHost::default(),
@@ -1369,6 +1580,7 @@ mod tests {
                 Route::Editor(Box::new(RoutedEditor {
                     state: editor_state(),
                     selection_first: false,
+                    session_id: None,
                 })),
             );
         });
@@ -1402,6 +1614,7 @@ mod tests {
         host.inner.borrow_mut().queued.push_back(RoutedEditor {
             state: editor_state(),
             selection_first: false,
+            session_id: None,
         });
         let ctx = egui::Context::default();
         let full = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -1550,7 +1763,10 @@ mod tests {
             matches!(app.route, Route::Settings) && transition_commands(&full).is_empty(),
             "settings stays settings with no churn"
         );
-        let toast = app.toast.expect("the already-open ping raised a toast");
+        let toast = app
+            .toast
+            .take()
+            .expect("the already-open ping raised a toast");
         assert!(
             !toast.expired(100.0),
             "a fresh toast outlives its raise frame"

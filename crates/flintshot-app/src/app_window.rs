@@ -240,6 +240,12 @@ struct SharedInner {
     /// can no longer ack a handshake while a fresh window is open
     /// (the race that put the app window in shots).
     window_open: bool,
+    /// The session-store entry tracking the capture the open
+    /// editor route is editing — set when the route opens (fresh
+    /// arrival or resume), cleared when it leaves. `None` while no
+    /// editor is live, or while an untracked fallback editor is
+    /// (a bare-stash restore; its leave-flush files it fresh).
+    active_session: Option<flintshot_core::SessionId>,
     /// The page the current epoch runs (a clone) — the same-page
     /// restore target when an external capture closes the window
     /// (plan decision 8: restores return to the page that was open,
@@ -363,7 +369,28 @@ impl Shared {
     /// Arm the route-home intent (see [`SharedInner::route_home`]).
     fn set_route_home(&self) {
         self.lock().route_home = true;
-        self.changed.notify_all();
+    }
+
+    /// Bind the session-store entry the opening editor route edits
+    /// (fresh arrival or resume); `None` marks an untracked
+    /// fallback editor (cleared by [`flush_active_editor`]).
+    fn set_active_session(&self, session: Option<flintshot_core::SessionId>) {
+        self.lock().active_session = session;
+    }
+
+    /// The leave-editor flush: persist the live committed
+    /// annotations into the tracked entry (or file an untracked
+    /// editor as a fresh capture — the stash), then clear the
+    /// binding. Called for every editor end: in-window route swaps,
+    /// image replacements, and window-closing exits.
+    fn flush_active_editor(&self, state: &EditorState) {
+        let active = self.lock().active_session.take();
+        if let Some(id) = active {
+            self.session.update_anns(id, &state.anns);
+        } else {
+            let id = self.session.insert(state.image.clone(), unix_now_secs());
+            self.session.update_anns(id, &state.anns);
+        }
     }
 
     /// Take the route-home intent, if one waits.
@@ -1071,6 +1098,10 @@ fn run_generation(
     let window_start = match start {
         GenerationStart::Home => flintshot_editor_egui::WindowStart::Home,
         GenerationStart::Editor(pending) => {
+            // Cold-start editors never pass `request_route`, so the
+            // active-session binding happens here (in-window route
+            // entries bind through the host).
+            shared.set_active_session(pending.session_id);
             flintshot_editor_egui::WindowStart::Editor(Box::new(to_routed(&pending)))
         }
         GenerationStart::Loading => flintshot_editor_egui::WindowStart::Loading,
@@ -1101,6 +1132,7 @@ fn to_routed(pending: &PendingEditor) -> flintshot_editor_egui::RoutedEditor {
     flintshot_editor_egui::RoutedEditor {
         state: pending.state.clone(),
         selection_first: pending.selection_first,
+        session_id: pending.session_id,
     }
 }
 
@@ -1108,15 +1140,12 @@ fn to_routed(pending: &PendingEditor) -> flintshot_editor_egui::RoutedEditor {
 /// restore page (an external capture's close reopens on it). The
 /// Loading route restores home — a reopen after a capture carries
 /// the delivered image through the pending editor, never a spinner.
-/// The rebuilt pending has no session id yet (the routed payload
-/// does not carry one until the resume plumbing lands); Task 005's
-/// restore rebuild re-links the store entry.
 fn route_to_page(route: &flintshot_editor_egui::Route) -> Page {
     match route {
         flintshot_editor_egui::Route::Editor(routed) => Page::Editor(Box::new(PendingEditor {
             state: routed.state.clone(),
             selection_first: routed.selection_first,
-            session_id: None,
+            session_id: routed.session_id,
         })),
         // The settings page restores itself (the same-page principle);
         // Loading restores home — a reopen after a capture carries
@@ -1936,10 +1965,15 @@ impl flintshot_editor_egui::RouteHost for RouteHostBridge {
             .map(|pending| to_routed(&pending))
     }
 
-    fn editor_route_opened(&mut self) {
+    fn editor_route_opened(&mut self, session_id: Option<flintshot_core::SessionId>) {
         // The daemon parity: one report per editor session, wherever
         // the editor lives (route entry inside the window counts).
         crate::cli::report_editor_window_opened_to_daemon();
+        self.shared.set_active_session(session_id);
+    }
+
+    fn editor_route_left(&mut self, state: &EditorState) {
+        self.shared.flush_active_editor(state);
     }
 
     fn take_route_home(&mut self) -> bool {
@@ -3020,6 +3054,7 @@ mod tests {
             flintshot_editor_egui::Route::Editor(Box::new(flintshot_editor_egui::RoutedEditor {
                 state: pending_over((3, 2), true).state,
                 selection_first: true,
+                session_id: None,
             }));
         assert!(matches!(
             route_to_page(&editor),
@@ -3363,6 +3398,15 @@ mod tests {
         flintshot_core::EditorState::new(img)
     }
 
+    fn test_line_ann() -> flintshot_core::Annotation {
+        use flintshot_core::{Color, Point, Stroke};
+        flintshot_core::Annotation::Line {
+            a: Point::new(1.0, 1.0),
+            b: Point::new(2.0, 2.0),
+            stroke: Stroke::new(Color::rgb(255, 0, 0), 2.0),
+        }
+    }
+
     /// A pending editor page over a `dims`-sized image, with the
     /// landing phase under test.
     fn pending_over(dims: (u32, u32), selection_first: bool) -> PendingEditor {
@@ -3419,6 +3463,102 @@ mod tests {
             shared.session.list().is_empty(),
             "the graceful-exit clear empties the store"
         );
+    }
+
+    /// The leave-flush writes the live annotations into the tracked
+    /// entry and clears the binding — the end of the old
+    /// navigate-away loss.
+    #[test]
+    fn flush_active_editor_updates_the_tracked_entry_and_clears() {
+        let (shared, _dir) = shared_with_session();
+        shared.arm_editor(fixture_png_state((3, 3)), false, None);
+        let id = shared.session.list()[0].id;
+        shared.set_active_session(Some(id));
+
+        let mut state = fixture_png_state((3, 3));
+        state.anns.push(test_line_ann());
+        shared.flush_active_editor(&state);
+
+        assert_eq!(
+            shared.session.list().len(),
+            1,
+            "the flush updates in place, never double-inserts"
+        );
+        assert!(
+            shared.session.load(id).is_none() || shared.session.list()[0].id == id,
+            "the entry survives"
+        );
+        // The annotation round-trips through the store's disk
+        // mirror once the PNG lands.
+        let loaded = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(cap) = shared.session.load(id) {
+                    break cap;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the PNG write never landed"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        assert_eq!(loaded.anns.len(), 1, "the live annotation was flushed");
+
+        // A second leave with no binding files a fresh entry (the
+        // untracked-fallback stash path).
+        shared.flush_active_editor(&state);
+        assert_eq!(shared.session.list().len(), 2);
+    }
+
+    /// The [`flintshot_editor_egui::RouteHost`] seam drives the same
+    /// flush the `Shared` methods pin — the bridge the egui router
+    /// actually calls.
+    #[test]
+    fn route_host_left_flushes_through_the_bridge() {
+        use flintshot_editor_egui::RouteHost as _;
+
+        let (shared, _dir) = shared_with_session();
+        let shared = std::sync::Arc::new(shared);
+        shared.arm_editor(fixture_png_state((2, 2)), false, None);
+        let id = shared.session.list()[0].id;
+        let mut bridge = RouteHostBridge {
+            shared: std::sync::Arc::clone(&shared),
+        };
+        bridge.editor_route_opened(Some(id));
+        let mut state = fixture_png_state((2, 2));
+        state.anns.push(test_line_ann());
+        bridge.editor_route_left(&state);
+
+        assert_eq!(shared.session.list().len(), 1, "no double insert");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(cap) = shared.session.load(id) {
+                assert_eq!(cap.anns.len(), 1);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the PNG never landed");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// `to_routed` / `route_to_page` keep the session binding across
+    /// the pending → route → restore-page round-trip.
+    #[test]
+    fn routed_and_restore_page_round_trip_the_session_id() {
+        let id = flintshot_core::SessionId::from_raw(9);
+        let pending = PendingEditor {
+            state: fixture_png_state((2, 2)),
+            selection_first: true,
+            session_id: Some(id),
+        };
+        let routed = to_routed(&pending);
+        assert_eq!(routed.session_id, Some(id));
+        let page = route_to_page(&flintshot_editor_egui::Route::Editor(Box::new(routed)));
+        match page {
+            Page::Editor(p) => assert_eq!(p.session_id, Some(id)),
+            other => panic!("editor restores as editor, got {other:?}"),
+        }
     }
 
     #[test]

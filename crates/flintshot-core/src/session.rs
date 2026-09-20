@@ -29,6 +29,22 @@ use crate::editor::Annotation;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(u64);
 
+impl SessionId {
+    /// Wrap a raw id. Production ids come from
+    /// [`SessionStore::insert`]; this is for tests, logging, and
+    /// serialization seams.
+    #[must_use]
+    pub const fn from_raw(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// The raw id (logging / serialization).
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// One resumable capture: the source image (never mutated by
 /// annotations) plus committed annotations, in draw order.
 #[derive(Debug, Clone, PartialEq)]
