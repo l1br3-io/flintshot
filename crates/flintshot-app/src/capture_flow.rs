@@ -247,6 +247,43 @@ pub(crate) fn copy_image_to_clipboard(img: &image::RgbaImage) -> Result<()> {
         .map_err(|e| color_eyre::eyre::eyre!("copying image to clipboard: {e}"))
 }
 
+/// The recents capacity for every routing point (the persisted
+/// `ui.recent-captures-limit`, clamped 1–200; built-in default on a
+/// load failure). One helper so every caller agrees.
+pub(crate) fn recents_limit() -> usize {
+    match flintshot_core::Config::load() {
+        Ok(c) => c.ui.recent_captures_limit_clamped(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load config; using the default recents limit");
+            flintshot_core::recents::DEFAULT_RECENTS_LIMIT
+        }
+    }
+}
+
+/// Persist a clipboard-copy capture per `output.save-clipboard-
+/// copies`: core's clipboard-copy rules (template-or-builtin naming,
+/// the resolved save directory, collision suffixing, `[output]
+/// format` encoding). Config-injected so tests never touch the
+/// platform paths; the caller records the returned path into
+/// recents. Best-effort by contract — the clipboard copy already
+/// succeeded, so a persist failure logs (never errors the capture)
+/// and returns `None`, as does the off-flag.
+pub(crate) fn persist_clipboard_capture(
+    img: &image::RgbaImage,
+    config: &flintshot_core::Config,
+) -> Option<std::path::PathBuf> {
+    if !config.output.save_clipboard_copies {
+        return None;
+    }
+    match flintshot_core::persist_clipboard_copy(img, &config.output) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            tracing::warn!(error = %e, "persisting the clipboard capture; the copy itself succeeded");
+            None
+        }
+    }
+}
+
 /// Per-slot wait for the portal's clipboard write
 /// ([`read_portal_clipboard_grab`]): xdg-desktop-portal-cosmic
 /// spawns the `clipboard:///` D-Bus Response *before* its update
@@ -592,6 +629,41 @@ pub(crate) fn monitor_grab_prepared(
 mod tests {
     use super::*;
     use crate::cli::SupersedeWatch;
+
+    // ── Clipboard-copy persistence (recent-captures-v2 Task 004) ─
+
+    /// A config over a tempdir save location, with the persist flag.
+    fn copy_persist_config(dir: &std::path::Path, on: bool) -> flintshot_core::Config {
+        let mut config = flintshot_core::Config::default();
+        config.output.save_dir = dir.to_string_lossy().into_owned();
+        config.output.save_clipboard_copies = on;
+        config
+    }
+
+    #[test]
+    fn clipboard_capture_persistence_respects_the_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = image::RgbaImage::from_pixel(6, 4, image::Rgba([1, 2, 3, 255]));
+
+        let out = persist_clipboard_capture(&img, &copy_persist_config(dir.path(), false));
+        assert!(out.is_none(), "off-flag: nothing persists");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let out = persist_clipboard_capture(&img, &copy_persist_config(dir.path(), true));
+        let path = out.expect("on-flag persists the grab");
+        assert!(path.exists());
+        assert!(path.starts_with(dir.path()));
+    }
+
+    #[test]
+    fn clipboard_capture_persistence_failure_is_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let img = image::RgbaImage::from_pixel(6, 4, image::Rgba([1, 2, 3, 255]));
+        let out = persist_clipboard_capture(&img, &copy_persist_config(&blocker, true));
+        assert!(out.is_none(), "a failed save never errors the capture");
+    }
 
     #[test]
     fn capture_prepared_abandons_when_superseded_before_the_grab() {

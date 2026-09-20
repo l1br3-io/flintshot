@@ -24,7 +24,7 @@
 //! flowing even when idle.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eframe::App;
@@ -114,6 +114,25 @@ pub trait HomeBridge {
         Vec::new()
     }
 
+    // -- Recents card actions (recent-captures-v2; defaults keep
+    //    test doubles compiling; the app crate's real bridge
+    //    overrides these) --
+
+    /// Copy a recent capture's file to the clipboard (the card's
+    /// **Copy** hover chip). The implementation honors the Wayland
+    /// fresh-handle rule and keeps the X11 selection alive for the
+    /// window's lifetime. Default: no-op.
+    fn copy_recent(&mut self, _path: &Path) {}
+
+    /// Reveal a recent capture's parent folder in the platform file
+    /// manager (the **Reveal** chip). Default: no-op.
+    fn reveal_recent(&mut self, _path: &Path) {}
+
+    /// Delete a recent capture permanently: remove the file from
+    /// disk and drop it from the recents index (the **Delete**
+    /// chip, after its on-chip "Sure?" confirm). Default: no-op.
+    fn delete_recent(&mut self, _path: &Path) {}
+
     // -- Settings-route plumbing (defaults keep test doubles
     //    compiling; the app crate's real bridge overrides these) --
 
@@ -171,6 +190,15 @@ pub trait HomeBridge {
 /// Recents per grid row — the mockup's 4-column layout.
 const RECENTS_PER_ROW: usize = 4;
 
+/// A decoded recent: the downscaled thumbnail texture plus the
+/// metadata the card caption needs (original dimensions and file
+/// size) — gathered once at decode, never re-stat'd per frame.
+pub(crate) struct RecentThumb {
+    texture: egui::TextureHandle,
+    dims: (u32, u32),
+    bytes: u64,
+}
+
 /// The eframe app for the home window. Owns no IPC state — see
 /// [`HomeBridge`].
 pub(crate) struct HomeApp {
@@ -181,7 +209,7 @@ pub(crate) struct HomeApp {
     recent: Vec<PathBuf>,
     /// Decoded thumbnails keyed by path — in-memory only, never
     /// persisted (the recents index stores paths alone).
-    thumbs: HashMap<PathBuf, egui::TextureHandle>,
+    thumbs: HashMap<PathBuf, RecentThumb>,
     /// The welcome's age, seconds — drives the hero's spring
     /// pop-in and stops once past the ramp.
     age: f32,
@@ -207,6 +235,9 @@ pub(crate) struct HomeApp {
     /// The watchdog has warned once (subsequent re-issues are silent
     /// repeats of an idempotent command).
     close_watchdog_warned: bool,
+    /// The card whose Delete chip is in the "Sure?" confirm step.
+    /// `None` = no armed delete; any click elsewhere disarms.
+    delete_armed: Option<PathBuf>,
 }
 
 /// Pure UI state of the home window — the part directives mutate.
@@ -249,6 +280,7 @@ impl HomeApp {
             paste_shortcut: KeyboardShortcut::new(Modifiers::NONE, Key::P),
             capture_clicked_at: None,
             close_watchdog_warned: false,
+            delete_armed: None,
         }
     }
 
@@ -352,15 +384,13 @@ impl App for HomeApp {
     }
 }
 
-/// The recents caption: file stem + relative age ("shot · 5 mins
-/// ago"). Pure for tests.
-fn recent_caption(path: &std::path::Path) -> String {
-    let stem = path.file_stem().map_or_else(
+/// A recent's display stem: the file name without extension
+/// ("capture" when the path has none). Pure.
+pub(crate) fn card_stem(path: &Path) -> String {
+    path.file_stem().map_or_else(
         || "capture".to_owned(),
         |s| s.to_string_lossy().into_owned(),
-    );
-    let age = age_seconds(path).unwrap_or(u64::MAX);
-    format!("{stem} · {}", relative_time(age))
+    )
 }
 
 /// Seconds since `path` was last modified. `None` when the file is
@@ -371,20 +401,57 @@ fn age_seconds(path: &std::path::Path) -> Option<u64> {
     Some(age.as_secs())
 }
 
-/// Relative-time caption with the spec's thresholds: now (under a
-/// minute) · mins · hours · yesterday · days. Pure for tests.
-pub(crate) fn relative_time(secs: u64) -> &'static str {
+/// The card's age line with counts: `now`, `5 mins ago`, `3 hours
+/// ago`, `yesterday`, `4 days ago` (singulars collapse to `1 min
+/// ago` & co.). The spec's thresholds, counted. Pure for tests.
+pub(crate) fn age_label(secs: u64) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
     const DAY: u64 = 24 * HOUR;
-    const YESTERDAY: u64 = 2 * DAY;
+    let plural = |n: u64, unit: &str| {
+        if n == 1 {
+            format!("1 {unit} ago")
+        } else {
+            format!("{n} {unit}s ago")
+        }
+    };
     match secs {
-        s if s < MINUTE => "now",
-        s if s < HOUR => "mins ago",
-        s if s < DAY => "hours ago",
-        s if s < YESTERDAY => "yesterday",
-        _ => "days ago",
+        s if s < MINUTE => "now".to_owned(),
+        s if s < HOUR => plural(s / MINUTE, "min"),
+        s if s < DAY => plural(s / HOUR, "hour"),
+        s if s < 2 * DAY => "yesterday".to_owned(),
+        s => plural(s / DAY, "day"),
     }
+}
+
+/// A human file size for the card's metadata line: `512 B`,
+/// `240 KB`, `1.4 MB`. Pure for tests.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "u64 file sizes stay far below 2^53; the one-decimal rounding is the point"
+)]
+pub(crate) fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// The card's metadata line: `1920×1080 · 240 KB · 5 mins ago`.
+/// Pure for tests.
+pub(crate) fn metadata_caption(dims: (u32, u32), bytes: u64, age_secs: u64) -> String {
+    format!(
+        "{}×{} · {} · {}",
+        dims.0,
+        dims.1,
+        format_size(bytes),
+        age_label(age_secs)
+    )
 }
 
 impl HomeApp {
@@ -680,7 +747,9 @@ impl HomeApp {
     /// The recents grid (with thumbnails decoded + downscaled on
     /// demand) or, when empty, the friendly empty card — never
     /// blank space. Dead paths render nothing (pruned at load;
-    /// undecodable files skip their card silently).
+    /// undecodable files skip their card silently). The grid
+    /// scrolls once the rows overflow the window (the hero and
+    /// secondaries stay pinned; still 4 per row).
     fn recents_section(&mut self, ui: &mut egui::Ui) {
         use crate::theme::palette as p;
         ui.label(
@@ -715,84 +784,243 @@ impl HomeApp {
             return;
         }
         // The mockup's 4-column grid: fixed-width cards chunked
-        // into rows of four.
-        let recent = self.recent.clone();
-        for row in recent.chunks(RECENTS_PER_ROW) {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing =
-                    egui::vec2(crate::theme::SPACE_SCALE[2], crate::theme::SPACE_SCALE[2]);
-                for path in row {
-                    self.recent_card(ui, path);
+        // into rows of four, inside the section's own scroll area
+        // (bounded to the space left under the pinned hero).
+        egui::ScrollArea::vertical()
+            .id_salt("recents-scroll")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let recent = self.recent.clone();
+                for row in recent.chunks(RECENTS_PER_ROW) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing =
+                            egui::vec2(crate::theme::SPACE_SCALE[2], crate::theme::SPACE_SCALE[2]);
+                        for path in row {
+                            self.recent_card(ui, path);
+                        }
+                    });
                 }
             });
-        }
     }
 
-    /// One recent's thumb card: letterboxed thumbnail on white,
-    /// click routes through the existing `open_image` path.
+    /// One recent's card: letterboxed thumbnail on cream, the
+    /// filename and metadata caption lines below, and — on hover —
+    /// a row of cutout chips over the thumbnail (Copy / Reveal /
+    /// Delete). A click anywhere else on the card routes through
+    /// the existing `open_image` path. Delete is a two-step confirm
+    /// on the chip itself: the first click arms ("Sure?"), the
+    /// second commits; leaving the card or clicking elsewhere
+    /// disarms.
     fn recent_card(&mut self, ui: &mut egui::Ui, path: &PathBuf) {
-        let Some(texture) = self.thumbnail(ui.ctx(), path) else {
+        use crate::theme::palette as p;
+        let Some(thumb) = self.thumbnail(ui.ctx(), path) else {
             return;
         };
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(112.0, 112.0), egui::Sense::hover());
+        let (texture_id, tsize, dims, bytes) = (
+            thumb.texture.id(),
+            thumb.texture.size_vec2(),
+            thumb.dims,
+            thumb.bytes,
+        );
+        let path_key = path.to_string_lossy().to_string();
+        let armed = self.delete_armed.as_deref() == Some(path.as_path());
+
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(112.0, 148.0), egui::Sense::hover());
         let resp = ui
             .interact(
                 rect,
-                egui::Id::new(("recent", path.to_string_lossy().to_string())),
+                egui::Id::new(("recent", path_key.clone())),
                 egui::Sense::click(),
             )
-            .on_hover_text(path.to_string_lossy().to_string());
+            .on_hover_text(path_key.clone());
         ui.painter().rect(
             rect,
             egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS),
-            crate::theme::palette::PAPER_CREAM,
+            p::PAPER_CREAM,
             if resp.hovered() {
-                egui::Stroke::new(1.25, crate::theme::palette::FOREST)
+                egui::Stroke::new(1.25, p::FOREST)
             } else {
                 crate::theme::HAIRLINE_STROKE
             },
             egui::StrokeKind::Middle,
         );
-        // Caption: file stem + relative time, ink-soft, under the
-        // thumb. Reserves 16 px inside the card.
-        let caption = recent_caption(path);
-        let caption_galley = ui.painter().layout_no_wrap(
-            caption,
-            egui::FontId::proportional(crate::theme::TYPE_XS),
-            crate::theme::palette::INK_SOFT,
-        );
-        // Letterbox: the fitted image centers in the card.
-        let thumb = texture.size_vec2();
-        let (tw, th) = (thumb.x, thumb.y);
-        let scale = 80.0 / tw.max(th);
+
+        // Letterbox: the fitted image centers in the thumb area
+        // (the card's top 112 px; the captions own the bottom).
+        let (tw, th) = (tsize.x, tsize.y);
+        let scale = 74.0 / tw.max(th);
         let size = egui::vec2(tw * scale, th * scale);
-        let thumb_center = egui::pos2(rect.center().x, rect.center().y - 6.0);
+        let thumb_center = egui::pos2(rect.center().x, rect.top() + 50.0);
         let img_rect = egui::Rect::from_center_size(thumb_center, size);
         ui.painter().image(
-            texture.id(),
+            texture_id,
             img_rect,
             egui::Rect {
                 min: egui::pos2(0.0, 0.0),
                 max: egui::pos2(1.0, 1.0),
             },
-            crate::theme::palette::PAPER_CREAM,
+            p::PAPER_CREAM,
+        );
+
+        // Two caption lines: filename over metadata.
+        let name_galley = ui.painter().layout_no_wrap(
+            card_stem(path),
+            egui::FontId::proportional(crate::theme::TYPE_XS),
+            p::INK,
+        );
+        let meta_galley = ui.painter().layout_no_wrap(
+            metadata_caption(dims, bytes, age_seconds(path).unwrap_or(u64::MAX)),
+            egui::FontId::proportional(crate::theme::TYPE_XS),
+            p::INK_SOFT,
         );
         ui.painter().galley(
             egui::pos2(
-                rect.center().x - caption_galley.size().x / 2.0,
-                rect.bottom() - 18.0,
+                rect.center().x - name_galley.size().x / 2.0,
+                rect.bottom() - 34.0,
             ),
-            caption_galley,
-            crate::theme::palette::INK_SOFT,
+            name_galley,
+            p::INK,
         );
-        if resp.clicked() {
+        ui.painter().galley(
+            egui::pos2(
+                rect.center().x - meta_galley.size().x / 2.0,
+                rect.bottom() - 17.0,
+            ),
+            meta_galley,
+            p::INK_SOFT,
+        );
+
+        // Hover chips over the thumbnail's top edge (gated on
+        // `contains_pointer`, not `hovered`: a chip registered in a
+        // prior frame is hit-test-topmost under the pointer, which
+        // would steal `hovered` from the card and un-render the row
+        // one frame before the click lands).
+        let chip_clicked = self.card_chips(
+            ui,
+            rect,
+            path,
+            &path_key,
+            resp.hovered() || resp.contains_pointer(),
+            armed,
+        );
+
+        // Card body click (not a chip): the existing open path.
+        if resp.clicked() && !chip_clicked {
+            self.delete_armed = None;
             let _ = self.bridge.open_image(path.clone());
             self.recent = self.bridge.recent_images();
         }
+
+        // Leaving the card disarms a pending delete ("clicking
+        // anywhere else resets" — the pointer must leave to click
+        // elsewhere). `contains_pointer`: the pointer on this
+        // card's own chips is still "on the card".
+        if armed && !resp.contains_pointer() {
+            self.delete_armed = None;
+        }
+    }
+
+    /// The card's hover chip row (the `floating.rs` cutout-chip
+    /// pattern, card-sized): Copy / Reveal / Delete over the
+    /// thumbnail's top edge. Delete is a two-step confirm on the
+    /// chip itself — the first click arms ("Sure?", gold fill), the
+    /// second commits. Returns whether a chip consumed the click
+    /// (the card body must not also open).
+    fn card_chips(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        path: &Path,
+        path_key: &str,
+        show: bool,
+        armed: bool,
+    ) -> bool {
+        use crate::theme::palette as p;
+        if !show {
+            return false;
+        }
+        let label = if armed { "Sure?" } else { "\u{1f5d1}" };
+        let chip_specs: [(&str, &str, f32); 3] = [
+            ("recent-copy", "\u{1f4cb}", 28.0),
+            ("recent-reveal", "\u{1f5c0}", 28.0),
+            ("recent-delete", label, if armed { 44.0 } else { 28.0 }),
+        ];
+        let total: f32 = chip_specs.iter().map(|(_, _, w)| *w).sum::<f32>() + 12.0;
+        let mut x = rect.center().x - total / 2.0;
+        let y = rect.top() + 8.0;
+        let mut chip_clicked = false;
+        for (id, glyph, w) in chip_specs {
+            let chip_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, 22.0));
+            x += w + 6.0;
+            let chip_id = egui::Id::new((id, path_key));
+            let chip = ui
+                .interact(chip_rect, chip_id, egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let radius = egui::CornerRadius::same(crate::theme::POD_RADIUS);
+            ui.painter()
+                .add(if chip.hovered() || (armed && id == "recent-delete") {
+                    crate::theme::SHADOW_LIFT.as_shape(chip_rect, radius)
+                } else {
+                    crate::theme::SHADOW_RESTING.as_shape(chip_rect, radius)
+                });
+            ui.painter().rect(
+                chip_rect,
+                radius,
+                if armed && id == "recent-delete" {
+                    p::with_alpha(p::GOLD, 60)
+                } else {
+                    p::PAPER_CREAM
+                },
+                egui::Stroke::NONE,
+                egui::StrokeKind::Middle,
+            );
+            // The white inner outline, 2 px inset.
+            let inner = chip_rect.shrink(2.0);
+            ui.painter().rect(
+                inner,
+                radius,
+                p::PAPER_CREAM,
+                egui::Stroke::new(1.5, p::PAPER),
+                egui::StrokeKind::Inside,
+            );
+            let galley = ui.painter().layout_no_wrap(
+                glyph.to_owned(),
+                egui::FontId::proportional(crate::theme::TYPE_XS),
+                p::INK,
+            );
+            ui.painter().galley(
+                egui::pos2(
+                    chip_rect.center().x - galley.size().x / 2.0,
+                    chip_rect.center().y - galley.size().y / 2.0,
+                ),
+                galley,
+                p::INK,
+            );
+            if chip.clicked() {
+                chip_clicked = true;
+                match id {
+                    "recent-copy" => self.bridge.copy_recent(path),
+                    "recent-reveal" => self.bridge.reveal_recent(path),
+                    _ => {
+                        if armed {
+                            self.delete_armed = None;
+                            self.bridge.delete_recent(path);
+                            self.recent = self.bridge.recent_images();
+                            self.thumbs.remove(path);
+                        } else {
+                            self.delete_armed = Some(path.to_path_buf());
+                        }
+                    }
+                }
+            }
+        }
+        chip_clicked
     }
 
     /// Decode + downscale a recent's thumbnail on demand, cached
-    /// in memory for the session. `None` when the file is gone or
+    /// in memory for the session together with the original
+    /// dimensions and file size the caption shows (one stat per
+    /// file, at decode). `None` when the file is gone or
     /// undecodable — the card silently skips.
     #[expect(
         clippy::cast_possible_truncation,
@@ -800,7 +1028,7 @@ impl HomeApp {
         clippy::cast_precision_loss,
         reason = "thumbnail dims are ≤ 2× the card edge by construction; u32 dims ≤ 2^24 are exact in f32"
     )]
-    fn thumbnail(&mut self, ctx: &egui::Context, path: &PathBuf) -> Option<&egui::TextureHandle> {
+    fn thumbnail(&mut self, ctx: &egui::Context, path: &PathBuf) -> Option<&RecentThumb> {
         if !self.thumbs.contains_key(path) {
             let img = image::open(path).ok()?;
             let rgba = img.to_rgba8();
@@ -833,7 +1061,15 @@ impl HomeApp {
                 image,
                 egui::TextureOptions::default(),
             );
-            self.thumbs.insert(path.clone(), handle);
+            let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
+            self.thumbs.insert(
+                path.clone(),
+                RecentThumb {
+                    texture: handle,
+                    dims: (w, h),
+                    bytes,
+                },
+            );
         }
         self.thumbs.get(path)
     }
@@ -995,6 +1231,10 @@ mod tests {
         paste_requests: usize,
         /// Whether the paste double "has an image on the clipboard".
         clipboard_has_image: bool,
+        /// Card action targets (the hover chips' bridge calls).
+        copied: Vec<PathBuf>,
+        revealed: Vec<PathBuf>,
+        deleted: Vec<PathBuf>,
     }
 
     /// Bridge double that records requests and replays directives.
@@ -1002,7 +1242,7 @@ mod tests {
     struct RecordingBridge {
         rec: Recording,
         pending: Arc<Mutex<VecDeque<HomeDirective>>>,
-        recents: Vec<PathBuf>,
+        recents: Arc<Mutex<Vec<PathBuf>>>,
     }
 
     impl HomeBridge for RecordingBridge {
@@ -1031,7 +1271,36 @@ mod tests {
         }
 
         fn recent_images(&mut self) -> Vec<PathBuf> {
-            self.recents.clone()
+            self.recents.lock().expect("recents mutex").clone()
+        }
+
+        fn copy_recent(&mut self, path: &Path) {
+            self.rec
+                .0
+                .lock()
+                .expect("recorder mutex")
+                .copied
+                .push(path.to_path_buf());
+        }
+
+        fn reveal_recent(&mut self, path: &Path) {
+            self.rec
+                .0
+                .lock()
+                .expect("recorder mutex")
+                .revealed
+                .push(path.to_path_buf());
+        }
+
+        fn delete_recent(&mut self, path: &Path) {
+            let mut rec = self.rec.0.lock().expect("recorder mutex");
+            rec.deleted.push(path.to_path_buf());
+            // The real bridge's index drop, mirrored: the deleted
+            // path leaves the recents list.
+            self.recents
+                .lock()
+                .expect("recents mutex")
+                .retain(|p| p != path);
         }
     }
 
@@ -1059,32 +1328,40 @@ mod tests {
     }
 
     #[test]
-    fn relative_time_hits_every_threshold() {
-        assert_eq!(relative_time(0), "now");
-        assert_eq!(relative_time(59), "now");
-        assert_eq!(relative_time(60), "mins ago");
-        assert_eq!(relative_time(3_599), "mins ago");
-        assert_eq!(relative_time(3_600), "hours ago");
-        assert_eq!(relative_time(86_399), "hours ago");
-        assert_eq!(relative_time(86_400), "yesterday");
-        assert_eq!(relative_time(172_799), "yesterday");
-        assert_eq!(relative_time(172_800), "days ago");
+    fn age_label_counts_every_threshold() {
+        assert_eq!(age_label(0), "now");
+        assert_eq!(age_label(59), "now");
+        assert_eq!(age_label(60), "1 min ago");
+        assert_eq!(age_label(300), "5 mins ago");
+        assert_eq!(age_label(3_600), "1 hour ago");
+        assert_eq!(age_label(7_200), "2 hours ago");
+        assert_eq!(age_label(86_400), "yesterday");
+        assert_eq!(age_label(172_800), "2 days ago");
     }
 
     #[test]
-    fn caption_is_stem_plus_relative_time() {
-        // A just-modified file reads "now"; the stem is file-stem
-        // only (no extension, no directory).
-        let dir = std::env::temp_dir();
-        let path = dir.join("flintshot_caption_probe.png");
-        std::fs::write(&path, b"x").expect("write probe");
-        let caption = recent_caption(&path);
-        std::fs::remove_file(&path).ok();
-        assert!(
-            caption.starts_with("flintshot_caption_probe · "),
-            "caption starts with the stem, got {caption}"
+    fn format_size_spans_bytes_kb_mb() {
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(2_048), "2 KB");
+        assert_eq!(format_size(245_760), "240 KB");
+        assert_eq!(format_size(1_500_000), "1.4 MB");
+    }
+
+    /// The spec's card caption line, verbatim shape.
+    #[test]
+    fn metadata_caption_composes_the_spec_line() {
+        assert_eq!(
+            metadata_caption((1920, 1080), 245_760, 300),
+            "1920×1080 · 240 KB · 5 mins ago"
         );
-        assert!(caption.ends_with("now"), "a fresh file reads now");
+    }
+
+    /// The card stem is the file stem only.
+    #[test]
+    fn card_stem_drops_extension_and_directory() {
+        let path = PathBuf::from("/tmp/shots/flintshot-2026-09-20-10-00-00.png");
+        assert_eq!(card_stem(&path), "flintshot-2026-09-20-10-00-00");
+        assert_eq!(card_stem(Path::new("/")), "capture");
     }
 
     #[test]
@@ -1198,17 +1475,74 @@ mod tests {
         ctx: &egui::Context,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
+        welcome_frame_sized(app, ctx, events, egui::vec2(1024.0, 768.0))
+    }
+
+    fn welcome_frame_sized(
+        app: &mut HomeApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        screen: egui::Vec2,
+    ) -> egui::FullOutput {
         // The hero speaks the display family — installed by
         // `theme::apply` in every real window (the router owns it).
         let raw = egui::RawInput {
             events,
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1024.0, 768.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), screen)),
             ..egui::RawInput::default()
         };
         ctx.run_ui(raw, |ui| app.ui_impl(ui))
+    }
+
+    /// A click at `at` (the welcome tests' event shape).
+    fn click_at(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    /// The hover chips' deterministic centers, mirrored from
+    /// `recent_card`'s layout: `which` 0=Copy 1=Reveal 2=Delete.
+    fn chip_center(card: egui::Rect, which: usize) -> egui::Pos2 {
+        let widths = [28.0_f32, 28.0, 28.0];
+        let total: f32 = widths.iter().sum::<f32>() + 12.0;
+        let mut x = card.center().x - total / 2.0;
+        for (i, w) in widths.iter().enumerate() {
+            if i == which {
+                return egui::pos2(x + w / 2.0, card.top() + 8.0 + 11.0);
+            }
+            x += w + 6.0;
+        }
+        unreachable!("three chips");
+    }
+
+    /// One recent fixture: a real decodable png + the bridge wired
+    /// for it. Returns (bridge, recorder, path).
+    fn one_recent() -> (RecordingBridge, Recording, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("shot.png");
+        let img = image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 40, 40, 255]));
+        img.save(&png).unwrap();
+        // keep the tempdir alive for the test's lifetime
+        std::mem::forget(dir);
+        let bridge = RecordingBridge {
+            recents: Arc::new(Mutex::new(vec![png.clone()])),
+            ..RecordingBridge::default()
+        };
+        let rec = bridge.rec.clone();
+        (bridge, rec, png)
     }
 
     /// Every welcome state renders the hero — never blank.
@@ -1253,7 +1587,7 @@ mod tests {
         img.save(&png).unwrap();
 
         let bridge = RecordingBridge {
-            recents: vec![png.clone()],
+            recents: Arc::new(Mutex::new(vec![png.clone()])),
             ..RecordingBridge::default()
         };
         let rec = bridge.rec.clone();
@@ -1295,11 +1629,170 @@ mod tests {
         );
     }
 
+    /// Hovering a card reveals the chip row; the Copy and Reveal
+    /// chips route to the bridge (and do NOT open the editor).
+    #[test]
+    fn hover_chips_route_card_actions() {
+        let (bridge, rec, png) = one_recent();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let card = ctx
+            .read_response(egui::Id::new(("recent", png.to_string_lossy().to_string())))
+            .expect("the card registers")
+            .rect;
+
+        // Settle: hover the card first so the chip row lays out and
+        // registers (egui assigns clicks from the prior frame's
+        // widgets), then click each chip.
+        let _ = welcome_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(card.center())],
+        );
+        let _ = welcome_frame(&mut app, &ctx, click_at(chip_center(card, 0)));
+        let _ = welcome_frame(&mut app, &ctx, click_at(chip_center(card, 1)));
+
+        let guard = rec.0.lock().expect("recorder mutex");
+        assert_eq!(guard.copied, vec![png.clone()], "the Copy chip routed");
+        assert_eq!(guard.revealed, vec![png.clone()], "the Reveal chip routed");
+        assert!(
+            guard.opened.is_empty(),
+            "chip clicks must not open the editor"
+        );
+        assert!(guard.deleted.is_empty(), "no delete on these chips");
+    }
+
+    /// Delete is two-step on the chip: the first click arms
+    /// ("Sure?"), only the second commits — and the grid drops the
+    /// card on the refresh that follows.
+    #[test]
+    fn delete_chip_requires_the_sure_step() {
+        let (bridge, rec, png) = one_recent();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let card = ctx
+            .read_response(egui::Id::new(("recent", png.to_string_lossy().to_string())))
+            .expect("the card registers")
+            .rect;
+
+        // Settle the hover, then arm — no delete yet.
+        let _ = welcome_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(card.center())],
+        );
+        let _ = welcome_frame(&mut app, &ctx, click_at(chip_center(card, 2)));
+        assert_eq!(
+            app.delete_armed,
+            Some(png.clone()),
+            "the first click arms the chip"
+        );
+        assert!(
+            rec.0.lock().expect("recorder mutex").deleted.is_empty(),
+            "one click must not delete"
+        );
+
+        // Step two: commit at the (now wider, same-center) chip.
+        let _ = welcome_frame(&mut app, &ctx, click_at(chip_center(card, 2)));
+        let guard = rec.0.lock().expect("recorder mutex");
+        assert_eq!(guard.deleted, vec![png.clone()], "the second click commits");
+        assert_eq!(app.delete_armed, None, "committed: disarmed");
+
+        // The refresh dropped the card from the grid (the response
+        // memory outlives the widget, so pin the app's own state).
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            app.recent.is_empty(),
+            "the deleted recent left the grid on the refresh"
+        );
+        assert!(app.thumbs.is_empty(), "its thumbnail cache entry went too");
+    }
+
+    /// A card click away from the chips still routes the open path
+    /// (and disarms any pending delete).
+    #[test]
+    fn card_click_off_the_chips_still_opens() {
+        let (bridge, rec, png) = one_recent();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let card = ctx
+            .read_response(egui::Id::new(("recent", png.to_string_lossy().to_string())))
+            .expect("the card registers")
+            .rect;
+
+        // The thumb's center — well below the chip row.
+        let at = egui::pos2(card.center().x, card.top() + 60.0);
+        let _ = welcome_frame(&mut app, &ctx, click_at(at));
+        let guard = rec.0.lock().expect("recorder mutex");
+        assert_eq!(guard.opened, vec![png], "the body click opened the image");
+        assert!(guard.copied.is_empty() && guard.deleted.is_empty());
+    }
+
+    /// Overflow scrolls the section, not the page: on a short
+    /// viewport the scroll area engages, the hero stays pinned, and
+    /// below-the-fold cards lay out beyond the viewport.
+    #[test]
+    fn recents_overflow_scrolls_the_section_not_the_hero() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recents = Vec::new();
+        for i in 0..12 {
+            let png = dir.path().join(format!("shot-{i}.png"));
+            image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 40, 40, 255]))
+                .save(&png)
+                .unwrap();
+            recents.push(png);
+        }
+        let first = recents[0].clone();
+        let last = recents[11].clone();
+        let bridge = RecordingBridge {
+            recents: Arc::new(Mutex::new(recents)),
+            ..RecordingBridge::default()
+        };
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame_sized(&mut app, &ctx, vec![], egui::vec2(1024.0, 420.0));
+
+        let hero = ctx
+            .read_response(egui::Id::new("hero-capture"))
+            .expect("the hero renders")
+            .rect;
+        assert!(hero.bottom() < 420.0, "the hero stays inside the viewport");
+        let first = ctx
+            .read_response(egui::Id::new((
+                "recent",
+                first.to_string_lossy().to_string(),
+            )))
+            .expect("the first card lays out")
+            .rect;
+        let last_card = ctx
+            .read_response(egui::Id::new((
+                "recent",
+                last.to_string_lossy().to_string(),
+            )))
+            .expect("clipped cards still lay out")
+            .rect;
+        assert!(
+            first.bottom() <= 420.0,
+            "the first row stays visible (the section is bounded, not pushing the page)"
+        );
+        assert!(
+            last_card.top() > 420.0,
+            "the below-the-fold card sits beyond the viewport (content taller than the pane)"
+        );
+    }
+
     /// A dead recent path renders nothing and breaks nothing.
     #[test]
     fn dead_recent_path_is_silently_absent() {
         let bridge = RecordingBridge {
-            recents: vec![PathBuf::from("/nonexistent/shot.png")],
+            recents: Arc::new(Mutex::new(vec![PathBuf::from("/nonexistent/shot.png")])),
             ..RecordingBridge::default()
         };
         let mut app = HomeApp::new(Box::new(bridge), "connected".into());

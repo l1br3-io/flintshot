@@ -114,6 +114,24 @@ pub struct UiConfig {
     /// transition to its end state.
     #[serde(default = "default_animations")]
     pub animations: bool,
+    /// How many entries the recents index keeps (the home grid and
+    /// `Recents` truncation consume the clamped form — see
+    /// [`UiConfig::recent_captures_limit_clamped`]). Clamped 1–200
+    /// at use; stored verbatim so a hand-edited out-of-range value
+    /// survives re-saves.
+    #[serde(default = "default_recent_captures_limit")]
+    pub recent_captures_limit: u32,
+}
+
+impl UiConfig {
+    /// The recents capacity actually enforced: the configured value
+    /// clamped to 1–200.
+    #[must_use]
+    pub fn recent_captures_limit_clamped(&self) -> usize {
+        // ≤ 200 by the clamp, so the fallback is unreachable on any
+        // real target — but no unwrap outside tests.
+        usize::try_from(self.recent_captures_limit.clamp(1, 200)).unwrap_or(1)
+    }
 }
 
 impl Default for UiConfig {
@@ -130,6 +148,7 @@ impl Default for UiConfig {
             show_statusbar: default_show_statusbar(),
             statusbar_size_mode: default_statusbar_size_mode(),
             animations: default_animations(),
+            recent_captures_limit: default_recent_captures_limit(),
         }
     }
 }
@@ -345,9 +364,47 @@ pub struct OutputConfig {
     #[serde(default)]
     pub filename_template: String,
     /// Direct-save directory. Empty (default) = the user's
-    /// pictures directory (platform standard).
+    /// pictures directory (platform standard — see
+    /// [`OutputConfig::resolve_save_dir`]).
     #[serde(default)]
     pub save_dir: String,
+    /// Whether flintshot's own copy-to-clipboard actions (the
+    /// editor's Copy button, `capture.after-grab = "clipboard"`)
+    /// also write the image to the resolved save directory so the
+    /// copy lands in recents. A persist failure never fails the
+    /// copy — the clipboard write already succeeded.
+    #[serde(default = "default_save_clipboard_copies")]
+    pub save_clipboard_copies: bool,
+}
+
+impl OutputConfig {
+    /// The effective save directory: the configured `save-dir`, or
+    /// the platform pictures dir plus `Flintshot` when unset
+    /// (`~/Pictures/Flintshot` on Linux and macOS,
+    /// `…\My Pictures\Flintshot` on Windows) — the fallback the
+    /// settings row has documented since Phase 1. Falls back to
+    /// `~/Pictures/Flintshot` via the home dir when the platform
+    /// reports no pictures dir, and to a relative `Flintshot` only
+    /// when no home exists either.
+    #[must_use]
+    pub fn resolve_save_dir(&self) -> PathBuf {
+        let base = dirs::picture_dir().or_else(|| dirs::home_dir().map(|h| h.join("Pictures")));
+        resolve_save_dir_with(&self.save_dir, base.as_deref())
+    }
+}
+
+/// Testable core of [`OutputConfig::resolve_save_dir`]: a non-blank
+/// `save_dir` passes through (whitespace-trimmed); a blank one joins
+/// `Flintshot` onto `pictures_base` (or a relative `Flintshot` when
+/// the platform offers no base — never empty, so callers always have
+/// a directory to create). Pure.
+#[must_use]
+pub fn resolve_save_dir_with(save_dir: &str, pictures_base: Option<&Path>) -> PathBuf {
+    let trimmed = save_dir.trim();
+    if !trimmed.is_empty() {
+        return PathBuf::from(trimmed);
+    }
+    pictures_base.map_or_else(|| PathBuf::from("Flintshot"), |base| base.join("Flintshot"))
 }
 
 impl Default for OutputConfig {
@@ -357,8 +414,17 @@ impl Default for OutputConfig {
             jpeg_quality: default_jpeg_quality(),
             filename_template: String::new(),
             save_dir: String::new(),
+            save_clipboard_copies: default_save_clipboard_copies(),
         }
     }
+}
+
+fn default_save_clipboard_copies() -> bool {
+    true
+}
+
+fn default_recent_captures_limit() -> u32 {
+    50
 }
 
 fn default_output_format() -> String {
@@ -655,6 +721,7 @@ impl Config {
         ensure_table(&mut doc, "capture");
         ensure_table(&mut doc, "hotkeys");
         ensure_table(&mut doc, "upload");
+        ensure_table(&mut doc, "output");
 
         if let Some(ui) = doc.get_mut("ui").and_then(|i| i.as_table_mut()) {
             self.merge_ui(ui);
@@ -688,6 +755,33 @@ impl Config {
                 upload,
                 "default-backend",
                 toml_edit::Value::from(self.upload.default_backend.as_str()),
+            );
+        }
+        if let Some(out) = doc.get_mut("output").and_then(|i| i.as_table_mut()) {
+            set_value(
+                out,
+                "format",
+                toml_edit::Value::from(self.output.format.as_str()),
+            );
+            set_value(
+                out,
+                "jpeg-quality",
+                toml_edit::Value::from(i64::from(self.output.jpeg_quality)),
+            );
+            set_value(
+                out,
+                "filename-template",
+                toml_edit::Value::from(self.output.filename_template.as_str()),
+            );
+            set_value(
+                out,
+                "save-dir",
+                toml_edit::Value::from(self.output.save_dir.as_str()),
+            );
+            set_value(
+                out,
+                "save-clipboard-copies",
+                toml_edit::Value::from(self.output.save_clipboard_copies),
             );
         }
 
@@ -754,6 +848,22 @@ impl Config {
             ui,
             "flip-to-select",
             toml_edit::Value::from(self.ui.flip_to_select),
+        );
+        set_value(
+            ui,
+            "show-statusbar",
+            toml_edit::Value::from(self.ui.show_statusbar),
+        );
+        set_value(
+            ui,
+            "statusbar-size-mode",
+            toml_edit::Value::from(self.ui.statusbar_size_mode.as_str()),
+        );
+        set_value(ui, "animations", toml_edit::Value::from(self.ui.animations));
+        set_value(
+            ui,
+            "recent-captures-limit",
+            toml_edit::Value::from(i64::from(self.ui.recent_captures_limit)),
         );
     }
 }
@@ -1648,6 +1758,14 @@ backend = \"portal\"
             d.output.filename_template
         );
         assert_eq!(from_asset.output.save_dir, d.output.save_dir);
+        assert_eq!(
+            from_asset.output.save_clipboard_copies,
+            d.output.save_clipboard_copies
+        );
+        assert_eq!(
+            from_asset.ui.recent_captures_limit,
+            d.ui.recent_captures_limit
+        );
     }
 
     /// The asset carries a user-facing header: the materialized file
@@ -1699,5 +1817,166 @@ backend = \"portal\"
 
         let after = fs::read_to_string(&path).unwrap();
         assert_eq!(after, sentinel, "byte-identical after the call");
+    }
+
+    // ── Recent-captures-v2 Task 001 ───────────────────────────────
+
+    /// The explicit `save-dir` passes through (whitespace-trimmed);
+    /// an unset one joins `Flintshot` onto the injected pictures
+    /// base, so the test never depends on the host env.
+    #[test]
+    fn resolve_save_dir_spans_explicit_empty_and_no_base() {
+        use std::path::Path;
+        assert_eq!(
+            resolve_save_dir_with("/tmp/shots", Some(Path::new("/home/u/Pictures"))),
+            PathBuf::from("/tmp/shots"),
+            "the explicit path wins"
+        );
+        assert_eq!(
+            resolve_save_dir_with("", Some(Path::new("/home/u/Pictures"))),
+            PathBuf::from("/home/u/Pictures/Flintshot"),
+            "empty resolves onto the base"
+        );
+        assert_eq!(
+            resolve_save_dir_with("   ", Some(Path::new("/p"))),
+            PathBuf::from("/p/Flintshot"),
+            "whitespace-only resolves like unset"
+        );
+        assert_eq!(
+            resolve_save_dir_with("", None),
+            PathBuf::from("Flintshot"),
+            "no base at all: a degraded relative dir, never empty"
+        );
+    }
+
+    /// The method (host dirs) is pinned where the host allows it:
+    /// explicit passthrough exactly, and the unset fallback always
+    /// ends in `Flintshot`.
+    #[test]
+    fn resolve_save_dir_method_resolves_on_this_host() {
+        let explicit = OutputConfig {
+            save_dir: "/tmp/explicit-shots".into(),
+            ..OutputConfig::default()
+        };
+        assert_eq!(
+            explicit.resolve_save_dir(),
+            PathBuf::from("/tmp/explicit-shots")
+        );
+        let resolved = OutputConfig::default().resolve_save_dir();
+        assert!(
+            resolved.ends_with("Flintshot"),
+            "unset resolves to the platform pictures dir + Flintshot, got {resolved:?}"
+        );
+    }
+
+    /// The new fields default correctly from a file that predates
+    /// them (acceptance: old configs load with zero migration).
+    #[test]
+    fn recents_v2_fields_default_when_absent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[ui]\ndefault-color = \"#ff0000\"\n").unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert!(
+            cfg.output.save_clipboard_copies,
+            "persists copies by default"
+        );
+        assert_eq!(cfg.ui.recent_captures_limit, 50, "default capacity 50");
+        assert!(OutputConfig::default().save_clipboard_copies);
+        assert_eq!(UiConfig::default().recent_captures_limit, 50);
+    }
+
+    /// Both new fields survive a save/load round-trip.
+    #[test]
+    fn recents_v2_fields_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.output.save_clipboard_copies = false;
+        cfg.ui.recent_captures_limit = 100;
+        cfg.save_to(&path).unwrap();
+        let back = Config::load_from(&path).unwrap();
+        assert!(!back.output.save_clipboard_copies);
+        assert_eq!(back.ui.recent_captures_limit, 100);
+    }
+
+    /// The clamp the recents plumbing consumes: 1–200.
+    #[test]
+    fn recent_captures_limit_clamps_one_to_two_hundred() {
+        let clamped = |v: u32| {
+            UiConfig {
+                recent_captures_limit: v,
+                ..UiConfig::default()
+            }
+            .recent_captures_limit_clamped()
+        };
+        assert_eq!(clamped(0), 1);
+        assert_eq!(clamped(500), 200);
+        assert_eq!(clamped(50), 50);
+    }
+
+    /// The merge fix at the heart of the picker: saving **into an
+    /// existing file** must write every `[output]` value and the
+    /// `[ui]` keys the merge previously dropped — otherwise a
+    /// Settings-driven change never reaches disk.
+    #[test]
+    fn save_into_existing_file_writes_output_and_late_ui_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[ui]\ndefault-color = \"#ff0000\"\n[capture]\ninclude-cursor = true\n",
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.output.format = "jpeg".into();
+        cfg.output.jpeg_quality = 75;
+        cfg.output.filename_template = "{app}-{date}".into();
+        cfg.output.save_dir = "/tmp/shots".into();
+        cfg.output.save_clipboard_copies = false;
+        cfg.ui.show_statusbar = false;
+        cfg.ui.statusbar_size_mode = "exact-png".into();
+        cfg.ui.animations = false;
+        cfg.ui.recent_captures_limit = 100;
+        cfg.save_to(&path).unwrap();
+
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.output.format, "jpeg");
+        assert_eq!(back.output.jpeg_quality, 75);
+        assert_eq!(back.output.filename_template, "{app}-{date}");
+        assert_eq!(back.output.save_dir, "/tmp/shots");
+        assert!(!back.output.save_clipboard_copies);
+        assert!(!back.ui.show_statusbar);
+        assert_eq!(back.ui.statusbar_size_mode, "exact-png");
+        assert!(!back.ui.animations);
+        assert_eq!(back.ui.recent_captures_limit, 100);
+    }
+
+    /// The merge preserves an existing `[output]` entry's comments
+    /// while rewriting its value (`set_value` decor semantics).
+    #[test]
+    fn output_merge_preserves_existing_comments() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[output]\n# where my shots go\nsave-dir = \"/old\"\n",
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.output.save_dir = "/new".into();
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("# where my shots go"),
+            "comment on save-dir lost:\n{written}"
+        );
+        assert!(
+            written.contains("save-dir = \"/new\""),
+            "value updated in place:\n{written}"
+        );
     }
 }
