@@ -20,6 +20,34 @@ Categories used below:
 
 ### Added
 
+- **Home capture grids rework** (effort `home-capture-grids`). The
+  home page's two capture sections get a sharper, more informative
+  layout:
+  - *Adaptive grid*: card columns floor-fill the window width
+    (narrowest card 150 px, 8-column cap) — cards stretch to fill
+    their column and thumbnails grow with the card, instead of the
+    fixed 112 px cards at 4-per-row. Both the "Recent captures" and
+    "This session" grids share the geometry.
+  - *Day-grouped recents*: the recents grid groups under
+    **TODAY / YESTERDAY / EARLIER** eyebrow labels, each sitting on a
+    dotted tear line (the pop-up-book perforated-strip motif),
+    newest-first within groups. Day buckets compare UTC civil days —
+    the same convention filename templates use (`flintshot_core::
+    recents::day_bucket`).
+  - *Section headers that carry state*: the recents header shows the
+    live count (`RECENT CAPTURES · 12 of 50`) next to an **Open
+    folder** chip that opens the resolved save directory in the file
+    manager; the session header shows `THIS SESSION · N`. An empty
+    session store still hides its section — now with no orphan gap
+    above the recents.
+  - *Caption discipline*: long filenames and metadata lines
+    ellipsize (middle truncation keeps head + tail of the name)
+    instead of overflowing the card.
+  - *Performance*: recents mtimes are gathered once at thumbnail
+    decode (the age caption and day grouping read the cached value);
+    the per-frame filesystem stat per card is gone. New
+    `HomeBridge` methods: `recents_limit`, `open_recents_folder`.
+
 - **Session captures: unsaved captures survive navigation until app
   exit** (effort `session-captures`; ADR-0067). Every capture that
   lands in the app window's editor is tracked — image plus committed
