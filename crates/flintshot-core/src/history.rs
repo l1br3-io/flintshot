@@ -39,6 +39,8 @@ pub enum EditKind {
     },
     /// The image was cropped.
     Crop,
+    /// The image was resized (annotations rescaled to match).
+    Resize,
     /// A text re-edit session committed a content change.
     EditText,
     /// A restyle gesture changed a text annotation's style.
@@ -60,6 +62,7 @@ impl fmt::Display for EditKind {
             Self::Move { count } => write!(f, "Moved {} {}", count, item_word(*count)),
             Self::Delete { count } => write!(f, "Deleted {} {}", count, item_word(*count)),
             Self::Crop => f.write_str("Cropped"),
+            Self::Resize => f.write_str("Resized"),
             Self::EditText => f.write_str("Edited text"),
             Self::RestyleText => f.write_str("Text style"),
             Self::Property { kind } => f.write_str(property_name(*kind)),
@@ -162,6 +165,7 @@ mod tests {
         assert_eq!(EditKind::Move { count: 1 }.to_string(), "Moved 1 item");
         assert_eq!(EditKind::Delete { count: 2 }.to_string(), "Deleted 2 items");
         assert_eq!(EditKind::Crop.to_string(), "Cropped");
+        assert_eq!(EditKind::Resize.to_string(), "Resized");
         assert_eq!(EditKind::EditText.to_string(), "Edited text");
         assert_eq!(EditKind::RestyleText.to_string(), "Text style");
         assert_eq!(

@@ -249,6 +249,10 @@ pub(crate) struct EditorApp {
     /// presses that begin there are chrome, never canvas gestures
     /// (misses between chips pass through to the canvas).
     floating_rects: Vec<egui::Rect>,
+    /// The resize popover's cross-frame state (open flag + custom
+    /// width field). Opened by the topbar overflow's Resize item;
+    /// applies through [`EditorState::resize`].
+    resize_menu: topbar::ResizeMenu,
 }
 
 /// The paper-cutout ring around the image: 8 px cream — the cutout
@@ -368,6 +372,7 @@ impl EditorApp {
             panel: panel::PanelState::default(),
             rail: rail::RailState::default(),
             floating_rects: Vec::new(),
+            resize_menu: topbar::ResizeMenu::default(),
         }
     }
 
@@ -1366,6 +1371,15 @@ impl EditorApp {
     /// as today's Cancel. Shell-side by design: the dispatcher's Esc
     /// → `Cancel` contract stays stable for future shells.
     fn dispatch_shortcut_key(&mut self, ctx: &Context, modifiers: Modifiers) -> bool {
+        // The resize popover is modal over shortcuts: Esc closes it
+        // (not the editor) and Enter / typing belong to its field —
+        // the dispatcher must not see them mid-popover.
+        if self.resize_menu.open {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.resize_menu.open = false;
+            }
+            return true;
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.state.selected.is_empty() {
             self.state.selected.clear();
             return true;
@@ -1510,6 +1524,7 @@ impl EditorApp {
             None,
             topbar::Enable::WORKER,
             copied,
+            self.can_resize(),
         ) {
             self.handle_topbar_action(a, ui.ctx());
         }
@@ -1525,6 +1540,17 @@ impl EditorApp {
             ui.ctx().request_repaint_after(delay);
         }
         self.draw_worker_topbar(ui);
+        // The resize popover (topbar overflow → `TopbarAction::Resize`):
+        // a Foreground-layer area, so it floats over the panels; both
+        // lifecycles render here (worker topbar above, routed pages
+        // via the router's forwarded action).
+        if let Some(target_w) = topbar::resize_popover(
+            ui.ctx(),
+            &mut self.resize_menu,
+            self.state.image.dimensions(),
+        ) {
+            self.state.resize(target_w);
+        }
         // Statusbar: the bottom zone strips its 30 px before the
         // side panels reserve (draw order: top → bottom → left →
         // right). Editor-only — the router draws home / settings
@@ -1727,6 +1753,12 @@ impl EditorApp {
             TopbarAction::Upload => self.handle_upload(ctx),
             TopbarAction::Open => self.handle_page_open(ctx),
             TopbarAction::Paste => self.handle_page_paste(ctx),
+            // The overflow's Resize entry: open the popover (the
+            // shell owns the state; `ui_impl` renders it next pass
+            // and applies through `EditorState::resize`).
+            TopbarAction::Resize => {
+                self.resize_menu.open_for(self.state.image.dimensions().0);
+            }
             // The shell's delegate (the daemon's `OpenSettings`
             // choreography: an open app window focuses + routes
             // itself to Settings; otherwise one is spawned on the
@@ -1942,6 +1974,12 @@ impl EditorApp {
     /// worker's own topbar and the router over routed pages.
     pub(crate) fn copied_visible(&self, now: f64) -> bool {
         copied_window_open(self.copied_at, now)
+    }
+
+    /// Whether the image can shrink (the Resize entry's liveness for
+    /// the router's topbar): false at ≤ 1 px wide.
+    pub(crate) fn can_resize(&self) -> bool {
+        self.state.image.dimensions().0 > 1
     }
 
     /// `+` chip / Ctrl+N handler: publish `NewCapture` and close —
@@ -4175,6 +4213,76 @@ mod tests {
         assert!(
             close_command_issued(&full),
             "the defensive arm still closes"
+        );
+    }
+
+    // --- Resize popover routing (editor-resize-image) ---
+
+    /// The overflow's Resize action opens the popover; a preset chip
+    /// click flows through `ui_impl` to `EditorState::resize` — dims
+    /// shrink, one undo entry, popover closed.
+    #[test]
+    fn resize_action_opens_popover_and_preset_click_resizes() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        app.handle_topbar_action(TopbarAction::Resize, &ctx);
+        assert!(app.resize_menu.open, "the popover opens");
+        // Sizing + settle passes (the popup quirk the topbar tests
+        // document): three frames before reading the chip rect.
+        for _ in 0..3 {
+            editor_frame(&ctx, &mut app, vec![]);
+        }
+        let chip = ctx
+            .read_response(egui::Id::new(("resize-preset", 1)))
+            .expect("50% chip")
+            .rect
+            .center();
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(chip),
+                egui::Event::PointerButton {
+                    pos: chip,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: chip,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(!app.resize_menu.open, "apply closes the popover");
+        assert_eq!(
+            app.state.image.dimensions(),
+            (32, 32),
+            "50% of a 64×64 image"
+        );
+        assert_eq!(app.state.undo.len(), 1, "one full snapshot pushed");
+    }
+
+    /// Esc with the popover open closes the popover alone — the
+    /// outcome slot stays unset, the window does not cancel.
+    #[test]
+    fn escape_closes_resize_popover_without_cancelling() {
+        let outcome: OutcomeSlot = Rc::new(RefCell::new(None));
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::clone(&outcome), false);
+        app.handle_topbar_action(TopbarAction::Resize, &ctx);
+        editor_frame(&ctx, &mut app, vec![key_press(egui::Key::Escape)]);
+        assert!(!app.resize_menu.open, "Esc closed the popover");
+        assert!(
+            outcome.borrow().is_none(),
+            "the editor did not cancel underneath the popover"
         );
     }
 

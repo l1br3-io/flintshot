@@ -183,6 +183,23 @@ Categories used below:
 
 ### Added
 
+- **Resize image: destructive, undoable downscale from the editor's
+  topbar overflow menu.** A new **Resize** item (editor surface only)
+  opens a popover with 25% / 50% / 75% preset chips — hover shows the
+  resulting `WxH` — and a custom-width field with a live
+  aspect-derived `× H` label (Enter applies). The whole composition
+  scales down uniformly: image, annotation geometry, stroke widths,
+  font sizes, arrow heads, and number diameters, with blur strength
+  kept ≥ 1 so blurs stay visible. Never upscales (presets and the
+  custom field clamp to below the current width; the entry dims at
+  ≤ 1 px).   Ctrl+Z restores the original pixels and annotations
+  bit-for-bit; Esc closes the popover without leaving the editor.
+  Each resize lands on the History tab as its own labeled `Resized`
+  row (elapsed-timestamped, clickable like every other edit).
+  (Pinned by the `resize*` unit tests across `flintshot-core` and
+  `flintshot-editor-egui`; effort spec:
+  `docs/specs/editor-resize-image/`.)
+
 - **Text selection & highlight while editing** (effort
   `text-selection-highlight`). In-edit text now behaves like real
   text in both shells (editor window and fullscreen overlay, fresh
