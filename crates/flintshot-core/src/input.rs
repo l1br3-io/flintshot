@@ -5,8 +5,9 @@
 //! [`EditorState::dispatch_input`](crate::EditorState::dispatch_input).
 //! The dispatcher mutates state and returns a [`DispatchOutcome`]
 //! telling the shell whether to perform a side effect (save, copy,
-//! cancel). This keeps the input model pure and unit-testable: no
-//! `egui::Context` or `eframe` types reach this module.
+//! cancel, focus the properties inspector). This keeps the input
+//! model pure and unit-testable: no `egui::Context` or `eframe`
+//! types reach this module.
 //!
 //! ## Why this lives in core
 //!
@@ -118,12 +119,14 @@ pub enum InputEvent {
     /// second press's [`PointerDown`](Self::PointerDown), in the same
     /// frame, immediately after it. The dispatcher treats that second
     /// press as a normal press (select / begin annotation) and this
-    /// event as the re-edit trigger — under `Tool::Text`, a hit on a
-    /// committed text lifts it out for re-editing
-    /// (see [`EditorState`](crate::EditorState)'s lift-out session).
-    /// Everywhere else it is a no-op, so shells on toolkits without a
-    /// native double-click signal can simply never emit it and lose
-    /// only the re-edit affordance.
+    /// event as the upgrade: a hit on a committed text lifts it out
+    /// for re-editing (see [`EditorState`](crate::EditorState)'s
+    /// lift-out session), a hit on any other committed annotation
+    /// quick-selects it and returns
+    /// [`FocusProperties`](DispatchOutcome::FocusProperties), and a
+    /// miss is a no-op — so shells on toolkits without a native
+    /// double-click signal can simply never emit it and lose only the
+    /// re-edit and quick-select affordances.
     DoubleClick {
         /// Position in canvas-physical px.
         pos: Point,
@@ -181,6 +184,13 @@ pub enum DispatchOutcome {
     /// User requested copy (`Ctrl+C`) — invoke the copy pipeline
     /// (`copy_to_clipboard`) and close on success.
     Copy,
+    /// A double-click quick-selected an annotation — the shell should
+    /// bring the properties inspector forward (e.g. flip the right
+    /// panel to its Properties tab). Shells without a properties
+    /// panel treat this as [`Continue`](Self::Continue); a hidden or
+    /// collapsed panel stays hidden — the outcome signals focus, never
+    /// layout changes.
+    FocusProperties,
 }
 
 #[cfg(test)]

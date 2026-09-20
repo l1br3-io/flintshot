@@ -1403,16 +1403,30 @@ impl EditorState {
             // documented no-op — line selection is a text-editing
             // affordance only (see `dispatch_text_event`).
             InputEvent::TextInput(_) | InputEvent::TripleClick { .. } => DispatchOutcome::Continue,
-            // Double-click owns exactly one behavior: re-edit. Only
-            // the Text tool reacts, and only when the accompanying
-            // second PointerDown didn't just start / continue a draft
-            // (mid-edit arrivals no-op in `dispatch_text_event`) and
-            // something text-shaped is actually under the pointer.
+            // Double-click routes by what is under the pointer: a
+            // text hit re-edits (Text tool, when the accompanying
+            // second PointerDown didn't just start / continue a
+            // draft — mid-edit arrivals no-op in
+            // `dispatch_text_event`); any other annotation hit
+            // quick-selects it, flips to Select, and asks the shell
+            // to focus the properties panel; empty space stays a
+            // no-op. The quick-select cancels whatever draft the
+            // presses began — under a drawing tool the second press
+            // leaves a degenerate draft in `pending`, which the
+            // release's degenerate filter would have canceled
+            // anyway, and under Crop the press-begun region is the
+            // same kind of tool chrome.
             InputEvent::DoubleClick { pos } => {
-                if self.tool == Tool::Text && self.pending.is_none() {
-                    if let Some(index) = self.text_hit_test(*pos) {
+                if let Some(index) = self.text_hit_test(*pos) {
+                    if self.tool == Tool::Text && self.pending.is_none() {
                         self.begin_text_reedit(index);
                     }
+                } else if let Some(index) = self.hit_test(*pos) {
+                    self.cancel_annotation();
+                    self.crop_region = None;
+                    self.set_tool(Tool::Select);
+                    self.select_only(index);
+                    return DispatchOutcome::FocusProperties;
                 }
                 DispatchOutcome::Continue
             }
@@ -2830,6 +2844,15 @@ mod tests {
             rect: Rect::new(Point::new(x1, y1), Point::new(x2, y2)),
             stroke: Stroke::new(Color::RED, 3.0),
             fill: None,
+        }
+    }
+
+    fn arrow_ann(x1: f32, y1: f32, x2: f32, y2: f32) -> Annotation {
+        Annotation::Arrow {
+            a: Point::new(x1, y1),
+            b: Point::new(x2, y2),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 10.0,
         }
     }
 
@@ -4459,6 +4482,21 @@ mod tests {
         s.dispatch_input(&InputEvent::DoubleClick { pos });
     }
 
+    /// Helper: the full double-click gesture as the pump delivers it
+    /// — press, release, press, then the synthesized `DoubleClick`
+    /// in the same frame as the second press (before its release),
+    /// per the emission contract in `dblclick.rs`.
+    fn full_dblclick(s: &mut EditorState, pos: Point) -> DispatchOutcome {
+        let down = InputEvent::PointerDown {
+            pos,
+            modifiers: Modifiers::default(),
+        };
+        s.dispatch_input(&down);
+        s.dispatch_input(&InputEvent::PointerUp);
+        s.dispatch_input(&down);
+        s.dispatch_input(&InputEvent::DoubleClick { pos })
+    }
+
     /// Double-click on a committed Text lifts it out of `anns` into
     /// `pending` with the caret at the end and the selection vacated
     /// (its slot in `anns` is gone for the session's duration).
@@ -4588,23 +4626,137 @@ mod tests {
         }
     }
 
-    /// `DoubleClick` is inert everywhere except a Text-tool hit on a
-    /// committed Text: misses, non-Text tools, and mid-edit arrivals
-    /// (the accompanying second `PointerDown` already did the work).
+    // --- Double-click quick-select (dblclick-select-properties) ---
+
+    /// Rect tool active, full double-click sequence landing on a
+    /// committed arrow: the arrow becomes the live selection, the tool
+    /// flips to Select, and the outcome asks the shell to focus the
+    /// properties panel. The press-begun degenerate draft is canceled
+    /// and no history entry appears — selection and tool flips are
+    /// chrome.
     #[test]
-    fn doubleclick_noops_miss_other_tools_and_mid_edit() {
+    fn doubleclick_from_rect_tool_quick_selects_arrow() {
+        let mut s = hundred_state();
+        s.anns.push(arrow_ann(10.0, 10.0, 60.0, 60.0));
+        s.tool = Tool::Rect;
+        let outcome = full_dblclick(&mut s, Point::new(30.0, 30.0));
+        assert_eq!(outcome, DispatchOutcome::FocusProperties);
+        assert_eq!(s.selected, vec![0], "the arrow is the live selection");
+        assert_eq!(s.tool, Tool::Select, "flipped to Select");
+        assert!(s.pending.is_none(), "the press-begun draft was canceled");
+        assert!(s.undo.is_empty(), "selection flips push no history");
+        assert!(s.redo.is_empty());
+    }
+
+    /// Blur and Pencil spot-checks: same quick-select route, with the
+    /// second press's degenerate draft (blur rect / single-point
+    /// polyline) canceled by the flip.
+    #[test]
+    fn doubleclick_from_blur_and_pencil_quick_select_and_cancel_draft() {
+        for tool in [Tool::Blur, Tool::Pencil] {
+            let mut s = hundred_state();
+            s.anns.push(rect_ann(10.0, 10.0, 60.0, 60.0));
+            s.tool = tool;
+            let outcome = full_dblclick(&mut s, Point::new(30.0, 30.0));
+            assert_eq!(outcome, DispatchOutcome::FocusProperties);
+            assert_eq!(s.selected, vec![0]);
+            assert_eq!(s.tool, Tool::Select);
+            assert!(s.pending.is_none(), "{tool:?}: draft canceled");
+        }
+    }
+
+    /// Number places immediately on press, so the double-click's two
+    /// presses place two bubbles and the quick-select lands on the
+    /// second (topmost). The placements' history is legit; the
+    /// quick-select itself adds nothing.
+    #[test]
+    fn doubleclick_from_number_tool_selects_the_second_bubble() {
+        let mut s = hundred_state();
+        s.anns.push(rect_ann(10.0, 10.0, 60.0, 60.0));
+        s.tool = Tool::Number;
+        let outcome = full_dblclick(&mut s, Point::new(30.0, 30.0));
+        assert_eq!(outcome, DispatchOutcome::FocusProperties);
+        assert_eq!(s.anns.len(), 3, "both presses placed their bubbles");
+        assert_eq!(s.selected, vec![2], "topmost at the point is bubble two");
+        assert_eq!(s.tool, Tool::Select);
+        assert_eq!(s.undo.len(), 2, "history holds the placements only");
+    }
+
+    /// The Crop tool's press-begun region is a draft in the same
+    /// sense: the quick-select flip cancels it, so no degenerate
+    /// region lingers armed under a tool that no longer owns it.
+    #[test]
+    fn doubleclick_from_crop_tool_clears_the_press_begun_region() {
+        let mut s = hundred_state();
+        s.anns.push(rect_ann(10.0, 10.0, 60.0, 60.0));
+        s.tool = Tool::Crop;
+        let outcome = full_dblclick(&mut s, Point::new(30.0, 30.0));
+        assert_eq!(outcome, DispatchOutcome::FocusProperties);
+        assert_eq!(s.selected, vec![0]);
+        assert_eq!(s.tool, Tool::Select);
+        assert!(s.crop_region.is_none(), "the region went with the tool");
+    }
+
+    /// From Select the gesture is pure signal: the second press
+    /// already selected and grabbed the annotation, and the armed
+    /// drag-grab survives so a following drag still moves it.
+    #[test]
+    fn doubleclick_from_select_tool_focuses_without_disturbing_the_grab() {
+        let mut s = hundred_state();
+        s.anns.push(rect_ann(10.0, 10.0, 60.0, 60.0));
+        s.tool = Tool::Select;
+        let outcome = full_dblclick(&mut s, Point::new(30.0, 30.0));
+        assert_eq!(outcome, DispatchOutcome::FocusProperties);
+        assert_eq!(s.selected, vec![0]);
+        assert_eq!(s.tool, Tool::Select);
+        assert!(s.moving.is_some(), "the armed drag-grab survives");
+    }
+
+    /// Empty-space double-click from a drawing tool: today's behavior
+    /// byte-for-byte — no selection, no flip, and the degenerate
+    /// draft still cancels on release.
+    #[test]
+    fn doubleclick_on_empty_space_keeps_today_behavior() {
+        let mut s = hundred_state();
+        s.anns.push(rect_ann(10.0, 10.0, 60.0, 60.0));
+        s.tool = Tool::Rect;
+        let outcome = full_dblclick(&mut s, Point::new(80.0, 80.0));
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(s.selected.is_empty());
+        assert_eq!(s.tool, Tool::Rect, "a miss never flips tools");
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.pending.is_none(), "degenerate draft cancels on release");
+        assert_eq!(s.anns.len(), 1);
+    }
+
+    /// `DoubleClick` is inert only on empty space and mid-edit (the
+    /// accompanying second `PointerDown` already did the work). A
+    /// non-Text tool over a text hit stays quiet for now — re-edit
+    /// from any tool is the text-precedence task.
+    #[test]
+    fn doubleclick_noops_on_empty_space_and_mid_edit() {
         // Miss under Text.
         let mut s = reedit_state();
         dblclick(&mut s, Point::new(80.0, 80.0));
         assert_eq!(s.anns.len(), 1);
         assert!(s.pending.is_none());
 
+        // Empty space from a drawing tool (full sequence).
+        let mut s = reedit_state();
+        s.tool = Tool::Rect;
+        let outcome = full_dblclick(&mut s, Point::new(80.0, 80.0));
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert_eq!(s.anns.len(), 1);
+        assert!(s.selected.is_empty());
+        assert_eq!(s.tool, Tool::Rect);
+
         // Non-Text tool over a text hit.
         let mut s = reedit_state();
         s.tool = Tool::Hand;
         dblclick(&mut s, Point::new(20.0, 15.0));
-        assert_eq!(s.anns.len(), 1, "Hand treats DoubleClick as noise");
+        assert_eq!(s.anns.len(), 1, "Hand stays quiet for now");
         assert!(s.pending.is_none());
+        assert!(s.selected.is_empty());
 
         // Mid-edit (fresh draft active): modal path swallows it.
         let mut s = reedit_state();
