@@ -220,12 +220,15 @@ pub trait HomeBridge {
 const RECENTS_PER_ROW: usize = 4;
 
 /// A decoded recent: the downscaled thumbnail texture plus the
-/// metadata the card caption needs (original dimensions and file
-/// size) — gathered once at decode, never re-stat'd per frame.
+/// metadata the card caption needs (original dimensions, file size,
+/// last-modified time) — gathered once at decode, never re-stat'd
+/// per frame. The mtime is a decode-time snapshot: a file rewritten
+/// in place keeps the cached age until its thumb re-decodes.
 pub(crate) struct RecentThumb {
     texture: egui::TextureHandle,
     dims: (u32, u32),
     bytes: u64,
+    mtime: u64,
 }
 
 /// One resumable session capture for the "This session" grid —
@@ -447,21 +450,18 @@ pub(crate) fn card_stem(path: &Path) -> String {
     )
 }
 
-/// Seconds since `path` was last modified. `None` when the file is
-/// gone or its mtime predates the epoch's representable range.
-/// A session card's age, from the store's arrival timestamp (not
-/// file mtime — the PNG write lands off-thread).
-fn session_age_secs(created_at: u64) -> u64 {
+/// Unix seconds now — the age terms' common `now` (session cards'
+/// arrival stamps and the recents thumbs' decode-time mtimes).
+fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
-        .saturating_sub(created_at)
 }
 
-fn age_seconds(path: &std::path::Path) -> Option<u64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let age = std::time::SystemTime::now().duration_since(modified).ok()?;
-    Some(age.as_secs())
+/// A session card's age, from the store's arrival timestamp (not
+/// file mtime — the PNG write lands off-thread).
+fn session_age_secs(created_at: u64) -> u64 {
+    unix_now().saturating_sub(created_at)
 }
 
 /// The card's age line with counts: `now`, `5 mins ago`, `3 hours
@@ -1119,11 +1119,12 @@ impl HomeApp {
         let Some(thumb) = self.thumbnail(ui.ctx(), path) else {
             return;
         };
-        let (texture_id, tsize, dims, bytes) = (
+        let (texture_id, tsize, dims, bytes, mtime) = (
             thumb.texture.id(),
             thumb.texture.size_vec2(),
             thumb.dims,
             thumb.bytes,
+            thumb.mtime,
         );
         let path_key = path.to_string_lossy().to_string();
         let armed = self.delete_armed.as_deref() == Some(path.as_path());
@@ -1172,7 +1173,7 @@ impl HomeApp {
             p::INK,
         );
         let meta_galley = ui.painter().layout_no_wrap(
-            metadata_caption(dims, bytes, age_seconds(path).unwrap_or(u64::MAX)),
+            metadata_caption(dims, bytes, unix_now().saturating_sub(mtime)),
             egui::FontId::proportional(crate::theme::TYPE_XS),
             p::INK_SOFT,
         );
@@ -1364,13 +1365,21 @@ impl HomeApp {
                 image,
                 egui::TextureOptions::default(),
             );
-            let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
+            let bytes_mtime = std::fs::metadata(path).ok().map_or((0, 0), |m| {
+                let secs = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs());
+                (m.len(), secs)
+            });
             self.thumbs.insert(
                 path.clone(),
                 RecentThumb {
                     texture: handle,
                     dims: (w, h),
-                    bytes,
+                    bytes: bytes_mtime.0,
+                    mtime: bytes_mtime.1,
                 },
             );
         }
@@ -2160,6 +2169,27 @@ mod tests {
                 .is_none(),
             "an undecodable recent renders no card"
         );
+    }
+
+    /// The decode gathers mtime once — the caption's age term and
+    /// the day grouping read it from the thumb, never re-stat the
+    /// file on the render path (home-capture-grids Task 002).
+    #[test]
+    fn recent_thumb_gathers_mtime_at_decode() {
+        let (bridge, _rec, png) = one_recent();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let thumb = app.thumbs.get(&png).expect("the recent decoded");
+        let expected = std::fs::metadata(&png)
+            .expect("fixture file exists")
+            .modified()
+            .expect("mtime readable")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("post-epoch mtime")
+            .as_secs();
+        assert_eq!(thumb.mtime, expected, "decode-time mtime, one stat");
     }
 
     /// One session fixture: a real decodable png + the bridge wired

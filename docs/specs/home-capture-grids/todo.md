@@ -3,7 +3,7 @@
 Single status source — one line per task, mirror of `plan.md`.
 
 - [x] Task 1: `day_bucket` in core (`tasks/001-day-bucket-core.md`)
-- [ ] Task 2: mtime at decode, drop the per-frame stat (`tasks/002-mtime-at-decode.md`)
+- [x] Task 2: mtime at decode, drop the per-frame stat (`tasks/002-mtime-at-decode.md`)
 - [ ] Task 3: adaptive recents grid (`tasks/003-adaptive-recents-grid.md`)
 - [ ] Task 4: day-grouped recents + tear-line eyebrows (`tasks/004-day-grouped-recents.md`)
 - [ ] Task 5: recents header — `N of LIMIT` + Open folder chip (`tasks/005-recents-header-open-folder.md`)
