@@ -252,6 +252,44 @@ fn column_width(available: f32, cols: usize, gap: f32) -> f32 {
     (available - (cols - 1) as f32 * gap) / cols as f32
 }
 
+/// A day group's eyebrow label — the section's letterpress caps.
+fn day_bucket_label(bucket: flintshot_core::recents::DayBucket) -> &'static str {
+    use flintshot_core::recents::DayBucket;
+    match bucket {
+        DayBucket::Today => "TODAY",
+        DayBucket::Yesterday => "YESTERDAY",
+        _ => "EARLIER",
+    }
+}
+
+/// Chunk day-bucketed recents into render groups: calendar order
+/// (Today → Yesterday → Earlier), newest-first within each group
+/// (input order preserved), empty groups omitted. Pure; unit-tested.
+fn group_by_day(
+    pairs: &[(PathBuf, u64)],
+    now: u64,
+) -> Vec<(flintshot_core::recents::DayBucket, Vec<PathBuf>)> {
+    use flintshot_core::recents::{day_bucket, DayBucket};
+    let mut today = Vec::new();
+    let mut yesterday = Vec::new();
+    let mut earlier = Vec::new();
+    for (path, mtime) in pairs {
+        match day_bucket(*mtime, now) {
+            DayBucket::Today => today.push(path.clone()),
+            DayBucket::Yesterday => yesterday.push(path.clone()),
+            _ => earlier.push(path.clone()),
+        }
+    }
+    [
+        (DayBucket::Today, today),
+        (DayBucket::Yesterday, yesterday),
+        (DayBucket::Earlier, earlier),
+    ]
+    .into_iter()
+    .filter(|(_, paths)| !paths.is_empty())
+    .collect()
+}
+
 /// A recent card's size on a grid column of `card_w`: the thumbnail
 /// box is the card width minus an 8 px inset per side; the caption
 /// band keeps its 36 px.
@@ -1087,14 +1125,15 @@ impl HomeApp {
         }
     }
 
-    /// The recents grid (with thumbnails decoded + downscaled on
-    /// demand) or, when empty, the friendly empty card — never
-    /// blank space. Dead paths render nothing (pruned at load;
-    /// undecodable files skip their card silently). The grid is
-    /// adaptive: columns floor-fill the available width at
-    /// [`MIN_CARD_WIDTH`], cards stretch to fill their column, and
-    /// the section scrolls once the rows overflow the window (the
-    /// hero and secondaries stay pinned).
+    /// The recents grid, day-grouped (Today / Yesterday / Earlier
+    /// eyebrows on dotted tear lines), or the friendly empty card —
+    /// never blank space. Two passes per frame: **decode** resolves
+    /// every path's thumbnail first (dead paths drop out before
+    /// layout, so groups only see renderable cards; thumbnails are
+    /// cached, so the card pass hits memory), **render** chunks each
+    /// day group into adaptive rows. The section scrolls once the
+    /// rows overflow the window (the hero and secondaries stay
+    /// pinned).
     fn recents_section(&mut self, ui: &mut egui::Ui) {
         use crate::theme::palette as p;
         ui.label(
@@ -1102,32 +1141,24 @@ impl HomeApp {
                 .size(crate::theme::TYPE_SM)
                 .color(p::INK_SOFT),
         );
-        if self.recent.is_empty() {
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width().min(420.0), 64.0),
-                egui::Sense::hover(),
-            );
-            let _ = ui.interact(rect, egui::Id::new("recents-empty"), egui::Sense::hover());
-            ui.painter().rect(
-                rect,
-                egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS),
-                crate::theme::palette::PAPER_CREAM,
-                crate::theme::HAIRLINE_STROKE,
-                egui::StrokeKind::Middle,
-            );
-            let galley = ui.painter().layout_no_wrap(
-                "No captures yet — your recent shots will land here".to_owned(),
-                egui::FontId::proportional(crate::theme::TYPE_SM),
-                crate::theme::palette::INK_SOFT,
-            );
-            let pos = egui::pos2(
-                rect.center().x - galley.size().x / 2.0,
-                rect.center().y - galley.size().y / 2.0,
-            );
-            ui.painter()
-                .galley(pos, galley, crate::theme::palette::INK_SOFT);
+        // Decode pass: one thumbnail lookup per path (cache hit on
+        // the common frame; the decode itself stats only on first
+        // sight). Idempotent per frame — egui holds no recents
+        // state across passes here.
+        let pairs: Vec<(PathBuf, u64)> = self
+            .recent
+            .clone()
+            .into_iter()
+            .filter_map(|path| {
+                self.thumbnail(ui.ctx(), &path)
+                    .map(|thumb| (path, thumb.mtime))
+            })
+            .collect();
+        if pairs.is_empty() {
+            Self::recents_empty_card(ui);
             return;
         }
+        let groups = group_by_day(&pairs, unix_now());
         let gap = crate::theme::SPACE_SCALE[2];
         let cols = columns_for_width(ui.available_width(), MIN_CARD_WIDTH, gap);
         let size = recent_card_size(column_width(ui.available_width(), cols, gap));
@@ -1135,16 +1166,79 @@ impl HomeApp {
             .id_salt("recents-scroll")
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                let recent = self.recent.clone();
-                for row in recent.chunks(cols) {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
-                        for path in row {
-                            self.recent_card(ui, path, size);
-                        }
-                    });
+                for (bucket, paths) in groups {
+                    Self::day_group_eyebrow(ui, day_bucket_label(bucket));
+                    for row in paths.chunks(cols) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                            for path in row {
+                                self.recent_card(ui, path, size);
+                            }
+                        });
+                    }
+                    ui.add_space(gap);
                 }
             });
+    }
+
+    /// The friendly empty card — a truly empty index *or* one whose
+    /// paths all went dead render this, never bare space.
+    fn recents_empty_card(ui: &mut egui::Ui) {
+        use crate::theme::palette as p;
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().min(420.0), 64.0),
+            egui::Sense::hover(),
+        );
+        let _ = ui.interact(rect, egui::Id::new("recents-empty"), egui::Sense::hover());
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS),
+            p::PAPER_CREAM,
+            crate::theme::HAIRLINE_STROKE,
+            egui::StrokeKind::Middle,
+        );
+        let galley = ui.painter().layout_no_wrap(
+            "No captures yet — your recent shots will land here".to_owned(),
+            egui::FontId::proportional(crate::theme::TYPE_SM),
+            p::INK_SOFT,
+        );
+        let pos = egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        );
+        ui.painter().galley(pos, galley, p::INK_SOFT);
+    }
+
+    /// A day group's eyebrow: letterpress caps sitting on a dotted
+    /// `PAPER_DIM` tear line running to the section's right edge —
+    /// the perforated-strip motif of the pop-up-book skin. Pure
+    /// painting (no widget), one dashed stroke.
+    fn day_group_eyebrow(ui: &mut egui::Ui, label: &str) {
+        use crate::theme::palette as p;
+        let galley = ui.painter().layout_no_wrap(
+            label.to_owned(),
+            egui::FontId::proportional(crate::theme::TYPE_XS),
+            p::INK_SOFT,
+        );
+        let height = galley.size().y + 6.0;
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::hover(),
+        );
+        ui.painter().galley(
+            egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+            galley.clone(),
+            p::INK_SOFT,
+        );
+        let y = rect.center().y;
+        let start = egui::pos2(rect.left() + 8.0 + galley.size().x + 8.0, y);
+        let end = egui::pos2(rect.right(), y);
+        ui.painter().add(egui::Shape::dashed_line(
+            &[start, end],
+            egui::Stroke::new(1.0, p::PAPER_DIM),
+            4.0,
+            3.0,
+        ));
     }
 
     /// One recent's card: letterboxed thumbnail on cream, the
@@ -2202,6 +2296,104 @@ mod tests {
     }
 
     // --- Adaptive recents grid (home-capture-grids Task 003) ---
+    /// Group ordering through the real render path: three files
+    /// seeded to now / 25 h ago / 8 days ago must lay out top-to-
+    /// bottom in calendar order (home-capture-grids Task 004).
+    #[test]
+    fn recents_render_grouped_in_calendar_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = unix_now();
+        let mtimes = [
+            ("today.png", now - 60),
+            ("yesterday.png", now - 25 * 3_600),
+            ("earlier.png", now - 8 * 86_400),
+        ];
+        let mut paths = Vec::new();
+        for (name, mtime) in mtimes {
+            let png = dir.path().join(name);
+            image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 40, 40, 255]))
+                .save(&png)
+                .unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&png)
+                .expect("reopen for mtime")
+                .set_times(std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(mtime),
+                ))
+                .expect("seed mtime");
+            paths.push(png);
+        }
+        std::mem::forget(dir);
+        let bridge = RecordingBridge {
+            recents: Arc::new(Mutex::new(paths.clone())),
+            ..RecordingBridge::default()
+        };
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        for _ in 0..2 {
+            let _ = welcome_frame(&mut app, &ctx, vec![]);
+        }
+        let top = |p: &PathBuf| {
+            ctx.read_response(egui::Id::new(("recent", p.to_string_lossy().to_string())))
+                .expect("the card laid out")
+                .rect
+                .top()
+        };
+        let (today, yesterday, earlier) = (&paths[0], &paths[1], &paths[2]);
+        assert!(top(today) < top(yesterday), "today above yesterday");
+        assert!(top(yesterday) < top(earlier), "yesterday above earlier");
+    }
+
+    /// `group_by_day` orders calendar-wise, keeps newest-first
+    /// within a group, and omits empty groups.
+    #[test]
+    fn group_by_day_orders_and_omits_empty_groups() {
+        let p = |n: u8| PathBuf::from(format!("/tmp/{n}.png"));
+        // `now` sits on epoch day 10 so yesterday/earlier are
+        // representable non-negative day numbers.
+        let now = 10 * 86_400 + 100;
+        let pairs = vec![
+            (p(1), now),
+            (p(2), now - 10),
+            (p(3), 9 * 86_400 + 40),
+            (p(4), 7 * 86_400),
+        ];
+        let groups = group_by_day(&pairs, now);
+        let buckets: Vec<_> = groups.iter().map(|(b, _)| *b).collect();
+        assert_eq!(
+            buckets,
+            vec![
+                flintshot_core::recents::DayBucket::Today,
+                flintshot_core::recents::DayBucket::Yesterday,
+                flintshot_core::recents::DayBucket::Earlier
+            ],
+            "calendar order"
+        );
+        assert_eq!(groups[0].1, vec![p(1), p(2)], "newest first within");
+        assert_eq!(groups[1].1, vec![p(3)]);
+        assert_eq!(groups[2].1, vec![p(4)]);
+    }
+
+    /// Only-Earlier histories render one group, not three labels.
+    #[test]
+    fn group_by_day_omits_empty_buckets() {
+        let groups = group_by_day(&[(PathBuf::from("/tmp/old.png"), 0)], 5 * 86_400);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, flintshot_core::recents::DayBucket::Earlier);
+        assert!(group_by_day(&[], 5).is_empty(), "nothing in, nothing out");
+    }
+
+    /// Every group label has its tear line text: the eyebrow mapping
+    /// is total and stable.
+    #[test]
+    fn day_bucket_labels_are_total() {
+        use flintshot_core::recents::DayBucket;
+        assert_eq!(day_bucket_label(DayBucket::Today), "TODAY");
+        assert_eq!(day_bucket_label(DayBucket::Yesterday), "YESTERDAY");
+        assert_eq!(day_bucket_label(DayBucket::Earlier), "EARLIER");
+    }
 
     /// Twelve recents under one bridge — the adaptive-grid fixture.
     fn twelve_recents() -> (RecordingBridge, Vec<PathBuf>) {
@@ -2333,7 +2525,10 @@ mod tests {
     /// no dead margin on the right.
     #[test]
     fn column_width_spans_the_available_space() {
-        assert_eq!(column_width(312.0, 2, 12.0), 150.0, "exact fit");
+        assert!(
+            (column_width(312.0, 2, 12.0) - 150.0).abs() < 0.01,
+            "exact fit"
+        );
         assert!((column_width(1568.0, 8, 12.0) - 185.5).abs() < 0.01);
         assert!((column_width(1568.0, 1, 12.0) - 1568.0).abs() < 0.01);
     }
