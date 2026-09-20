@@ -20,6 +20,24 @@ Categories used below:
 
 ### Changed
 
+- **Tray: *Show/Hide flintshot* replaces *Open app window*** (effort
+  `tray-show-hide-toggle`). One static toggle item — the
+  Telegram/Discord tray convention — sends the new
+  `Request::ToggleWindow`; the daemon resolves the direction from
+  window presence, so the label never flips. No window running → the
+  click opens one (indistinguishable from the old item). Window
+  visible → the click closes it with X-close semantics: the window
+  process exits, the daemon and tray are unaffected, and a
+  mid-editor session discards exactly as an X / Alt+F4 would.
+  Window capture-hidden → the click reopens the existing process (no
+  exit, no duplicate spawn). The retired `flintshot.app` menu id is
+  pinned dead by test and will never be reused. *Capture*,
+  *Settings*, and *Quit* are unchanged. (Decision record:
+  ADR-0067; pinned by
+  `toggle_window_forwards_when_a_window_is_present_and_spawns_nothing`,
+  `close_reason_orders_capture_over_hide_over_quit`,
+  `app_toggle_on_a_visible_window_directs_a_quit`.)
+
 - **Tray / applet *Open app window* now routes the open window to its
   home page** (mirrors the *Settings* ping's choreography). The click
   always showed + focused an already-running window, but never

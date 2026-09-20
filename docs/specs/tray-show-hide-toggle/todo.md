@@ -1,5 +1,5 @@
-- [ ] 001 IPC append: Request::ToggleWindow + Event::AppToggle
-- [ ] 002 Daemon-side toggle resolution (presence forward-or-spawn + fallback arm)
-- [ ] 003 Window-side toggle resolution (HomeDirective::Quit + AppToggle handling)
-- [ ] 004 Tray menu swap (Show/Hide flintshot replaces Open app window)
-- [ ] 005 ADR-0067 + CHANGELOG + finish gates
+- [x] 001 IPC append: Request::ToggleWindow + Event::AppToggle
+- [x] 002 Daemon-side toggle resolution (presence forward-or-spawn + fallback arm)
+- [x] 003 Window-side toggle resolution (HomeDirective::Quit + AppToggle handling)
+- [x] 004 Tray menu swap (Show/Hide flintshot replaces Open app window)
+- [x] 005 ADR-0067 + CHANGELOG + finish gates
