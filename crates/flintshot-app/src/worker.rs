@@ -293,7 +293,15 @@ pub fn dispatch(
         // then exits promptly on that held lock. With no window
         // running, the spawn is what creates one (and the broadcast
         // lands on nobody — harmless).
-        Request::OpenApp => {
+        //
+        // `ToggleWindow` shares the body as its spawn-direction
+        // fallback (tray-show-hide-toggle): the plain-`dispatch`
+        // callers (drain_hotkeys and any direct site) never consult
+        // the presence oracle, so the toggle degrades to an open. The
+        // IPC layer routes the request through
+        // `dispatch_open_blocking` instead, where presence picks the
+        // direction.
+        Request::OpenApp | Request::ToggleWindow => {
             sink(Event::AppFocus);
             let argv = app_argv(AppRoute::Home);
             spawn_argv(spawner, &argv)?;
@@ -469,6 +477,7 @@ fn variant_name(request: &Request) -> &'static str {
         Request::ReportCaptured => "report-captured",
         Request::OpenApp => "open-app",
         Request::OpenSettings => "open-settings",
+        Request::ToggleWindow => "toggle-window",
         Request::PrepareCapture => "prepare-capture",
         Request::ReportAppHidden => "report-app-hidden",
         Request::ReportEditorWindowOpened => "report-editor-window-opened",
@@ -490,7 +499,10 @@ pub fn spawns_capture_worker(request: &Request) -> bool {
 /// [`spawns_capture_worker`]'s role at the dispatch table.
 #[must_use]
 pub fn forwards_to_app_window(request: &Request) -> bool {
-    matches!(request, Request::OpenImage { .. } | Request::OpenLast)
+    matches!(
+        request,
+        Request::OpenImage { .. } | Request::OpenLast | Request::ToggleWindow
+    )
 }
 
 /// Supersede-wait poll cadence: the machine owns the deadlines; this
@@ -630,8 +642,10 @@ impl CaptureDispatch {
     /// **Forward-or-spawn for open intents** (single-window): with an
     /// app window present, [`Request::OpenImage`] and
     /// [`Request::OpenLast`] broadcast [`Event::OpenRequested`] with
-    /// the resolved path instead of spawning the open worker; without
-    /// one, today's spawn path runs byte-identical. No supersede
+    /// the resolved path instead of spawning the open worker, and
+    /// [`Request::ToggleWindow`] broadcasts [`Event::AppToggle`]
+    /// (spawn nothing — the hide-then-reshow race pin); without one,
+    /// today's spawn path runs byte-identical. No supersede
     /// cycle — opens replace nothing (the window swaps its page).
     /// Non-blocking (unlike the capture path's bounded waits), so
     /// async entry points may call it directly.
@@ -646,6 +660,19 @@ impl CaptureDispatch {
         sink: &mut impl FnMut(Event),
     ) -> eyre::Result<DispatchOutcome> {
         if self.app_window_present() {
+            if matches!(request, Request::ToggleWindow) {
+                // The race pin (tray-show-hide-toggle): a present
+                // window gets the toggle event and NOTHING is
+                // spawned. An unconditional spawn (the OpenApp
+                // pattern) would race the exiting window's app-lock
+                // release and could resurrect a window the user just
+                // asked to hide. The window resolves the event from
+                // its own surface state; the daemon never tracks
+                // visibility.
+                tracing::info!("app window present; forwarding the toggle");
+                sink(Event::AppToggle);
+                return Ok(DispatchOutcome::Continue);
+            }
             let forwarded = match request {
                 Request::OpenImage { path } => Some(path.clone()),
                 // The no-last-save error must surface identically
@@ -862,6 +889,97 @@ mod tests {
         )
         .expect("open dispatch");
         assert_eq!(spawner.snapshot().len(), 1, "the open worker spawns");
+    }
+
+    // --- Toggle forwarding (tray-show-hide-toggle Task 002) ---
+
+    #[test]
+    fn toggle_window_joins_the_open_forwarding_predicate() {
+        assert!(
+            forwards_to_app_window(&Request::ToggleWindow),
+            "the connection layer routes ToggleWindow through dispatch_open_blocking"
+        );
+    }
+
+    /// The race pin: with a window present, the toggle must forward and
+    /// spawn nothing. An unconditional spawn (the `OpenApp` pattern)
+    /// would race the exiting window's app-lock release and could
+    /// resurrect a window the user just asked to hide.
+    #[test]
+    fn toggle_window_forwards_when_a_window_is_present_and_spawns_nothing() {
+        let gate = Arc::new(crate::prepare_gate::PrepareGate::new());
+        gate.app_window_connected();
+        let ctx = CaptureDispatch::new().with_prepare_gate(gate);
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        let outcome = ctx
+            .dispatch_open_blocking(
+                &Request::ToggleWindow,
+                &spawner,
+                &DispatchState::new(),
+                &mut |ev| events.push(ev),
+            )
+            .expect("toggle dispatch");
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert!(
+            spawner.snapshot().is_empty(),
+            "presence armed: no spawn, ever"
+        );
+        assert_eq!(
+            events,
+            vec![Event::AppToggle],
+            "the window resolves the toggle from its own surface state"
+        );
+    }
+
+    #[test]
+    fn toggle_window_without_presence_runs_the_open_app_choreography() {
+        // No window: the toggle is an open — byte-identical to the
+        // OpenApp arm (AppFocus broadcast + app --standalone spawn).
+        let ctx = CaptureDispatch::new();
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        let outcome = ctx
+            .dispatch_open_blocking(
+                &Request::ToggleWindow,
+                &spawner,
+                &DispatchState::new(),
+                &mut |ev| events.push(ev),
+            )
+            .expect("toggle dispatch");
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert_eq!(events, vec![Event::AppFocus]);
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["app".to_string(), "--standalone".into()]]
+        );
+    }
+
+    #[test]
+    fn plain_toggle_window_dispatch_matches_the_open_app_arm() {
+        // The fallback arm (drain_hotkeys and any direct dispatch
+        // caller): the spawn direction — correct where no presence
+        // oracle is consulted.
+        let spawner = RecordingSpawner::new();
+        let mut events = Vec::new();
+        let outcome = dispatch(
+            &Request::ToggleWindow,
+            &spawner,
+            &DispatchState::new(),
+            &mut |ev| events.push(ev),
+        )
+        .unwrap();
+        assert_eq!(outcome, DispatchOutcome::Continue);
+        assert_eq!(
+            events,
+            vec![Event::AppFocus],
+            "same events as the OpenApp arm"
+        );
+        assert_eq!(
+            spawner.snapshot(),
+            vec![vec!["app".to_string(), "--standalone".into()]],
+            "same argv as the OpenApp arm"
+        );
     }
 
     #[test]
@@ -1313,6 +1431,9 @@ mod tests {
             // settings-improvement: opening a window never grabs the
             // screen — the icon must not vanish for it.
             Request::OpenSettings,
+            // tray-show-hide-toggle: toggling the window never grabs
+            // the screen either direction.
+            Request::ToggleWindow,
         ];
         for request in &others {
             assert!(
@@ -1553,6 +1674,8 @@ mod tests {
             (Request::ReportCaptured, "report-captured"),
             (Request::OpenApp, "open-app"),
             (Request::OpenSettings, "open-settings"),
+            // tray-show-hide-toggle — appended
+            (Request::ToggleWindow, "toggle-window"),
             (Request::PrepareCapture, "prepare-capture"),
             (Request::ReportAppHidden, "report-app-hidden"),
             (
