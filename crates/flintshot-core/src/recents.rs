@@ -222,6 +222,38 @@ pub fn recents_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("flintshot").join("recents.toml"))
 }
 
+/// Which day-group a capture's mtime lands in, against `now` —
+/// the recents grid's Today / Yesterday / Earlier eyebrows.
+///
+/// Days compare as UTC civil days (unix seconds ÷ 86 400, the same
+/// convention [`crate::output::chrono_date`] bakes into filename
+/// templates); a far-from-UTC midnight skew is the accepted,
+/// documented simplification — no timezone dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DayBucket {
+    /// The same UTC civil day as `now`.
+    Today,
+    /// The UTC civil day before `now`'s.
+    Yesterday,
+    /// Anything older — or a clock-skewed future mtime.
+    Earlier,
+}
+
+/// Bucket `mtime` (unix seconds) against `now`. A future mtime
+/// (clock skew) lands [`DayBucket::Earlier`] rather than panicking.
+#[must_use]
+pub fn day_bucket(mtime: u64, now: u64) -> DayBucket {
+    if mtime > now {
+        return DayBucket::Earlier;
+    }
+    match now / 86_400 - mtime / 86_400 {
+        0 => DayBucket::Today,
+        1 => DayBucket::Yesterday,
+        _ => DayBucket::Earlier,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +478,43 @@ mod tests {
                 Some("recents.toml".into())
             );
         }
+    }
+
+    // --- day_bucket (home-capture-grids Task 001) ---
+
+    /// `now` pinned to 23:30:00 UTC on day `20_000` so hour-based
+    /// cases land deterministically around the midnight boundary.
+    const NOW: u64 = 20_000 * 86_400 + 23 * 3_600 + 1_800;
+
+    #[test]
+    fn day_bucket_same_instant_is_today() {
+        assert_eq!(day_bucket(NOW, NOW), DayBucket::Today);
+    }
+
+    #[test]
+    fn day_bucket_twenty_three_hours_ago_is_today() {
+        // Exactly midnight today: the same civil day, one hour and
+        // a half before `now`.
+        assert_eq!(day_bucket(NOW - 84_600, NOW), DayBucket::Today);
+    }
+
+    #[test]
+    fn day_bucket_one_second_past_the_boundary_is_yesterday() {
+        assert_eq!(day_bucket(NOW - 84_601, NOW), DayBucket::Yesterday);
+    }
+
+    #[test]
+    fn day_bucket_twenty_five_hours_ago_is_yesterday() {
+        assert_eq!(day_bucket(NOW - 90_000, NOW), DayBucket::Yesterday);
+    }
+
+    #[test]
+    fn day_bucket_a_week_ago_is_earlier() {
+        assert_eq!(day_bucket(NOW - 604_800, NOW), DayBucket::Earlier);
+    }
+
+    #[test]
+    fn day_bucket_clock_skew_lands_earlier_without_panicking() {
+        assert_eq!(day_bucket(NOW + 1, NOW), DayBucket::Earlier);
     }
 }
