@@ -219,6 +219,46 @@ pub trait HomeBridge {
 /// Recents per grid row — the mockup's 4-column layout.
 const RECENTS_PER_ROW: usize = 4;
 
+/// The adaptive grid's column cap — past it, wider windows keep
+/// 8 columns instead of growing postage stamps.
+const MAX_GRID_COLUMNS: usize = 8;
+
+/// The adaptive grid's narrowest card, logical px. A narrower
+/// window gets fewer columns, never a squeezed card.
+const MIN_CARD_WIDTH: f32 = 150.0;
+
+/// Adaptive grid columns for `available` logical px: floor-fill at
+/// `min_card` (the most whole cards that fit, gap-separated),
+/// clamped so a narrow window gets fewer columns and a huge one
+/// stops at [`MAX_GRID_COLUMNS`]. Pure; unit-tested.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "floor of a positive ratio is the definition here; usize is the column count"
+)]
+fn columns_for_width(available: f32, min_card: f32, gap: f32) -> usize {
+    let fits = ((available + gap) / (min_card + gap)).floor() as usize;
+    fits.clamp(1, MAX_GRID_COLUMNS)
+}
+
+/// The card width when `cols` columns share `available` px at `gap`
+/// spacing (cards stretch to fill; no dead margin on the right).
+/// Pure; unit-tested.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "column counts are ≤ MAX_GRID_COLUMNS (8) — exact in f32"
+)]
+fn column_width(available: f32, cols: usize, gap: f32) -> f32 {
+    (available - (cols - 1) as f32 * gap) / cols as f32
+}
+
+/// A recent card's size on a grid column of `card_w`: the thumbnail
+/// box is the card width minus an 8 px inset per side; the caption
+/// band keeps its 36 px.
+fn recent_card_size(card_w: f32) -> egui::Vec2 {
+    egui::vec2(card_w, (card_w - 16.0) + 36.0)
+}
+
 /// A decoded recent: the downscaled thumbnail texture plus the
 /// metadata the card caption needs (original dimensions, file size,
 /// last-modified time) — gathered once at decode, never re-stat'd
@@ -1050,9 +1090,11 @@ impl HomeApp {
     /// The recents grid (with thumbnails decoded + downscaled on
     /// demand) or, when empty, the friendly empty card — never
     /// blank space. Dead paths render nothing (pruned at load;
-    /// undecodable files skip their card silently). The grid
-    /// scrolls once the rows overflow the window (the hero and
-    /// secondaries stay pinned; still 4 per row).
+    /// undecodable files skip their card silently). The grid is
+    /// adaptive: columns floor-fill the available width at
+    /// [`MIN_CARD_WIDTH`], cards stretch to fill their column, and
+    /// the section scrolls once the rows overflow the window (the
+    /// hero and secondaries stay pinned).
     fn recents_section(&mut self, ui: &mut egui::Ui) {
         use crate::theme::palette as p;
         ui.label(
@@ -1086,20 +1128,19 @@ impl HomeApp {
                 .galley(pos, galley, crate::theme::palette::INK_SOFT);
             return;
         }
-        // The mockup's 4-column grid: fixed-width cards chunked
-        // into rows of four, inside the section's own scroll area
-        // (bounded to the space left under the pinned hero).
+        let gap = crate::theme::SPACE_SCALE[2];
+        let cols = columns_for_width(ui.available_width(), MIN_CARD_WIDTH, gap);
+        let size = recent_card_size(column_width(ui.available_width(), cols, gap));
         egui::ScrollArea::vertical()
             .id_salt("recents-scroll")
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 let recent = self.recent.clone();
-                for row in recent.chunks(RECENTS_PER_ROW) {
+                for row in recent.chunks(cols) {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing =
-                            egui::vec2(crate::theme::SPACE_SCALE[2], crate::theme::SPACE_SCALE[2]);
+                        ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                         for path in row {
-                            self.recent_card(ui, path);
+                            self.recent_card(ui, path, size);
                         }
                     });
                 }
@@ -1113,8 +1154,12 @@ impl HomeApp {
     /// the existing `open_image` path. Delete is a two-step confirm
     /// on the chip itself: the first click arms ("Sure?"), the
     /// second commits; leaving the card or clicking elsewhere
-    /// disarms.
-    fn recent_card(&mut self, ui: &mut egui::Ui, path: &PathBuf) {
+    /// disarms. Sized by the adaptive grid (`size` from
+    /// [`recent_card_size`]); the thumbnail letterboxes into the
+    /// square-ish box the width affords (source decodes at ≤ 2×
+    /// [`THUMB_EDGE`], so very wide columns upscale softly —
+    /// accepted for a thumbnail).
+    fn recent_card(&mut self, ui: &mut egui::Ui, path: &PathBuf, size: egui::Vec2) {
         use crate::theme::palette as p;
         let Some(thumb) = self.thumbnail(ui.ctx(), path) else {
             return;
@@ -1129,7 +1174,7 @@ impl HomeApp {
         let path_key = path.to_string_lossy().to_string();
         let armed = self.delete_armed.as_deref() == Some(path.as_path());
 
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(112.0, 148.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
         let resp = ui
             .interact(
                 rect,
@@ -1149,12 +1194,14 @@ impl HomeApp {
             egui::StrokeKind::Middle,
         );
 
-        // Letterbox: the fitted image centers in the thumb area
-        // (the card's top 112 px; the captions own the bottom).
+        // Letterbox: the fitted image centers in the thumb box (the
+        // card's width minus an 8 px inset per side, below the chip
+        // row; the captions own the bottom 36 px).
+        let box_side = rect.width() - 16.0;
         let (tw, th) = (tsize.x, tsize.y);
-        let scale = 74.0 / tw.max(th);
+        let scale = box_side / tw.max(th);
         let size = egui::vec2(tw * scale, th * scale);
-        let thumb_center = egui::pos2(rect.center().x, rect.top() + 50.0);
+        let thumb_center = egui::pos2(rect.center().x, rect.top() + 8.0 + box_side / 2.0);
         let img_rect = egui::Rect::from_center_size(thumb_center, size);
         ui.painter().image(
             texture_id,
@@ -1834,7 +1881,6 @@ mod tests {
     }
 
     // --- Welcome screen (pop-up book Task 010) ---
-
     fn welcome_frame(
         app: &mut HomeApp,
         ctx: &egui::Context,
@@ -2101,12 +2147,14 @@ mod tests {
 
     /// Overflow scrolls the section, not the page: on a short
     /// viewport the scroll area engages, the hero stays pinned, and
-    /// below-the-fold cards lay out beyond the viewport.
+    /// below-the-fold cards lay out beyond the viewport. (18 cards
+    /// at 1024 px = 3 adaptive rows of 6; the fixed-4 rows of the
+    /// mockup era are gone.)
     #[test]
     fn recents_overflow_scrolls_the_section_not_the_hero() {
         let dir = tempfile::tempdir().unwrap();
         let mut recents = Vec::new();
-        for i in 0..12 {
+        for i in 0..18 {
             let png = dir.path().join(format!("shot-{i}.png"));
             image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 40, 40, 255]))
                 .save(&png)
@@ -2114,7 +2162,7 @@ mod tests {
             recents.push(png);
         }
         let first = recents[0].clone();
-        let last = recents[11].clone();
+        let last = recents[17].clone();
         let bridge = RecordingBridge {
             recents: Arc::new(Mutex::new(recents)),
             ..RecordingBridge::default()
@@ -2144,13 +2192,150 @@ mod tests {
             .expect("clipped cards still lay out")
             .rect;
         assert!(
-            first.bottom() <= 420.0,
-            "the first row stays visible (the section is bounded, not pushing the page)"
+            first.top() < 420.0,
+            "the grid starts inside the viewport (the section is bounded, not pushing the page)"
         );
         assert!(
             last_card.top() > 420.0,
             "the below-the-fold card sits beyond the viewport (content taller than the pane)"
         );
+    }
+
+    // --- Adaptive recents grid (home-capture-grids Task 003) ---
+
+    /// Twelve recents under one bridge — the adaptive-grid fixture.
+    fn twelve_recents() -> (RecordingBridge, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recents = Vec::new();
+        for i in 0..12 {
+            let png = dir.path().join(format!("shot-{i}.png"));
+            image::RgbaImage::from_pixel(40, 30, image::Rgba([200, 40, 40, 255]))
+                .save(&png)
+                .unwrap();
+            recents.push(png);
+        }
+        std::mem::forget(dir);
+        let bridge = RecordingBridge {
+            recents: Arc::new(Mutex::new(recents.clone())),
+            ..RecordingBridge::default()
+        };
+        (bridge, recents)
+    }
+
+    /// Cards sharing the first card's row (top within 1 px).
+    ///
+    /// GOTCHA (egui): `Context::read_response` serves the *previous*
+    /// pass — geometry read right after a single `run_ui` is the
+    /// last frame's layout, not this one's (first-ever pass excepted,
+    /// which is why the single-frame tests get away with it). Any
+    /// test that asserts geometry at a given window size must run
+    /// that size **twice** before reading.
+    fn row_mates(ctx: &egui::Context, ids: &[egui::Id], first: egui::Id) -> Vec<egui::Rect> {
+        let top = ctx
+            .read_response(first)
+            .expect("the first card laid out")
+            .rect
+            .top();
+        ids.iter()
+            .filter_map(|id| ctx.read_response(*id))
+            .filter(|r| (r.rect.top() - top).abs() < 1.0)
+            .map(|r| r.rect)
+            .collect()
+    }
+
+    /// The grid reflows: a wide window lays more cards per row than
+    /// a narrow one.
+    #[test]
+    fn recents_grid_adapts_columns_to_width() {
+        let (bridge, paths) = twelve_recents();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let ids: Vec<egui::Id> = paths
+            .iter()
+            .map(|p| egui::Id::new(("recent", p.to_string_lossy().to_string())))
+            .collect();
+        for _ in 0..2 {
+            let _ = welcome_frame_sized(&mut app, &ctx, vec![], egui::vec2(800.0, 768.0));
+        }
+        let narrow = row_mates(&ctx, &ids, ids[0]).len();
+        for _ in 0..2 {
+            let _ = welcome_frame_sized(&mut app, &ctx, vec![], egui::vec2(1600.0, 768.0));
+        }
+        let wide = row_mates(&ctx, &ids, ids[0]).len();
+        assert!(
+            wide > narrow,
+            "1600 px lays {wide} per row, 800 px lays {narrow} — the grid must reflow"
+        );
+    }
+
+    /// Row-mates share equal widths spanning the full available
+    /// width (the grid has no dead margin on the right).
+    #[test]
+    fn recents_grid_cards_fill_their_row() {
+        let (bridge, paths) = twelve_recents();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let ids: Vec<egui::Id> = paths
+            .iter()
+            .map(|p| egui::Id::new(("recent", p.to_string_lossy().to_string())))
+            .collect();
+        let width = 1024.0;
+        for _ in 0..2 {
+            let _ = welcome_frame_sized(&mut app, &ctx, vec![], egui::vec2(width, 768.0));
+        }
+        let row = row_mates(&ctx, &ids, ids[0]);
+        assert!(row.len() > 1, "the fixture must lay more than one column");
+        let w0 = row[0].width();
+        assert!(
+            row.iter().all(|r| (r.width() - w0).abs() < 1.0),
+            "row-mates share equal widths"
+        );
+        let margin = 16.0;
+        assert!(
+            (row[0].left() - margin).abs() < 1.0,
+            "the row starts at the panel margin"
+        );
+        assert!(
+            (row.last().unwrap().right() - (width - margin)).abs() < 1.0,
+            "the row ends at the panel margin — no dead space"
+        );
+    }
+
+    /// The grid floor-fill: narrow stays at one column, huge clamps
+    /// at the cap, and the 700/1024/1600 locals land where the math
+    /// says (min card 150, gap 12).
+    #[test]
+    fn columns_for_width_floor_fills_and_clamps() {
+        assert_eq!(columns_for_width(1.0, 150.0, 12.0), 1, "tiny: floor");
+        assert_eq!(columns_for_width(150.0, 150.0, 12.0), 1, "exactly one");
+        assert_eq!(
+            columns_for_width(312.0, 150.0, 12.0),
+            2,
+            "two cards + one gap exactly"
+        );
+        assert_eq!(
+            columns_for_width(311.9, 150.0, 12.0),
+            1,
+            "just under the second card"
+        );
+        assert_eq!(columns_for_width(668.0, 150.0, 12.0), 4, "700 px window");
+        assert_eq!(columns_for_width(992.0, 150.0, 12.0), 6, "1024 px window");
+        assert_eq!(
+            columns_for_width(1_000_000.0, 150.0, 12.0),
+            MAX_GRID_COLUMNS,
+            "huge: cap"
+        );
+    }
+
+    /// Cards stretch: `cols` columns split the available width with
+    /// no dead margin on the right.
+    #[test]
+    fn column_width_spans_the_available_space() {
+        assert_eq!(column_width(312.0, 2, 12.0), 150.0, "exact fit");
+        assert!((column_width(1568.0, 8, 12.0) - 185.5).abs() < 0.01);
+        assert!((column_width(1568.0, 1, 12.0) - 1568.0).abs() < 0.01);
     }
 
     /// A dead recent path renders nothing and breaks nothing.
