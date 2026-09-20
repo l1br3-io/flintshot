@@ -76,11 +76,26 @@ pub(crate) struct PanelState {
     grain: Option<egui::TextureHandle>,
     /// Whether the selection inspector's custom-colour popover ran
     /// this frame — drives `end_property_edit` bracketing when the
-    /// popover closes (a continuous widget's burst must end when
-    /// its popover does).
+    /// popover closes (a continuous widget's burst must end when its
+    /// popover does).
     color_pop_live: bool,
     /// Same bracketing flag for the text-style popover.
     text_pop_live: bool,
+}
+
+impl PanelState {
+    /// The active tab (assertion accessor for shell tests).
+    #[cfg(test)]
+    pub(crate) fn tab(&self) -> PanelTab {
+        self.tab
+    }
+
+    /// Bring the Properties tab forward — the double-click
+    /// quick-select's `FocusProperties` landing. Tab flip only: the
+    /// gesture never forces panel visibility or layout changes.
+    pub(crate) fn focus_properties(&mut self) {
+        self.tab = PanelTab::Properties;
+    }
 }
 
 /// The properties panel's contextual sections (spec `SEC_MAP`).
@@ -2413,6 +2428,21 @@ mod tests {
             delete.rect.top() > header.bottom(),
             "section content renders beneath the header"
         );
+    }
+
+    /// `focus_properties` flips the active tab to Properties — the
+    /// double-click quick-select landing. Tab flip only; the panel's
+    /// visibility and layout are never the gesture's business.
+    #[test]
+    fn focus_properties_flips_the_tab_from_history() {
+        let mut panel = PanelState {
+            tab: PanelTab::History,
+            ..PanelState::default()
+        };
+        panel.focus_properties();
+        assert_eq!(panel.tab, PanelTab::Properties);
+        panel.focus_properties();
+        assert_eq!(panel.tab, PanelTab::Properties, "idempotent");
     }
 
     /// Clicking HISTORY swaps the body (tool sections gone, the

@@ -1344,13 +1344,19 @@ impl EditorApp {
             }
         }
         for event in pointer_events {
-            // Outcome is always `Continue` for pointer events today
-            // (no current tool produces a side-effecting outcome via
-            // pointer). Match exhaustively so future outcomes that
-            // *can* arise from pointer events (e.g. a Select-tool
-            // "crop-and-save" gesture) surface here as a compile error
-            // rather than silently dropping.
-            let _ = self.state.dispatch_input(&event);
+            // Outcome capture (dblclick-select-properties):
+            // quick-select's FocusProperties is the first
+            // pointer-born outcome — this loop used to discard
+            // outcomes outright (`let _ =`). The window-ending
+            // outcomes (Cancel / Save / Copy) still never arise from
+            // pointer events; any future one that does must be
+            // routed here, not silently dropped.
+            if matches!(
+                self.state.dispatch_input(&event),
+                DispatchOutcome::FocusProperties
+            ) {
+                self.panel.focus_properties();
+            }
         }
 
         self.set_hover_cursors(ctx, canvas_rect, pos, at, on_floating);
@@ -1502,6 +1508,12 @@ impl EditorApp {
         if matches!(outcome, DispatchOutcome::Copy) {
             self.handle_copy(ctx);
             return true;
+        }
+        // Unreachable from keys today (quick-select is pointer-born);
+        // routed so a future shortcut that emits it flips the panel
+        // instead of silently no-oping through the fall-through.
+        if matches!(outcome, DispatchOutcome::FocusProperties) {
+            self.panel.focus_properties();
         }
         false
     }
@@ -5679,6 +5691,121 @@ mod tests {
             Some(Annotation::Text { text, .. }) => assert_eq!(text, "hello"),
             other => panic!("expected lifted-out Text, got {other:?}"),
         }
+    }
+
+    /// Editor-window state on the Rect tool with one committed
+    /// arrow — the quick-select target.
+    fn shape_app() -> (egui::Context, EditorApp) {
+        let ctx = egui::Context::default();
+        let mut state = blank_state(64, 64);
+        state.tool = Tool::Rect;
+        state.anns.push(Annotation::Arrow {
+            a: Point::new(10.0, 10.0),
+            b: Point::new(60.0, 60.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+            head_size: 10.0,
+        });
+        let app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        (ctx, app)
+    }
+
+    /// Helper: click a screen position through the full app frame
+    /// (press + release on subsequent frames).
+    fn app_click(ctx: &egui::Context, app: &mut EditorApp, t: f64, at: egui::Pos2) {
+        editor_frame_at(
+            ctx,
+            app,
+            t,
+            vec![egui::Event::PointerMoved(at), primary_button(at, true)],
+        );
+        editor_frame_at(ctx, app, t + 0.05, vec![primary_button(at, false)]);
+    }
+
+    /// Pointer-pump outcome capture (dblclick-select-properties): a
+    /// full double-click onto a committed arrow quick-selects it and
+    /// the `FocusProperties` outcome flips the panel from HISTORY to
+    /// PROPERTIES — starting from a real chip click, ending with a
+    /// real one, so manual switching brackets the gesture.
+    #[test]
+    fn doubleclick_quick_select_focuses_the_properties_tab() {
+        let (ctx, mut app) = shape_app();
+        editor_frame(&ctx, &mut app, vec![]); // caches canvas_rect
+        editor_frame(&ctx, &mut app, vec![]); // settle
+        let history = ctx
+            .read_response(egui::Id::new(("panel-tab", panel::PanelTab::History)))
+            .expect("the HISTORY chip registers")
+            .rect
+            .center();
+        app_click(&ctx, &mut app, 0.5, history);
+        assert_eq!(
+            app.panel.tab(),
+            panel::PanelTab::History,
+            "fixture: History is forward"
+        );
+
+        // Full double-click on the arrow (press, release, rapid press).
+        let press = screen_point(&app, (30.0, 30.0));
+        editor_frame_at(
+            &ctx,
+            &mut app,
+            1.0,
+            vec![
+                egui::Event::PointerMoved(press),
+                primary_button(press, true),
+            ],
+        );
+        editor_frame_at(&ctx, &mut app, 1.05, vec![primary_button(press, false)]);
+        editor_frame_at(
+            &ctx,
+            &mut app,
+            1.1,
+            vec![
+                egui::Event::PointerMoved(press),
+                primary_button(press, true),
+            ],
+        );
+        assert_eq!(app.state.selected, vec![0], "quick-select landed");
+        assert_eq!(app.state.tool, Tool::Select, "flipped to Select");
+        assert_eq!(
+            app.panel.tab(),
+            panel::PanelTab::Properties,
+            "the outcome flipped the tab"
+        );
+
+        // Manual switching still works after the gesture.
+        app_click(&ctx, &mut app, 2.0, history);
+        assert_eq!(
+            app.panel.tab(),
+            panel::PanelTab::History,
+            "manual switching intact"
+        );
+    }
+
+    /// Slow presses (plain draws, `Continue` outcomes) never touch
+    /// the tab — only the double-click gesture focuses Properties.
+    #[test]
+    fn slow_presses_leave_the_panel_tab_alone() {
+        let (ctx, mut app) = shape_app();
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        let history = ctx
+            .read_response(egui::Id::new(("panel-tab", panel::PanelTab::History)))
+            .expect("the HISTORY chip registers")
+            .rect
+            .center();
+        app_click(&ctx, &mut app, 0.5, history);
+        assert_eq!(app.panel.tab(), panel::PanelTab::History);
+
+        // Two slow presses on the arrow — no DoubleClick fires, no
+        // flip happens.
+        let press = screen_point(&app, (30.0, 30.0));
+        app_click(&ctx, &mut app, 1.0, press);
+        app_click(&ctx, &mut app, 3.0, press);
+        assert_eq!(
+            app.panel.tab(),
+            panel::PanelTab::History,
+            "Continue outcomes leave the tab alone"
+        );
     }
 
     /// Slow presses at the same spot stay a plain re-select — no
