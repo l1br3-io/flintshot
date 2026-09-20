@@ -103,6 +103,17 @@ pub trait HomeBridge {
     /// message, the window stays.
     fn request_paste(&mut self) -> bool;
 
+    /// Resume a session capture (a "This session" card click):
+    /// reload it from the session store — image plus committed
+    /// annotations — and route to the editor page. Same contract as
+    /// [`Self::open_image`]: `true` = routed; `false` = store miss
+    /// (the entry was saved or discarded meanwhile), the window
+    /// stays as it was. Default: no routing — minimal bridges and
+    /// test doubles.
+    fn open_session_capture(&mut self, _id: flintshot_core::SessionId) -> bool {
+        false
+    }
+
     /// Take one pending directive, oldest first. Called every
     /// frame (see [`REPOLL_INTERVAL`]).
     fn poll_directive(&mut self) -> Option<HomeDirective>;

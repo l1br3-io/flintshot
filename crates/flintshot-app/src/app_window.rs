@@ -1068,7 +1068,9 @@ fn next_start_after_reopen(shared: &Shared) -> GenerationStart {
         None if route_settings => GenerationStart::Settings,
         None => match shared.take_restore_page().unwrap_or(Page::Home) {
             Page::Home => GenerationStart::Home,
-            Page::Editor(pending) => GenerationStart::Editor(pending),
+            Page::Editor(pending) => {
+                GenerationStart::Editor(Box::new(rebuild_restore(shared, *pending)))
+            }
             Page::Settings => GenerationStart::Settings,
         },
     };
@@ -1076,6 +1078,28 @@ fn next_start_after_reopen(shared: &Shared) -> GenerationStart {
     // would flip a later reopen into a stranded spinner.
     shared.clear_pending_loading();
     start
+}
+
+/// The same-page restore for an editor route: when the stashed
+/// pending's session entry still exists, rebuild from the store —
+/// a fresh decode plus the committed annotations (newer than the
+/// stash, which is the construction snapshot; undo/redo start
+/// empty by design). A store miss keeps today's bare-stash
+/// fallback: the pre-epoch image, annotations lost, never an error.
+fn rebuild_restore(shared: &Shared, pending: PendingEditor) -> PendingEditor {
+    let Some(id) = pending.session_id else {
+        return pending;
+    };
+    let Some(cap) = shared.session.load(id) else {
+        return pending;
+    };
+    let mut state = crate::cli::state_from_config(cap.image, &editor_session_config());
+    state.anns = cap.anns;
+    PendingEditor {
+        state,
+        selection_first: pending.selection_first,
+        session_id: Some(id),
+    }
 }
 
 /// What a window generation opens on — the outer loop's routing
@@ -1603,6 +1627,21 @@ struct Bridge {
 impl HomeBridge for Bridge {
     fn request_capture(&mut self) {
         self.shared.set_pending_capture(PumpCommand::Capture);
+    }
+
+    fn open_session_capture(&mut self, id: flintshot_core::SessionId) -> bool {
+        match self.shared.session.load(id) {
+            Some(cap) => {
+                tracing::info!(id = id.raw(), "session capture resumed");
+                let mut state = crate::cli::state_from_config(cap.image, &editor_session_config());
+                state.anns = cap.anns;
+                // Resume reuses the entry — `Some(id)`, never a fresh
+                // insert (the double-track gotcha at `arm_editor`).
+                self.shared.arm_editor(state, false, Some(id));
+                true
+            }
+            None => false,
+        }
     }
 
     // -- Settings-route plumbing (the real config handle) --
@@ -2182,8 +2221,9 @@ mod tests {
     fn hidden_close_restores_the_page_that_was_open() {
         // Plan decision 8: an external capture's close brings back
         // the page that was open — home if home, the editor page if
-        // editing (the pre-epoch image; in-session annotations are
-        // the Replace policy's loss).
+        // editing. An untracked stash (no session entry) still
+        // restores the bare pre-epoch image; tracked ones rebuild
+        // with annotations (see the rebuild test below).
         let shared = Shared::default();
         shared.set_restore_page(Page::Editor(Box::new(pending_over((2, 2), false))));
         let next = next_start_after_reopen(&shared);
@@ -2191,6 +2231,101 @@ mod tests {
             matches!(next, GenerationStart::Editor(_)),
             "the editor page restores"
         );
+    }
+    /// The leave-flush wrote live annotations into the store; the
+    /// hidden-close restore rebuilds from it — the end of the
+    /// documented "in-session annotations are lost" behavior.
+    #[test]
+    fn hidden_close_restore_rebuilds_annotations_from_the_store() {
+        let (shared, _dir) = shared_with_session();
+        shared.arm_editor(fixture_png_state((3, 3)), false, None);
+        let id = shared.session.list()[0].id;
+        // The editor epoch consumed the armed pending; the window
+        // then closed hidden with the editor route open.
+        shared.take_pending_editor();
+        shared.set_active_session(Some(id));
+        let mut live = fixture_png_state((3, 3));
+        live.anns.push(test_line_ann());
+        shared.flush_active_editor(&live);
+        wait_for_store_entry(&shared, id);
+
+        // The stash is the construction snapshot: same image, no
+        // annotations, but carrying the session binding.
+        let stash = PendingEditor {
+            state: fixture_png_state((3, 3)),
+            selection_first: false,
+            session_id: Some(id),
+        };
+        shared.set_restore_page(Page::Editor(Box::new(stash)));
+
+        match next_start_after_reopen(&shared) {
+            GenerationStart::Editor(p) => {
+                assert_eq!(p.session_id, Some(id), "the binding survives the rebuild");
+                assert_eq!(p.state.anns.len(), 1, "committed annotations come back");
+                assert!(p.state.undo.is_empty(), "history resets by design");
+                assert!(p.state.redo.is_empty());
+            }
+            GenerationStart::Home | GenerationStart::Loading | GenerationStart::Settings => {
+                panic!("the editor restore must rebuild")
+            }
+        }
+    }
+
+    /// A store miss (saved / discarded in the meantime) keeps the
+    /// bare-stash fallback — never an error surface.
+    #[test]
+    fn hidden_close_restore_falls_back_to_the_bare_stash() {
+        let (shared, _dir) = shared_with_session();
+        let stash = PendingEditor {
+            state: fixture_png_state((2, 2)),
+            selection_first: true,
+            session_id: Some(flintshot_core::SessionId::from_raw(4242)),
+        };
+        shared.set_restore_page(Page::Editor(Box::new(stash)));
+        match next_start_after_reopen(&shared) {
+            GenerationStart::Editor(p) => {
+                assert!(p.state.anns.is_empty(), "the bare stash carries no anns");
+                assert!(p.selection_first, "the stash's landing phase survives");
+            }
+            _ => panic!("the fallback still restores the editor page"),
+        }
+    }
+
+    /// Resume through the home bridge: stored annotations intact,
+    /// undo/redo empty, the entry reused — never re-inserted.
+    #[test]
+    fn open_session_capture_resumes_with_stored_annotations() {
+        use flintshot_editor_egui::HomeBridge as _;
+
+        let (shared, _dir) = shared_with_session();
+        shared.arm_editor(fixture_png_state((3, 3)), false, None);
+        let id = shared.session.list()[0].id;
+        shared.set_active_session(Some(id));
+        shared.commit_active_annotations(&[test_line_ann()]);
+        wait_for_store_entry(&shared, id);
+        let shared = std::sync::Arc::new(shared);
+        let mut bridge = Bridge {
+            shared: std::sync::Arc::clone(&shared),
+        };
+
+        assert!(bridge.open_session_capture(id), "a live store entry routes");
+        let pending = shared
+            .take_pending_editor()
+            .expect("resume armed the editor");
+        assert_eq!(pending.session_id, Some(id));
+        assert_eq!(
+            pending.state.anns.len(),
+            1,
+            "the stored annotation came back"
+        );
+        assert!(pending.state.undo.is_empty() && pending.state.redo.is_empty());
+        assert_eq!(shared.session.list().len(), 1, "resume never re-inserts");
+
+        assert!(
+            !bridge.open_session_capture(flintshot_core::SessionId::from_raw(999)),
+            "a store miss routes nothing"
+        );
+        assert!(shared.take_pending_editor().is_none());
     }
 
     #[test]
@@ -3435,6 +3570,19 @@ mod tests {
             a: Point::new(1.0, 1.0),
             b: Point::new(2.0, 2.0),
             stroke: Stroke::new(Color::rgb(255, 0, 0), 2.0),
+        }
+    }
+
+    /// Poll until the store's background PNG write lands — resume
+    /// and rebuild decode from disk.
+    fn wait_for_store_entry(shared: &Shared, id: flintshot_core::SessionId) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while shared.session.load(id).is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the store's PNG never landed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
