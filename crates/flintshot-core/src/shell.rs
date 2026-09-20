@@ -27,7 +27,9 @@ pub enum EditorOutcome {
     /// `+` chip / Ctrl+N, Win11-Snipping-Tool-style): the window has
     /// closed — so it cannot be in the new shot — and the caller
     /// should re-run the capture+editor cycle. Unsaved annotations
-    /// are discarded, Win11-style.
+    /// are the *host's* to preserve: page-mode hosts stash them
+    /// (the session-captures store) before acting; only hosts
+    /// without a stash still lose them.
     NewCapture {
         /// Which capture kind to start next.
         mode: NewCaptureMode,
