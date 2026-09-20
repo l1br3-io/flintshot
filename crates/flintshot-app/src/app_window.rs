@@ -92,6 +92,16 @@ struct PendingEditor {
     state: EditorState,
     /// Whether the epoch opens selection-first.
     selection_first: bool,
+    /// The session-store entry tracking this capture, once armed
+    /// (`Some(id)` after [`Shared::arm_editor`], whether freshly
+    /// inserted or resumed). `None` only for constructors outside
+    /// the arm choke point (test fixtures; a bare-stash restore
+    /// whose store entry is gone).
+    // Write-only in the bin until the flush/save/resume tasks land
+    // (003-005); tests read it now, so `expect` would trip on the
+    // test target.
+    #[allow(dead_code)]
+    session_id: Option<flintshot_core::SessionId>,
 }
 
 /// Pause between the window closing and the capture delegating, so
@@ -183,6 +193,12 @@ enum PumpCommand {
 struct Shared {
     inner: std::sync::Mutex<SharedInner>,
     changed: std::sync::Condvar,
+    /// The process's session capture store — every capture that
+    /// lands in an editor epoch is tracked here until saved,
+    /// discarded, or the process exits. Clone-cheap (Arc inner);
+    /// `Default` resolves the platform dir, tests inject via
+    /// [`Shared::with_session`].
+    session: flintshot_core::SessionStore,
 }
 
 #[derive(Default)]
@@ -239,6 +255,16 @@ struct SharedInner {
 }
 
 impl Shared {
+    /// Construct with an explicit session store (tests inject a
+    /// temp-dir store; production sweeps and opens the platform
+    /// dir in [`run`]).
+    fn with_session(session: flintshot_core::SessionStore) -> Self {
+        Self {
+            session,
+            ..Self::default()
+        }
+    }
+
     /// Push one directive for the (open) window and/or the outer
     /// loop. `Show` additionally arms the reopen flag — and drains
     /// any stale `Hide` (one queued while the window was closed by
@@ -286,6 +312,28 @@ impl Shared {
     fn set_pending_editor(&self, pending: PendingEditor) {
         self.lock().pending_editor = Some(pending);
         self.changed.notify_all();
+    }
+
+    /// The one door an image takes into the editor epoch: track it
+    /// in the session store, then arm the pending editor page.
+    ///
+    /// GOTCHA: `resume` must carry `Some(id)` when re-opening a
+    /// capture that is already tracked (Home's session card) —
+    /// `None` mints a **fresh** entry, and a resumed capture would
+    /// be double-tracked (two cards for one image).
+    fn arm_editor(
+        &self,
+        state: EditorState,
+        selection_first: bool,
+        resume: Option<flintshot_core::SessionId>,
+    ) {
+        let session_id =
+            resume.or_else(|| Some(self.session.insert(state.image.clone(), unix_now_secs())));
+        self.set_pending_editor(PendingEditor {
+            state,
+            selection_first,
+            session_id,
+        });
     }
 
     /// Take the pending editor page, if one waits for the next
@@ -701,6 +749,14 @@ fn editor_session_config() -> Config {
     }
 }
 
+/// Unix wall-clock seconds now (0 when the clock is before the
+/// epoch) — the session store's arrival timestamps.
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// Route one grab outcome to the outer loop: an image arms the
 /// editor page and wakes the router; quiet exits and failures reopen
 /// the prior page (home), failures with the message on the status
@@ -711,10 +767,11 @@ fn route_grab(shared: &Shared, core: &mut HomeCore, grab: AppGrab) {
             img,
             selection_first,
         } => {
-            shared.set_pending_editor(PendingEditor {
-                state: crate::cli::state_from_config(img, &editor_session_config()),
+            shared.arm_editor(
+                crate::cli::state_from_config(img, &editor_session_config()),
                 selection_first,
-            });
+                None,
+            );
             if let Some(directive) = core.force_show() {
                 shared.push_directive(directive);
             }
@@ -808,7 +865,14 @@ pub(crate) fn run(initial: crate::worker::AppRoute, standalone: bool) -> eyre::R
     };
 
     let (cmd_tx, cmd_rx) = tokio_mpsc::channel::<PumpCommand>(8);
-    let shared = Arc::new(Shared::default());
+    // A crashed run's session dir lingers in the runtime dir —
+    // sweep it before this process's store opens on the same path
+    // (no resume across restarts, by spec).
+    let session_dir = flintshot_core::session_dir();
+    flintshot_core::SessionStore::sweep_stale(&session_dir);
+    let shared = Arc::new(Shared::with_session(flintshot_core::SessionStore::in_dir(
+        session_dir,
+    )));
 
     let pump = std::thread::Builder::new()
         .name("flintshot-app-pump".into())
@@ -890,6 +954,11 @@ pub(crate) fn run(initial: crate::worker::AppRoute, standalone: bool) -> eyre::R
     drop(cmd_tx);
     let _ = pump.join();
 
+    // Graceful exit: the session dir was scratch space — every
+    // break path above falls through here (crashes skip it, and
+    // the next startup's sweep cleans up after them).
+    shared.session.clear();
+
     result
 }
 
@@ -898,10 +967,7 @@ pub(crate) fn run(initial: crate::worker::AppRoute, standalone: bool) -> eyre::R
 fn apply_open_outcome(shared: &Shared, decoded: eyre::Result<EditorState>, path: &str) {
     match decoded {
         Ok(state) => {
-            shared.set_pending_editor(PendingEditor {
-                state,
-                selection_first: false,
-            });
+            shared.arm_editor(state, false, None);
             shared.push_directive(HomeDirective::Show);
         }
         Err(e) => {
@@ -1042,11 +1108,15 @@ fn to_routed(pending: &PendingEditor) -> flintshot_editor_egui::RoutedEditor {
 /// restore page (an external capture's close reopens on it). The
 /// Loading route restores home — a reopen after a capture carries
 /// the delivered image through the pending editor, never a spinner.
+/// The rebuilt pending has no session id yet (the routed payload
+/// does not carry one until the resume plumbing lands); Task 005's
+/// restore rebuild re-links the store entry.
 fn route_to_page(route: &flintshot_editor_egui::Route) -> Page {
     match route {
         flintshot_editor_egui::Route::Editor(routed) => Page::Editor(Box::new(PendingEditor {
             state: routed.state.clone(),
             selection_first: routed.selection_first,
+            session_id: None,
         })),
         // The settings page restores itself (the same-page principle);
         // Loading restores home — a reopen after a capture carries
@@ -1571,10 +1641,7 @@ impl HomeBridge for Bridge {
             Ok(state) => {
                 tracing::info!(path = %path.display(), "image routed to the editor page");
                 flintshot_core::recents::record(&path, crate::capture_flow::recents_limit());
-                self.shared.set_pending_editor(PendingEditor {
-                    state,
-                    selection_first: false,
-                });
+                self.shared.arm_editor(state, false, None);
                 true
             }
             Err(e) => {
@@ -1591,10 +1658,7 @@ impl HomeBridge for Bridge {
     fn request_paste(&mut self) -> bool {
         if let Some(state) = paste_clipboard_image() {
             tracing::info!("clipboard image routed to the editor page");
-            self.shared.set_pending_editor(PendingEditor {
-                state,
-                selection_first: false,
-            });
+            self.shared.arm_editor(state, false, None);
             true
         } else {
             self.shared.push_directive(HomeDirective::SetStatus(
@@ -1830,10 +1894,7 @@ impl EditorPageBridge for PageBridge {
             Ok(state) => {
                 tracing::info!(path = %path.display(), "editor chrome open routed");
                 flintshot_core::recents::record(&path, crate::capture_flow::recents_limit());
-                self.shared.set_pending_editor(PendingEditor {
-                    state,
-                    selection_first: false,
-                });
+                self.shared.arm_editor(state, false, None);
                 true
             }
             Err(e) => {
@@ -1850,10 +1911,7 @@ impl EditorPageBridge for PageBridge {
     fn request_paste(&mut self) -> bool {
         if let Some(state) = paste_clipboard_image() {
             tracing::info!("editor chrome paste routed");
-            self.shared.set_pending_editor(PendingEditor {
-                state,
-                selection_first: false,
-            });
+            self.shared.arm_editor(state, false, None);
             true
         } else {
             self.shared
@@ -3311,7 +3369,56 @@ mod tests {
         PendingEditor {
             state: fixture_png_state(dims),
             selection_first,
+            session_id: None,
         }
+    }
+
+    /// A `Shared` backed by a temp-dir session store, so tests
+    /// never touch the platform runtime dir.
+    fn shared_with_session() -> (Shared, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Shared::with_session(flintshot_core::SessionStore::in_dir(
+            dir.path().to_path_buf(),
+        ));
+        (shared, dir)
+    }
+
+    #[test]
+    fn arm_editor_inserts_on_new_arrival_and_reuses_on_resume() {
+        let (shared, _dir) = shared_with_session();
+
+        shared.arm_editor(fixture_png_state((3, 3)), false, None);
+        let list = shared.session.list();
+        assert_eq!(list.len(), 1, "arming a new arrival tracks it in the store");
+        let id = list[0].id;
+        let pending = shared.take_pending_editor().unwrap();
+        assert_eq!(
+            pending.session_id,
+            Some(id),
+            "the armed pending editor carries its store id"
+        );
+
+        shared.arm_editor(fixture_png_state((3, 3)), false, Some(id));
+        assert_eq!(
+            shared.session.list().len(),
+            1,
+            "resume must reuse the entry, never double-insert"
+        );
+        let pending = shared.take_pending_editor().unwrap();
+        assert_eq!(pending.session_id, Some(id));
+    }
+
+    #[test]
+    fn store_clear_empties_the_tracked_session() {
+        let (shared, _dir) = shared_with_session();
+        shared.arm_editor(fixture_png_state((2, 2)), false, None);
+        assert_eq!(shared.session.list().len(), 1);
+
+        shared.session.clear();
+        assert!(
+            shared.session.list().is_empty(),
+            "the graceful-exit clear empties the store"
+        );
     }
 
     #[test]
