@@ -76,3 +76,4 @@ Format: **Context · Decision · Consequences**.
 | ADR-0064 | [The Select / Crop / Hand tool remap](ADR-0064-select-crop-hand-tool-remap.md) |
 | ADR-0065 | [The worker editor's Home link delegates to the app window](ADR-0065-worker-home-delegates-to-app-window.md) |
 | ADR-0066 | [The app window is the liveness anchor](ADR-0066-app-window-liveness-anchor.md) |
+| ADR-0067 | [Session captures — an advisory temp-dir store behind the editor](ADR-0067-session-capture-store.md) |
