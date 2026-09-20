@@ -9,4 +9,4 @@ Single status source — one line per task, mirror of `plan.md`.
 - [x] Task 5: recents header — `N of LIMIT` + Open folder chip (`tasks/005-recents-header-open-folder.md`)
 - [x] Task 6: session grid + `THIS SESSION · N` + gap fix (`tasks/006-session-grid-header.md`)
 - [x] Task 7: caption truncation + card polish (`tasks/007-caption-truncation.md`)
-- [ ] Task 8: finish — gates, CHANGELOG, manual pass (`tasks/008-finish-gates-changelog.md`)
+- [x] Task 8: finish — gates, CHANGELOG, manual pass (`tasks/008-finish-gates-changelog.md`)
