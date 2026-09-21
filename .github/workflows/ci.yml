@@ -48,6 +48,25 @@ jobs:
       - name: Run doc tests (lib crates only)
         run: cargo test --doc -p flintshot-core -p flintshot-editor-egui
 
+  # Release-plan gate: the plan only parses metadata (no compilation),
+  # so no apt deps are needed. The installer URL is pinned to the same
+  # version as cargo-dist-version in dist-workspace.toml.
+  dist-plan:
+    name: dist plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dist (pinned 0.32.0)
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      - name: Validate the release plan
+        run: dist plan
+      - name: Check generated release CI and msi templates are current
+        run: |
+          dist generate --mode ci --check
+          dist generate --mode msi --check
+
   msrv:
     name: MSRV (1.95) build
     runs-on: ubuntu-latest

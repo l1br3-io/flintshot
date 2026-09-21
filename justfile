@@ -13,6 +13,8 @@
 # Optional cargo subcommands (install with `just bootstrap`):
 #   cargo-watch   - rebuild on save (used by `dev`, `watch`)
 #   cargo-nextest - faster test runner (used by `nextest`, preferred by `test`)
+#   dist          - release pipeline (cargo-dist, pinned; used by `dist-*`)
+#   actionlint    - GitHub workflow linter (used by `dist-lint`)
 # Recipes that need them fall back gracefully when absent.
 
 # Pass recipe arguments to recipe scripts as positional parameters
@@ -43,6 +45,27 @@ bootstrap:
     }
     install_if_missing watch
     install_if_missing nextest
+    # dist: pinned to cargo-dist-version in dist-workspace.toml so
+    # local plans match CI. Checked via its own binary name —
+    # cargo-dist 0.32 ships only `dist`, not `cargo-dist`.
+    if dist --version >/dev/null 2>&1; then
+        echo "ok: dist already installed ($(dist --version))"
+    else
+        echo "installing: cargo-dist (pinned 0.32.0)"
+        cargo install -q cargo-dist@0.32.0 --locked
+        echo "ok: dist installed ($(dist --version))"
+    fi
+    # actionlint is Go, not cargo-installable: fetch the pinned
+    # release binary into ~/.cargo/bin (already on PATH for rust
+    # users).
+    if command -v actionlint >/dev/null 2>&1; then
+        echo "ok: actionlint already installed ($(actionlint --version | head -1))"
+    else
+        echo "installing: actionlint (pinned 1.7.12)"
+        curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+            | bash -s -- 1.7.12 "$HOME/.cargo/bin"
+        echo "ok: actionlint installed ($(actionlint --version | head -1))"
+    fi
 
 # Auto-fix what CI checks: formatting and clippy.
 fix:
@@ -112,6 +135,77 @@ msrv:
 #   libglib2.0-dev libgfxbuffer-dev pkg-config
 cosmic:
     cargo build -q -p flintshot-cosmic
+
+# --- Release pipeline (cargo-dist; config in dist-workspace.toml) ---
+
+# Validate the cargo-dist release plan (no build). Fast sanity check
+# that dist-workspace.toml + Cargo.toml produce the expected artifact
+# set. Run before merging any release-config change. Requires `dist` —
+# `just bootstrap` to install (pinned).
+dist-plan:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! dist --version >/dev/null 2>&1; then
+        echo "error: dist not on PATH (cargo-dist). Run 'just bootstrap' or" >&2
+        echo "       'cargo install cargo-dist@0.32.0 --locked'" >&2
+        exit 1
+    fi
+    dist plan
+
+# Build host-platform artifacts locally without publishing — smoke
+# test the packaging config (tarball/installers on the host OS).
+# Output under target/distrib/. On Linux/macOS, also runs the custom
+# packaging scripts when they exist (deb/rpm/AppImage, universal dmg)
+# with upload disabled, so local smoke covers the CI paths exactly.
+dist-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dist build
+    if [[ "$(uname -s)" == "Linux" && -f packaging/linux/build-packages.sh ]]; then
+        FLINTSHOT_PACKAGE_NO_UPLOAD=1 bash packaging/linux/build-packages.sh
+    elif [[ "$(uname -s)" == "Darwin" && -f packaging/macos/build-dmg.sh ]]; then
+        FLINTSHOT_PACKAGE_NO_UPLOAD=1 bash packaging/macos/build-dmg.sh
+    fi
+
+# Lint GitHub workflow files with actionlint. The generated
+# release.yml is excluded: it's cargo-dist's output (regenerate, never
+# hand-edit), so upstream style noise there isn't ours to fix — CI's
+# `dist generate --check` covers its freshness. Uses actionlint when
+# installed; otherwise prints a skip note (not a failure — matches
+# the graceful-fallback convention of `bootstrap`).
+dist-lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v actionlint >/dev/null 2>&1; then
+        mapfile -t flows < <(find .github/workflows -name '*.yml' ! -name 'release.yml' | sort)
+        actionlint "${flows[@]}"
+        echo "ok: actionlint clean on ${#flows[@]} workflow(s)"
+    else
+        echo "ok: actionlint not on PATH; skipping (just bootstrap installs it)"
+    fi
+
+# Dry-run the release: preview what cargo-release would do (version
+# bump, changelog rewrite, tag, push) without executing anything.
+# Working tree is untouched afterwards — the intended human
+# checkpoint before `just release`.
+#   just release-dry          # patch preview
+#   just release-dry minor    # the first-release path (0.1.0)
+release-dry level="patch":
+    cargo release {{ level }} --workspace --no-execute
+
+# Cut a release. Runs the full CI gate first (never release red),
+# then `just dist-plan` (never release a broken plan), then
+# cargo-release with --execute: bump + changelog + tag + push. The
+# tag push triggers .github/workflows/release.yml, which builds the
+# matrix and publishes the GitHub Release.
+#   just release          # 0.x.y -> 0.x.(y+1)
+#   just release minor    # 0.x.* -> 0.(x+1).0
+release level="patch":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just ci
+    just dist-plan
+    cargo release {{ level }} --workspace --execute
 
 # --- Install / uninstall (desktop integration) ---
 
