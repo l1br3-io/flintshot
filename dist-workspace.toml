@@ -17,7 +17,15 @@ targets = [
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 ]
-installers = ["shell", "powershell", "msi"]
+installers = ["shell", "powershell", "msi", "homebrew"]
+# Homebrew channel: formula is pushed to this tap on each release.
+# Requires repo secret HOMEBREW_TAP_TOKEN (PAT, repo scope) — see
+# docs/specs/release-pipeline/tasks/004-homebrew-tap.md.
+tap = "l1br3-io/homebrew-tap"
+# Formula name is what users type: `brew install flintshot` (the
+# binary name), not the cargo package name flintshot-app.
+formula = "flintshot"
+publish-jobs = ["homebrew"]
 # Spec'd format: tar.gz decompresses everywhere; xz (0.32's default)
 # still trips up some minimal systems.
 unix-archive = ".tar.gz"
