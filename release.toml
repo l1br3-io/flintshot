@@ -1,0 +1,35 @@
+# cargo-release config — consolidated workspace releases.
+#
+# Shape: virtual workspace, unified versions (all crates inherit
+# [workspace.package] version via version.workspace = true), so this
+# follows the cargo-dist book's "Virtual Workspace With Unified
+# Versions" recipe: shared-version + a single "vX.Y.Z" tag that dist
+# interprets as "release the whole workspace".
+#
+# Release flow: `just release <level>` gates on `just ci` + `just
+# dist-plan`, then runs `cargo release <level> --workspace --execute`:
+# bump -> changelog rewrite -> commit -> tag v{version} -> push; the
+# tag push triggers .github/workflows/release.yml (cargo-dist).
+
+# One commit for the whole workspace bump (not one per crate).
+consolidate-commits = true
+# All crates share [workspace.package] version; release them in
+# lockstep under a single tag.
+shared-version = true
+tag-name = "v{{version}}"
+# Never publish to crates.io (source installs are a non-goal; the
+# flintshot-cosmic crate is publish=false anyway).
+publish = false
+# Skip `cargo publish --dry-run`-style verification; `just release`
+# already ran the full test gate. (Moot with publish=false, but
+# explicit.)
+verify = false
+# Keep workspace-internal version requirements (flintshot-core etc.
+# in [workspace.dependencies]) in sync with the bump.
+dependent-version = "upgrade"
+# Only release from the integration branch.
+allow-branch = ["main"]
+# The CHANGELOG rewrite lives in flintshot-app's
+# [package.metadata.release] instead of here: replacements run
+# per-package, and a workspace-level entry would rewrite the root
+# CHANGELOG.md once per crate (and re-match its own insert).

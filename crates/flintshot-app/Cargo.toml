@@ -22,6 +22,15 @@ path-guid = "932eac9d-b2ac-4efd-a40c-9afbfd94b760"
 license = false
 eula = false
 
+# Scoped to the one released package: workspace-level replacements
+# would run once per crate against the same root file. Rewrites the
+# Keep-a-Changelog Unreleased header into the released version and
+# re-opens a fresh Unreleased section above it.
+[package.metadata.release]
+pre-release-replacements = [
+    { file = "../../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", min = 1 },
+]
+
 [features]
 default = ["egui"]
 egui = ["dep:flintshot-editor-egui"]
