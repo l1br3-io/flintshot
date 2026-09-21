@@ -13,6 +13,15 @@ authors.workspace = true
 name = "flintshot"
 path = "src/main.rs"
 
+# WiX identity for the msi installer (stable GUIDs so upgrades
+# replace instead of side-by-side install; license/eula off — nobody
+# should "agree" to MIT/Apache).
+[package.metadata.wix]
+upgrade-guid = "6c55b274-9df3-4fc3-82c4-ffd9e35ab681"
+path-guid = "932eac9d-b2ac-4efd-a40c-9afbfd94b760"
+license = false
+eula = false
+
 [features]
 default = ["egui"]
 egui = ["dep:flintshot-editor-egui"]
