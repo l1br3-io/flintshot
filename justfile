@@ -294,7 +294,7 @@ _build:
             # trigger the hint.
             if [[ ",${features}," == *",tray,"* ]]; then
                 echo "hint: the 'tray' feature needs the GTK dev libs at build time" >&2
-                echo "      (Debian/Ubuntu: libgtk-3-dev libayatana-appindicator3-dev)" >&2
+                echo "      (Debian/Ubuntu: libgtk-3-dev libayatana-appindicator3-dev libxdo-dev)" >&2
                 echo "      Install them, or re-run with FEATURES='' for a minimal no-tray build" >&2
             fi
             exit 1
@@ -321,7 +321,7 @@ _refresh-build:
             # trigger the hint.
             if [[ ",${features}," == *",tray,"* ]]; then
                 echo "hint: the 'tray' feature needs the GTK dev libs at build time" >&2
-                echo "      (Debian/Ubuntu: libgtk-3-dev libayatana-appindicator3-dev)" >&2
+                echo "      (Debian/Ubuntu: libgtk-3-dev libayatana-appindicator3-dev libxdo-dev)" >&2
                 echo "      Install them, or re-run with FEATURES='' for a minimal no-tray build" >&2
             fi
             exit 1
