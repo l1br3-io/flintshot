@@ -13,8 +13,8 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/anomalyco/flintshot"
-homepage = "https://github.com/anomalyco/flintshot"
+repository = "https://github.com/l1br3-io/flintshot"
+homepage = "https://github.com/l1br3-io/flintshot"
 authors = ["flintshot contributors"]
 
 [workspace.dependencies]

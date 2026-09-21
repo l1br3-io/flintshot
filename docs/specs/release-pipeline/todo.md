@@ -1,6 +1,6 @@
 # release-pipeline todo
 
-- [ ] 001 Author dist.toml (pinned cargo-dist config, plan green)
+- [x] 001 Author dist.toml (pinned cargo-dist config, plan green)
 - [ ] 002 Generate release.yml + CI plan job + just recipes
 - [ ] 003 cargo-release wiring (release.toml, just release / release-dry)
 - [ ] 004 Homebrew tap channel (tap repo + dist.toml)
