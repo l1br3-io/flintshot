@@ -25,10 +25,12 @@ eula = false
 # Scoped to the one released package: workspace-level replacements
 # would run once per crate against the same root file. Rewrites the
 # Keep-a-Changelog Unreleased header into the released version and
-# re-opens a fresh Unreleased section above it.
+# re-opens a fresh Unreleased section above it. Anchored + exactly=1:
+# the changelog's prose mentions "## [Unreleased]" literally (release
+# checklist section) — an unanchored pattern would rewrite those too.
 [package.metadata.release]
 pre-release-replacements = [
-    { file = "../../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", min = 1 },
+    { file = "../../CHANGELOG.md", search = "^## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
 ]
 
 [features]
