@@ -207,7 +207,9 @@ release level="patch":
     set -euo pipefail
     just ci
     just dist-plan
-    cargo release {{ level }} --workspace --execute
+    # --no-publish is redundant with release.toml publish=false —
+    # kept as a guard so a config regression can't reach crates.io.
+    cargo release {{ level }} --workspace --execute --no-publish
 
 # --- Install / uninstall (desktop integration) ---
 
