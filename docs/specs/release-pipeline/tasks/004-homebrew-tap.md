@@ -39,3 +39,25 @@ the config plus the exact setup instructions.
   set `formula = "flintshot"` and note why.
 
 **Estimated scope:** Small (1-2 files + human setup)
+
+## Maintainer setup (required before first release — Task 010)
+
+The tap repo and token are user-side actions; the pipeline cannot
+create them:
+
+1. **Create the tap repo**: <https://github.com/new> → owner
+   `l1br3-io`, name `homebrew-tap`, **public**, no README/license
+   (cargo-dist pushes `Formula/flintshot.rb` itself; an empty repo
+   keeps the first push conflict-free).
+2. **Create a PAT**: <https://github.com/settings/tokens> →
+   "Fine-grained" or classic with `repo` scope (classic) / "Contents:
+   read and write" on `l1br3-io/homebrew-tap` only (fine-grained).
+3. **Add the secret** on the main repo:
+   <https://github.com/l1br3-io/flintshot/settings/secrets/actions> →
+   `HOMEBREW_TAP_TOKEN` = the PAT.
+4. After the first release: `brew tap l1br3-io/tap
+   https://github.com/l1br3-io/homebrew-tap && brew install flintshot`
+   (or `brew install l1br3-io/tap/flintshot`) verifies the channel.
+
+Note: `tap` in dist-workspace.toml uses `l1br3-io` (the real git
+remote), replacing the spec's assumed `anomalyco` org.
