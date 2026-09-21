@@ -345,3 +345,21 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  custom-package-linux:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/package-linux.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+
+  custom-package-macos-dmg:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/package-macos-dmg.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit

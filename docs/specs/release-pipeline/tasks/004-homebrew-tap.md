@@ -1,22 +1,22 @@
 # Task 004: Homebrew tap channel
 
 **Description:** Enable cargo-dist's Homebrew installer: add
-`"homebrew"` to `installers`, set `tap = "anomalyco/homebrew-tap"`
-and `publish-jobs = ["homebrew"]` in `dist.toml`. The tap repo and
+`"homebrew"` to `installers`, set `tap = "l1br3-io/homebrew-tap"`
+and `publish-jobs = ["homebrew"]` in `dist-workspace.toml`. The tap repo and
 its `HOMEBREW_TAP_TOKEN` secret are user actions — this task ships
 the config plus the exact setup instructions.
 
 **Acceptance criteria:**
-- [ ] `dist.toml`: `installers` includes `"homebrew"`,
-      `tap = "anomalyco/homebrew-tap"`,
+- [ ] `dist-workspace.toml`: `installers` includes `"homebrew"`,
+      `tap = "l1br3-io/homebrew-tap"`,
       `publish-jobs = ["homebrew"`
 - [ ] `cargo dist plan` exit 0; plan shows the homebrew publish job
       and the formula artifact
 - [ ] `release.yml` regenerated (homebrew publish job present)
 - [ ] Setup instructions for the maintainer written into the task
-      file / release docs (create empty repo `anomalyco/
+      file / release docs (create empty repo `l1br3-io/
       homebrew-tap`, PAT with repo scope → repo secret
-      `HOMEBREW_TAP_TOKEN` on `anomalyco/flintshot`)
+      `HOMEBREW_TAP_TOKEN` on `l1br3-io/flintshot`)
 - [ ] No `[dist.dependencies.homebrew]` entries needed (tray's GTK
       deps are Linux-only — verified: `gtk`/`zbus` are
       target-scoped in flintshot-app/Cargo.toml)
@@ -30,7 +30,7 @@ the config plus the exact setup instructions.
 **Dependencies:** Task 002 (regenerating release.yml)
 
 **Files likely touched:**
-- `dist.toml`
+- `dist-workspace.toml`
 - `.github/workflows/release.yml` (regenerated)
 
 **Docs:**

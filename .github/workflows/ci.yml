@@ -96,6 +96,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
+            libxdo-dev \
             ${{ env.XCAP_LINUX_DEPS }}
       - name: Run cargo clippy (tray feature)
         run: cargo clippy -p flintshot-app --features tray --all-targets -- -D warnings

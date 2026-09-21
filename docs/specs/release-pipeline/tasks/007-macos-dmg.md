@@ -12,7 +12,7 @@ icon; CFBundleIcon from the SVG → icns), wraps it in a `.dmg` via
 - [ ] `packaging/macos/build-dmg.sh`: universal build → lipo →
       `.app` (correct `CFBundleExecutable`, `LSUIElement=true`,
       icns icon) → `hdiutil create` →
-      `target/dist/flintshot_<v>_universal.dmg`; honors
+      `target/packages/flintshot_<v>_universal.dmg`; honors
       `FLINTSHOT_PACKAGE_NO_UPLOAD=1`
 - [ ] Icon conversion step (SVG → icns via `rsvg-convert` +
       `iconutil`, or a pre-generated `assets/icons/...icns`
@@ -21,7 +21,7 @@ icon; CFBundleIcon from the SVG → icns), wraps it in a `.dmg` via
 - [ ] `.github/workflows/package-macos-dmg.yml`: `on:
       workflow_call`, `runs-on: macos-latest`, runs the script,
       `.sha256`, `gh release upload` on `github.ref_name`
-- [ ] `dist.toml` `post-announce-jobs` gains `"./package-macos-dmg"`;
+- [ ] `dist-workspace.toml` `post-announce-jobs` gains `"./package-macos-dmg"`;
       release.yml regenerated
 - [ ] `packaging-test.yml` gains the macOS no-upload leg
 
@@ -41,7 +41,7 @@ only the smoke workflow shape; can start after Task 2 if desired
 - `packaging/macos/build-dmg.sh` (new)
 - `.github/workflows/package-macos-dmg.yml` (new)
 - `.github/workflows/packaging-test.yml`
-- `dist.toml`
+- `dist-workspace.toml`
 - `.github/workflows/release.yml` (regenerated)
 - `assets/icons/` (icns, if that route is taken)
 

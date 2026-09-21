@@ -48,7 +48,7 @@ server deployment.
 
 | Tool             | Role                                                            |
 | ---------------- | --------------------------------------------------------------- |
-| **cargo-dist** (pinned) | Generates the release workflow, cross-platform build matrix, native artifacts (`.tar.gz`/`.zip`, `.msi`, shell/powershell installers), SHA256 checksums, `dist-manifest.json` (what makes `cargo binstall` work), and the Homebrew formula. Config: `dist.toml`. Extended via custom `post-announce-jobs` for the non-native formats. |
+| **cargo-dist** (pinned) | Generates the release workflow, cross-platform build matrix, native artifacts (`.tar.gz`/`.zip`, `.msi`, shell/powershell installers), SHA256 checksums, `dist-manifest.json` (what makes `cargo binstall` work), and the Homebrew formula. Config: `dist-workspace.toml`. Extended via custom `post-announce-jobs` for the non-native formats. |
 | **cargo-release** | Version bump (workspace-consolidated), CHANGELOG `## [Unreleased]` → version header, git tag `vX.Y.Z`, push. Config: `release.toml`. |
 | **cargo-deb** | `.deb` construction — invoked by our custom Linux packaging job/script. Runtime deps + desktop entry + icon declared in `[package.metadata.deb]`. |
 | **cargo-generate-rpm** | `.rpm` construction — invoked by the same job. Runtime deps in `[package.metadata.generate-rpm]`. |
@@ -56,10 +56,10 @@ server deployment.
 | `hdiutil` + `lipo` + custom `.app` bundling script | macOS **universal** `.dmg` (cargo-dist has no native dmg and no `universal-apple-darwin` target — issue #77 — so the dmg job builds both arches and `lipo`s them itself). |
 | linuxdeploy / appimagetool | `.AppImage` built by the custom Linux packaging job. |
 | actionlint (optional) | Lint GitHub workflow syntax in `just dist-lint`. |
-| GitHub Actions | Runners: `macos-latest`, `windows-latest`, Linux x64 pinned to `ubuntu-22.04` via `[dist.github-custom-runners]` (glibc 2.35 floor → runs on Debian 12+, Ubuntu 22.04+, Fedora 39+). |
+| GitHub Actions | Runners: `macos-latest`, `windows-latest`; native Linux job pinned `ubuntu-24.04` (newest PipeWire headers the capture stack compiles against); custom Linux packaging job runs in a `debian:12` container. Supported floor: **Debian 12+, Ubuntu 24.04+, Fedora 39+** (Ubuntu 22.04 → build from source; its PipeWire 0.3.48 headers cannot compile xcap 0.9's pipewire stack — verified in container). |
 
 Pinning rule: `cargo-dist-version` and `cargo-release` versions are
-pinned exact in `dist.toml` / `release.toml` so releases are
+pinned exact in `dist-workspace.toml` / `release.toml` so releases are
 reproducible. Versions are chosen at plan time after verifying current
 maintenance status (see Risks — cargo-dist maintenance).
 
@@ -81,7 +81,7 @@ not "what".
 
 ```just
 # Validate the cargo-dist release plan (no build, no network).
-# Fast sanity check that dist.toml + Cargo.toml produce the expected
+# Fast sanity check that dist-workspace.toml + Cargo.toml produce the expected
 # artifact set. Run before merging any release-config change.
 dist-plan:
     cargo dist plan -q
@@ -151,7 +151,8 @@ GitHub Release upload, Homebrew formula push to the tap repo.
 ## Project Structure
 
 ```
-dist.toml                       # NEW — cargo-dist config: targets, packages
+dist-workspace.toml              # NEW — cargo-dist config: [workspace]
+                                #   members + [dist]: targets, packages
                                 #   = ["flintshot-app"], features = ["tray"],
                                 #   precise-builds, apt build deps, custom
                                 #   runners, installers, post-announce-jobs
@@ -162,8 +163,9 @@ release.toml                    # NEW — cargo-release config: workspace-
                                 #   regenerate via `cargo dist init`, never
                                 #   hand-edit beyond regeneration
 .github/workflows/package-linux.yml   # NEW — custom job (workflow_call):
-                                #   deb + rpm (+ AppImage) on ubuntu-22.04,
-                                #   uploads to the release with .sha256
+                                #   deb + rpm (+ AppImage) in a debian:12
+                                #   container (glibc 2.36 / PipeWire 0.3.65
+                                #   floor), uploads to the release + .sha256
 .github/workflows/package-macos-dmg.yml # NEW — custom job (workflow_call):
                                 #   universal .app + .dmg, uploads with .sha256
 .github/workflows/packaging-test.yml   # NEW — workflow_dispatch smoke: runs
@@ -194,12 +196,16 @@ Native cargo-dist artifacts get `.sha256` files + `dist-manifest.json`
 
 Config files follow repo conventions: TOML keys documented by
 comments only when the "why" is non-obvious, no dead config, exact
-version pins. Example — the shape of `dist.toml` (exact keys verified
+version pins. Example — the shape of `dist-workspace.toml` (exact
+keys verified
 against cargo-dist docs at plan time):
 
 ```toml
+[workspace]
+members = ["cargo:."]
+
 [dist]
-cargo-dist-version = "0.33.0"       # pinned exact
+cargo-dist-version = "0.32.0"       # pinned exact (crates.io max; 0.33.0 GitHub-only)
 packages = ["flintshot-app"]        # never package flintshot-cosmic
 features = ["tray"]                 # release = the launcher promise
 precise-builds = true               # --package builds only; the workspace
@@ -211,13 +217,22 @@ targets = [
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 ]
-installers = ["shell", "powershell", "msi"]
+installers = ["shell", "powershell", "msi", "homebrew"]
+tap = "l1br3-io/homebrew-tap"       # formula pushed here on each release
+formula = "flintshot"               # users type the bin name, not flintshot-app
+publish-jobs = ["homebrew"]
+unix-archive = ".tar.gz"            # decompresses everywhere; xz default trips
+                                    # some minimal systems
 pr-run-mode = "upload"              # PRs build artifacts to validate the plan
 post-announce-jobs = ["./package-linux", "./package-macos-dmg"]
 
 [dist.github-custom-runners]
-# glibc 2.35 floor: binary runs on Debian 12+, Ubuntu 22.04+, Fedora 39+
-x86_64-unknown-linux-gnu = "ubuntu-22.04"
+# Native Linux artifacts build on 24.04: xcap 0.9's pipewire-rs
+# bindgen-compiles against system PipeWire headers; 22.04's 0.3.48
+# predates SPA symbols libspa 0.10 uses. deb/rpm/AppImage come from
+# the debian:12 container job instead. Pinned (not ubuntu-latest) so
+# a future -latest bump can't silently change the build environment.
+x86_64-unknown-linux-gnu = "ubuntu-24.04"
 
 [dist.dependencies.apt]             # xcap + tray build deps for the Linux job
 pkg-config = "*"
@@ -241,13 +256,13 @@ Commands). Generated workflow YAML is cargo-dist's — not hand-styled.
 A release pipeline can't be unit-tested; verification is layered:
 
 1. **Plan validation (fast, every PR):** a new CI job runs
-   `cargo dist plan` so a broken `dist.toml`/feature/target combo
+   `cargo dist plan` so a broken `dist-workspace.toml`/feature/target combo
    fails before merge. Locally: `just dist-plan`.
 2. **PR artifact build (medium, every PR touching release config):**
    `pr-run-mode = "upload"` makes release.yml build (but not publish)
    artifacts on PRs, proving the matrix stays green.
 3. **Local smoke (per maintainer, pre-release):** `just dist-build`
-   then inspect `target/dist/` — install the `.deb` in a fresh
+   then inspect `target/packages/` (custom formats) and `target/distrib/` (cargo-dist output) — install the `.deb` in a fresh
    container (`docker run --rm -v target/dist:/a debian:bookworm` …
    `apt install /a/*.deb && flintshot --version`), mount the `.msi` /
    `.dmg` steps are manual.
@@ -306,9 +321,9 @@ instead.
 - [ ] `just release-dry` previews, and `just release patch` performs:
       CI gate → plan validation → version bump → changelog edit →
       tag → push, with no manual steps between confirm and Release.
-- [ ] `.deb` installs on a clean Debian 12 / Ubuntu 22.04 container
-      and `flintshot daemon` starts with a working tray (GTK +
-      appindicator runtime deps auto-resolved by apt).
+- [ ] `.deb` installs on a clean Debian 12 container and `flintshot
+      --version` runs (GTK + appindicator + xdo runtime deps
+      auto-resolved by apt); also installs on Ubuntu 24.04.
 - [ ] `.rpm` installs on a clean Fedora container likewise.
 - [ ] `.dmg` contains a universal `.app` bundle that launches on
       macOS (Intel and Apple Silicon), tray icon appears.
@@ -325,11 +340,13 @@ instead.
 | Risk | Mitigation |
 | ---- | ---------- |
 | ~~cargo-dist maintenance status~~ | **Resolved at planning**: actively maintained (v0.33.0, Sep 2026). |
-| `extra-artifacts` are **arch-independent only** (single copy per release, runs on the global ubuntu job) — not usable for deb/rpm/dmg/AppImage. | Custom `post-announce-jobs` (reusable `workflow_call` workflows) on pinned runners: `package-linux` (deb/rpm/AppImage, ubuntu-22.04), `package-macos-dmg` (universal lipo dmg). Each uploads its own `.sha256`. |
+| `extra-artifacts` are **arch-independent only** (single copy per release, runs on the global ubuntu job) — not usable for deb/rpm/dmg/AppImage. | Custom `post-announce-jobs` (reusable `workflow_call` workflows): `package-linux` (deb/rpm/AppImage in a `debian:12` container), `package-macos-dmg` (universal lipo dmg). Each uploads its own `.sha256`. |
 | No `universal-apple-darwin` target (cargo-dist #77, open). | Ship per-arch macOS tarballs natively (standard practice — matches rustup/cargo-dist itself); the custom dmg job builds both arches and `lipo`s them into one universal `.app`/`.dmg`. |
-| `.deb`/`.rpm` are not native cargo-dist artifact kinds. | cargo-deb + cargo-generate-rpm with runtime deps derived from `ldd` of the built binary (GTK/appindicator/xcap libs); verified by container install tests (Debian 12, Fedora 39+). |
+| `.deb`/`.rpm` are not native cargo-dist artifact kinds. | cargo-deb + cargo-generate-rpm with runtime deps derived from `ldd` of the built binary (GTK/appindicator/xcap/xdo libs); verified by container install tests (Debian 12, Fedora). |
+| ~~xcap's pipewire stack vs Ubuntu 22.04~~ — **resolved at build**: pipewire-rs 0.10 bindgen-compiles against system headers; 22.04's 0.3.48 cannot compile (missing SPA symbols), 0.3.65+ can. | Floor decision (user-approved): Debian 12 / Ubuntu 24.04+. Native job → `ubuntu-24.04`; deb/rpm/AppImage built in a `debian:12` container. Ubuntu 22.04 users build from source. |
+| ~~Linux glibc portability~~ — **resolved by the same decision**: debian:12 container build → glibc 2.36 floor for deb/rpm/AppImage; native tarball on 24.04 (2.39). | Verified: deb built in debian:12 installs + runs on debian:12 and ubuntu:24.04 containers. |
+| Tray builds need `libxdo-dev` at link time (muda → libxdo) — plain CI never hits it, tray builds do. | Added to `[dist.dependencies.apt]`, `package-linux.yml`, ci.yml's `tray-build` job, AGENTS.md, and the justfile hint. `libxdo3` already in deb `Depends`. |
 | AppImage + GTK3/appindicator bundling is fragile (linuxdeploy GTK plugin maturity). | Timeboxed attempt; fallback decision point: drop the AppImage format for v1 of this effort (documented here + CHANGELOG). |
-| Linux glibc portability — `ubuntu-latest` (24.04) links against glibc 2.39. | `[dist.github-custom-runners]` pins the Linux target job to `ubuntu-22.04` (glibc 2.35); custom packaging job uses the same runner. Verified by the Debian 12 smoke test. |
 | cargo-dist `--workspace` build would compile `flintshot-cosmic` (needs libcosmic system deps not installed in the release job). | `precise-builds = true` + `packages = ["flintshot-app"]`; caught immediately by `cargo dist plan`. |
 | cargo-release with workspace-inherited versions (`version.workspace = true`). | Follow the cargo-dist book's cargo-release guide; verify bump applies to `[workspace.package] version` in the dry run before any `--execute`. |
 | Homebrew formula runtime deps. | None needed — the `tray` feature's GTK/appindicator deps are Linux-only (`gtk`/`zbus` are target-scoped in flintshot-app's Cargo.toml); on macOS tray-icon uses native APIs. Formula stays dependency-free. |
@@ -337,11 +354,11 @@ instead.
 ## Open Questions
 
 1. **First release version** — `0.1.0`? (assumed)
-2. **Tap repo name** — `anomalyco/homebrew-tap`? Needs creating +
+2. **Tap repo name** — `l1br3-io/homebrew-tap`? Needs creating +
    `HOMEBREW_TAP_TOKEN` secret before first release.
 3. **AppImage fallback** — if GTK bundling proves unstable: drop the
    format? (decided: drop, revisit — not the no-tray variant, to keep
    the "tray everywhere" release promise)
-4. ~~glibc baseline~~ — **Resolved at planning**: `ubuntu-22.04`
-   runner pin → glibc 2.35 floor (Debian 12+, Ubuntu 22.04+,
-   Fedora 39+).
+4. ~~glibc baseline~~ — **Resolved at build**: Debian 12 /
+   Ubuntu 24.04+ floor (user-approved after the PipeWire-header
+   discovery); see Risks.

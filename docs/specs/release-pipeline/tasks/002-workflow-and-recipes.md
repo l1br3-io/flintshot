@@ -21,7 +21,7 @@ recipes plus `bootstrap` additions (cargo-dist, actionlint).
       `dist-lint` (actionlint, graceful skip) — following the
       existing recipe conventions (shebang + `set -euo pipefail`,
       quiet-on-success)
-- [ ] `bootstrap` installs `cargo-dist` (pinned 0.33.0) and
+- [ ] `bootstrap` installs `cargo-dist` (pinned 0.32.0) and
       `actionlint` idempotently
 - [ ] release.yml defaults reviewed: no `--all-features` surprises,
       `GITHUB_TOKEN` permissions untouched
@@ -43,6 +43,6 @@ recipes plus `bootstrap` additions (cargo-dist, actionlint).
 
 **Docs:**
 - Boundary: release.yml is regenerated, never hand-edited. If a
-  change is needed, change `dist.toml` and regenerate.
+  change is needed, change `dist-workspace.toml` and regenerate.
 
 **Estimated scope:** Medium (3 files)

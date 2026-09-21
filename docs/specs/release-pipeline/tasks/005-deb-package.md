@@ -11,7 +11,7 @@ without a release.
 
 **Acceptance criteria:**
 - [ ] `packaging/linux/build-packages.sh` builds the tray release
-      binary and produces `target/dist/flintshot_<v>_amd64.deb`;
+      binary and produces `target/packages/flintshot_<v>_amd64.deb`;
       installs cargo-deb pinned+locked; honors
       `FLINTSHOT_PACKAGE_NO_UPLOAD=1`; `set -euo pipefail`, clear
       failure messages
@@ -19,11 +19,14 @@ without a release.
       ldd-derived `depends`, desktop entry + icon assets (from
       `assets/applications/`, `assets/icons/`), maintainer, section
 - [ ] `.github/workflows/package-linux.yml`: `on: workflow_call`,
-      job on `ubuntu-22.04` (glibc floor), installs xcap+GTK apt
+      job in a **`debian:12` container** on `ubuntu-latest` (glibc
+      2.36 + PipeWire 0.3.65 = the release floor; 22.04's 0.3.48
+      headers cannot compile the pipewire stack), installs xcap+GTK+
+      xdo apt
       deps, runs the script, generates `.sha256`, uploads to the
       GitHub Release via `gh release upload` (tag from
       `github.ref_name`)
-- [ ] `dist.toml`: `post-announce-jobs = ["./package-linux"]`;
+- [ ] `dist-workspace.toml`: `post-announce-jobs = ["./package-linux"]`;
       release.yml regenerated
 - [ ] `.github/workflows/packaging-test.yml`: `on:
       workflow_dispatch` (+ `pull_request` paths filter on
@@ -34,10 +37,10 @@ without a release.
 
 **Verification:**
 - [ ] `FLINTSHOT_PACKAGE_NO_UPLOAD=1 bash packaging/linux/build-packages.sh` locally, exit 0
-- [ ] `docker run --rm -v "$PWD/target/dist:/a:ro" debian:12 bash -c
+- [ ] `docker run --rm -v "$PWD/target/packages:/a:ro" debian:12 bash -c
       "apt-get update -qq && apt-get install -y -qq /a/*.deb &&
       flintshot --version"` — exit 0 (deps auto-resolve)
-- [ ] Same on `ubuntu:22.04`
+- [ ] Same on `ubuntu:24.04`
 - [ ] `bash -n` + `shellcheck` (if installed) on the script
 - [ ] `just dist-lint` (actionlint) on new workflows
 - [ ] Push branch, dispatch `packaging-test.yml`, green
@@ -49,7 +52,7 @@ without a release.
 - `.github/workflows/package-linux.yml` (new)
 - `.github/workflows/packaging-test.yml` (new)
 - `crates/flintshot-app/Cargo.toml`
-- `dist.toml`
+- `dist-workspace.toml`
 - `.github/workflows/release.yml` (regenerated)
 
 **Docs:**

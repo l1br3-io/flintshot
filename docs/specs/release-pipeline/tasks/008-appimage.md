@@ -9,13 +9,29 @@ GTK-in-AppImage proves unstable, drop the format (decided fallback —
 see spec Open Questions) and record it; do not ship a no-tray
 AppImage.
 
+**Outcome (attempt path taken, succeeded):**
+- linuxdeploy `1-alpha-20251107-1`, `--appimage-extract-and-run`
+  (no FUSE in CI), `OUTPUT` env for the final name.
+- GOTCHA: `--deploy-deps-only` requires the lib *inside* the AppDir
+  first — copy the dlopen'd `libayatana-appindicator3.so.1` into
+  `usr/lib/`, then deploy its deps.
+- GOTCHA: appimagetool requires the `file` utility — added to the
+  job's apt list.
+- GOTCHA: libpipewire is dlopen'd (not NEEDED-linked) and is
+  deliberately NOT bundled — a bundled client newer than the
+  session's daemon breaks the protocol; rely on the host's
+  (standard AppImage practice). Same discovery added
+  `libpipewire-0.3-0` to the deb's Depends.
+- Verified: built + runs via extract-and-run in the debian:12
+  container (floor); 62 bundled libs incl. gtk-3 + appindicator.
+
 **Acceptance criteria (attempt path):**
-- [ ] `packaging/linux/build-packages.sh` produces
-      `target/dist/flintshot_<v>_x86_64.AppImage` (linuxdeploy
+- [x] `packaging/linux/build-packages.sh` produces
+      `target/packages/flintshot_<v>_x86_64.AppImage` (linuxdeploy
       downloaded pinned by SHA256 or version-pinned URL;
       `--appimage-extract-and-run` used so no FUSE needed in CI)
-- [ ] AppDir carries `flintshot.desktop` + hicolor icons
-- [ ] `.sha256` + upload handled by the existing job
+- [x] AppDir carries `flintshot.desktop` + hicolor icons
+- [x] `.sha256` + upload handled by the existing job
 
 **Acceptance criteria (fallback path — if timebox expires):**
 - [ ] AppImage dropped from spec artifact table + CHANGELOG note +

@@ -1,0 +1,56 @@
+name: package-linux
+
+# Custom cargo-dist post-announce job: builds the non-native Linux
+# packages (.deb today; .rpm/.AppImage land in later tasks of the
+# release-pipeline effort) and uploads them to the just-published
+# GitHub Release. Invoked from release.yml via workflow_call after
+# announce; also callable standalone (packaging-test.yml) with
+# no-upload for branch-time smoke.
+
+on:
+  workflow_call:
+    inputs:
+      # The dist plan manifest, passed by release.yml per cargo-dist's
+      # custom-job convention. Unused for now; accepted for parity.
+      plan:
+        description: dist plan manifest JSON
+        type: string
+        default: ""
+      no-upload:
+        description: Build + checksum only, skip the release upload
+        type: boolean
+        default: false
+
+jobs:
+  package-linux:
+    name: linux packages (deb)
+    # debian:12 container = the release floor: glibc 2.36 + PipeWire
+    # 0.3.65 headers (oldest set the xcap 0.9 / pipewire-rs 0.10 stack
+    # compiles against — 22.04's 0.3.48 fails bindgen). deb/rpm/
+    # AppImage from here run on Debian 12+, Ubuntu 24.04+, Fedora 39+.
+    # The container runs as root: no sudo on the apt steps.
+    runs-on: ubuntu-latest
+    container: debian:12
+    env:
+      FLINTSHOT_PACKAGE_NO_UPLOAD: ${{ inputs.no-upload && '1' || '0' }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcap + GTK (tray) system deps
+        # Mirrors [dist.dependencies.apt] in dist-workspace.toml: the
+        # xcap libs plus the tray feature's GTK/appindicator stack.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            pkg-config libclang-dev libxcb1-dev libxrandr-dev \
+            libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev \
+            libgbm-dev libgtk-3-dev libayatana-appindicator3-dev \
+            libxdo-dev librsvg2-bin file ca-certificates curl
+      - name: Build packages
+        run: bash packaging/linux/build-packages.sh
+      - name: Upload packages as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: target/packages/*
+          if-no-files-found: error

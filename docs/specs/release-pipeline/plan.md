@@ -13,8 +13,8 @@ the whole maintainer flow). Full detail: `spec.md` in this directory.
 
 ## Architecture Decisions
 
-1. **cargo-dist 0.33.0 (pinned), actively maintained** — verified Sep
-   2026. Config in root `dist.toml`; `release.yml` is generated and
+1. **cargo-dist 0.32.0 (pinned), actively maintained** — verified Sep
+   2026. Config in root `dist-workspace.toml`; `release.yml` is generated and
    checked in; regeneration only, never hand-edit.
 2. **Native vs custom artifacts** — cargo-dist builds: per-arch macOS
    tarballs, Windows zip+msi, Linux tarball, installers, checksums,
@@ -26,13 +26,16 @@ the whole maintainer flow). Full detail: `spec.md` in this directory.
 3. **No universal-apple-darwin** (cargo-dist #77, open) — per-arch
    tarballs are the norm; the dmg job lipos both arches into one
    universal `.app`/`.dmg`.
-4. **glibc floor 2.35** — `[dist.github-custom-runners]` pins the
-   Linux target job and the custom packaging job to `ubuntu-22.04`
-   (runs on Debian 12+, Ubuntu 22.04+, Fedora 39+).
+4. **Linux floor: Debian 12 / Ubuntu 24.04+** — xcap 0.9's
+   pipewire-rs bindgen-compiles against system PipeWire headers;
+   22.04's 0.3.48 cannot compile (verified in container; user
+   approved the floor). Native job pinned `ubuntu-24.04`; deb/rpm/
+   AppImage built in a `debian:12` container (glibc 2.36, PipeWire
+   0.3.65). Ubuntu 22.04 users build from source.
 5. **`precise-builds = true` + `packages = ["flintshot-app"]`** — the
    default `--workspace` build would compile `flintshot-cosmic`
    (libcosmic system deps absent in the release job).
-6. **Tray on all platforms** — `features = ["tray"]` in dist.toml;
+6. **Tray on all platforms** — `features = ["tray"]` in dist-workspace.toml;
    deb/rpm declare GTK/appindicator/xcap runtime deps (ldd-derived);
    Homebrew formula needs none (tray's GTK deps are Linux-only).
 7. **Packaging scripts are shared** — `packaging/{linux,macos}/*.sh`
@@ -44,7 +47,7 @@ the whole maintainer flow). Full detail: `spec.md` in this directory.
 ## Task Index
 
 ### Phase 1: Foundation (native cargo-dist matrix)
-- [ ] Task 1: Author `dist.toml` (pinned config, plan green) → `tasks/001-dist-toml.md`
+- [ ] Task 1: Author `dist-workspace.toml` (pinned config, plan green) → `tasks/001-dist-toml.md`
 - [ ] Task 2: Generate `release.yml`, PR plan-check job, `just` recipes → `tasks/002-workflow-and-recipes.md`
 
 ### Checkpoint A: Foundation
@@ -88,5 +91,5 @@ run before any execute).
 ## Open Questions
 
 - First release version — `0.1.0` assumed; confirm at Task 10.
-- Tap repo `anomalyco/homebrew-tap` + `HOMEBREW_TAP_TOKEN` secret —
+- Tap repo `l1br3-io/homebrew-tap` + `HOMEBREW_TAP_TOKEN` secret —
   user action needed before Task 4 verification / first release.

@@ -7,7 +7,7 @@ checklist from the spec. This is the acceptance run for the whole
 effort — human-gated at the tag push.
 
 **Acceptance criteria:**
-- [ ] Maintainer confirmed `0.1.0` + tap repo `anomalyco/
+- [ ] Maintainer confirmed `0.1.0` + tap repo `l1br3-io/
       homebrew-tap` exists with `HOMEBREW_TAP_TOKEN` set
 - [ ] CHANGELOG `## [Unreleased]` contains release-worthy notes
       (effort summary)
@@ -24,7 +24,7 @@ effort — human-gated at the tag push.
         `debian:12` container
   - [ ] Released `.rpm` installs in `fedora:39` container
   - [ ] `cargo binstall flintshot@0.1.0` resolves + installs
-  - [ ] `brew install anomalyco/tap/flintshot` on macOS
+  - [ ] `brew install l1br3-io/tap/flintshot` on macOS
   - [ ] `.dmg` `.app` launches on macOS, tray icon appears
         (Intel or AS; both if available)
   - [ ] `.msi` installs/uninstalls on Windows, Start-menu entry

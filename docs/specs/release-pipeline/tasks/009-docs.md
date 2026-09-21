@@ -2,7 +2,7 @@
 
 **Description:** Record the pipeline decisions durably and make the
 next agent's life easy: an ADR for the release architecture
-(cargo-dist + custom jobs split, glibc pin, signing deferral), an
+(cargo-dist + custom jobs split, Linux floor, signing deferral), an
 AGENTS.md section for the release commands and boundaries, and the
 CHANGELOG `## [Unreleased]` entry.
 
@@ -10,7 +10,7 @@ CHANGELOG `## [Unreleased]` entry.
 - [ ] `docs/adrs/ADR-0068-release-pipeline.md` — Context · Decision
       · Consequences: cargo-dist-native vs custom-job artifact split
       (+ why: extra-artifacts are arch-independent-only,
-      universal-apple-darwin unsupported), ubuntu-22.04 glibc pin,
+      universal-apple-darwin unsupported), debian:12-container floor (Ubuntu 24.04+/Debian 12+; 22.04 source-only),
       signing deferred with the native drop-in hooks named
       (`ssldotcom-windows-sign`, `azure-windows-sign`, Apple
       notarization TODO)

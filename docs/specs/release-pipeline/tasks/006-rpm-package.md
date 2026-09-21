@@ -7,7 +7,7 @@ no new workflows.
 
 **Acceptance criteria:**
 - [ ] `packaging/linux/build-packages.sh` also produces
-      `target/dist/flintshot-<v>.x86_64.rpm` (installs
+      `target/packages/flintshot-<v>.x86_64.rpm` (installs
       cargo-generate-rpm pinned+locked)
 - [ ] `[package.metadata.generate-rpm]` in
       `crates/flintshot-app/Cargo.toml`: Fedora package `requires`
