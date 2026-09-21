@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
+# Never shipped: not on crates.io, not in release artifacts (dist
+# inherits this as dist=false). Opt-in CI-build-only crate.
+publish = false
 
 [[bin]]
 name = "flintshot-cosmic"
