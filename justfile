@@ -185,13 +185,15 @@ dist-lint:
     fi
 
 # Dry-run the release: preview what cargo-release would do (version
-# bump, changelog rewrite, tag, push) without executing anything.
-# Working tree is untouched afterwards — the intended human
-# checkpoint before `just release`.
+# bump, changelog rewrite, tag, push). cargo-release does nothing
+# side-effectful without --execute, so this leaves the working tree
+# untouched — the intended human checkpoint before `just release`.
+# Previews from any branch (--allow-branch passes the current one);
+# the real `release` stays main-only via release.toml.
 #   just release-dry          # patch preview
 #   just release-dry minor    # the first-release path (0.1.0)
 release-dry level="patch":
-    cargo release {{ level }} --workspace --no-execute
+    cargo release {{ level }} --workspace --allow-branch "$(git branch --show-current)"
 
 # Cut a release. Runs the full CI gate first (never release red),
 # then `just dist-plan` (never release a broken plan), then
