@@ -1,0 +1,45 @@
+name: package-macos-dmg
+
+# Custom cargo-dist post-announce job: builds the universal macOS
+# .dmg (both arches lipo'd into one .app — cargo-dist has no
+# universal-apple-darwin target) and uploads it to the just-published
+# GitHub Release. Invoked from release.yml via workflow_call after
+# announce; also callable standalone (packaging-test.yml) with
+# no-upload for branch-time smoke.
+
+on:
+  workflow_call:
+    inputs:
+      # The dist plan manifest, passed by release.yml per cargo-dist's
+      # custom-job convention. Unused for now; accepted for parity.
+      plan:
+        description: dist plan manifest JSON
+        type: string
+        default: ""
+      no-upload:
+        description: Build + checksum only, skip the release upload
+        type: boolean
+        default: false
+
+jobs:
+  package-macos-dmg:
+    name: macOS universal dmg
+    runs-on: macos-latest
+    env:
+      FLINTSHOT_PACKAGE_NO_UPLOAD: ${{ inputs.no-upload && '1' || '0' }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install icon tooling
+        # rsvg-convert renders the SVG icon to the png set iconutil
+        # turns into icns. Best-effort: the script ships a no-icns
+        # .app if this fails to install.
+        run: brew install librsvg
+      - name: Build dmg
+        run: bash packaging/macos/build-dmg.sh
+      - name: Upload dmg as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: target/packages/*
+          if-no-files-found: error

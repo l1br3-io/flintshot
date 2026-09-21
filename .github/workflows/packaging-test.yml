@@ -1,0 +1,26 @@
+name: packaging-test
+
+# Branch-time smoke for the custom packaging jobs without a release:
+# runs the same workflow_call jobs the release pipeline uses, with the
+# release upload disabled (FLINTSHOT_PACKAGE_NO_UPLOAD=1 inside).
+# Dispatch manually, or let the pull_request paths filter fire it on
+# packaging changes.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - packaging/**
+      - .github/workflows/package-linux.yml
+      - .github/workflows/packaging-test.yml
+      - crates/flintshot-app/Cargo.toml
+
+jobs:
+  linux:
+    uses: ./.github/workflows/package-linux.yml
+    with:
+      no-upload: true
+  macos:
+    uses: ./.github/workflows/package-macos-dmg.yml
+    with:
+      no-upload: true

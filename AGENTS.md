@@ -78,6 +78,25 @@ cargo run -- app                 # app window (capture home; auto-starts the dae
 cargo run -- backends            # capture-backend diagnostics (probes + auto pick)
 ```
 
+### Release (cargo-dist + cargo-release)
+
+```sh
+just dist-plan                   # validate the release plan (fast, no build)
+just dist-build                  # build host artifacts + custom formats, no upload
+just dist-lint                   # actionlint on owned workflows (release.yml excluded)
+just release-dry [minor|patch]   # preview version bump / changelog / tag — no changes
+just release [minor|patch]       # ci gate -> plan gate -> bump+tag+push; tag triggers release.yml
+```
+
+Boundaries: `release.yml` is cargo-dist's *generated* output — change
+`dist-workspace.toml` and regenerate (`dist generate --mode ci`),
+never hand-edit (CI checks freshness). Version bumps go through
+`just release`, never manual tags. Linux release floor: Debian 12 /
+Ubuntu 24.04+ / Fedora 39+ (PipeWire-header constraint; see
+`docs/adrs/ADR-0068-release-pipeline.md`). Custom formats live in
+`packaging/{linux,macos}/` + `.github/workflows/package-*.yml`
+(post-announce jobs; smoke via `packaging-test.yml` dispatch).
+
 ### Dev tooling (optional, recommended)
 
 The `justfile` defines `bootstrap`, `watch`, `nextest`, and `dev`
@@ -117,7 +136,9 @@ sudo apt-get install -y --no-install-recommends \
 CI installs these in the `lint`, `test`, and `msrv` jobs (see the
 `XCAP_LINUX_DEPS` env in `.github/workflows/ci.yml`); the `tray-build`
 job additionally compiles the tray feature path (adds
-`libgtk-3-dev` + `libayatana-appindicator3-dev`). macOS and
+`libgtk-3-dev` + `libayatana-appindicator3-dev` +
+`libxdo-dev` — libxdo is a link-time dep via muda, the tray menu
+lib). macOS and
 Windows need no extra deps for Phase 1's capture path.
 
 > **Note:** `libgbm-dev` is required at link time even though xcap's
@@ -182,6 +203,8 @@ Authoritative style detail lives in
 | egui editor implementation      | `crates/flintshot-editor-egui/src/`                        |
 | Cross-crate types re-exports    | `crates/flintshot-core/src/lib.rs`                         |
 | CI pipeline                     | `.github/workflows/ci.yml`                                 |
+| Release pipeline (cargo-dist)   | `dist-workspace.toml`, `release.toml`, `.github/workflows/release.yml` (generated) |
+| Custom packaging (deb/rpm/AppImage/dmg) | `packaging/{linux,macos}/`, `.github/workflows/package-*.yml` |
 | Tech stack rationale            | `docs/adrs/`                                               |
 
 ## When you finish a change

@@ -13,6 +13,75 @@ authors.workspace = true
 name = "flintshot"
 path = "src/main.rs"
 
+# WiX identity for the msi installer (stable GUIDs so upgrades
+# replace instead of side-by-side install; license/eula off — nobody
+# should "agree" to MIT/Apache).
+[package.metadata.wix]
+upgrade-guid = "6c55b274-9df3-4fc3-82c4-ffd9e35ab681"
+path-guid = "932eac9d-b2ac-4efd-a40c-9afbfd94b760"
+license = false
+eula = false
+
+# Scoped to the one released package: workspace-level replacements
+# would run once per crate against the same root file. Rewrites the
+# Keep-a-Changelog Unreleased header into the released version and
+# re-opens a fresh Unreleased section above it. Anchored + exactly=1:
+# the changelog's prose mentions "## [Unreleased]" literally (release
+# checklist section) — an unanchored pattern would rewrite those too.
+[package.metadata.release]
+pre-release-replacements = [
+    { file = "../../CHANGELOG.md", search = "^## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+]
+
+# Debian package (built by packaging/linux/build-packages.sh; CI job
+# runs on ubuntu-22.04 = glibc 2.35 floor). Depends lists DIRECT
+# sonames from `readelf -d` on the tray binary plus the dlopen-only
+# libappindicator (tray-icon loads it at runtime, so it never shows
+# in NEEDED). Explicit, not $auto: shlibdeps would emit builder-host
+# names and the 24.04 t64 rename (libgtk-3-0 -> libgtk-3-0t64) breaks
+# single-name deps across releases — `|` alternatives cover both eras.
+[package.metadata.deb]
+maintainer = "flintshot contributors (https://github.com/l1br3-io/flintshot)"
+section = "utils"
+# libpipewire-0.3-0: dlopen'd at runtime by xcap's pipewire capture
+# path (not NEEDED-linked, so shlibdeps misses it) — Depend on it or
+# Wayland capture breaks on minimal systems. No t64 rename for this
+# lib (pipewire 1.x still ships the 0.3 soname).
+depends = "libayatana-appindicator3-1, libpipewire-0.3-0, libgtk-3-0 | libgtk-3-0t64, libglib2.0-0 | libglib2.0-0t64, libgdk-pixbuf-2.0-0 | libgdk-pixbuf-2.0-0t64, libxdo3, libgbm1, libxcb1, libgcc-s1, libc6"
+assets = [
+    ["target/release/flintshot", "usr/bin/", "755"],
+    ["../../assets/applications/flintshot.desktop", "usr/share/applications/", "644"],
+    ["../../assets/icons/hicolor/scalable/apps/flintshot.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+]
+
+# Fedora-side names for the same runtime set (xcap's capture libs +
+# tray's GTK/appindicator/xdo). Explicit: rpmbuild-style auto-detection
+# isn't available from a debian:12 container, and Fedora renames
+# differ (gtk3, mesa-libgbm, pipewire-libs, libxdo). Verified by the
+# fedora:39 container install test in the release-pipeline effort.
+[package.metadata.generate-rpm]
+requires = {
+    "gtk3" = "*",
+    "libayatana-appindicator-gtk3" = "*",
+    "libxdo" = "*",
+    "mesa-libgbm" = "*",
+    "mesa-libEGL" = "*",
+    "pipewire-libs" = "*",
+    "libwayland-client" = "*",
+    "libxkbcommon" = "*",
+    "libXrandr" = "*",
+    "libxcb" = "*",
+    "dbus-libs" = "*",
+}
+# NOTE on paths: unlike cargo-deb (workspace-target-relative), these
+# resolve relative to THIS manifest's directory — hence ../../ for the
+# workspace target/ and assets/.
+assets = [
+    { source = "../../target/release/flintshot", dest = "/usr/bin/flintshot", mode = "755" },
+    { source = "../../assets/applications/flintshot.desktop", dest = "/usr/share/applications/flintshot.desktop", mode = "644" },
+    { source = "../../assets/icons/hicolor/scalable/apps/flintshot.svg", dest = "/usr/share/icons/hicolor/scalable/apps/flintshot.svg", mode = "644" },
+]
+
 [features]
 default = ["egui"]
 egui = ["dep:flintshot-editor-egui"]

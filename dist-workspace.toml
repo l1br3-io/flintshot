@@ -1,0 +1,64 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.32.0"
+# Never package flintshot-cosmic: it needs libcosmic system deps the
+# release runners don't install (it stays an opt-in CI-build crate).
+packages = ["flintshot-app"]
+# Release = the launcher promise: tray ships everywhere it can.
+features = ["tray"]
+# Build with --package; the workspace build would drag in
+# flintshot-cosmic's system deps.
+precise-builds = true
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+installers = ["shell", "powershell", "msi", "homebrew"]
+# Homebrew channel: formula is pushed to this tap on each release.
+# Requires repo secret HOMEBREW_TAP_TOKEN (PAT, repo scope) — see
+# docs/specs/release-pipeline/tasks/004-homebrew-tap.md.
+tap = "l1br3-io/homebrew-tap"
+# Formula name is what users type: `brew install flintshot` (the
+# binary name), not the cargo package name flintshot-app.
+formula = "flintshot"
+publish-jobs = ["homebrew"]
+# Non-native formats (deb/rpm on Linux; universal dmg on macOS):
+# reusable workflow_call jobs, invoked after the GitHub Release exists.
+post-announce-jobs = ["./package-linux", "./package-macos-dmg"]
+# Spec'd format: tar.gz decompresses everywhere; xz (0.32's default)
+# still trips up some minimal systems.
+unix-archive = ".tar.gz"
+# PRs build (but don't publish) artifacts, proving the matrix stays
+# green on release-config changes.
+pr-run-mode = "upload"
+
+[dist.github-custom-runners]
+# Native Linux artifacts build on 24.04: xcap 0.9's pipewire-rs
+# bindgen-compiles against the system PipeWire headers, and 22.04's
+# 0.3.48 predates SPA symbols libspa 0.10 uses (verified in
+# container: 0.3.48 fails, 0.3.65/1.0.4 compile). The deb/rpm/
+# AppImage job builds in a debian:12 container instead — the 2.36
+# floor that covers Debian 12+. Ubuntu 22.04 users build from
+# source. Pinned (not ubuntu-latest) so a future -latest bump can't
+# silently raise the tarball's glibc.
+x86_64-unknown-linux-gnu = "ubuntu-24.04"
+
+# XCAP_LINUX_DEPS from ci.yml plus the tray feature's stack (GTK,
+# appindicator; libxdo via muda — tray menus — is link-time).
+[dist.dependencies.apt]
+pkg-config = "*"
+libclang-dev = "*"
+libxcb1-dev = "*"
+libxrandr-dev = "*"
+libdbus-1-dev = "*"
+libpipewire-0.3-dev = "*"
+libwayland-dev = "*"
+libegl-dev = "*"
+libgbm-dev = "*"
+libgtk-3-dev = "*"
+libayatana-appindicator3-dev = "*"
+libxdo-dev = "*"

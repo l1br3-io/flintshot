@@ -43,6 +43,30 @@ Categories used below:
     outcome is a documented no-op there (selection + tool flip
     still land). Selection and tool flips are chrome — no undo
     history entries.
+- **Cross-platform release pipeline** (effort `release-pipeline`;
+  ADR-0068). One command cuts a release: `just release [minor|patch]`
+  gates on CI + the cargo-dist plan, then cargo-release bumps the
+  workspace version, rewrites this changelog's `Unreleased` section,
+  tags, and pushes — the `v*` tag triggers the generated
+  `.github/workflows/release.yml`, which builds and publishes:
+  - *Artifacts*: macOS x86_64 + aarch64 tarballs and a universal
+    `.dmg` (proper `.app` bundle, tray-aware `LSUIElement`), Windows
+    x64 `.zip` + `.msi`, Linux x86_64 tarball + `.deb` + `.rpm` +
+    `.AppImage` — every artifact with a bare-filename `.sha256`.
+  - *Channels*: GitHub Releases, `curl | sh` / `irm | iex`
+    installers, `cargo binstall`, and a Homebrew tap
+    (`brew install l1br3-io/tap/flintshot`).
+  - *Linux floor*: Debian 12 / Ubuntu 24.04+ / Fedora 39+ — the
+    capture stack's pipewire bindings require PipeWire ≥ 0.3.65
+    headers (Ubuntu 22.04 users build from source). deb/rpm/
+    AppImage build in a `debian:12` container for the glibc 2.36
+    floor, verified by container install tests.
+  - *Guardrails*: `dist generate --check` freshness job, a
+    `packaging-test.yml` dispatch workflow that smoke-runs the
+    custom packaging jobs without a release, and tray link-time
+    `libxdo-dev` added to every tray-compiling environment.
+  - New recipes: `dist-plan`, `dist-build`, `dist-lint`,
+    `release-dry`, `release`.
 
 - **Home capture grids rework** (effort `home-capture-grids`). The
   home page's two capture sections get a sharper, more informative
