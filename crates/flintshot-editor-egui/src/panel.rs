@@ -136,10 +136,6 @@ impl PanelState {
     }
 
     /// Whether the panel is collapsed (skipped from the frame).
-    #[allow(
-        dead_code,
-        reason = "test-only until the app wiring (fit path, persist) lands next task"
-    )]
     pub(crate) fn is_collapsed(&self) -> bool {
         self.collapsed
     }
@@ -147,10 +143,6 @@ impl PanelState {
     /// The live panel width, logical px. Raw — the caller owns the
     /// collapsed-means-zero policy (the worker fit path); the panel
     /// itself always restores this width.
-    #[allow(
-        dead_code,
-        reason = "test-only until the app wiring (fit path, persist) lands next task"
-    )]
     pub(crate) fn live_width(&self) -> f32 {
         self.width
     }
@@ -159,10 +151,6 @@ impl PanelState {
     /// width and the collapsed-at-close flag. Applied once at
     /// construction (`EditorApp::new_lifecycle`); afterwards the
     /// mirror tracks the rendered rect.
-    #[allow(
-        dead_code,
-        reason = "test-only until the app wiring (fit path, persist) lands next task"
-    )]
     pub(crate) fn seed(&mut self, width: f32, collapsed: bool) {
         self.width = width.clamp(PANEL_MIN_WIDTH, PANEL_MAX_WIDTH);
         self.collapsed = collapsed;
