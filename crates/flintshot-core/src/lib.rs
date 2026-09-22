@@ -38,8 +38,9 @@ pub mod text;
 pub mod upload;
 
 pub use ai::{
-    image_part, png_data_url, text_part, AiChoice, AiClient, AiError, AiRequest, AiResponse,
-    AiResponseMessage, ChatMessage, ContentPart, ImageUrl, ProviderPreset,
+    image_part, png_data_url, text_part, transform_store_path, AiChoice, AiClient, AiError,
+    AiRequest, AiResponse, AiResponseMessage, AiTransform, ChatMessage, ContentPart, ImageUrl,
+    ProviderPreset, TransformStore,
 };
 #[cfg(target_os = "linux")]
 pub use capture::PortalScreenshotCapturer;

@@ -75,6 +75,8 @@ toml_edit = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tray-icon = "0.24"
+# Transform-store ids (uuid v4); already in the lockfile transitively.
+uuid = { version = "1", features = ["v4"] }
 xcap = "0.9"
 # Direct dep for the SNI watchdog's poke-to-activate calls (the `gtk`
 # stack has no D-Bus client). tokio backend to match ashpd's pin —
