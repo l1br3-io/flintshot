@@ -2383,6 +2383,7 @@ dependencies = [
  "reqwest",
  "rpassword",
  "serde",
+ "serde_json",
  "single-instance",
  "tempfile",
  "tokio",

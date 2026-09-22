@@ -233,7 +233,15 @@ pub enum AiError {
     #[error("transport error: {0}")]
     Transport(String),
 
-    /// The provider rejected the request (401, 429, 5xx, ...).
+    /// Authentication failure (missing, bad, or expired API key).
+    #[error("auth error: {0}")]
+    Auth(String),
+
+    /// Rate limited (HTTP 429).
+    #[error("rate limited: {0}")]
+    RateLimited(String),
+
+    /// The provider rejected the request (400, 5xx, ...).
     #[error("provider error ({status}): {message}")]
     Provider {
         /// HTTP status code.
@@ -249,16 +257,32 @@ pub enum AiError {
 }
 
 impl AiError {
-    /// Build a [`AiError::Provider`] from a non-2xx response body.
+    /// Build the typed [`AiError`] for a non-2xx status from its
+    /// response body.
     ///
     /// Parses the `{"error": {"message": ...}}` envelope all in-scope
     /// providers use; if the body isn't that shape, the raw body
-    /// becomes the message (still surfaced, never swallowed).
+    /// becomes the message (still surfaced, never swallowed). Status
+    /// mapping: 401/403 ⇒ [`AiError::Auth`], 429 ⇒
+    /// [`AiError::RateLimited`], everything else ⇒
+    /// [`AiError::Provider`].
     #[must_use]
-    pub fn provider_from_body(status: u16, body: &str) -> Self {
+    pub fn from_status_and_body(status: u16, body: &str) -> Self {
         let message = serde_json::from_str::<AiErrorBody>(body)
             .map_or_else(|_| body.to_string(), |parsed| parsed.error.message);
-        Self::Provider { status, message }
+        Self::from_status_and_message(status, message)
+    }
+
+    /// Map a status + already-extracted message to the typed variant
+    /// (the mapping half of [`AiError::from_status_and_body`], split
+    /// out for clients that parse the body themselves).
+    #[must_use]
+    pub fn from_status_and_message(status: u16, message: String) -> Self {
+        match status {
+            401 | 403 => Self::Auth(message),
+            429 => Self::RateLimited(message),
+            _ => Self::Provider { status, message },
+        }
     }
 }
 
@@ -502,15 +526,36 @@ mod tests {
     }
 
     #[test]
-    fn error_body_parses_into_provider_with_message() {
-        let err = AiError::provider_from_body(
+    fn error_body_parses_into_typed_error_with_message() {
+        // 401 surfaces as Auth with the provider's message.
+        let err = AiError::from_status_and_body(
             401,
             r#"{"error": {"message": "Incorrect API key provided", "type": "invalid_request_error", "code": "invalid_api_key"}}"#,
         );
         match err {
+            AiError::Auth(message) => assert_eq!(message, "Incorrect API key provided"),
+            other => panic!("expected Auth, got {other:?}"),
+        }
+
+        // 429 surfaces as RateLimited.
+        let err = AiError::from_status_and_body(
+            429,
+            r#"{"error": {"message": "Rate limit reached", "type": "rate_limit_error"}}"#,
+        );
+        match err {
+            AiError::RateLimited(message) => assert_eq!(message, "Rate limit reached"),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+
+        // 5xx surfaces as Provider with the status retained.
+        let err = AiError::from_status_and_body(
+            500,
+            r#"{"error": {"message": "Internal server error"}}"#,
+        );
+        match err {
             AiError::Provider { status, message } => {
-                assert_eq!(status, 401);
-                assert_eq!(message, "Incorrect API key provided");
+                assert_eq!(status, 500);
+                assert_eq!(message, "Internal server error");
             }
             other => panic!("expected Provider, got {other:?}"),
         }
@@ -518,7 +563,7 @@ mod tests {
 
     #[test]
     fn non_json_error_body_falls_back_to_raw_text() {
-        let err = AiError::provider_from_body(502, "<html>Bad Gateway</html>");
+        let err = AiError::from_status_and_body(502, "<html>Bad Gateway</html>");
         match err {
             AiError::Provider { status, message } => {
                 assert_eq!(status, 502);

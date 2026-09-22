@@ -111,6 +111,9 @@ postcard = { workspace = true }
 reqwest = { workspace = true }
 rpassword = { workspace = true }
 serde = { workspace = true }
+# Response-body decoding in the AI client (already in the lockfile
+# via flintshot-core).
+serde_json = "1"
 tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }

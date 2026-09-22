@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod ai;
 #[cfg(feature = "egui")]
 mod ambient;
 #[cfg(feature = "egui")]
