@@ -16,6 +16,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 
+pub mod ai;
 pub mod capture;
 pub mod config;
 pub mod editor;
@@ -36,6 +37,10 @@ pub mod shell;
 pub mod text;
 pub mod upload;
 
+pub use ai::{
+    image_part, png_data_url, text_part, AiChoice, AiClient, AiError, AiRequest, AiResponse,
+    AiResponseMessage, ChatMessage, ContentPart, ImageUrl, ProviderPreset,
+};
 #[cfg(target_os = "linux")]
 pub use capture::PortalScreenshotCapturer;
 pub use capture::{
