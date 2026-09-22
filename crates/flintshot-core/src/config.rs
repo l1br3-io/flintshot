@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ai::ProviderPreset;
 use crate::error::{FlintshotError, Result};
 use crate::geom::Color;
 use crate::serde_util::format_color;
@@ -42,6 +43,10 @@ pub struct Config {
     /// Output defaults (settings route; see [`OutputConfig`]).
     #[serde(default)]
     pub output: OutputConfig,
+    /// AI provider choice for Ask-the-shot (see [`AiConfig`]). Holds
+    /// no secret material — the API key lives in the OS keyring.
+    #[serde(default)]
+    pub ai: AiConfig,
 }
 
 /// Editor defaults: persist the user's last-used color, stroke width,
@@ -296,6 +301,74 @@ impl Default for UploadConfig {
 
 fn default_upload_backend() -> String {
     "imgur".into()
+}
+
+/// AI provider defaults (Ask-the-shot). The `[ai]` section holds
+/// only the *choice* of provider/model/base-url — the API key lives
+/// in the OS keyring (entry `flinshot / ai:<provider>`), never in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub struct AiConfig {
+    /// Provider preset id: `"openai"`, `"xai"`, `"gemini"`, or
+    /// `"custom"`. Stored verbatim; unknown values warn and resolve
+    /// to the custom preset at use time (string-tolerant policy).
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    /// Model id sent on the wire (e.g. `"gpt-4o-mini"`). Default
+    /// empty — must be user-set; pages pre-fill from the preset's
+    /// model hint.
+    #[serde(default)]
+    pub model: String,
+    /// Base-URL override for the provider endpoint. Empty (default)
+    /// = the preset's base URL; non-empty wins (`Ollama`, `LM
+    /// Studio`, `OpenRouter`, ...).
+    #[serde(default)]
+    pub base_url: String,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_ai_provider(),
+            model: String::new(),
+            base_url: String::new(),
+        }
+    }
+}
+
+impl AiConfig {
+    /// The provider preset for use: unknown ids warn and resolve to
+    /// custom — the stored value survives re-saves (string-tolerant
+    /// policy, `interaction-mode` precedent).
+    #[must_use]
+    pub fn preset(&self) -> &'static ProviderPreset {
+        let preset = ProviderPreset::for_id(&self.provider);
+        if preset.id != self.provider {
+            tracing::warn!(
+                "unknown ai.provider {:?}; resolving to the custom preset",
+                self.provider
+            );
+        }
+        preset
+    }
+
+    /// Base URL requests go to: the override when set, else the
+    /// preset's. May be empty (custom with no override yet) — the
+    /// config page treats that as "not configured".
+    #[must_use]
+    pub fn effective_base_url(&self) -> &str {
+        if self.base_url.is_empty() {
+            self.preset().base_url
+        } else {
+            &self.base_url
+        }
+    }
+}
+
+fn default_ai_provider() -> String {
+    "openai".into()
 }
 
 fn default_color() -> Color {
@@ -1765,6 +1838,77 @@ backend = \"portal\"
         assert_eq!(
             from_asset.ui.recent_captures_limit,
             d.ui.recent_captures_limit
+        );
+
+        assert_eq!(from_asset.ai.provider, d.ai.provider);
+        assert_eq!(from_asset.ai.model, d.ai.model);
+        assert_eq!(from_asset.ai.base_url, d.ai.base_url);
+    }
+
+    // ── [ai] section (ai-transforms Task 003) ────────────────────
+
+    #[test]
+    fn ai_section_missing_partial_and_unknown_field_load_cleanly() {
+        let missing: Config = toml::from_str("").unwrap();
+        assert_eq!(missing.ai.provider, "openai");
+        assert_eq!(missing.ai.model, "");
+        assert_eq!(missing.ai.base_url, "");
+
+        let partial: Config = toml::from_str("[ai]\nprovider = \"xai\"\n").unwrap();
+        assert_eq!(partial.ai.provider, "xai");
+        assert_eq!(partial.ai.model, "");
+        assert_eq!(partial.ai.base_url, "");
+
+        let unknown: Config = toml::from_str(
+            "[ai]\nprovider = \"gemini\"\nmodel = \"gemini-2.0-flash\"\nsome-future-field = 7\n",
+        )
+        .unwrap();
+        assert_eq!(unknown.ai.provider, "gemini");
+        assert_eq!(unknown.ai.model, "gemini-2.0-flash");
+    }
+
+    #[test]
+    fn ai_section_round_trips_with_kebab_case_keys() {
+        let config: Config = toml::from_str(
+            "[ai]\nprovider = \"custom\"\nmodel = \"llama3.2-vision\"\nbase-url = \"http://localhost:11434/v1\"\n",
+        )
+        .unwrap();
+        let written = toml::to_string_pretty(&config).unwrap();
+        let reloaded: Config = toml::from_str(&written).unwrap();
+        assert_eq!(reloaded.ai.provider, "custom");
+        assert_eq!(reloaded.ai.model, "llama3.2-vision");
+        assert_eq!(reloaded.ai.base_url, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn ai_provider_unknown_value_resolves_custom_at_use_but_stores_verbatim() {
+        let mut config = Config::default();
+        config.ai.provider = "anthrope".into(); // typo-tolerant at use
+        let preset = config.ai.preset();
+        assert_eq!(preset.id, "custom", "unknown provider resolves custom");
+
+        // ...and the stored value survives a save/load round-trip.
+        let written = toml::to_string_pretty(&config).unwrap();
+        let reloaded: Config = toml::from_str(&written).unwrap();
+        assert_eq!(reloaded.ai.provider, "anthrope");
+    }
+
+    #[test]
+    fn ai_effective_base_url_prefers_override_then_preset() {
+        let mut config = Config::default();
+        assert_eq!(
+            config.ai.effective_base_url(),
+            "https://api.openai.com/v1",
+            "no override => preset default"
+        );
+        config.ai.base_url = "http://localhost:11434/v1".into();
+        assert_eq!(config.ai.effective_base_url(), "http://localhost:11434/v1");
+        config.ai.provider = "custom".into();
+        config.ai.base_url.clear();
+        assert_eq!(
+            config.ai.effective_base_url(),
+            "",
+            "custom with no override is empty (not-configured signal)"
         );
     }
 

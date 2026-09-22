@@ -52,8 +52,9 @@ pub use capture::{
 pub use config::{
     config_path, default_config_toml, ensure_user_config, ensure_user_config_at,
     estimate_size_bytes, heuristic_bytes, parse_default_mode, parse_output_format, parse_size_mode,
-    render_filename_template, resolve_save_dir_with, sanitize_filename, CaptureConfig, Config,
-    DefaultMode, HotkeyConfig, OutputConfig, OutputFormat, SizeMode, UiConfig, UploadConfig,
+    render_filename_template, resolve_save_dir_with, sanitize_filename, AiConfig, CaptureConfig,
+    Config, DefaultMode, HotkeyConfig, OutputConfig, OutputFormat, SizeMode, UiConfig,
+    UploadConfig,
 };
 pub use editor::{
     Annotation, BlurKind, EditorState, Snapshot, Tool, NUMBER_MAX_DIAMETER, NUMBER_MIN_DIAMETER,

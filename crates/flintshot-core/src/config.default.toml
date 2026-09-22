@@ -117,3 +117,21 @@ save-dir = ""
 # save location so the copy lands in recents. A save failure never
 # fails the copy.
 save-clipboard-copies = true
+
+# AI (Ask-the-shot) provider choice. The API key never lives in
+# this file — it's stored in your system's secret store (keychain)
+# and managed from Settings -> AI.
+#
+# provider: "openai", "xai" (Grok), "gemini", or "custom" (any
+#   OpenAI-compatible endpoint: Ollama, LM Studio, OpenRouter...).
+#   Unknown values fall back to "custom" with a warning.
+# model: the model id sent on the wire, e.g. "gpt-4o-mini". The AI
+#   settings page pre-fills a vision-capable suggestion per provider.
+# base-url: override the provider's default endpoint. Empty = the
+#   preset's URL; set it to point "custom" at a local server (e.g.
+#   "http://localhost:11434/v1" for Ollama).
+#
+# [ai]
+# provider = "openai"
+# model = ""
+# base-url = ""
