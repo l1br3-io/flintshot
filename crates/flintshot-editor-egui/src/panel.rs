@@ -1,30 +1,46 @@
 //! The docked side panel — the editor's control home.
 //!
-//! Right-docked, grain-textured cream paper. The first row is the
-//! `PROPERTIES | HISTORY` tab header (two segmented chips — cutout
-//! at rest, ink-filled when active). The Properties tab is the
-//! contextual options surface: the mode title (`{Tool} ·
-//! Properties`, or `N selected · Properties` when the Select tool's
-//! multi-selection turns the panel into a selection inspector)
-//! followed by exactly that mode's section cards — the
-//! color/stroke picker bay collapses behind one popover pod button
-//! (see `crate::popover`). The History tab is the labeled edit
-//! timeline: past rows oldest-first, the current-state marker, and
-//! dimmed-but-clickable future rows — one click time-travels via
-//! `restore_to`. The tool rail (left), the topbar's Capture / Copy
-//! heroes, and the floating undo / redo clusters are other
-//! surfaces; the canvas beside this panel is never grained or
-//! shadowed.
+//! Right-docked, grain-textured cream paper, resizable by dragging
+//! its inner (left) edge and collapsible via the header chevron or
+//! `Ctrl+B` (the shell owns the chord; see `crate::app`). The first
+//! row is the `PROPERTIES | HISTORY` tab header (two segmented
+//! chips — cutout at rest, ink-filled when active) with the collapse
+//! chevron at its right end. The Properties tab is the contextual
+//! options surface: the mode title (`{Tool} · Properties`, or `N
+//! selected · Properties` when the Select tool's multi-selection
+//! turns the panel into a selection inspector) followed by exactly
+//! that mode's section cards — the color/stroke picker bay collapses
+//! behind one popover pod button (see `crate::popover`). The History
+//! tab is the labeled edit timeline: past rows oldest-first, the
+//! current-state marker, and dimmed-but-clickable future rows — one
+//! click time-travels via `restore_to`. The tool rail (left), the
+//! topbar's Capture / Copy heroes, and the floating undo / redo
+//! clusters are other surfaces; the canvas beside this panel is
+//! never grained or shadowed.
+//!
+//! # Chatbox extension seam
+//!
+//! The tab vocabulary is the documented seam for a future chat
+//! panel (the VS Code secondary-side-bar pattern): add a `Chat`
+//! variant to [`PanelTab`] plus its `label()` arm, one entry in the
+//! header loop's tab array ([`TAB_VOCABULARY`]), and one body arm
+//! in [`show`]'s dispatch. Nothing here — layout, collapse, resize,
+//! persistence — may assume the two-tab set; the collapse state and
+//! width are tab-agnostic by construction.
 //!
 //! Input gating lives in `crate::app`: a press only starts a
 //! canvas gesture when it lands inside the cached `CentralPanel`
 //! rect, which egui shrinks past this panel automatically — the
-//! panel's chips can never feed annotation drags.
+//! panel's chips (and its resize separator) can never feed
+//! annotation drags.
 
 use flintshot_core::{Annotation, EditorState, Tool};
 
 use egui::{Color32, CornerRadius, FontId, Pos2, Sense, Stroke, StrokeKind, Vec2};
-use flintshot_core::{BlurKind, Color, FontFamily, FontStyle, FontWeight, TextAlign, TextOutline};
+use flintshot_core::{
+    BlurKind, Color, FontFamily, FontStyle, FontWeight, TextAlign, TextOutline, PANEL_MAX_WIDTH,
+    PANEL_MIN_WIDTH,
+};
 use flintshot_core::{NUMBER_MAX_DIAMETER, NUMBER_MIN_DIAMETER};
 
 use crate::popover;
@@ -32,9 +48,10 @@ use crate::rail::{arrowhead, pt, seg, Glyph};
 use crate::theme;
 use crate::widgets;
 
-/// Docked panel width, logical px. Wide enough for the widest bay
-/// row (the swatch row) plus card dressing; leaves ≥ ~700 px of
-/// canvas at the 1024×640 editor page default.
+/// Default docked panel width, logical px — the seed for a fresh
+/// session (the user's last width arrives via [`PanelState::seed`]).
+/// Matches core's `default_panel_width` (236.0): the grain + frame
+/// contract at this width is byte-identical to the pre-resize era.
 pub(crate) const PANEL_WIDTH: f32 = 236.0;
 
 /// Grain seed — any fixed value; determinism is the contract.
@@ -66,12 +83,27 @@ impl PanelTab {
     }
 }
 
+/// The header's tab set, in render order — the whole vocabulary a
+/// new tab joins (a future `Chat` variant is one entry here, one
+/// `label` arm, one body arm in [`show`]; see the module docs).
+const TAB_VOCABULARY: [PanelTab; 2] = [PanelTab::Properties, PanelTab::History];
+
 /// Panel state that persists across frames: the active tab, the
-/// collapse flag, and the (lazily created) grain texture handle.
-#[derive(Default)]
+/// collapse flag, the live width mirror, and the (lazily created)
+/// grain texture handle.
 pub(crate) struct PanelState {
     /// The active tab (Properties by default).
     tab: PanelTab,
+    /// Whether the panel is collapsed (not rendered at all; the
+    /// canvas reclaims the strip). Reopened with `Ctrl+B` or
+    /// [`Self::toggle_collapse`] — by design there is no clickable
+    /// affordance while collapsed.
+    collapsed: bool,
+    /// The live panel width, logical px — the seed for the panel's
+    /// `default_width` and the read-back the app's fit path and
+    /// persistence consume. Updated from the rendered rect every
+    /// expanded frame; frozen while collapsed (the value to restore).
+    width: f32,
     /// The grain tile, created on first use.
     grain: Option<egui::TextureHandle>,
     /// Whether the selection inspector's custom-colour popover ran
@@ -95,6 +127,58 @@ impl PanelState {
     /// gesture never forces panel visibility or layout changes.
     pub(crate) fn focus_properties(&mut self) {
         self.tab = PanelTab::Properties;
+    }
+
+    /// Toggle the collapsed flag (the chevron click and `Ctrl+B`
+    /// path). Width and active tab ride through unchanged.
+    pub(crate) fn toggle_collapse(&mut self) {
+        self.collapsed = !self.collapsed;
+    }
+
+    /// Whether the panel is collapsed (skipped from the frame).
+    #[allow(
+        dead_code,
+        reason = "test-only until the app wiring (fit path, persist) lands next task"
+    )]
+    pub(crate) fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    /// The live panel width, logical px. Raw — the caller owns the
+    /// collapsed-means-zero policy (the worker fit path); the panel
+    /// itself always restores this width.
+    #[allow(
+        dead_code,
+        reason = "test-only until the app wiring (fit path, persist) lands next task"
+    )]
+    pub(crate) fn live_width(&self) -> f32 {
+        self.width
+    }
+
+    /// Seed the session state from config: the clamped last-used
+    /// width and the collapsed-at-close flag. Applied once at
+    /// construction (`EditorApp::new_lifecycle`); afterwards the
+    /// mirror tracks the rendered rect.
+    #[allow(
+        dead_code,
+        reason = "test-only until the app wiring (fit path, persist) lands next task"
+    )]
+    pub(crate) fn seed(&mut self, width: f32, collapsed: bool) {
+        self.width = width.clamp(PANEL_MIN_WIDTH, PANEL_MAX_WIDTH);
+        self.collapsed = collapsed;
+    }
+}
+
+impl Default for PanelState {
+    fn default() -> Self {
+        Self {
+            tab: PanelTab::default(),
+            collapsed: false,
+            width: PANEL_WIDTH,
+            grain: None,
+            color_pop_live: false,
+            text_pop_live: false,
+        }
     }
 }
 
@@ -304,6 +388,14 @@ fn number_row(ui: &mut egui::Ui, state: &mut EditorState) {
 /// it is byte-for-byte today's tool-defaults panel: the `{Tool} ·
 /// Properties` title and exactly `sections_for(tool)`.
 ///
+/// The panel is bounded-resizable (`PANEL_MIN_WIDTH..=
+/// PANEL_MAX_WIDTH`, separator line off so the grain + frame
+/// visuals stay identical to the fixed era) and collapsible: a
+/// collapsed [`PanelState`] skips the panel entirely this frame so
+/// the central panel reclaims the strip; egui's panel memory holds
+/// the dragged width across the collapse round-trip, and the
+/// mirror's `default_width` seed covers the never-dragged case.
+///
 /// Returns the fired history action (the Selection section's
 /// Delete).
 pub(crate) fn show(
@@ -311,6 +403,9 @@ pub(crate) fn show(
     state: &mut EditorState,
     panel: &mut PanelState,
 ) -> ToolbarAction {
+    if panel.collapsed {
+        return ToolbarAction::None;
+    }
     let frame = egui::Frame::new()
         .fill(theme::palette::PAPER)
         .inner_margin(egui::Margin::same(8));
@@ -324,9 +419,11 @@ pub(crate) fn show(
     let inspector = inspector_mode(state);
     let caps = state.selected_capabilities();
     let mut action = ToolbarAction::None;
-    egui::Panel::right("editor_panel")
-        .resizable(false)
-        .exact_size(PANEL_WIDTH)
+    let rendered = egui::Panel::right("editor_panel")
+        .resizable(true)
+        .size_range(PANEL_MIN_WIDTH..=PANEL_MAX_WIDTH)
+        .default_size(panel.width.clamp(PANEL_MIN_WIDTH, PANEL_MAX_WIDTH))
+        .show_separator_line(false)
         .frame(frame)
         .show(ui, |ui| {
             paint_grain(ui, panel);
@@ -338,6 +435,9 @@ pub(crate) fn show(
                 PanelTab::History => history_body(ui, state),
             }
         });
+    // The live-width read-back: what the fit path and persistence
+    // see is what the frame reserved, drags included.
+    panel.width = rendered.response.rect.width();
     if color_pop_was_live && !panel.color_pop_live {
         state.end_property_edit();
     }
@@ -347,12 +447,13 @@ pub(crate) fn show(
     action
 }
 
-/// The PROPERTIES | HISTORY tab header: two segmented chips in the
-/// panel's first row (cutout at rest, ink-filled when active — the
-/// blur-kind control's idiom).
+/// The PROPERTIES | HISTORY tab header: the vocabulary's segmented
+/// chips in the panel's first row (cutout at rest, ink-filled when
+/// active — the blur-kind control's idiom), with the collapse
+/// chevron at the row's right end.
 fn tab_header(ui: &mut egui::Ui, panel: &mut PanelState) {
     ui.horizontal(|ui| {
-        for tab in [PanelTab::Properties, PanelTab::History] {
+        for tab in TAB_VOCABULARY {
             if segmented_chip(
                 ui,
                 egui::Id::new(("panel-tab", tab)),
@@ -362,8 +463,41 @@ fn tab_header(ui: &mut egui::Ui, panel: &mut PanelState) {
                 panel.tab = tab;
             }
         }
+        // The collapse chevron, pinned to the row's right end.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if collapse_chevron(ui) {
+                panel.toggle_collapse();
+            }
+        });
     });
     ui.add_space(theme::SPACE_SCALE[1]);
+}
+
+/// The header's collapse chevron: a quiet double-chevron chip
+/// pointing at the panel's fixed (right) edge — the collapse
+/// direction. Clicking hides the panel; `Ctrl+B` (named in the
+/// tooltip, the only reopen affordance once collapsed) brings it
+/// back. Returns whether it was clicked.
+fn collapse_chevron(ui: &mut egui::Ui) -> bool {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+    let resp = ui
+        .interact(rect, egui::Id::new("panel-collapse"), egui::Sense::click())
+        .on_hover_text("Hide panel · Ctrl+B");
+    let ink = if resp.hovered() {
+        theme::palette::INK
+    } else {
+        theme::palette::INK_SOFT
+    };
+    let stroke = Stroke::new(1.5, ink);
+    for dx in [0.0, 6.0] {
+        let cx = rect.center().x - 4.0 + dx;
+        let cy = rect.center().y;
+        ui.painter()
+            .line_segment([egui::pos2(cx, cy - 4.0), egui::pos2(cx + 4.0, cy)], stroke);
+        ui.painter()
+            .line_segment([egui::pos2(cx + 4.0, cy), egui::pos2(cx, cy + 4.0)], stroke);
+    }
+    resp.clicked()
 }
 
 /// The History tab's body: the edit timeline. Past rows (`undo`,
@@ -2662,6 +2796,229 @@ mod tests {
         assert!(
             last.top() > 768.0,
             "content overflows the 768 px viewport (scrolls, not overflows)"
+        );
+    }
+
+    // --- sidebar-collapse-resize Task 002 -------------------------
+
+    /// The 1024 px screen the harness draws on.
+    const SCREEN_W: f32 = 1024.0;
+
+    /// The egui resize separator's response id for `editor_panel`.
+    fn resize_id() -> egui::Id {
+        egui::Id::new("editor_panel").with("__resize")
+    }
+
+    /// One frame drawing the panel + a central-panel probe, returning
+    /// the central panel's right edge (`SCREEN_W` minus whatever the
+    /// panel reserved).
+    fn draw_measuring(
+        ctx: &egui::Context,
+        state: &mut EditorState,
+        panel: &mut PanelState,
+        events: Vec<egui::Event>,
+    ) -> f32 {
+        let raw = egui::RawInput {
+            events,
+            ..screen(SCREEN_W, 768.0)
+        };
+        let mut right = 0.0;
+        let _ = ctx.run_ui(raw, |ui| {
+            let _ = show(ui, state, panel);
+            let central = egui::CentralPanel::default().show(ui, |_ui| {});
+            right = central.response.rect.right();
+        });
+        right
+    }
+
+    /// A separator drag as egui needs to see it: press at `from`
+    /// (frame 1), move to `to` while down (frame 2 — the frame the
+    /// resize applies, reading the separator's live response), then
+    /// release (frame 3 — the released size persists into egui's
+    /// panel memory).
+    fn separator_drag(
+        ctx: &egui::Context,
+        state: &mut EditorState,
+        panel: &mut PanelState,
+        from: egui::Pos2,
+        to: egui::Pos2,
+    ) {
+        draw_measuring(
+            ctx,
+            state,
+            panel,
+            vec![
+                egui::Event::PointerMoved(from),
+                egui::Event::PointerButton {
+                    pos: from,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        draw_measuring(ctx, state, panel, vec![egui::Event::PointerMoved(to)]);
+        draw_measuring(
+            ctx,
+            state,
+            panel,
+            vec![egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+
+    /// A fresh panel's separator position (the panel's left edge) at
+    /// the default width, mid-height.
+    fn default_separator_pos(ctx: &egui::Context) -> egui::Pos2 {
+        let resp = ctx
+            .read_response(resize_id())
+            .expect("the resizable panel registers its separator");
+        resp.rect.center()
+    }
+
+    /// Default: the panel reserves exactly 236 px and reports it as
+    /// the live width.
+    #[test]
+    fn panel_reserves_two_thirty_six_by_default() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut state = panel_state();
+        let mut panel = PanelState::default();
+        let right = draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        assert!(
+            (right - (SCREEN_W - 236.0)).abs() < 1.0,
+            "236 px reserved, central right {right}"
+        );
+        assert!((panel.live_width() - 236.0).abs() < 1.0);
+    }
+
+    /// A drag on the separator widens the panel; the central panel
+    /// reflows to the new reserved width.
+    #[test]
+    fn resize_drag_changes_the_reserved_width() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut state = panel_state();
+        let mut panel = PanelState::default();
+        draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        let at = default_separator_pos(&ctx);
+        // Drag the left edge 84 px further left → width 320.
+        let target = egui::pos2(at.x - 84.0, at.y);
+        separator_drag(&ctx, &mut state, &mut panel, at, target);
+        let right = draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        assert!(
+            (right - (SCREEN_W - 320.0)).abs() < 1.0,
+            "320 px reserved after the drag, central right {right}"
+        );
+        assert!((panel.live_width() - 320.0).abs() < 1.0);
+    }
+
+    /// Dragging past the bounds stops at the bounds: 400 max, 200
+    /// min.
+    #[test]
+    fn resize_drag_clamps_at_two_hundred_and_four_hundred() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut state = panel_state();
+        let mut panel = PanelState::default();
+        draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        let at = default_separator_pos(&ctx);
+        // Yank far left (would be ~824 px wide) → clamped to 400.
+        separator_drag(&ctx, &mut state, &mut panel, at, egui::pos2(200.0, at.y));
+        let right = draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        assert!(
+            (right - (SCREEN_W - 400.0)).abs() < 1.0,
+            "max 400, central right {right}"
+        );
+        // Yank far right (would be ~0 px wide) → clamped to 200.
+        // egui's min is content-aware: the no-wrap title can push a
+        // few px past the floor, but the drag itself stops there.
+        let at = default_separator_pos(&ctx);
+        separator_drag(&ctx, &mut state, &mut panel, at, egui::pos2(SCREEN_W, at.y));
+        let right = draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        let reserved = SCREEN_W - right;
+        assert!(
+            (200.0..=205.0).contains(&reserved),
+            "min 200 (content-aware), reserved {reserved}"
+        );
+    }
+
+    /// The header chevron collapses the panel; the central panel
+    /// reclaims the strip. Re-expanding restores the width AND the
+    /// active tab.
+    #[test]
+    fn chevron_collapses_and_reexpand_restores_width_and_tab() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut state = panel_state();
+        let mut panel = PanelState::default();
+        draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        // Switch to History first: the tab must survive the round trip.
+        let tab = ctx
+            .read_response(egui::Id::new(("panel-tab", PanelTab::History)))
+            .expect("the History chip registers")
+            .rect
+            .center();
+        draw_measuring(&ctx, &mut state, &mut panel, click_events(tab));
+        assert_eq!(panel.tab(), PanelTab::History, "fixture: History is live");
+        // Widen to 320 so the restore is distinguishable from 236.
+        let at = default_separator_pos(&ctx);
+        separator_drag(
+            &ctx,
+            &mut state,
+            &mut panel,
+            at,
+            egui::pos2(at.x - 84.0, at.y),
+        );
+        draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        // Chevron click collapses.
+        let chevron = ctx
+            .read_response(egui::Id::new("panel-collapse"))
+            .expect("the chevron registers")
+            .rect
+            .center();
+        draw_measuring(&ctx, &mut state, &mut panel, click_events(chevron));
+        assert!(panel.is_collapsed(), "chevron collapsed the panel");
+        let right = draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        assert!(
+            (right - SCREEN_W).abs() < 1.0,
+            "collapsed: the central panel spans the freed strip, right {right}"
+        );
+        // Re-expand: width 320 and the History tab, as-left.
+        panel.toggle_collapse();
+        let right = draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        assert!(
+            (right - (SCREEN_W - 320.0)).abs() < 1.0,
+            "re-expand restores 320, central right {right}"
+        );
+        assert_eq!(panel.tab(), PanelTab::History, "tab survives the collapse");
+    }
+
+    /// Seeding (the config path): a seeded width + collapsed flag
+    /// drive the first frame, and the clamp bound comes from the
+    /// config seed the app passes.
+    #[test]
+    fn seed_drives_width_and_collapsed_state() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut state = panel_state();
+        let mut panel = PanelState::default();
+        panel.seed(280.0, true);
+        assert!(panel.is_collapsed());
+        let right = draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        assert!(
+            (right - SCREEN_W).abs() < 1.0,
+            "seeded collapsed: nothing reserved, right {right}"
+        );
+        panel.toggle_collapse();
+        let right = draw_measuring(&ctx, &mut state, &mut panel, vec![]);
+        assert!(
+            (right - (SCREEN_W - 280.0)).abs() < 1.0,
+            "seeded 280 reserved on expand, central right {right}"
         );
     }
 }
