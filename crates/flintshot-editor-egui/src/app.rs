@@ -243,6 +243,19 @@ pub(crate) struct EditorApp {
     /// The AI tab's conversation state (Ask-the-shot; in-memory
     /// only — history never persists).
     ai: crate::ai_panel::AiConversation,
+    /// The Ask-the-shot transform dialog (open flag + drafts).
+    ai_dialog: crate::ai_dialog::AiDialog,
+    /// Saved-transform snapshot the dialog lists. Refreshed by the
+    /// host (Task 007 reloads on route entry).
+    ai_transforms: Vec<flintshot_core::AiTransform>,
+    /// Whether a provider + model + key are configured (Run vs
+    /// Configure AI… in the dialog). Host-supplied; Task 007
+    /// computes it from `[ai]` + keyring.
+    ai_configured: bool,
+    /// The dialog action awaiting routing (Run fires the request in
+    /// Task 007; Configure routes in Task 009). Consumed by the
+    /// frame's poll — never held across frames.
+    ai_pending_action: Option<crate::ai_dialog::AiDialogAction>,
     /// The left tool rail's persistent state (grain texture).
     rail: rail::RailState,
     /// The config snapshot this editor session runs on: workers read
@@ -379,6 +392,10 @@ impl EditorApp {
             open_home: None,
             panel: panel::PanelState::default(),
             ai: crate::ai_panel::AiConversation::default(),
+            ai_dialog: crate::ai_dialog::AiDialog::default(),
+            ai_transforms: Vec::new(),
+            ai_configured: false,
+            ai_pending_action: None,
             rail: rail::RailState::default(),
             floating_rects: Vec::new(),
             resize_menu: topbar::ResizeMenu::default(),
@@ -1281,8 +1298,10 @@ impl EditorApp {
         // chips sit inside `canvas_rect`, so the press gate must
         // exclude them explicitly or a chip press would also start
         // an annotation drag. Misses between chips pass through
-        // (the pointer-miss passthrough contract).
-        let on_floating = self.floating_rects.iter().any(|r| r.contains(pos));
+        // (the pointer-miss passthrough contract). The Ask-the-shot
+        // dialog is fully modal while open.
+        let on_floating =
+            self.floating_rects.iter().any(|r| r.contains(pos)) || self.ai_dialog.is_open();
         // Selection-first phase drag gate: a live phase with a
         // non-Crop tool skips pointer dispatch entirely — the
         // phase is annotation-proof by drag as well as by chip and
@@ -1429,6 +1448,22 @@ impl EditorApp {
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.resize_menu.open = false;
             }
+            return true;
+        }
+        // The Ask-the-shot dialog is modal the same way: Esc closes
+        // it, Enter runs (both handled inside the dialog's own
+        // render), and every other keystroke belongs to its prompt
+        // field.
+        if self.ai_dialog.is_open() {
+            return true;
+        }
+        // The spark chip's keyboard twin: `I` opens the dialog
+        // (tooltip's "(I)" hint). Never fires while text-editing —
+        // this dispatcher only runs outside text sessions.
+        if ctx.input(|i| i.key_pressed(egui::Key::I))
+            && !(modifiers.ctrl || modifiers.shift || modifiers.alt || modifiers.super_key)
+        {
+            self.ai_dialog.open();
             return true;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.state.selected.is_empty() {
@@ -1615,9 +1650,14 @@ impl EditorApp {
         self.draw_statusbar(ui);
         // Tool rail: the left zone (draw order: top → bottom → left
         // → right). Tool switching mutates the shared state directly;
-        // the gate reflects the selection-first phase.
+        // the gate reflects the selection-first phase. The return is
+        // the Ask-the-shot spark chip (an action — the tool is
+        // untouched).
         let gate = self.rail_gate();
-        rail::show(ui, &mut self.state, gate, &mut self.rail);
+        let ai_pressed = rail::show(ui, &mut self.state, gate, &mut self.rail);
+        if ai_pressed {
+            self.ai_dialog.open();
+        }
         // Properties panel. Must come before CentralPanel so egui
         // reserves the right-hand strip. The plain call (no closure)
         // keeps the borrow of `&mut self.state` disjoint from the
@@ -1741,6 +1781,16 @@ impl EditorApp {
         });
         self.floating_rects = chip_rects;
         self.handle_floating_action(floating_action);
+
+        // The Ask-the-shot dialog floats over everything (Middle
+        // order); while open it is modal — the press gate below
+        // blocks canvas gestures so no annotation starts beneath it.
+        if let Some(action) = self
+            .ai_dialog
+            .show(ui.ctx(), &self.ai_transforms, self.ai_configured)
+        {
+            self.ai_pending_action = Some(action);
+        }
 
         // Handle toolbar actions outside the toolbar drawing code so
         // we can borrow `&self.outcome` cleanly. Each handler runs the

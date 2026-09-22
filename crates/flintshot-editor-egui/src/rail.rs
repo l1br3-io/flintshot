@@ -377,12 +377,16 @@ pub(crate) fn tooltip_text(spec: &ToolSpec, gate: ToolGate) -> String {
 /// Draw the rail as the window's left panel. Call it after the
 /// top / bottom panels and before the right panel (draw order:
 /// top → bottom → left → right).
+///
+/// Returns whether the **Ask the shot** spark chip fired (an
+/// action, not a tool — `state.tool` never changes).
 pub(crate) fn show(
     ui: &mut egui::Ui,
     state: &mut EditorState,
     gate: ToolGate,
     rail: &mut RailState,
-) {
+) -> bool {
+    let mut ai_pressed = false;
     egui::Panel::left("tool_rail")
         .resizable(false)
         .exact_size(RAIL_WIDTH)
@@ -414,8 +418,117 @@ pub(crate) fn show(
                         ui.add_space(4.0);
                     }
                 }
+                // The Ask-the-shot pod: below a hairline, after the
+                // redact pod — an action chip in its own island.
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    ai_pressed = spark_chip(ui);
+                    ui.add_space(4.0);
+                    let w = ui.available_width();
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
+                    ui.painter().line_segment(
+                        [rect.left_center(), rect.right_center()],
+                        Stroke::new(
+                            1.0,
+                            theme::palette::with_alpha(theme::palette::CREAM_TEXT, 46),
+                        ),
+                    );
+                    ui.add_space(4.0);
+                });
             });
         });
+    ai_pressed
+}
+
+/// The Ask-the-shot action chip: a four-point gold spark, hover-lift
+/// only. Deliberately **not** a tool chip — no pressed/sticky state,
+/// no gate interaction (never lock-grey); pressing opens the
+/// transform dialog (`crate::ai_dialog`).
+fn spark_chip(ui: &mut egui::Ui) -> bool {
+    let id = egui::Id::new("rail-ai");
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(RAIL_TOOL, RAIL_TOOL), egui::Sense::hover());
+    let resp = ui
+        .interact(rect, id, egui::Sense::click())
+        .on_hover_text("Ask the shot (I)");
+
+    // Hover-lift shadow only — the panel's hover-lift language; no
+    // selection styling because there is nothing to select.
+    let chip_rect = if resp.hovered() {
+        let lifted = egui::Rect::from_center_size(rect.center(), rect.size() * 1.06);
+        ui.painter()
+            .add(theme::SHADOW_LIFT.as_shape(lifted, egui::CornerRadius::same(theme::POD_RADIUS)));
+        lifted
+    } else {
+        rect
+    };
+    ui.painter().rect(
+        chip_rect,
+        egui::CornerRadius::same(theme::POD_RADIUS),
+        if resp.hovered() {
+            theme::palette::with_alpha(theme::palette::CREAM_TEXT, 31)
+        } else {
+            Color32::TRANSPARENT
+        },
+        egui::Stroke::NONE,
+        egui::StrokeKind::Middle,
+    );
+    g_spark(ui.painter(), chip_rect, theme::palette::GOLD);
+    resp.clicked()
+}
+
+/// Four-point spark — the Ask-the-shot mark: a diamond star of four
+/// tapered points, gold on the forest rail.
+fn g_spark(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    // Centre cross of four lines out to the tips, plus a smaller
+    // rotated square for the star's body — reads at 28 px.
+    let ct = r.center();
+    let long = 7.0;
+    let short = 2.2;
+    p.line_segment(
+        [
+            egui::pos2(ct.x - long, ct.y),
+            egui::pos2(ct.x - short, ct.y),
+        ],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [
+            egui::pos2(ct.x + short, ct.y),
+            egui::pos2(ct.x + long, ct.y),
+        ],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [
+            egui::pos2(ct.x, ct.y - long),
+            egui::pos2(ct.x, ct.y - short),
+        ],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [
+            egui::pos2(ct.x, ct.y + short),
+            egui::pos2(ct.x, ct.y + long),
+        ],
+        Stroke::new(1.8, c),
+    );
+    let body = short * std::f32::consts::FRAC_1_SQRT_2;
+    p.line_segment(
+        [egui::pos2(ct.x - body, ct.y), egui::pos2(ct.x, ct.y - body)],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [egui::pos2(ct.x, ct.y - body), egui::pos2(ct.x + body, ct.y)],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [egui::pos2(ct.x + body, ct.y), egui::pos2(ct.x, ct.y + body)],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [egui::pos2(ct.x, ct.y + body), egui::pos2(ct.x - body, ct.y)],
+        Stroke::new(1.8, c),
+    );
 }
 
 /// Stamp the grain tile under the chips — first widget call in the
@@ -543,7 +656,7 @@ mod tests {
         gate: ToolGate,
         rail: &mut RailState,
         events: Vec<egui::Event>,
-    ) -> egui::FullOutput {
+    ) -> bool {
         let raw = egui::RawInput {
             events,
             screen_rect: Some(egui::Rect::from_min_size(
@@ -552,9 +665,11 @@ mod tests {
             )),
             ..egui::RawInput::default()
         };
-        ctx.run_ui(raw, |ui| {
-            show(ui, state, gate, rail);
-        })
+        let mut fired = false;
+        let _ = ctx.run_ui(raw, |ui| {
+            fired = show(ui, state, gate, rail);
+        });
+        fired
     }
 
     fn click_events(at: egui::Pos2) -> Vec<egui::Event> {
@@ -850,6 +965,48 @@ mod tests {
             click_events(pen.rect.center()),
         );
         assert_ne!(state.tool, Tool::Pencil, "gated click cannot switch");
+    }
+
+    /// The Ask-the-shot spark chip is an action, not a tool: it
+    /// fires (show returns `true`) without touching `state.tool`,
+    /// under any gate (never lock-grey — it is not a `Tool`).
+    #[test]
+    fn spark_chip_fires_without_touching_the_tool() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = blank_state();
+        state.set_tool(Tool::Rect);
+        let mut rail = RailState::default();
+        // The rail is tall — the spark pod sits below the tool pods,
+        // so the frame needs headroom beyond the 640×480 default.
+        let mut frame = |events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 800.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let mut fired = false;
+            let _ = ctx.run_ui(raw, |ui| {
+                fired = show(ui, &mut state, ToolGate::CropOnly, &mut rail);
+            });
+            fired
+        };
+        assert!(!frame(vec![]), "no click, no fire");
+        let spark = ctx
+            .read_response(egui::Id::new("rail-ai"))
+            .expect("the spark chip registers");
+        assert!(
+            spark.rect.bottom() < 800.0 && spark.rect.top() > 0.0,
+            "the spark sits on-screen: {:?}",
+            spark.rect
+        );
+        let fired = frame(click_events(spark.rect.center()));
+        assert!(fired, "the spark chip fires even under CropOnly");
+        assert_eq!(state.tool, Tool::Rect, "the tool never changes");
     }
 
     /// Switching tools bounces the active chip through the spring;

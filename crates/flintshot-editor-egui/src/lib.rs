@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 
+mod ai_dialog;
 mod ai_panel;
 mod app;
 mod canvas;
