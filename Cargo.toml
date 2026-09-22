@@ -44,6 +44,15 @@ base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 color-eyre = "0.6"
 dirs = "6"
+# Markdown rendering for the AI panel's assistant cards (Task 008).
+# Pin 0.24 = the egui 0.35 line (0.25 targets egui 0.36).
+# default-features off drops `load-images`: assistant markdown must
+# never fetch remote content (spec boundary — no third-party
+# traffic). Code blocks render plain (no syntect) on the theme's
+# tinted fill. Fallback if this pin is ever rejected: vendor a
+# minimal renderer in ai_panel.rs (headings/lists/fenced code/
+# tables) — one-branch switch at the `assistant_markdown` fn.
+egui_commonmark = { version = "0.24", default-features = false }
 # default-features off so consumers pick the feature set (the editor
 # crate excludes `accesskit` — see its Cargo.toml for why).
 eframe = { version = "0.35", default-features = false }

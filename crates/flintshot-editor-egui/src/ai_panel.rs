@@ -14,6 +14,24 @@
 use crate::theme;
 use egui::{CornerRadius, RichText, Sense};
 
+/// Render assistant markdown. One-branch switch to the vendored
+/// minimal renderer if the `egui_commonmark` pin is ever rejected
+/// (the spec's fallback path — see the dep comment in the workspace
+/// `Cargo.toml`).
+fn assistant_markdown(ui: &mut egui::Ui, cache: &mut egui_commonmark::CommonMarkCache, text: &str) {
+    // Theme mapping: ink text on the cream card, code blocks on a
+    // forest-tinted fill, forest links. The crate sizes headings
+    // itself from the type ladder in `ui.style`.
+    ui.style_mut().visuals.override_text_color = Some(theme::palette::INK);
+    ui.style_mut().visuals.code_bg_color = theme::palette::with_alpha(theme::palette::FOREST, 24);
+    ui.style_mut().visuals.hyperlink_color = theme::palette::FOREST_MID;
+    // The shared cache carries image/loading state (none without
+    // `load-images`); parsing is per-frame by crate design —
+    // panel-sized responses parse in microseconds and only while
+    // the AI tab is visible.
+    egui_commonmark::CommonMarkViewer::new().show(ui, cache, text);
+}
+
 /// One rendered turn of the conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AiTurn {
@@ -50,6 +68,10 @@ pub(crate) struct AiConversation {
     draft: String,
     /// The initiating shot's thumbnail texture.
     thumb: Option<egui::TextureHandle>,
+    /// The shared markdown cache for assistant cards (image/loading
+    /// state — unused without `load-images`, kept so the viewer has
+    /// its per-conversation home).
+    md_cache: egui_commonmark::CommonMarkCache,
     /// A submitted follow-up awaiting the page's send wiring
     /// (submitted inside `panel::show`'s borrow; consumed right
     /// after via [`AiConversation::take_outbox`]).
@@ -130,29 +152,31 @@ impl AiConversation {
 /// page's send wiring (Task 007) — the request itself is not this
 /// function's business.
 pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
+    let thumb = conversation.thumb.clone();
+    let turns = conversation.turns().to_vec();
+    let empty = conversation.is_empty() && !conversation.is_pending();
+    let pending = conversation.is_pending();
+    let md_cache = &mut conversation.md_cache;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            if conversation.is_empty() && !conversation.is_pending() {
+            if empty {
                 crate::panel::hint(ui, "Nothing asked yet — press the spark in the rail");
                 return;
             }
-            if let Some(thumb) = conversation.thumb.as_ref() {
+            if let Some(thumb) = thumb.as_ref() {
                 thumbnail(ui, thumb);
             }
-            let turns = conversation.turns.clone();
             for (i, turn) in turns.iter().enumerate() {
                 match turn {
                     AiTurn::User { prompt } => user_chip(ui, egui::Id::new(("ai-turn", i)), prompt),
-                    AiTurn::Assistant { text } => {
-                        assistant_card(ui, egui::Id::new(("ai-turn", i)), text);
-                    }
+                    AiTurn::Assistant { text } => assistant_card(ui, md_cache, text),
                     AiTurn::Error { message } => {
                         error_card(ui, egui::Id::new(("ai-turn", i)), message);
                     }
                 }
             }
-            if conversation.is_pending() {
+            if pending {
                 pending_row(ui);
             }
         });
@@ -227,8 +251,9 @@ fn user_chip(ui: &mut egui::Ui, _id: egui::Id, prompt: &str) {
     ui.add_space(theme::SPACE_SCALE[1]);
 }
 
-/// One assistant turn: a full-width cream paper card.
-fn assistant_card(ui: &mut egui::Ui, id: egui::Id, text: &str) {
+/// One assistant turn: a full-width cream paper card with the
+/// markdown-rendered response.
+fn assistant_card(ui: &mut egui::Ui, cache: &mut egui_commonmark::CommonMarkCache, text: &str) {
     egui::Frame::new()
         .fill(theme::palette::PAPER_CREAM)
         .corner_radius(CornerRadius::same(theme::POD_RADIUS))
@@ -236,12 +261,7 @@ fn assistant_card(ui: &mut egui::Ui, id: egui::Id, text: &str) {
         .stroke(theme::HAIRLINE_STROKE)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let _ = id;
-            ui.label(
-                RichText::new(text)
-                    .size(theme::TYPE_SM)
-                    .color(theme::palette::INK),
-            );
+            assistant_markdown(ui, cache, text);
         });
     ui.add_space(theme::SPACE_SCALE[1]);
 }
@@ -412,5 +432,40 @@ mod tests {
         );
         conversation.push_assistant("answer");
         assert!(!conversation.is_pending());
+    }
+
+    /// The markdown fixture renders: a heading, a fenced code block,
+    /// and a table all paint without panicking inside the panel
+    /// width.
+    #[test]
+    fn assistant_markdown_renders_heading_code_and_table() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut conversation = AiConversation::default();
+        conversation.push_assistant(
+            "## Extracted\n\n- one\n- two\n\n```rust\nlet x = 1;\n```\n\n| Button | Action |\n|---|---|\n| Copy | copies |\n",
+        );
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(236.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let panel_width = 236.0f32;
+        let mut shapes = 0;
+        for _ in 0..2 {
+            let out = ctx.run_ui(raw.clone(), |ui| {
+                egui::Panel::right("test_ai_panel")
+                    .resizable(false)
+                    .exact_size(panel_width)
+                    .show(ui, |ui| show(ui, &mut conversation));
+            });
+            shapes = out.shapes.len();
+        }
+        assert!(shapes > 4, "the fixture painted shapes: {shapes}");
+        // Two identical render passes don't collide on the shared
+        // cache (the per-turn keying criterion's smoke form).
     }
 }

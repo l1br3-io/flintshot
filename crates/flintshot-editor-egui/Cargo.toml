@@ -33,6 +33,7 @@ eframe = { workspace = true, features = [
     "x11",
 ] }
 egui = { workspace = true }
+egui_commonmark = { workspace = true }
 image = { workspace = true }
 rfd = { workspace = true }
 arboard = { workspace = true }
