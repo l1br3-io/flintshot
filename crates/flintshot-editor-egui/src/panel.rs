@@ -54,6 +54,8 @@ pub(crate) enum PanelTab {
     Properties,
     /// The edit-history timeline.
     History,
+    /// The Ask-the-shot conversation (`crate::ai_panel`).
+    Ai,
 }
 
 impl PanelTab {
@@ -62,6 +64,7 @@ impl PanelTab {
         match self {
             Self::Properties => "PROPERTIES",
             Self::History => "HISTORY",
+            Self::Ai => "AI",
         }
     }
 }
@@ -95,6 +98,16 @@ impl PanelState {
     /// gesture never forces panel visibility or layout changes.
     pub(crate) fn focus_properties(&mut self) {
         self.tab = PanelTab::Properties;
+    }
+
+    /// Bring the AI tab forward — the response-arrival flip's
+    /// landing (Task 007). Same contract as
+    /// [`PanelState::focus_properties`]: tab flip only.
+    // Task 007 calls this on response arrival; the Task 005 test
+    // covers the flip itself. Remove the allow when wired.
+    #[allow(dead_code)]
+    pub(crate) fn focus_ai(&mut self) {
+        self.tab = PanelTab::Ai;
     }
 }
 
@@ -310,6 +323,7 @@ pub(crate) fn show(
     ui: &mut egui::Ui,
     state: &mut EditorState,
     panel: &mut PanelState,
+    ai: &mut crate::ai_panel::AiConversation,
 ) -> ToolbarAction {
     let frame = egui::Frame::new()
         .fill(theme::palette::PAPER)
@@ -336,6 +350,9 @@ pub(crate) fn show(
                     action = properties_body(ui, state, panel, inspector, caps);
                 }
                 PanelTab::History => history_body(ui, state),
+                PanelTab::Ai => {
+                    let _ = crate::ai_panel::show(ui, ai);
+                }
             }
         });
     if color_pop_was_live && !panel.color_pop_live {
@@ -352,7 +369,7 @@ pub(crate) fn show(
 /// blur-kind control's idiom).
 fn tab_header(ui: &mut egui::Ui, panel: &mut PanelState) {
     ui.horizontal(|ui| {
-        for tab in [PanelTab::Properties, PanelTab::History] {
+        for tab in [PanelTab::Properties, PanelTab::History, PanelTab::Ai] {
             if segmented_chip(
                 ui,
                 egui::Id::new(("panel-tab", tab)),
@@ -1745,13 +1762,24 @@ mod tests {
         panel: &mut PanelState,
         events: Vec<egui::Event>,
     ) -> ToolbarAction {
+        let mut ai = crate::ai_panel::AiConversation::default();
+        draw_with_ai(ctx, state, panel, &mut ai, events)
+    }
+
+    fn draw_with_ai(
+        ctx: &egui::Context,
+        state: &mut EditorState,
+        panel: &mut PanelState,
+        ai: &mut crate::ai_panel::AiConversation,
+        events: Vec<egui::Event>,
+    ) -> ToolbarAction {
         let raw = egui::RawInput {
             events,
             ..screen(1024.0, 768.0)
         };
         let mut fired = ToolbarAction::None;
         let _ = ctx.run_ui(raw, |ui| {
-            fired = show(ui, state, panel);
+            fired = show(ui, state, panel, ai);
         });
         fired
     }
@@ -2410,7 +2438,7 @@ mod tests {
         let mut panel = PanelState::default();
         assert_eq!(panel.tab, PanelTab::Properties, "default tab");
         let _ = draw(&ctx, &mut state, &mut panel, vec![]);
-        for tab in [PanelTab::Properties, PanelTab::History] {
+        for tab in [PanelTab::Properties, PanelTab::History, PanelTab::Ai] {
             assert!(
                 ctx.read_response(egui::Id::new(("panel-tab", tab)))
                     .is_some(),
@@ -2443,6 +2471,39 @@ mod tests {
         assert_eq!(panel.tab, PanelTab::Properties);
         panel.focus_properties();
         assert_eq!(panel.tab, PanelTab::Properties, "idempotent");
+    }
+
+    /// The AI tab: chip clicks select it, the empty-conversation
+    /// invitation renders (and no Properties sections do), and
+    /// `focus_ai` flips to it from any tab — the response-arrival
+    /// landing (Task 007 wires the flip itself).
+    #[test]
+    fn ai_tab_selects_and_shows_the_invitation() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        widgets::set_animations(&ctx, false);
+        let mut state = panel_state();
+        state.tool = Tool::Rect;
+        let mut panel = PanelState::default();
+        let mut ai = crate::ai_panel::AiConversation::default();
+        let _ = draw_with_ai(&ctx, &mut state, &mut panel, &mut ai, vec![]);
+        let ai_chip = chip_center(&ctx, egui::Id::new(("panel-tab", PanelTab::Ai)));
+        let _ = draw_with_ai(&ctx, &mut state, &mut panel, &mut ai, click_events(ai_chip));
+        assert_eq!(panel.tab, PanelTab::Ai, "the click selects the tab");
+        let _ = draw_with_ai(&ctx, &mut state, &mut panel, &mut ai, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("panel-delete")).is_none(),
+            "the AI body stays up and the tool sections are gone"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new("ai-follow-up")).is_some(),
+            "the follow-up input renders"
+        );
+
+        // focus_ai flips from Properties (the arrival flip seam).
+        panel.focus_properties();
+        panel.focus_ai();
+        assert_eq!(panel.tab, PanelTab::Ai, "focus_ai flips to the AI tab");
     }
 
     /// Clicking HISTORY swaps the body (tool sections gone, the

@@ -240,6 +240,9 @@ pub(crate) struct EditorApp {
     /// The docked side panel's cross-frame state (hover-lift
     /// progress, grain texture).
     panel: panel::PanelState,
+    /// The AI tab's conversation state (Ask-the-shot; in-memory
+    /// only — history never persists).
+    ai: crate::ai_panel::AiConversation,
     /// The left tool rail's persistent state (grain texture).
     rail: rail::RailState,
     /// The config snapshot this editor session runs on: workers read
@@ -375,6 +378,7 @@ impl EditorApp {
             open_settings: None,
             open_home: None,
             panel: panel::PanelState::default(),
+            ai: crate::ai_panel::AiConversation::default(),
             rail: rail::RailState::default(),
             floating_rects: Vec::new(),
             resize_menu: topbar::ResizeMenu::default(),
@@ -1619,7 +1623,7 @@ impl EditorApp {
         // keeps the borrow of `&mut self.state` disjoint from the
         // panel's own state. Returns the Selection section's fired
         // Delete, if any.
-        let panel_action = panel::show(ui, &mut self.state, &mut self.panel);
+        let panel_action = panel::show(ui, &mut self.state, &mut self.panel, &mut self.ai);
 
         // Selection-first phase: the toolbar's "Crop · Enter" button
         // crops through `confirm_crop`, bypassing `logic` — so
