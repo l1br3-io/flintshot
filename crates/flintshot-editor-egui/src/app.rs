@@ -20,10 +20,11 @@ use std::rc::Rc;
 use eframe::App;
 use egui::Context;
 use flintshot_core::{
-    chrono_date, chrono_time, compose_final, compose_final_region, parse_default_mode,
-    parse_output_format, parse_size_mode, render::render, render_filename_template,
-    save_capture_image, BlurCache, Config, DefaultMode, DispatchOutcome, EditorOutcome,
-    EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode, Rect, SizeMode, Tool,
+    chrono_date, chrono_time, compose_final, compose_final_region, image_part, parse_default_mode,
+    parse_output_format, parse_size_mode, png_data_url, render::render, render_filename_template,
+    save_capture_image, text_part, BlurCache, ChatMessage, Config, DefaultMode, DispatchOutcome,
+    EditorOutcome, EditorState, FlintshotError, InputEvent, Key, Modifiers, NewCaptureMode, Rect,
+    SizeMode, Tool,
 };
 
 use crate::canvas::{EguiCanvas, EguiTexture};
@@ -360,7 +361,7 @@ impl EditorApp {
         let magnifier_always_on = cfg.ui.magnifier_always_on;
         let magnifier_key = parse_magnifier_key(&cfg.ui.magnifier_modifier);
         let flushed_anns = state.anns.clone();
-        Self {
+        let mut app = Self {
             statusbar_size: None,
             config: cfg.clone(),
             state,
@@ -400,7 +401,17 @@ impl EditorApp {
             floating_rects: Vec::new(),
             resize_menu: topbar::ResizeMenu::default(),
             flushed_anns,
+        };
+        // Ask-the-shot snapshot (page mode): the saved-transform list
+        // and the configured gate come from the host bridge — it owns
+        // config + keyring. Worker windows keep the defaults (no AI
+        // there; the dialog's Run is inert without a bridge).
+        if let Some(bridge) = app.page.as_ref() {
+            let mut borrowed = bridge.borrow_mut();
+            app.ai_transforms = borrowed.ai_transforms();
+            app.ai_configured = borrowed.ai_configured();
         }
+        app
     }
 
     /// Whether the selection-first phase is live: requested at
@@ -1791,6 +1802,7 @@ impl EditorApp {
         {
             self.ai_pending_action = Some(action);
         }
+        self.handle_ai_actions(ui.ctx());
 
         // Handle toolbar actions outside the toolbar drawing code so
         // we can borrow `&self.outcome` cleanly. Each handler runs the
@@ -1989,6 +2001,23 @@ impl EditorApp {
                 HomeDirective::SetStatus(_) => {}
             }
         }
+        // Ask-the-shot arrivals: the assistant turn (or error card)
+        // lands and the panel flips to the AI tab — the
+        // `FocusProperties` precedent.
+        while let Some(event) = bridge.borrow_mut().poll_ai_event() {
+            match event {
+                crate::shell::AiEvent::Response(text) => self.ai.push_assistant(text),
+                crate::shell::AiEvent::Failed(message) => self.ai.push_error(message),
+            }
+            self.panel.focus_ai();
+        }
+        // While a request is pending the response must arrive
+        // without user input: a short repaint timer carries the poll.
+        // No cross-thread `Context` clone — the worker signals only
+        // through the bridge's channel.
+        if self.ai.is_pending() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 
     /// Whether the current page is a single-window page epoch.
@@ -2028,6 +2057,66 @@ impl EditorApp {
         // Same no-close contract as the page Open (see
         // [`Self::apply_page_open`]).
         let _ = bridge.borrow_mut().request_paste();
+    }
+
+    /// Consume the Ask-the-shot surface's outbound actions: the
+    /// dialog's typed action (Run fires; Configure routes in Task
+    /// 009) and the follow-up outbox (submitted inside
+    /// `panel::show`'s borrow).
+    fn handle_ai_actions(&mut self, ctx: &Context) {
+        if let Some(action) = self.ai_pending_action.take() {
+            match action {
+                crate::ai_dialog::AiDialogAction::Run { prompt } => {
+                    self.handle_ai_run(ctx, &prompt);
+                }
+                // Task 009 routes this to the AI config page; the
+                // dialog has already closed.
+                crate::ai_dialog::AiDialogAction::Configure => {}
+            }
+        }
+        if let Some(text) = self.ai.take_outbox() {
+            self.handle_ai_follow_up(&text);
+        }
+    }
+
+    /// Fire an Ask-the-shot run (the dialog's Run): flatten via the
+    /// Copy/Upload compose path, reset the conversation, show the
+    /// pending row, and hand the first-turn messages (image part
+    /// included) to the bridge's request worker.
+    fn handle_ai_run(&mut self, ctx: &Context, prompt: &str) {
+        let png = ai_run_payload(&self.state);
+        self.ai.reset();
+        // The contact-sheet thumbnail of exactly what was sent.
+        if let Ok(decoded) = image::load_from_memory(&png) {
+            let rgba = decoded.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let texture = ctx.load_texture(
+                "ai-shot-thumb",
+                egui::ColorImage::from_rgba_unmultiplied(size, &rgba),
+                egui::TextureOptions::default(),
+            );
+            self.ai.set_thumb(Some(texture));
+        }
+        self.ai.push_user(prompt);
+        self.ai.begin_pending();
+        let messages = ai_run_messages(prompt, &png);
+        if let Some(bridge) = self.page.clone() {
+            bridge.borrow_mut().ai_request(messages);
+        }
+    }
+
+    /// Fire a follow-up: text-only history (no image part — by
+    /// construction in [`ai_follow_up_messages`]) plus the new turn.
+    fn handle_ai_follow_up(&mut self, text: &str) {
+        if self.ai.is_pending() {
+            return;
+        }
+        let messages = ai_follow_up_messages(self.ai.turns(), text);
+        self.ai.push_user(text);
+        self.ai.begin_pending();
+        if let Some(bridge) = self.page.clone() {
+            bridge.borrow_mut().ai_request(messages);
+        }
     }
 
     /// The page chrome's keyboard accelerators: `C` capture, `O`
@@ -2446,6 +2535,76 @@ pub(crate) fn compose_selection_aware(state: &EditorState) -> image::RgbaImage {
         }
         _ => compose_final(state),
     }
+}
+
+// ------------------------------------------------------------------
+// Ask-the-shot payload building (Task 007)
+// ------------------------------------------------------------------
+
+/// Longest-edge cap for the Ask-the-shot image payload — bounds the
+/// request size (spec: 2048 px).
+pub(crate) const AI_IMAGE_MAX_EDGE: u32 = 2048;
+
+/// Cap an image's longest edge at [`AI_IMAGE_MAX_EDGE`] (no-op at or
+/// below; integer scale math so the cap is exact). Never upscales
+/// (core's `resize` clamps targets to the source).
+pub(crate) fn cap_longest_edge(img: &image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let longest = w.max(h);
+    if longest <= AI_IMAGE_MAX_EDGE || longest == 0 {
+        return img.clone();
+    }
+    let tw = (w * AI_IMAGE_MAX_EDGE / longest).max(1);
+    let th = (h * AI_IMAGE_MAX_EDGE / longest).max(1);
+    flintshot_core::image_ops::resize(img, (tw, th))
+}
+
+/// The Run payload: the same flatten path Copy/Upload use
+/// (`compose_selection_aware` — annotations included), capped, then
+/// PNG-encoded.
+pub(crate) fn ai_run_payload(state: &EditorState) -> Vec<u8> {
+    let flat = compose_selection_aware(state);
+    let capped = cap_longest_edge(&flat);
+    let mut bytes = Vec::new();
+    if let Err(e) = capped.write_to(
+        &mut std::io::Cursor::new(&mut bytes),
+        image::ImageFormat::Png,
+    ) {
+        tracing::warn!("encoding the Ask-the-shot payload: {e}");
+    }
+    bytes
+}
+
+/// The first-turn messages: exactly one text part + one image part.
+pub(crate) fn ai_run_messages(prompt: &str, png_bytes: &[u8]) -> Vec<ChatMessage> {
+    vec![ChatMessage::User {
+        content: vec![text_part(prompt), image_part(png_data_url(png_bytes))],
+    }]
+}
+
+/// Follow-up messages: the conversation so far as **text-only**
+/// history (no image part — by construction) plus the new text.
+/// Failed turns never rejoin the wire history.
+pub(crate) fn ai_follow_up_messages(
+    turns: &[crate::ai_panel::AiTurn],
+    text: &str,
+) -> Vec<ChatMessage> {
+    let mut messages = Vec::new();
+    for turn in turns {
+        match turn {
+            crate::ai_panel::AiTurn::User { prompt } => messages.push(ChatMessage::User {
+                content: vec![text_part(prompt.clone())],
+            }),
+            crate::ai_panel::AiTurn::Assistant { text } => messages.push(ChatMessage::Assistant {
+                content: text.clone(),
+            }),
+            crate::ai_panel::AiTurn::Error { .. } => {}
+        }
+    }
+    messages.push(ChatMessage::User {
+        content: vec![text_part(text)],
+    });
+    messages
 }
 
 /// Whether a successful worker Copy should close the editor window,
@@ -2966,6 +3125,107 @@ mod tests {
     fn compose_selection_aware_without_selection_is_full_image() {
         let img = compose_selection_aware(&blank_state(10, 8));
         assert_eq!(img.dimensions(), (10, 8), "no selection → full image");
+    }
+
+    // --- Ask-the-shot payload builders (Task 007) ---
+
+    #[test]
+    fn cap_longest_edge_caps_without_upscaling() {
+        let wide = image::RgbaImage::from_pixel(4096, 1024, image::Rgba([9, 9, 9, 255]));
+        let capped = cap_longest_edge(&wide);
+        assert_eq!(
+            capped.dimensions(),
+            (2048, 512),
+            "longest edge hits the cap, aspect kept"
+        );
+
+        let small = image::RgbaImage::from_pixel(100, 80, image::Rgba([1, 2, 3, 255]));
+        assert_eq!(
+            cap_longest_edge(&small).dimensions(),
+            (100, 80),
+            "below the cap is a no-op"
+        );
+
+        let exact = image::RgbaImage::from_pixel(2048, 2048, image::Rgba([1, 2, 3, 255]));
+        assert_eq!(
+            cap_longest_edge(&exact).dimensions(),
+            (2048, 2048),
+            "at the cap is a no-op"
+        );
+    }
+
+    #[test]
+    fn run_payload_is_the_flatten_path_capped_and_png() {
+        // An annotated state (a committed red rect) so the flatten is
+        // more than the raw background.
+        let mut state = blank_state(3000, 1000);
+        state.pending = Some(Annotation::Rect {
+            rect: Rect::from_xywh(10.0, 10.0, 40.0, 30.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+            fill: None,
+        });
+        state.commit_annotation();
+        let payload = ai_run_payload(&state);
+        let decoded = image::load_from_memory(&payload).expect("the payload is a PNG");
+        let rgba = decoded.to_rgba8();
+        assert_eq!(
+            rgba.dimensions(),
+            (2048, 682),
+            "the sent image is the capped flatten"
+        );
+    }
+
+    #[test]
+    fn run_messages_carry_exactly_one_image_part() {
+        let messages = ai_run_messages("read it", b"png");
+        let [ChatMessage::User { content }] = messages.as_slice() else {
+            panic!("run is a single user turn");
+        };
+        assert_eq!(content.len(), 2);
+        assert!(matches!(
+            content[0],
+            flintshot_core::ContentPart::Text { .. }
+        ));
+        let image_parts = content
+            .iter()
+            .filter(|part| matches!(part, flintshot_core::ContentPart::ImageUrl { .. }))
+            .count();
+        assert_eq!(image_parts, 1, "exactly one image part on the first turn");
+    }
+
+    #[test]
+    fn follow_up_messages_are_text_only_by_construction() {
+        use crate::ai_panel::AiTurn;
+        let turns = vec![
+            AiTurn::User {
+                prompt: "read it".into(),
+            },
+            AiTurn::Assistant {
+                text: "found: foo".into(),
+            },
+            AiTurn::Error {
+                message: "boom".into(),
+            },
+        ];
+        let messages = ai_follow_up_messages(&turns, "what color?");
+        assert_eq!(messages.len(), 3, "error turns never rejoin the wire");
+        for message in &messages {
+            let has_image = match message {
+                ChatMessage::User { content } => content
+                    .iter()
+                    .any(|p| matches!(p, flintshot_core::ContentPart::ImageUrl { .. })),
+                _ => false,
+            };
+            assert!(!has_image, "follow-ups carry no image parts: {message:?}");
+        }
+        let last = messages.last().unwrap();
+        match last {
+            ChatMessage::User { content } => match &content[0] {
+                flintshot_core::ContentPart::Text { text } => assert_eq!(text, "what color?"),
+                other => panic!("the follow-up is a text part: {other:?}"),
+            },
+            other => panic!("the follow-up is a user turn: {other:?}"),
+        }
     }
 
     #[test]

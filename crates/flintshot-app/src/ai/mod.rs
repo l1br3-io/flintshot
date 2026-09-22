@@ -23,12 +23,13 @@
 //! `LM Studio`) run keyless and some reject requests carrying an
 //! `Authorization` header.
 
-// Task 007 (worker pipeline) constructs clients here; Task 010
-// (config page) uses the keyring helpers. Until then the items are
-// unused in the binary — allowed here so the CI dead-code gate
-// stays green without wiring consumers early. Remove when Task 010
-// lands.
+// The client surface is wired by the page bridge (app_window) and
+// the worker module; the keyring helpers serve Task 010's config
+// page. Items unused in some feature combinations stay allowed so
+// the CI dead-code gate stays green without wiring consumers early.
 #![allow(dead_code)]
+
+pub mod worker;
 
 use flintshot_core::{AiClient, AiError, AiRequest, AiResponse};
 use std::future::Future;

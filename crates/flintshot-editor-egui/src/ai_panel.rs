@@ -11,12 +11,6 @@
 //! [`AiConversation`] is pure page-owned state (the unit-test seam);
 //! rendering consumes theme tokens only.
 
-// Task 007 (bridge + worker pipeline) constructs turns from real
-// responses and uploads the thumbnail; until then the push_* /
-// set_thumb surface is only exercised by unit tests. Allowed here so
-// the CI dead-code gate stays green. Remove when Task 007 lands.
-#![allow(dead_code)]
-
 use crate::theme;
 use egui::{CornerRadius, RichText, Sense};
 
@@ -56,6 +50,10 @@ pub(crate) struct AiConversation {
     draft: String,
     /// The initiating shot's thumbnail texture.
     thumb: Option<egui::TextureHandle>,
+    /// A submitted follow-up awaiting the page's send wiring
+    /// (submitted inside `panel::show`'s borrow; consumed right
+    /// after via [`AiConversation::take_outbox`]).
+    outbox: Option<String>,
 }
 
 impl AiConversation {
@@ -107,6 +105,13 @@ impl AiConversation {
         self.draft.clear();
         self.pending = false;
         self.thumb = None;
+        self.outbox = None;
+    }
+
+    /// Take the submitted follow-up, if any (the send wiring's
+    /// handoff).
+    pub(crate) fn take_outbox(&mut self) -> Option<String> {
+        self.outbox.take()
     }
 
     /// Set (or clear) the initiating thumbnail.
@@ -120,11 +125,11 @@ impl AiConversation {
     }
 }
 
-/// Render the AI tab body. Returns the submitted follow-up text when
-/// the send affordance fires (Enter or the send glyph) with a
-/// non-empty draft; send *wiring* (the request itself) is Task 007.
-pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) -> Option<String> {
-    let mut submitted = None;
+/// Render the AI tab body. Submitted follow-ups land in the
+/// conversation's outbox ([`AiConversation::take_outbox`]) for the
+/// page's send wiring (Task 007) — the request itself is not this
+/// function's business.
+pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -162,14 +167,13 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) -> Opti
         follow_up_row(ui, egui::Id::new("ai-follow-up"), &mut draft, inert);
     let enter_pressed = edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     if (send_clicked || enter_pressed) && !draft.trim().is_empty() && !inert {
-        submitted = Some(draft.trim().to_string());
+        conversation.outbox = Some(draft.trim().to_string());
         draft.clear();
     }
     if !edit_response.has_focus() && enter_pressed {
         edit_response.request_focus();
     }
     conversation.draft = draft;
-    submitted
 }
 
 /// The initiating shot as a small paper-shadowed thumbnail.

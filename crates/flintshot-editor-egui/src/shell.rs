@@ -160,6 +160,43 @@ pub trait EditorPageBridge {
     /// crash-safe between route changes. Default no-op: only the
     /// app window's page bridge has a session store behind it.
     fn annotations_committed(&mut self, _anns: &[flintshot_core::Annotation]) {}
+
+    /// Fire an Ask-the-shot request: the full message thread (the
+    /// page owns the conversation; a fresh Run's first turn carries
+    /// the image part, follow-ups are text-only by construction).
+    /// The host resolves provider/model/key, spawns the request
+    /// worker, and answers on [`Self::poll_ai_event`]. Default
+    /// no-op (headless tests): requests just never answer.
+    fn ai_request(&mut self, _messages: Vec<flintshot_core::ChatMessage>) {}
+
+    /// Take one arrived AI event (oldest first). `None` when no
+    /// response is pending. Default: always `None`.
+    fn poll_ai_event(&mut self) -> Option<AiEvent> {
+        None
+    }
+
+    /// The saved-transform snapshot for the Ask-the-shot dialog.
+    /// Default: empty store (the dialog shows its invitation copy).
+    fn ai_transforms(&mut self) -> Vec<flintshot_core::AiTransform> {
+        Vec::new()
+    }
+
+    /// Whether a provider + model + key are configured (the dialog's
+    /// Run vs Configure AI… gate). Default: unconfigured.
+    fn ai_configured(&mut self) -> bool {
+        false
+    }
+}
+
+/// An arrived Ask-the-shot result, host → page. Mirrors
+/// [`HomeDirective`]'s poll-directive choreography.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AiEvent {
+    /// The assistant's response text (markdown).
+    Response(String),
+    /// The request failed; the message is one-line actionable copy.
+    Failed(String),
 }
 
 /// Shared handle to the boxed [`EditorPageBridge`]: the shell keeps

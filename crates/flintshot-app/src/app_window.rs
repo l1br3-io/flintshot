@@ -1189,6 +1189,7 @@ fn run_generation(
             }),
             Box::new(PageBridge {
                 shared: Arc::clone(shared),
+                ai: AiHost::default(),
             }),
             Box::new(RouteHostBridge {
                 shared: Arc::clone(shared),
@@ -2047,6 +2048,19 @@ fn decode_image_file(path: &std::path::Path) -> eyre::Result<EditorState> {
 /// lands on the shared line, directives poll every frame.
 struct PageBridge {
     shared: Arc<Shared>,
+    /// Ask-the-shot host state: the live worker's channel plus
+    /// immediate-failure events (unconfigured requests never spawn).
+    ai: AiHost,
+}
+
+/// The bridge's AI plumbing. One request at a time: a second request
+/// while one is pending replaces the receiver (the old worker's send
+/// fails into the void and its thread exits — the page only fires a
+/// second request after a turn landed, so this is defensive).
+#[derive(Default)]
+struct AiHost {
+    rx: Option<std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>>,
+    queue: std::collections::VecDeque<flintshot_editor_egui::AiEvent>,
 }
 
 impl EditorPageBridge for PageBridge {
@@ -2117,6 +2131,48 @@ impl EditorPageBridge for PageBridge {
                 .push_directive(HomeDirective::SetStatus("clipboard has no image".into()));
             false
         }
+    }
+
+    fn ai_request(&mut self, messages: Vec<flintshot_core::ChatMessage>) {
+        let config = flintshot_core::Config::load().unwrap_or_default();
+        match crate::ai::worker::resolve_ai(&config) {
+            Ok(resolved) => {
+                self.ai.rx = Some(crate::ai::worker::spawn_chat_worker(resolved, messages));
+            }
+            // Unconfigured: an immediate failure with the same
+            // actionable copy the Configure gate would have shown.
+            Err(reason) => {
+                self.ai
+                    .queue
+                    .push_back(flintshot_editor_egui::AiEvent::Failed(reason));
+            }
+        }
+    }
+
+    fn poll_ai_event(&mut self) -> Option<flintshot_editor_egui::AiEvent> {
+        // Drain arrived worker results into the queue, then hand
+        // back the oldest event.
+        if let Some(rx) = self.ai.rx.as_ref() {
+            while let Ok(result) = rx.try_recv() {
+                let event = match result {
+                    Ok(text) => flintshot_editor_egui::AiEvent::Response(text),
+                    Err(err) => flintshot_editor_egui::AiEvent::Failed(
+                        crate::ai::worker::ai_error_copy(&err),
+                    ),
+                };
+                self.ai.queue.push_back(event);
+            }
+        }
+        self.ai.queue.pop_front()
+    }
+
+    fn ai_transforms(&mut self) -> Vec<flintshot_core::AiTransform> {
+        flintshot_core::TransformStore::load().all().to_vec()
+    }
+
+    fn ai_configured(&mut self) -> bool {
+        let config = flintshot_core::Config::load().unwrap_or_default();
+        crate::ai::worker::ai_configured(&config)
     }
 }
 
@@ -3951,6 +4007,7 @@ mod tests {
         let shared = std::sync::Arc::new(shared);
         let mut bridge = PageBridge {
             shared: std::sync::Arc::clone(&shared),
+            ai: AiHost::default(),
         };
 
         bridge.report_outcome(&EditorOutcome::Saved(std::path::PathBuf::from(
@@ -3961,6 +4018,39 @@ mod tests {
             shared.session.list().is_empty(),
             "the entry graduated; only recents holds the capture now"
         );
+    }
+
+    /// An unconfigured Ask-the-shot request fails immediately with
+    /// actionable copy (no worker spawn), surfaced through the same
+    /// `poll_ai_event` queue a worker result would ride.
+    #[test]
+    fn unconfigured_ai_request_fails_immediately_with_copy() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (shared, _dir) = shared_with_session();
+        let shared = std::sync::Arc::new(shared);
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::clone(&shared),
+            ai: AiHost::default(),
+        };
+
+        // Default config: no model set ⇒ unconfigured, and the
+        // default [ai] table holds no key anywhere (keys never live
+        // in config files).
+        assert!(!bridge.ai_configured());
+
+        let messages = vec![flintshot_core::ChatMessage::User {
+            content: vec![flintshot_core::text_part("read it")],
+        }];
+        bridge.ai_request(messages);
+        let event = bridge.poll_ai_event().expect("the failure is immediate");
+        match event {
+            flintshot_editor_egui::AiEvent::Failed(message) => {
+                assert!(message.contains("AI settings"), "copy was: {message}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(bridge.poll_ai_event().is_none(), "exactly one event");
     }
 
     /// Uploads, copies, and cancels deliberately keep the entry
@@ -3976,6 +4066,7 @@ mod tests {
         let shared = std::sync::Arc::new(shared);
         let mut bridge = PageBridge {
             shared: std::sync::Arc::clone(&shared),
+            ai: AiHost::default(),
         };
 
         for outcome in [
@@ -4005,6 +4096,7 @@ mod tests {
         let shared = std::sync::Arc::new(shared);
         let mut bridge = PageBridge {
             shared: std::sync::Arc::clone(&shared),
+            ai: AiHost::default(),
         };
 
         let anns = vec![test_line_ann()];

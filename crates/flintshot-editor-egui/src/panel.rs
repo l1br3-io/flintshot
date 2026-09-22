@@ -101,11 +101,8 @@ impl PanelState {
     }
 
     /// Bring the AI tab forward — the response-arrival flip's
-    /// landing (Task 007). Same contract as
+    /// landing. Same contract as
     /// [`PanelState::focus_properties`]: tab flip only.
-    // Task 007 calls this on response arrival; the Task 005 test
-    // covers the flip itself. Remove the allow when wired.
-    #[allow(dead_code)]
     pub(crate) fn focus_ai(&mut self) {
         self.tab = PanelTab::Ai;
     }
@@ -351,7 +348,7 @@ pub(crate) fn show(
                 }
                 PanelTab::History => history_body(ui, state),
                 PanelTab::Ai => {
-                    let _ = crate::ai_panel::show(ui, ai);
+                    crate::ai_panel::show(ui, ai);
                 }
             }
         });
