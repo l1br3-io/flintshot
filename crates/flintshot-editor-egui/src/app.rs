@@ -5234,6 +5234,131 @@ mod tests {
         assert!(!app.canvas_drag_active, "no drag may survive the release");
     }
 
+    // --- sidebar-collapse-resize Task 004 --------------------------
+
+    /// A press on the panel's resize separator must never start a
+    /// canvas gesture — the separator belongs to egui's resize
+    /// interaction, and the pointer-gating strip outside the cached
+    /// canvas rect keeps it gesture-free too.
+    #[test]
+    fn press_on_the_resize_separator_never_starts_a_gesture() {
+        let ctx = egui::Context::default();
+        let mut state = move_state_with_ann();
+        state.tool = Tool::Rect;
+        state.selected.clear();
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+        // The separator sits on the panel's left edge: a hair right
+        // of the canvas rect's right edge.
+        let on_separator = egui::pos2(canvas.max.x + 2.0, canvas.min.y + 60.0);
+        let into_canvas = egui::pos2(canvas.min.x + 30.0, canvas.min.y + 30.0);
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(on_separator),
+                egui::Event::PointerButton {
+                    pos: on_separator,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(into_canvas),
+                egui::Event::PointerButton {
+                    pos: into_canvas,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(
+            app.state.pending.is_none() && app.state.anns.len() == 1,
+            "a separator press must not begin a rect annotation"
+        );
+        assert!(!app.canvas_drag_active, "no drag may survive the release");
+    }
+
+    /// With the panel collapsed, a press on the freed strip (where
+    /// the panel used to sit) is an ordinary canvas press — the
+    /// gesture starts, drags, and commits.
+    #[test]
+    fn collapsed_panel_press_across_the_freed_strip_starts_the_gesture() {
+        let ctx = egui::Context::default();
+        // A big enough image that its fitted box covers the freed
+        // strip once the canvas widens (a 64×64 fixture letterboxes
+        // into a small centered box the strip never overlaps).
+        let mut state = blank_state(400, 300);
+        state.tool = Tool::Rect;
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        let expanded = app.canvas_rect.expect("fixture: canvas rect cached");
+        ctrl_b_frame(&ctx, &mut app);
+        editor_frame(&ctx, &mut app, vec![]);
+        let collapsed = app.canvas_rect.expect("fixture: canvas rect cached");
+        assert!(
+            collapsed.max.x > expanded.max.x,
+            "fixture: the canvas reclaimed the strip"
+        );
+        // A point that sat on the panel before the collapse: near the
+        // image's right edge, mapped through the live view like
+        // `canvas_drag` does (view-independent fixtures).
+        let freed = app
+            .canvas
+            .view_over(collapsed)
+            .image_to_logical(flintshot_core::Point::new(350.0, 100.0));
+        assert!(
+            freed.x > expanded.max.x,
+            "fixture: the press point sat on the panel strip, freed {freed:?} vs {}",
+            expanded.max.x
+        );
+        let into = app
+            .canvas
+            .view_over(collapsed)
+            .image_to_logical(flintshot_core::Point::new(320.0, 80.0));
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(freed),
+                egui::Event::PointerButton {
+                    pos: freed,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(
+            app.state.pending.is_some(),
+            "a press on the freed strip starts the gesture"
+        );
+        editor_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(into)]);
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: into,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert_eq!(
+            app.state.anns.len(),
+            1,
+            "the gesture across the freed strip committed"
+        );
+        assert!(!app.canvas_drag_active, "no drag may survive the release");
+    }
+
     /// The direct-save path composes dir + rendered template + ext.
     /// Collision handling: the second save at the same target gets
     /// a `-2` suffix before the extension.
