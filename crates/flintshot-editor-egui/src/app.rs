@@ -1474,6 +1474,7 @@ impl EditorApp {
         if ctx.input(|i| i.key_pressed(egui::Key::I))
             && !(modifiers.ctrl || modifiers.shift || modifiers.alt || modifiers.super_key)
         {
+            self.refresh_ai_transforms();
             self.ai_dialog.open();
             return true;
         }
@@ -1667,6 +1668,7 @@ impl EditorApp {
         let gate = self.rail_gate();
         let ai_pressed = rail::show(ui, &mut self.state, gate, &mut self.rail);
         if ai_pressed {
+            self.refresh_ai_transforms();
             self.ai_dialog.open();
         }
         // Properties panel. Must come before CentralPanel so egui
@@ -2057,6 +2059,16 @@ impl EditorApp {
         // Same no-close contract as the page Open (see
         // [`Self::apply_page_open`]).
         let _ = bridge.borrow_mut().request_paste();
+    }
+
+    /// The transform dialog's saved list: refreshed from the host
+    /// bridge each time the dialog opens (a transform created in AI
+    /// settings is immediately available — no live push).
+    fn refresh_ai_transforms(&mut self) {
+        let Some(bridge) = self.page.clone() else {
+            return;
+        };
+        self.ai_transforms = bridge.borrow_mut().ai_transforms();
     }
 
     /// Consume the Ask-the-shot surface's outbound actions: the

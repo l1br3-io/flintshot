@@ -19,7 +19,7 @@
 //! **Configure AI…** link (the editor parks and returns on Esc), and
 //! `app --route ai-config` (cold start).
 
-use flintshot_core::{Config, ProviderPreset};
+use flintshot_core::{Config, ProviderPreset, TransformStore};
 
 use crate::theme;
 use crate::widgets;
@@ -70,6 +70,26 @@ pub(crate) enum TestStatus {
     Failed(String),
 }
 
+/// The inline transform editor's draft (creating when `id` is
+/// `None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditingTransform {
+    /// The transform being edited; `None` = a fresh one.
+    id: Option<String>,
+    /// Name draft.
+    name: String,
+    /// Prompt draft.
+    prompt: String,
+}
+
+impl EditingTransform {
+    /// Whether the draft commits (both fields non-empty after
+    /// trim).
+    fn committable(&self) -> bool {
+        !self.name.trim().is_empty() && !self.prompt.trim().is_empty()
+    }
+}
+
 /// The AI settings page's state.
 pub(crate) struct AiConfigApp {
     /// The working config copy (edits land here, save on debounce).
@@ -88,12 +108,21 @@ pub(crate) struct AiConfigApp {
     test: Option<TestStatus>,
     /// Clicked actions awaiting the router's drain.
     actions: Vec<AiConfigAction>,
+    /// The saved-transform store (CRUD user data — deliberately not
+    /// part of `config.toml`). Writes persist immediately on
+    /// commit, never on the config debounce.
+    transforms: TransformStore,
+    /// Where the transforms store persists.
+    transforms_path: std::path::PathBuf,
+    /// The inline transform editor's open draft, if any.
+    editing: Option<EditingTransform>,
 }
 
 impl AiConfigApp {
     /// Snapshot the page from a config.
     pub(crate) fn new(config: Config) -> Self {
         let key_saved_for = config.ai.provider.clone();
+        let (transforms, transforms_path) = default_transform_store();
         Self {
             config,
             dirty_since: None,
@@ -102,7 +131,22 @@ impl AiConfigApp {
             key_saved_for,
             test: None,
             actions: Vec::new(),
+            transforms,
+            transforms_path,
+            editing: None,
         }
+    }
+
+    /// Test seam: a page over an explicit transforms store path
+    /// (tempdir-backed tests never touch the real config dir).
+    #[cfg(test)]
+    pub(crate) fn with_transforms_path(config: Config, path: std::path::PathBuf) -> Self {
+        let key_saved_for = config.ai.provider.clone();
+        let mut page = Self::new(config);
+        page.transforms = TransformStore::load_from(&path);
+        page.transforms_path = path;
+        let _ = key_saved_for;
+        page
     }
 
     /// The working config.
@@ -275,6 +319,106 @@ impl AiConfigApp {
             })
         })
     }
+
+    // --- Transforms CRUD (immediate store writes, never the
+    // config debounce) ---
+
+    /// The saved transforms, display order.
+    #[must_use]
+    pub(crate) fn transforms(&self) -> &[flintshot_core::AiTransform] {
+        self.transforms.all()
+    }
+
+    /// Open the inline creator (the *New transform…* affordance).
+    pub(crate) fn begin_create_transform(&mut self) {
+        self.editing = Some(EditingTransform {
+            id: None,
+            name: String::new(),
+            prompt: String::new(),
+        });
+    }
+
+    /// Open the inline editor over an existing transform.
+    pub(crate) fn begin_edit_transform(&mut self, id: &str) {
+        let Some(target) = self.transforms.get(id) else {
+            return;
+        };
+        self.editing = Some(EditingTransform {
+            id: Some(target.id.clone()),
+            name: target.name.clone(),
+            prompt: target.prompt.clone(),
+        });
+    }
+
+    /// Commit the inline editor: insert (creating) or update
+    /// (editing), then persist immediately. Returns whether the
+    /// commit landed (a disabled Save or an unknown id is a no-op).
+    pub(crate) fn commit_transform(&mut self) -> bool {
+        let Some(draft) = self.editing.take() else {
+            return false;
+        };
+        if !draft.committable() {
+            // Keep the draft: the fields need input.
+            self.editing = Some(draft);
+            return false;
+        }
+        let landed = match draft.id.as_deref() {
+            None => {
+                self.transforms
+                    .insert(draft.name.trim(), draft.prompt.trim());
+                true
+            }
+            Some(id) => self
+                .transforms
+                .update(id, draft.name.trim(), draft.prompt.trim()),
+        };
+        if landed {
+            self.persist_transforms();
+        }
+        landed
+    }
+
+    /// Discard the inline editor.
+    pub(crate) fn cancel_transform_edit(&mut self) {
+        self.editing = None;
+    }
+
+    /// Delete a transform by id (immediate persist).
+    pub(crate) fn delete_transform(&mut self, id: &str) {
+        if self.transforms.remove(id) {
+            self.persist_transforms();
+        }
+    }
+
+    /// Reorder by delta (clamped at the ends — the store's move
+    /// op); immediate persist.
+    pub(crate) fn move_transform(&mut self, id: &str, delta: isize) {
+        if self.transforms.move_by(id, delta) {
+            self.persist_transforms();
+        }
+    }
+
+    /// Persist the transforms store (atomic save). A failure logs —
+    /// the list stays usable in-memory and the next write retries.
+    fn persist_transforms(&self) {
+        if let Err(e) = self.transforms.save_to(&self.transforms_path) {
+            tracing::warn!(
+                path = %self.transforms_path.display(),
+                error = %e,
+                "saving the transforms store"
+            );
+        }
+    }
+}
+
+/// The platform transforms store + its path (the default page
+/// construction; tests inject via
+/// [`AiConfigApp::with_transforms_path`]).
+fn default_transform_store() -> (TransformStore, std::path::PathBuf) {
+    match flintshot_core::transform_store_path() {
+        Some(path) => (TransformStore::load_from(&path), path),
+        None => (TransformStore::new(), std::path::PathBuf::new()),
+    }
 }
 
 /// The page's draw entry (the router's [`Route::AiConfig`] body).
@@ -294,7 +438,7 @@ impl AiConfigPage {
                     ui.set_min_width(column);
                     ui.add_space(theme::SPACE_SCALE[3]);
                     model_section(ui, page, now);
-                    transforms_section(ui);
+                    transforms_section(ui, page);
                     ui.add_space(theme::SPACE_SCALE[3]);
                 });
             });
@@ -422,16 +566,189 @@ fn status_line(ui: &mut egui::Ui, text: &str) {
     ui.add_space(theme::SPACE_SCALE[1]);
 }
 
-/// The Transforms section — the saved-transform CRUD (Task 011 fills
-/// the body).
-fn transforms_section(ui: &mut egui::Ui) {
+/// The Transforms section: the saved-transform list (name + prompt
+/// excerpt) with add / edit / delete / reorder, persisted to
+/// `ai-transforms.toml` immediately on commit.
+fn transforms_section(ui: &mut egui::Ui, page: &mut AiConfigApp) {
     section_card(ui, "Transforms", |ui| {
-        ui.label(
-            egui::RichText::new("Saved transforms are managed here — landing in Task 011.")
-                .size(theme::TYPE_SM)
-                .color(theme::palette::INK_SOFT),
-        );
+        if page.transforms().is_empty() {
+            ui.label(
+                egui::RichText::new("No saved transforms — add one")
+                    .size(theme::TYPE_SM)
+                    .color(theme::palette::INK_SOFT),
+            );
+            ui.add_space(theme::SPACE_SCALE[1]);
+        } else {
+            let snapshot: Vec<flintshot_core::AiTransform> = page.transforms().to_vec();
+            for transform in snapshot {
+                transform_row(ui, page, &transform);
+            }
+        }
+        if page.editing.is_some() {
+            // The editor closure borrows the draft; the intent comes
+            // back as a value so the page applies it after.
+            let mut draft = page.editing.take().expect("checked is_some");
+            match transform_editor(ui, &mut draft) {
+                EditorIntent::Save => {
+                    page.editing = Some(draft);
+                    let _ = page.commit_transform();
+                }
+                EditorIntent::Cancel => page.cancel_transform_edit(),
+                EditorIntent::None => page.editing = Some(draft),
+            }
+        } else if ghost_pill(
+            ui,
+            egui::Id::new("ai-transform-new"),
+            "New transform…",
+            true,
+        ) {
+            page.begin_create_transform();
+        }
     });
+}
+
+/// What the inline editor asked for this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorIntent {
+    /// Nothing fired.
+    None,
+    /// Save clicked (the page commits the draft).
+    Save,
+    /// Cancel clicked (the page discards the draft).
+    Cancel,
+}
+
+/// One saved-transform row: name + one-line prompt excerpt left,
+/// reorder / edit / delete controls right.
+fn transform_row(
+    ui: &mut egui::Ui,
+    page: &mut AiConfigApp,
+    transform: &flintshot_core::AiTransform,
+) {
+    let editing_this = page
+        .editing
+        .as_ref()
+        .is_some_and(|draft| draft.id.as_deref() == Some(transform.id.as_str()));
+    egui::Frame::new()
+        .fill(theme::palette::PAPER_DIM)
+        .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(transform.name.clone())
+                            .size(theme::TYPE_SM)
+                            .color(theme::palette::INK),
+                    );
+                    ui.label(
+                        egui::RichText::new(prompt_excerpt(&transform.prompt))
+                            .size(theme::TYPE_XS)
+                            .color(theme::palette::INK_SOFT),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ghost_pill(
+                        ui,
+                        egui::Id::new(("ai-transform-del", transform.id.clone())),
+                        "Delete",
+                        true,
+                    ) {
+                        page.cancel_transform_edit();
+                        page.delete_transform(&transform.id);
+                    }
+                    if !editing_this
+                        && ghost_pill(
+                            ui,
+                            egui::Id::new(("ai-transform-edit", transform.id.clone())),
+                            "Edit",
+                            true,
+                        )
+                    {
+                        page.begin_edit_transform(&transform.id);
+                    }
+                    if ghost_pill(
+                        ui,
+                        egui::Id::new(("ai-transform-down", transform.id.clone())),
+                        "↓",
+                        true,
+                    ) {
+                        page.move_transform(&transform.id, 1);
+                    }
+                    if ghost_pill(
+                        ui,
+                        egui::Id::new(("ai-transform-up", transform.id.clone())),
+                        "↑",
+                        true,
+                    ) {
+                        page.move_transform(&transform.id, -1);
+                    }
+                });
+            });
+        });
+    ui.add_space(theme::SPACE_SCALE[1]);
+}
+
+/// The inline creator/editor: name + prompt fields, Save (gated on
+/// both non-empty) and Cancel. Returns the frame's intent; the
+/// draft itself stays owned by the caller.
+fn transform_editor(ui: &mut egui::Ui, draft: &mut EditingTransform) -> EditorIntent {
+    let mut intent = EditorIntent::None;
+    egui::Frame::new()
+        .fill(theme::palette::PAPER)
+        .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
+        .inner_margin(egui::Margin::same(8))
+        .stroke(theme::HAIRLINE_STROKE)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Name")
+                        .size(theme::TYPE_SM)
+                        .color(theme::palette::INK),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .id(egui::Id::new("ai-transform-name"))
+                        .desired_width(160.0),
+                );
+            });
+            ui.add_space(theme::SPACE_SCALE[0]);
+            ui.add(
+                egui::TextEdit::singleline(&mut draft.prompt)
+                    .id(egui::Id::new("ai-transform-prompt"))
+                    .hint_text("The instruction sent with the image…")
+                    .desired_width(ui.available_width()),
+            );
+            ui.add_space(theme::SPACE_SCALE[1]);
+            ui.horizontal(|ui| {
+                if ghost_pill(
+                    ui,
+                    egui::Id::new("ai-transform-save"),
+                    "Save",
+                    draft.committable(),
+                ) {
+                    intent = EditorIntent::Save;
+                }
+                if ghost_pill(ui, egui::Id::new("ai-transform-cancel"), "Cancel", true) {
+                    intent = EditorIntent::Cancel;
+                }
+            });
+        });
+    ui.add_space(theme::SPACE_SCALE[1]);
+    intent
+}
+
+/// One line of prompt copy, ellipsized (the row's excerpt).
+fn prompt_excerpt(prompt: &str) -> String {
+    let first = prompt.lines().next().unwrap_or_default();
+    if first.chars().count() > 48 {
+        let cut: String = first.chars().take(46).collect();
+        format!("{cut}…")
+    } else {
+        first.to_string()
+    }
 }
 
 /// A `set-row`: label left, control right (the settings page's).
@@ -647,5 +964,127 @@ mod tests {
         assert!(toml.contains("provider = \"custom\""));
         assert!(toml.contains("model = \"llama3.2-vision\""));
         assert!(toml.contains("base-url = \"http://localhost:11434/v1\""));
+    }
+
+    // --- Transforms CRUD (tempdir-backed; the real config dir is
+    // never touched) ---
+
+    fn page_with_store() -> (AiConfigApp, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ai-transforms.toml");
+        (
+            AiConfigApp::with_transforms_path(Config::default(), path),
+            dir,
+        )
+    }
+
+    fn create(page: &mut AiConfigApp, name: &str, prompt: &str) -> String {
+        page.begin_create_transform();
+        page.editing = Some(EditingTransform {
+            id: None,
+            name: name.into(),
+            prompt: prompt.into(),
+        });
+        assert!(page.commit_transform(), "a full draft commits");
+        page.transforms().last().unwrap().id.clone()
+    }
+
+    #[test]
+    fn creating_a_transform_persists_the_transform_table() {
+        let (mut page, dir) = page_with_store();
+        assert!(
+            page.transforms().is_empty(),
+            "the empty store invites creation"
+        );
+        let id = create(
+            &mut page,
+            "Extract text",
+            "Extract the text inside this image",
+        );
+        assert_eq!(page.transforms().len(), 1);
+        assert_eq!(page.transforms()[0].id, id);
+
+        // The file on disk carries the [[transform]] table.
+        let body = std::fs::read_to_string(dir.path().join("ai-transforms.toml")).unwrap();
+        assert!(body.contains("[[transform]]"), "body:\n{body}");
+        assert!(body.contains("name = \"Extract text\""));
+        assert!(body.contains("prompt = \"Extract the text inside this image\""));
+
+        // A fresh page over the same path sees it (the dialog's
+        // fresh-snapshot semantics).
+        let reloaded = TransformStore::load_from(&dir.path().join("ai-transforms.toml"));
+        assert_eq!(reloaded.all(), page.transforms());
+    }
+
+    #[test]
+    fn editing_persists_name_and_prompt() {
+        let (mut page, _dir) = page_with_store();
+        let id = create(&mut page, "OCR", "read it");
+        page.begin_edit_transform(&id);
+        page.editing = Some(EditingTransform {
+            id: Some(id.clone()),
+            name: "Extract text".into(),
+            prompt: "Extract the text inside this image".into(),
+        });
+        assert!(page.commit_transform());
+        assert_eq!(page.transforms().len(), 1, "an edit never duplicates");
+        assert_eq!(page.transforms()[0].name, "Extract text");
+        assert_eq!(
+            page.transforms()[0].prompt,
+            "Extract the text inside this image"
+        );
+    }
+
+    #[test]
+    fn deleting_removes_exactly_that_id() {
+        let (mut page, _dir) = page_with_store();
+        let a = create(&mut page, "A", "a");
+        let b = create(&mut page, "B", "b");
+        page.delete_transform(&a);
+        assert_eq!(page.transforms().len(), 1);
+        assert_eq!(page.transforms()[0].id, b, "the survivor is intact");
+        page.delete_transform(&a);
+        assert_eq!(page.transforms().len(), 1, "re-delete is a no-op");
+    }
+
+    #[test]
+    fn reordering_swaps_neighbours_and_no_ops_at_the_ends() {
+        let (mut page, _dir) = page_with_store();
+        let a = create(&mut page, "A", "p");
+        let b = create(&mut page, "B", "p");
+        let c = create(&mut page, "C", "p");
+
+        page.move_transform(&c, -1);
+        assert_eq!(
+            ids(&page),
+            vec![a.clone(), c.clone(), b.clone()],
+            "C moves up over B"
+        );
+        page.move_transform(&a, -1);
+        assert_eq!(
+            ids(&page),
+            vec![a.clone(), c.clone(), b.clone()],
+            "top no-op"
+        );
+        page.move_transform(&b, 1);
+        assert_eq!(ids(&page), vec![a, c, b], "bottom no-op (order unchanged)");
+    }
+
+    fn ids(page: &AiConfigApp) -> Vec<String> {
+        page.transforms().iter().map(|t| t.id.clone()).collect()
+    }
+
+    #[test]
+    fn an_empty_draft_never_commits() {
+        let (mut page, _dir) = page_with_store();
+        page.begin_create_transform();
+        page.editing = Some(EditingTransform {
+            id: None,
+            name: "  ".into(),
+            prompt: "filled".into(),
+        });
+        assert!(!page.commit_transform(), "a nameless draft stays open");
+        assert!(page.editing.is_some(), "the draft survives for input");
+        assert!(page.transforms().is_empty());
     }
 }
