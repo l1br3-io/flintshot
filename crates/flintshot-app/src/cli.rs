@@ -1865,6 +1865,7 @@ pub fn run_hotkeys(args: &HotkeysArgs) -> Result<()> {
 pub fn run_app(args: &AppArgs) -> Result<()> {
     let route = match args.route.as_str() {
         "settings" => crate::worker::AppRoute::Settings,
+        "ai-config" => crate::worker::AppRoute::AiConfig,
         _ => crate::worker::AppRoute::Home,
     };
     crate::app_window::run(route, args.standalone)
@@ -1908,7 +1909,7 @@ pub struct AppArgs {
 /// (the `--after` precedent — a just-typed flag does not tolerate
 /// typos the way a config field does).
 fn validate_app_route(value: &str) -> std::result::Result<String, String> {
-    const VALID: [&str; 2] = ["home", "settings"];
+    const VALID: [&str; 3] = ["home", "settings", "ai-config"];
     if VALID.contains(&value) {
         Ok(value.to_string())
     } else {
@@ -2621,6 +2622,11 @@ mod tests {
         assert!(
             matches!(&cli.command, Some(Command::App(args)) if args.route == "settings"),
             "--route settings parses"
+        );
+        let cli = Cli::parse_from(["flintshot", "app", "--route", "ai-config"]);
+        assert!(
+            matches!(&cli.command, Some(Command::App(args)) if args.route == "ai-config"),
+            "--route ai-config parses"
         );
     }
 

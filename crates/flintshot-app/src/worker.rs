@@ -399,6 +399,8 @@ pub enum AppRoute {
     Home,
     /// The settings page (`--route settings`).
     Settings,
+    /// The AI settings page (`--route ai-config`).
+    AiConfig,
 }
 
 /// Build the `flintshot app [--route settings] --standalone` argv for
@@ -414,6 +416,7 @@ pub(crate) fn app_argv(route: AppRoute) -> Vec<String> {
     let mut argv = match route {
         AppRoute::Home => vec!["app".to_string()],
         AppRoute::Settings => vec!["app".to_string(), "--route".into(), "settings".into()],
+        AppRoute::AiConfig => vec!["app".to_string(), "--route".into(), "ai-config".into()],
     };
     argv.push("--standalone".into());
     argv

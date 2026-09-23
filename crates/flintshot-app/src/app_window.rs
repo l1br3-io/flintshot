@@ -81,6 +81,9 @@ enum Page {
     /// external capture closes the window while Settings is open
     /// (plan decision 8's principle applied to the new route).
     Settings,
+    /// The AI settings page — cold-start (`--route ai-config`) only;
+    /// in-window entries route through the editor-egui router.
+    AiConfig,
 }
 
 /// An editor page waiting to run: the image's editor state plus the
@@ -229,6 +232,10 @@ struct SharedInner {
     /// settings page. An open window consumes it through the route
     /// host instead (in-place swap).
     route_settings: bool,
+    /// The transform dialog's Configure AI… link armed the AI
+    /// settings route (the in-window router consumes it; parking
+    /// happens editor-egui side from the live editor).
+    route_ai_config: bool,
     /// The window closed for a hide directive (not a user quit): the
     /// outer loop must wait for the reopen instead of exiting.
     hide_requested: bool,
@@ -439,6 +446,16 @@ impl Shared {
     /// Take the route-settings intent, if one waits.
     fn take_route_settings(&self) -> bool {
         std::mem::take(&mut self.lock().route_settings)
+    }
+
+    /// Arm the AI settings route intent (the Configure link).
+    fn set_route_ai_config(&self) {
+        self.lock().route_ai_config = true;
+    }
+
+    /// Take the pending AI settings route intent, if one waits.
+    fn take_route_ai_config(&self) -> bool {
+        std::mem::take(&mut self.lock().route_ai_config)
     }
 
     /// Whether a window generation is currently running.
@@ -961,10 +978,7 @@ pub(crate) fn run(initial: crate::worker::AppRoute, standalone: bool) -> eyre::R
         .map_err(|e| eyre::eyre!("spawning the app pump thread: {e}"))?;
 
     let mut result = Ok(());
-    let mut start = match initial {
-        crate::worker::AppRoute::Home => GenerationStart::Home,
-        crate::worker::AppRoute::Settings => GenerationStart::Settings,
-    };
+    let mut start = generation_start(initial);
 
     // One iteration = one window **generation** (one eframe
     // lifetime; pages route inside it). Only captures and user quit
@@ -1099,6 +1113,7 @@ fn next_start_after_reopen(shared: &Shared) -> GenerationStart {
                 GenerationStart::Editor(Box::new(rebuild_restore(shared, *pending)))
             }
             Page::Settings => GenerationStart::Settings,
+            Page::AiConfig => GenerationStart::AiConfig,
         },
     };
     // Whichever won, drain the other flag — a stale loading mark
@@ -1145,6 +1160,18 @@ enum GenerationStart {
     /// `app --route settings`, a `SettingsFocus` reopen, or the
     /// same-page restore.
     Settings,
+    /// The AI settings page: cold start on `app --route ai-config`.
+    AiConfig,
+}
+
+/// Map the CLI/daemon route onto the window generation's start page
+/// (pure — pinned by the cold-start test).
+fn generation_start(initial: crate::worker::AppRoute) -> GenerationStart {
+    match initial {
+        crate::worker::AppRoute::Home => GenerationStart::Home,
+        crate::worker::AppRoute::Settings => GenerationStart::Settings,
+        crate::worker::AppRoute::AiConfig => GenerationStart::AiConfig,
+    }
 }
 
 /// Run one window generation to its close through the window router:
@@ -1179,6 +1206,7 @@ fn run_generation(
         }
         GenerationStart::Loading => flintshot_editor_egui::WindowStart::Loading,
         GenerationStart::Settings => flintshot_editor_egui::WindowStart::Settings,
+        GenerationStart::AiConfig => flintshot_editor_egui::WindowStart::AiConfig,
     };
     shared.set_window_open();
     let ran = crate::ambient::with_ambient_runtime(|| {
@@ -1226,6 +1254,7 @@ fn route_to_page(route: &flintshot_editor_egui::Route) -> Page {
         // the delivered image through the pending editor, never a
         // spinner — and future route kinds restore the empty state.
         flintshot_editor_egui::Route::Settings => Page::Settings,
+        flintshot_editor_egui::Route::AiConfig { .. } => Page::AiConfig,
         _ => Page::Home,
     }
 }
@@ -2174,6 +2203,10 @@ impl EditorPageBridge for PageBridge {
         let config = flintshot_core::Config::load().unwrap_or_default();
         crate::ai::worker::ai_configured(&config)
     }
+
+    fn request_ai_config_route(&mut self) {
+        self.shared.set_route_ai_config();
+    }
 }
 
 /// [`flintshot_editor_egui::RouteHost`] impl: the in-window router's
@@ -2208,6 +2241,10 @@ impl flintshot_editor_egui::RouteHost for RouteHostBridge {
 
     fn take_route_settings(&mut self) -> bool {
         self.shared.take_route_settings()
+    }
+
+    fn take_route_ai_config(&mut self) -> bool {
+        self.shared.take_route_ai_config()
     }
 }
 
@@ -2421,7 +2458,10 @@ mod tests {
                 assert!(p.state.undo.is_empty(), "history resets by design");
                 assert!(p.state.redo.is_empty());
             }
-            GenerationStart::Home | GenerationStart::Loading | GenerationStart::Settings => {
+            GenerationStart::Home
+            | GenerationStart::Loading
+            | GenerationStart::Settings
+            | GenerationStart::AiConfig => {
                 panic!("the editor restore must rebuild")
             }
         }
@@ -2499,7 +2539,10 @@ mod tests {
                 );
                 assert_eq!(pending.state.image.dimensions(), (5, 4));
             }
-            GenerationStart::Home | GenerationStart::Loading | GenerationStart::Settings => {
+            GenerationStart::Home
+            | GenerationStart::Loading
+            | GenerationStart::Settings
+            | GenerationStart::AiConfig => {
                 panic!("a routed image must win over the stash")
             }
         }
@@ -2945,6 +2988,32 @@ mod tests {
             !shared.take_route_settings(),
             "the intent is consumed exactly once"
         );
+    }
+
+    #[test]
+    fn ai_config_route_intent_round_trips_once() {
+        let shared = Shared::default();
+        shared.set_route_ai_config();
+        assert!(shared.take_route_ai_config());
+        assert!(
+            !shared.take_route_ai_config(),
+            "the intent is consumed exactly once"
+        );
+    }
+
+    /// The cold-start chain: `--route ai-config` maps through
+    /// `AppRoute` → `GenerationStart`, and the editor-egui route
+    /// restores onto the `AiConfig` page.
+    #[test]
+    fn ai_config_cold_start_maps_to_the_window_start() {
+        assert!(matches!(
+            generation_start(crate::worker::AppRoute::AiConfig),
+            GenerationStart::AiConfig
+        ));
+        let routed = route_to_page(&flintshot_editor_egui::Route::AiConfig {
+            parked_editor: None,
+        });
+        assert!(matches!(routed, Page::AiConfig));
     }
 
     #[test]

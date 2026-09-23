@@ -186,6 +186,11 @@ pub trait EditorPageBridge {
     fn ai_configured(&mut self) -> bool {
         false
     }
+
+    /// The dialog's **Configure AI…** link fired: route the window
+    /// to the AI settings page (the router parks this editor and
+    /// restores it on Esc). Default no-op (headless tests).
+    fn request_ai_config_route(&mut self) {}
 }
 
 /// An arrived Ask-the-shot result, host → page. Mirrors
@@ -402,6 +407,9 @@ fn start_route(start: &WindowStart) -> Route {
         WindowStart::Editor(routed) => Route::Editor(Box::new((**routed).clone())),
         WindowStart::Loading => Route::Loading,
         WindowStart::Settings => Route::Settings,
+        WindowStart::AiConfig => Route::AiConfig {
+            parked_editor: None,
+        },
     }
 }
 

@@ -2069,9 +2069,14 @@ impl EditorApp {
                 crate::ai_dialog::AiDialogAction::Run { prompt } => {
                     self.handle_ai_run(ctx, &prompt);
                 }
-                // Task 009 routes this to the AI config page; the
-                // dialog has already closed.
-                crate::ai_dialog::AiDialogAction::Configure => {}
+                // The Configure link routes the window to the AI
+                // settings page; the router parks this editor and
+                // restores it on Esc.
+                crate::ai_dialog::AiDialogAction::Configure => {
+                    if let Some(bridge) = self.page.clone() {
+                        bridge.borrow_mut().request_ai_config_route();
+                    }
+                }
             }
         }
         if let Some(text) = self.ai.take_outbox() {

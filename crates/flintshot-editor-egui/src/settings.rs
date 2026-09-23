@@ -35,6 +35,9 @@ pub(crate) enum SettingsAction {
     /// through the daemon (the bridge owns the IPC; Wayland-only —
     /// the row renders iff the session is Wayland).
     RebindShortcuts,
+    /// *Ask the shot settings…* clicked: route to the AI settings
+    /// page (the router swaps in place).
+    OpenAiConfig,
 }
 
 /// The settings page's state: the working config copy plus the
@@ -450,6 +453,15 @@ fn config_file_section(ui: &mut egui::Ui, page: &mut SettingsApp) {
         if page.show_defaults {
             defaults_card(ui, &page.default_toml);
         }
+        set_row(ui, "Ask the shot", |ui| {
+            if link(
+                ui,
+                egui::Id::new("set-open-ai-config"),
+                "Ask the shot settings…",
+            ) {
+                page.actions.push(SettingsAction::OpenAiConfig);
+            }
+        });
     });
 }
 

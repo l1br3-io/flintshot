@@ -76,6 +76,17 @@ pub enum Route {
     /// The settings page (Task 010): reached from every route's
     /// dots overflow; Escape returns to Home.
     Settings,
+    /// The AI settings page (Ask-the-shot): reached from Settings'
+    /// link row, the transform dialog's **Configure AI…** link, or
+    /// `app --route ai-config`. Escaping returns to the parked
+    /// editor when the dialog routed from one (annotations intact),
+    /// else Home.
+    AiConfig {
+        /// The editor session parked by the Configure link — the
+        /// live state (not the route's construction snapshot),
+        /// restored on Esc / breadcrumb.
+        parked_editor: Option<Box<RoutedEditor>>,
+    },
 }
 
 /// An editor route waiting to run: the editor state plus its
@@ -109,6 +120,9 @@ pub enum WindowStart {
     /// Settings (`app --route settings`) or the reopen after a
     /// `SettingsFocus` intent while the window was closed.
     Settings,
+    /// The AI settings page: cold start (`app --route ai-config`).
+    /// In-window entries route via [`Route::AiConfig`] parking.
+    AiConfig,
 }
 
 /// How one window generation ended — the post-close input the app
@@ -166,6 +180,14 @@ pub trait RouteHost {
     /// *Settings*). The router swaps the settings page in place, no
     /// close.
     fn take_route_settings(&mut self) -> bool;
+
+    /// Take a pending "route AI settings" intent, if one waits (the
+    /// transform dialog's **Configure AI…** link arming the swap
+    /// through the page bridge's shared state). Default: never —
+    /// only the app window's host arms it.
+    fn take_route_ai_config(&mut self) -> bool {
+        false
+    }
 }
 
 /// Per-route viewport geometry — the one-time command batch a route
@@ -195,11 +217,13 @@ pub(crate) fn route_geometry(route: &Route) -> RouteGeometry {
             resizable: true,
             title: HOME_WINDOW_TITLE,
         },
-        Route::Editor(..) | Route::Loading | Route::Settings => RouteGeometry {
-            size: EDITOR_PAGE_DEFAULT_SIZE,
-            resizable: true,
-            title: WINDOW_TITLE,
-        },
+        Route::Editor(..) | Route::Loading | Route::Settings | Route::AiConfig { .. } => {
+            RouteGeometry {
+                size: EDITOR_PAGE_DEFAULT_SIZE,
+                resizable: true,
+                title: WINDOW_TITLE,
+            }
+        }
     }
 }
 
@@ -223,6 +247,8 @@ pub(crate) struct WindowApp {
     /// The settings page, when the Settings route is active. Built
     /// on route entry from the bridge's config snapshot.
     settings: Option<crate::settings::SettingsApp>,
+    /// The AI settings page, when the `AiConfig` route is active.
+    ai_config: Option<crate::ai_config::AiConfigApp>,
     /// The live toast, if one is up (the already-open Settings ping
     /// is the first raiser).
     toast: Option<crate::toast::Toast>,
@@ -263,6 +289,12 @@ impl WindowApp {
             WindowStart::Home => (Route::Home, None),
             WindowStart::Loading => (Route::Loading, None),
             WindowStart::Settings => (Route::Settings, None),
+            WindowStart::AiConfig => (
+                Route::AiConfig {
+                    parked_editor: None,
+                },
+                None,
+            ),
             WindowStart::Editor(routed) => {
                 let editor = Self::build_editor(&routed, ctx, &page_bridge, &editor_outcome);
                 (Route::Editor(routed), Some(editor))
@@ -278,11 +310,17 @@ impl WindowApp {
         } else {
             None
         };
+        let ai_config = if matches!(route, Route::AiConfig { .. }) {
+            Some(Self::build_ai_config(&mut home))
+        } else {
+            None
+        };
         Self {
             route,
             home,
             editor,
             settings,
+            ai_config,
             toast: None,
             page_bridge,
             host,
@@ -321,6 +359,12 @@ impl WindowApp {
         )
     }
 
+    /// Snapshot the AI settings page from the home bridge (every
+    /// `AiConfig` entry shares it).
+    fn build_ai_config(home: &mut crate::home::HomeApp) -> crate::ai_config::AiConfigApp {
+        crate::ai_config::AiConfigApp::new(home.load_config())
+    }
+
     /// Swap the route in place: construct / drop the route's app and
     /// issue the one-time geometry batch when the route *kind*
     /// changes. Same-kind swaps (an image swap inside the editor
@@ -337,6 +381,27 @@ impl WindowApp {
                 self.host.editor_route_left(editor.state());
             }
         }
+        // AiConfig computes its parked payload from the live editor
+        // before the match (the match's other arms read `&route`).
+        // Parking rule: when the Configure link routed from a live
+        // editor, the parked state is the *live* state (the same
+        // freshness rule as the flush above — the route slot's copy
+        // predates every annotation).
+        let route = if let Route::AiConfig { .. } = route {
+            let parked = match (&self.route, self.editor.as_ref()) {
+                (Route::Editor(routed), Some(editor)) => {
+                    let mut fresh = (**routed).clone();
+                    fresh.state = editor.state().clone();
+                    Some(Box::new(fresh))
+                }
+                _ => None,
+            };
+            Route::AiConfig {
+                parked_editor: parked,
+            }
+        } else {
+            route
+        };
         match &route {
             Route::Editor(routed) => {
                 self.host.editor_route_opened(routed.session_id);
@@ -350,14 +415,23 @@ impl WindowApp {
                 // slot — a stale Cancelled must not route the new
                 // page home on its first frame.
                 *self.editor_outcome.borrow_mut() = None;
+                self.settings = None;
+                self.ai_config = None;
             }
             Route::Home | Route::Loading => {
                 self.editor = None;
                 self.settings = None;
+                self.ai_config = None;
             }
             Route::Settings => {
                 self.editor = None;
                 self.settings = Some(Self::build_settings(&mut self.home));
+                self.ai_config = None;
+            }
+            Route::AiConfig { .. } => {
+                self.editor = None;
+                self.settings = None;
+                self.ai_config = Some(Self::build_ai_config(&mut self.home));
             }
         }
         self.route = route.clone();
@@ -430,6 +504,21 @@ impl WindowApp {
         }
     }
 
+    /// The `AiConfig` route poll: the transform dialog's **Configure
+    /// AI…** link (page-mode editor) arms the intent through the page
+    /// bridge's shared state; the router swaps in place — parking
+    /// happens inside `request_route` from the live editor.
+    fn poll_route_ai_config(&mut self, ctx: &Context) {
+        if self.host.take_route_ai_config() && !matches!(self.route, Route::AiConfig { .. }) {
+            self.request_route(
+                ctx,
+                Route::AiConfig {
+                    parked_editor: None,
+                },
+            );
+        }
+    }
+
     /// The editor outcome poll: outcomes that route in-place are
     /// consumed here; a capture intent is left in the slot for the
     /// window's exit (its close is already landing).
@@ -485,7 +574,8 @@ impl WindowApp {
             // which owns the page borrow — but the directive queue
             // still needs a consumer here (a Hide during a capture
             // must close the window from the settings page too).
-            Route::Settings => {
+            // `AiConfig` shares the poll contract.
+            Route::Settings | Route::AiConfig { .. } => {
                 ctx.request_repaint_after(LOADING_REPAINT);
                 self.poll_page_directives(ctx);
             }
@@ -502,6 +592,7 @@ impl WindowApp {
         self.poll_editor_outcome(ctx);
         self.poll_route_home(ctx);
         self.poll_route_settings(ctx);
+        self.poll_route_ai_config(ctx);
     }
 
     /// Headless-callable core of [`App::ui`].
@@ -512,7 +603,7 @@ impl WindowApp {
             Route::Home => crate::topbar::Surface::Home,
             Route::Editor(..) => crate::topbar::Surface::Editor,
             Route::Loading => crate::topbar::Surface::Loading,
-            Route::Settings => crate::topbar::Surface::Settings,
+            Route::Settings | Route::AiConfig { .. } => crate::topbar::Surface::Settings,
         };
         let status = if matches!(self.route, Route::Home) {
             Some(self.home.status_line())
@@ -541,7 +632,10 @@ impl WindowApp {
             // settings route is a page over home (the bridge's
             // capture path + close choreography is route-agnostic).
             Some(crate::topbar::TopbarAction::Capture)
-                if matches!(self.route, Route::Home | Route::Settings) =>
+                if matches!(
+                    self.route,
+                    Route::Home | Route::Settings | Route::AiConfig { .. }
+                ) =>
             {
                 self.home.start_capture(ui.ctx());
             }
@@ -569,6 +663,23 @@ impl WindowApp {
             }
             _ => {}
         }
+        // Deferred route intents: whole-`self` route swaps must wait
+        // out the per-page borrows of the body pass.
+        if let Some(route) = self.draw_route_body(ui) {
+            self.request_route(ui.ctx(), route);
+        }
+        if let Some(editor) = self.editor.as_mut() {
+            editor.ui_impl(ui);
+        }
+        crate::toast::show(ui, &mut self.toast);
+    }
+
+    /// The active route's body. Returns a deferred route intent
+    /// (Esc / link clicks): whole-`self` route swaps must wait out
+    /// this pass's per-page borrows, so the caller applies them
+    /// after it returns.
+    fn draw_route_body(&mut self, ui: &mut egui::Ui) -> Option<Route> {
+        let mut route_after: Option<Route> = None;
         match &mut self.route {
             Route::Home => self.home.ui_impl(ui),
             Route::Editor(..) => {}
@@ -601,7 +712,11 @@ impl WindowApp {
                     }
                     // The page's clicked links: the bridge services
                     // them (the editor spawn leaves the UI thread).
+                    let mut actions = Vec::new();
                     while let Some(action) = page.drain_action() {
+                        actions.push(action);
+                    }
+                    for action in actions {
                         match action {
                             crate::settings::SettingsAction::EditConfigFile => {
                                 self.home.open_config_file();
@@ -609,18 +724,44 @@ impl WindowApp {
                             crate::settings::SettingsAction::RebindShortcuts => {
                                 self.home.request_rebind();
                             }
+                            // The Ask-the-shot link row: route to the
+                            // AI settings page (no parked editor —
+                            // Settings never has one).
+                            crate::settings::SettingsAction::OpenAiConfig => {
+                                route_after = Some(Route::AiConfig {
+                                    parked_editor: None,
+                                });
+                            }
                         }
                     }
                     if escape {
-                        self.request_route(ui.ctx(), Route::Home);
+                        route_after = Some(Route::Home);
+                    }
+                }
+            }
+            Route::AiConfig { parked_editor } => {
+                if let Some(page) = self.ai_config.as_mut() {
+                    let now = ui.ctx().input(|i| i.time);
+                    let panel = egui::CentralPanel::default()
+                        .frame(egui::Frame::new().fill(crate::theme::palette::PAPER_CREAM))
+                        .show(ui, |ui| crate::ai_config::AiConfigPage::show(ui, page, now));
+                    let escape = panel.inner;
+                    if let Some(config) = page.drain_save(now) {
+                        self.home.save_config(&config);
+                    }
+                    if escape {
+                        // Esc / breadcrumb: the parked editor returns
+                        // (annotations intact) when the Configure
+                        // link routed from one, else Home.
+                        match parked_editor.take() {
+                            Some(parked) => route_after = Some(Route::Editor(parked)),
+                            None => route_after = Some(Route::Home),
+                        }
                     }
                 }
             }
         }
-        if let Some(editor) = self.editor.as_mut() {
-            editor.ui_impl(ui);
-        }
-        crate::toast::show(ui, &mut self.toast);
+        route_after
     }
 }
 
@@ -1102,6 +1243,7 @@ mod tests {
         left: Vec<Vec<flintshot_core::Annotation>>,
         route_home: Option<()>,
         route_settings: Option<()>,
+        route_ai_config: Option<()>,
     }
 
     impl RouteHost for RecordingHost {
@@ -1125,6 +1267,10 @@ mod tests {
 
         fn take_route_settings(&mut self) -> bool {
             self.inner.borrow_mut().route_settings.take().is_some()
+        }
+
+        fn take_route_ai_config(&mut self) -> bool {
+            self.inner.borrow_mut().route_ai_config.take().is_some()
         }
     }
 
@@ -1286,6 +1432,170 @@ mod tests {
             1,
             "the outgoing editor flushes even without a kind change"
         );
+    }
+
+    /// Editor → `AiConfig` (the Configure link's route): the editor
+    /// parks with its **live** annotations, the leave-flush fires
+    /// once, and Esc restores the editor with the annotations intact
+    /// — the configure-and-back round-trip contract.
+    #[test]
+    fn aiconfig_parks_the_editor_and_esc_restores_it_annotated() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, _bridge, host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+                session_id: None,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        // Annotate after construction so the live state provably
+        // differs from the route's snapshot.
+        app.editor
+            .as_mut()
+            .expect("editor start builds the editor app")
+            .state_mut()
+            .anns
+            .push(line_ann_fixture());
+        app.request_route(
+            &ctx,
+            Route::AiConfig {
+                parked_editor: None,
+            },
+        );
+
+        assert!(matches!(app.route, Route::AiConfig { .. }));
+        assert!(
+            app.editor.is_none(),
+            "the editor app drops while parked (the route payload holds it)"
+        );
+        assert_eq!(
+            host.inner.borrow().left.len(),
+            1,
+            "leaving Editor for AiConfig flushes once"
+        );
+        match &app.route {
+            Route::AiConfig { parked_editor } => {
+                let parked = parked_editor
+                    .as_ref()
+                    .expect("routing from a live editor parks it");
+                assert_eq!(
+                    parked.state.anns.len(),
+                    1,
+                    "the parked state is the live one, not the snapshot"
+                );
+            }
+            other => panic!("expected AiConfig, got {other:?}"),
+        }
+
+        // Esc on the AiConfig page restores the parked editor.
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1024.0, 640.0),
+            )),
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        assert!(
+            matches!(app.route, Route::Editor(..)),
+            "Esc restores the editor"
+        );
+        assert_eq!(
+            app.editor
+                .as_ref()
+                .expect("the editor app rebuilt")
+                .state()
+                .anns
+                .len(),
+            1,
+            "annotations survive the configure-and-back round-trip"
+        );
+    }
+
+    /// A cold start (or Settings entry) has nothing parked: Esc
+    /// routes Home.
+    #[test]
+    fn aiconfig_without_a_parked_editor_escapes_home() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, _bridge, _host) = window_app_start(
+            WindowStart::AiConfig,
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        assert!(matches!(
+            app.route,
+            Route::AiConfig {
+                parked_editor: None
+            }
+        ));
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1024.0, 640.0),
+            )),
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        assert!(matches!(app.route, Route::Home));
+    }
+
+    /// The Configure-link route poll: an armed intent routes from a
+    /// live editor with parking (the in-window path the page bridge
+    /// arms through the app's shared state).
+    #[test]
+    fn aiconfig_route_intent_routes_and_parks_from_the_editor() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, _bridge, host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+                session_id: None,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        app.editor
+            .as_mut()
+            .expect("editor start builds the editor app")
+            .state_mut()
+            .anns
+            .push(line_ann_fixture());
+        host.inner.borrow_mut().route_ai_config = Some(());
+        app.logic_impl(&ctx);
+        assert!(
+            matches!(app.route, Route::AiConfig { ref parked_editor } if parked_editor.is_some()),
+            "the poll routes to AiConfig with the editor parked"
+        );
+    }
+
+    /// `AiConfig` shares the stable geometry (the Settings precedent).
+    #[test]
+    fn aiconfig_route_uses_the_stable_geometry() {
+        let g = route_geometry(&Route::AiConfig {
+            parked_editor: None,
+        });
+        assert_eq!(g.size, egui::vec2(1024.0, 640.0));
+        assert!(g.resizable);
+        assert_eq!(g.title, "flintshot — annotate");
     }
 
     fn window_app() -> WindowApp {
