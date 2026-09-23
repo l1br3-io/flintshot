@@ -77,3 +77,5 @@ Format: **Context · Decision · Consequences**.
 | ADR-0065 | [The worker editor's Home link delegates to the app window](ADR-0065-worker-home-delegates-to-app-window.md) |
 | ADR-0066 | [The app window is the liveness anchor](ADR-0066-app-window-liveness-anchor.md) |
 | ADR-0067 | [Session captures — an advisory temp-dir store behind the editor](ADR-0067-session-capture-store.md) |
+| ADR-0068 | [Release pipeline — cargo-dist core, custom jobs for non-native formats](ADR-0068-release-pipeline.md) |
+| ADR-0069 | [AI provider client — one OpenAI-compatible wire format, trait in core, reqwest in app](ADR-0069-ai-provider-client.md) |

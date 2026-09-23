@@ -139,10 +139,12 @@ impl AiDialog {
                         );
                         ui.add_space(theme::SPACE_SCALE[1]);
 
+                        field_label(ui, "SAVED TRANSFORMS");
                         saved_list(ui, transforms, &mut self.selected);
                         ui.add_space(theme::SPACE_SCALE[1]);
                         hairline(ui);
                         ui.add_space(theme::SPACE_SCALE[1]);
+                        field_label(ui, "CUSTOM PROMPT");
 
                         let mut prompt = std::mem::take(&mut self.prompt);
                         let edit = ui.add(
@@ -201,6 +203,16 @@ impl AiDialog {
         }
         action
     }
+}
+
+/// A quiet uppercase field label (the dialog's section grammar).
+fn field_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .size(theme::TYPE_XS)
+            .color(theme::palette::INK_SOFT),
+    );
+    ui.add_space(theme::SPACE_SCALE[0]);
 }
 
 /// The saved-transform list: vertical radio pills, or the invitation

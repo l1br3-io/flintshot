@@ -75,6 +75,7 @@ cargo run -- --help              # see subcommand surface
 cargo run -- capture             # the single Capture action (OS selection UI on
                                  # Wayland; fallback: monitor grab -> editor)
 cargo run -- app                 # app window (capture home; auto-starts the daemon)
+cargo run -- app --route ai-config  # cold-start the app window on the AI settings page
 cargo run -- backends            # capture-backend diagnostics (probes + auto pick)
 ```
 
@@ -200,6 +201,8 @@ Authoritative style detail lives in
 | Capture backends / registry     | `crates/flintshot-core/src/capture/` (`Capturer` trait, `xcap` + portal, `select_backend`) |
 | `Canvas` / `EditorShell` traits | `crates/flintshot-core/src/{render,shell}.rs`             |
 | Upload `Backend` trait          | `crates/flintshot-core/src/upload.rs`                     |
+| Ask-the-shot (AI) types / client | `flintshot-core/src/ai/` (wire types, trait, store) + `flintshot-app/src/ai/` (reqwest impl + worker; see ADR-0069) |
+| AI panel / dialog / config page | `flintshot-editor-egui/src/{ai_panel,ai_dialog,ai_config}.rs` |
 | egui editor implementation      | `crates/flintshot-editor-egui/src/`                        |
 | Cross-crate types re-exports    | `crates/flintshot-core/src/lib.rs`                         |
 | CI pipeline                     | `.github/workflows/ci.yml`                                 |

@@ -20,6 +20,41 @@ Categories used below:
 
 ### Added
 
+- **Ask the shot — AI over your screenshots** (effort
+  `ai-transforms`; ADR-0069). From the editor, send what you see to
+  a vision-capable chat model and read the answer in-app:
+  - **AI tool chip** in the editor rail (gold spark, bottom pod,
+    `I` key): opens the transform dialog — pick a saved transform
+    or type a custom prompt, `Run` flattens the canvas (annotations,
+    crops, blurs included; longest edge capped at 2048 px) and sends
+    it as the image part of one vision message. With no provider
+    configured the dialog offers **Configure AI…** instead of a
+    dead Run.
+  - **AI tab** in the right panel (beside Properties / History):
+    the conversation as a contact sheet — the sent shot as a
+    thumbnail, user chips, assistant answers rendered as markdown
+    (headings, code blocks, tables), error cards with next-step
+    copy. The tab flips forward when a response arrives (gold
+    arrival hairline, `ui.animations` respected). Follow-ups send
+    the thread text-only from a one-line chatbox; a new run starts
+    a fresh conversation. History lives in memory only.
+  - **AI settings page** (`app --route ai-config`, Settings link,
+    or the dialog's Configure link — the editor parks and returns
+    annotated on Esc): provider presets (OpenAI · xAI (Grok) ·
+    Gemini · Custom OpenAI-compatible — covers Ollama / LM Studio /
+    OpenRouter via base-URL override), model id, **Test connection**
+    with inline pass/fail, and the API key stored in the OS
+    keyring (`flinshot / ai:<provider>`) — never in `config.toml`,
+    never echoed back.
+  - **Saved transforms** CRUD (name + prompt, e.g. *"Extract the
+    text inside this image"*): add / edit / delete / reorder on the
+    AI settings page, persisted to `ai-transforms.toml` in the
+    config dir, immediately available in the dialog.
+  - Core: `flintshot-core::ai` — chat wire types, `AiClient`
+    trait, provider presets, `AiError` mapping (auth / rate-limit /
+    provider / transport), `[ai]` config section, and the
+    `TransformStore`.
+
 - **Double-click selects + focuses Properties** (effort
   `dblclick-select-properties`). A double-click on the canvas now
   follows Snagit-style semantics instead of being a Text-tool-only

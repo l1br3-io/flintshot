@@ -76,6 +76,10 @@ pub(crate) struct AiConversation {
     /// (submitted inside `panel::show`'s borrow; consumed right
     /// after via [`AiConversation::take_outbox`]).
     outbox: Option<String>,
+    /// Whether an assistant response just landed (the arrival
+    /// hairline's one-shot trigger; the first render of the fresh
+    /// card consumes it).
+    fresh_arrival: bool,
 }
 
 impl AiConversation {
@@ -93,10 +97,17 @@ impl AiConversation {
     }
 
     /// Append an assistant response and clear the pending flag —
-    /// response arrival always ends the wait.
+    /// response arrival always ends the wait (and arms the arrival
+    /// hairline).
     pub(crate) fn push_assistant(&mut self, text: impl Into<String>) {
         self.turns.push(AiTurn::Assistant { text: text.into() });
         self.pending = false;
+        self.fresh_arrival = true;
+    }
+
+    /// Take the one-shot arrival flag (the fresh card's first render).
+    fn take_fresh_arrival(&mut self) -> bool {
+        std::mem::take(&mut self.fresh_arrival)
     }
 
     /// Append an error card and clear the pending flag — a surfaced
@@ -128,6 +139,7 @@ impl AiConversation {
         self.pending = false;
         self.thumb = None;
         self.outbox = None;
+        self.fresh_arrival = false;
     }
 
     /// Take the submitted follow-up, if any (the send wiring's
@@ -154,6 +166,7 @@ impl AiConversation {
 pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
     let thumb = conversation.thumb.clone();
     let turns = conversation.turns().to_vec();
+    let fresh_arrival = conversation.take_fresh_arrival();
     let empty = conversation.is_empty() && !conversation.is_pending();
     let pending = conversation.is_pending();
     let md_cache = &mut conversation.md_cache;
@@ -170,7 +183,12 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
             for (i, turn) in turns.iter().enumerate() {
                 match turn {
                     AiTurn::User { prompt } => user_chip(ui, egui::Id::new(("ai-turn", i)), prompt),
-                    AiTurn::Assistant { text } => assistant_card(ui, md_cache, text),
+                    AiTurn::Assistant { text } => {
+                        // The arrival hairline: only the card a
+                        // response just landed into animates.
+                        let fresh = fresh_arrival && i + 1 == turns.len();
+                        assistant_card(ui, md_cache, egui::Id::new(("ai-arrival", i)), text, fresh);
+                    }
                     AiTurn::Error { message } => {
                         error_card(ui, egui::Id::new(("ai-turn", i)), message);
                     }
@@ -251,10 +269,41 @@ fn user_chip(ui: &mut egui::Ui, _id: egui::Id, prompt: &str) {
     ui.add_space(theme::SPACE_SCALE[1]);
 }
 
+/// The arrival hairline's thickening window (~300 ms through the
+/// animation gate; the gate-off path jumps to the rest width).
+const ARRIVAL_SECS: f32 = 0.3;
+
+/// The card's left-edge gold hairline width, 0→1 progress eased.
+/// Fresh arrivals start at 0 (a 1 px hairline thickening to 3 px);
+/// every other card renders at rest. The animation gate jumps
+/// straight to rest.
+fn arrival_progress(ctx: &egui::Context, id: egui::Id, fresh: bool) -> f32 {
+    if !crate::widgets::animate(ctx) {
+        return 1.0;
+    }
+    let dt = ctx.input(|i| i.stable_dt);
+    let t = ctx.data_mut(|d| {
+        let start = if fresh { 0.0 } else { 1.0 };
+        let current = d.get_temp::<f32>(id).unwrap_or(start);
+        let next = theme::ease::approach(current, 1.0, dt, ARRIVAL_SECS);
+        d.insert_temp(id, next);
+        next
+    });
+    theme::ease::spring(t)
+}
+
 /// One assistant turn: a full-width cream paper card with the
-/// markdown-rendered response.
-fn assistant_card(ui: &mut egui::Ui, cache: &mut egui_commonmark::CommonMarkCache, text: &str) {
-    egui::Frame::new()
+/// markdown-rendered response. A response's arrival paints a gold
+/// left-edge hairline that thickens over [`ARRIVAL_SECS`] — the one
+/// motion moment; everything else stays still.
+fn assistant_card(
+    ui: &mut egui::Ui,
+    cache: &mut egui_commonmark::CommonMarkCache,
+    arrival_id: egui::Id,
+    text: &str,
+    fresh: bool,
+) {
+    let resp = egui::Frame::new()
         .fill(theme::palette::PAPER_CREAM)
         .corner_radius(CornerRadius::same(theme::POD_RADIUS))
         .inner_margin(egui::Margin::same(10))
@@ -262,7 +311,18 @@ fn assistant_card(ui: &mut egui::Ui, cache: &mut egui_commonmark::CommonMarkCach
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             assistant_markdown(ui, cache, text);
-        });
+        })
+        .response;
+    let progress = arrival_progress(ui.ctx(), arrival_id, fresh);
+    let width = 1.0 + 2.0 * progress;
+    let left = resp.rect.left_center();
+    ui.painter().line_segment(
+        [
+            egui::pos2(left.x + width / 2.0, resp.rect.top()),
+            egui::pos2(left.x + width / 2.0, resp.rect.bottom()),
+        ],
+        egui::Stroke::new(width, theme::palette::GOLD),
+    );
     ui.add_space(theme::SPACE_SCALE[1]);
 }
 
@@ -432,6 +492,45 @@ mod tests {
         );
         conversation.push_assistant("answer");
         assert!(!conversation.is_pending());
+    }
+
+    /// The arrival hairline: a fresh arrival starts thin and settles
+    /// at rest over ~300 ms; the animation gate jumps straight to
+    /// rest.
+    #[test]
+    fn arrival_hairline_thickens_then_rests_and_the_gate_jumps() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, true);
+        let id = egui::Id::new("test-arrival");
+        let step = |i: f64, fresh: bool| {
+            let raw = egui::RawInput {
+                time: Some(i * 0.016),
+                predicted_dt: 1.0 / 60.0,
+                ..egui::RawInput::default()
+            };
+            let mut out = 0.0_f32;
+            let _ = ctx.run_ui(raw, |ui| {
+                out = arrival_progress(ui.ctx(), id, fresh);
+            });
+            out
+        };
+        let first = step(0.0, true);
+        assert!(first < 0.9, "a fresh arrival starts thin: {first}");
+        let mut last = first;
+        for i in 1..40 {
+            last = step(f64::from(i), false);
+        }
+        assert!(
+            (last - 1.0).abs() < 0.05,
+            "the hairline settles at rest: {last}"
+        );
+
+        crate::widgets::set_animations(&ctx, false);
+        assert!(
+            (step(41.0, true) - 1.0).abs() < f32::EPSILON,
+            "the gate jumps to rest"
+        );
     }
 
     /// The markdown fixture renders: a heading, a fenced code block,
