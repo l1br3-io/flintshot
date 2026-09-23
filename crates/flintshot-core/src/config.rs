@@ -126,6 +126,17 @@ pub struct UiConfig {
     /// survives re-saves.
     #[serde(default = "default_recent_captures_limit")]
     pub recent_captures_limit: u32,
+    /// Right panel width in logical px, clamped to
+    /// [`PANEL_MIN_WIDTH`]..=[`PANEL_MAX_WIDTH`] on read (see
+    /// [`UiConfig::panel_width_clamped`]). Persisted so the editor
+    /// reopens at the user's last width.
+    #[serde(default = "default_panel_width")]
+    pub panel_width: f32,
+    /// Whether the right panel starts collapsed. Reopened with
+    /// `Ctrl+B` (the collapsed state exposes no clickable
+    /// affordance by design).
+    #[serde(default)]
+    pub panel_collapsed: bool,
 }
 
 impl UiConfig {
@@ -136,6 +147,14 @@ impl UiConfig {
         // ≤ 200 by the clamp, so the fallback is unreachable on any
         // real target — but no unwrap outside tests.
         usize::try_from(self.recent_captures_limit.clamp(1, 200)).unwrap_or(1)
+    }
+
+    /// The panel width actually enforced: the configured value
+    /// clamped to [`PANEL_MIN_WIDTH`]..=[`PANEL_MAX_WIDTH`]. Stored
+    /// verbatim; every consumer (panel seed, worker fit) reads this.
+    #[must_use]
+    pub fn panel_width_clamped(&self) -> f32 {
+        self.panel_width.clamp(PANEL_MIN_WIDTH, PANEL_MAX_WIDTH)
     }
 }
 
@@ -154,9 +173,19 @@ impl Default for UiConfig {
             statusbar_size_mode: default_statusbar_size_mode(),
             animations: default_animations(),
             recent_captures_limit: default_recent_captures_limit(),
+            panel_width: default_panel_width(),
+            panel_collapsed: false,
         }
     }
 }
+
+/// The right panel's resize bounds, logical px: below 200 the panel
+/// content breaks, above 400 it squeezes the canvas. Shared by the
+/// editor shell's panel `size_range` and the clamp-on-read accessor
+/// — one source of truth, toolkit-free f32.
+pub const PANEL_MIN_WIDTH: f32 = 200.0;
+/// See [`PANEL_MIN_WIDTH`].
+pub const PANEL_MAX_WIDTH: f32 = 400.0;
 
 /// Capture behaviour: cursor inclusion, pre-grab delay, and the
 /// capture-backend selection.
@@ -498,6 +527,10 @@ fn default_save_clipboard_copies() -> bool {
 
 fn default_recent_captures_limit() -> u32 {
     50
+}
+
+fn default_panel_width() -> f32 {
+    236.0
 }
 
 fn default_output_format() -> String {
@@ -937,6 +970,16 @@ impl Config {
             ui,
             "recent-captures-limit",
             toml_edit::Value::from(i64::from(self.ui.recent_captures_limit)),
+        );
+        set_value(
+            ui,
+            "panel-width",
+            toml_edit::Value::from(f64::from(self.ui.panel_width)),
+        );
+        set_value(
+            ui,
+            "panel-collapsed",
+            toml_edit::Value::from(self.ui.panel_collapsed),
         );
     }
 }
@@ -1839,6 +1882,8 @@ backend = \"portal\"
             from_asset.ui.recent_captures_limit,
             d.ui.recent_captures_limit
         );
+        assert_eq!(from_asset.ui.panel_width, d.ui.panel_width);
+        assert_eq!(from_asset.ui.panel_collapsed, d.ui.panel_collapsed);
 
         assert_eq!(from_asset.ai.provider, d.ai.provider);
         assert_eq!(from_asset.ai.model, d.ai.model);
@@ -2122,5 +2167,74 @@ backend = \"portal\"
             written.contains("save-dir = \"/new\""),
             "value updated in place:\n{written}"
         );
+    }
+
+    // ── sidebar-collapse-resize Task 001 ──────────────────────────
+
+    /// The panel fields default (236 / false) in code and from a
+    /// file that predates them (acceptance: old configs load with
+    /// zero migration).
+    #[test]
+    fn panel_fields_default_when_absent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[ui]\ndefault-color = \"#ff0000\"\n").unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.ui.panel_width, 236.0, "default width 236");
+        assert!(!cfg.ui.panel_collapsed, "default expanded");
+        assert_eq!(UiConfig::default().panel_width, 236.0);
+        assert!(!UiConfig::default().panel_collapsed);
+    }
+
+    /// Both fields survive a save/load round-trip in kebab-case.
+    #[test]
+    fn panel_fields_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.ui.panel_width = 320.0;
+        cfg.ui.panel_collapsed = true;
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("panel-width = 320"),
+            "panel-width not persisted kebab-case:\n{written}"
+        );
+        assert!(
+            written.contains("panel-collapsed = true"),
+            "panel-collapsed not persisted kebab-case:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.ui.panel_width, 320.0);
+        assert!(back.ui.panel_collapsed);
+    }
+
+    /// The clamp the panel plumbing consumes: 200–400, stored
+    /// verbatim so a hand-edited out-of-range value survives
+    /// re-saves (the `recent_captures_limit` policy).
+    #[test]
+    fn panel_width_clamps_two_hundred_to_four_hundred() {
+        let clamped = |v: f32| {
+            UiConfig {
+                panel_width: v,
+                ..UiConfig::default()
+            }
+            .panel_width_clamped()
+        };
+        assert_eq!(clamped(5.0), 200.0);
+        assert_eq!(clamped(9000.0), 400.0);
+        assert_eq!(clamped(236.0), 236.0);
+        // The raw field loads verbatim (clamp is at use, not on load).
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[ui]\npanel-width = 9000.0\n").unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.ui.panel_width, 9000.0, "stored verbatim");
+        assert_eq!(cfg.ui.panel_width_clamped(), 400.0, "clamped at use");
+        // The bounds consts are the single source both crates share.
+        assert_eq!(PANEL_MIN_WIDTH, 200.0);
+        assert_eq!(PANEL_MAX_WIDTH, 400.0);
     }
 }

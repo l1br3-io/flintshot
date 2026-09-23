@@ -54,6 +54,31 @@ Categories used below:
     trait, provider presets, `AiError` mapping (auth / rate-limit /
     provider / transport), `[ai]` config section, and the
     `TransformStore`.
+- **Collapsible + resizable editor sidebar** (effort
+  `sidebar-collapse-resize`). The editor's right dock — the
+  Properties/History panel — gains the two standard editor
+  affordances:
+  - **Resize**: drag the panel's inner edge; content-aware bounds
+    clamp to 200–400 px and the canvas reflows live (grain + frame
+    visuals unchanged at the 236 px default). The tab chips read
+    `PROPS | HIST | AI` — abbreviated so the merged three-tab row +
+    chevron fits the 200 px floor (the full words need ~255 px).
+  - **Collapse**: `Ctrl+B` or the header chevron hides the panel
+    entirely — the canvas reclaims the strip; `Ctrl+B` brings it
+    back with the same width and tab. The chord works during the
+    selection-first phase and is named in the chevron tooltip and
+    the statusbar's kbd chips (the collapsed state has no clickable
+    reopen affordance by design).
+  - Width + collapsed state persist to `[ui]` config
+    (`panel-width` / `panel-collapsed`, kebab-case, clamped on read)
+    alongside the last-used stroke defaults, and seed the next
+    editor session — both the worker window and the routed page.
+  - The worker window's resize-to-image now accounts for the
+    **live** panel width (0 when collapsed) instead of a baked-in
+    constant.
+  - The panel's tab vocabulary (`PanelTab` + header loop + body
+    dispatch) is the documented seam for a future `CHAT` tab;
+    nothing hard-codes the two-tab set.
 
 - **Double-click selects + focuses Properties** (effort
   `dblclick-select-properties`). A double-click on the canvas now

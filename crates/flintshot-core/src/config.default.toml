@@ -58,6 +58,14 @@ animations = true
 # index truncates to). Clamped to 1-200 at use.
 recent-captures-limit = 50
 
+# Right panel width in logical px. Clamped to 200-400 at use; the
+# editor reopens at your last width.
+panel-width = 236.0
+
+# Whether the editor's right panel starts collapsed. Reopen it with
+# Ctrl+B (the collapsed state has no clickable affordance).
+panel-collapsed = false
+
 [capture]
 # Include the mouse cursor in captured images.
 include-cursor = true

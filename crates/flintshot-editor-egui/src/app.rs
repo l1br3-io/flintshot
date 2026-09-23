@@ -361,6 +361,10 @@ impl EditorApp {
         let magnifier_always_on = cfg.ui.magnifier_always_on;
         let magnifier_key = parse_magnifier_key(&cfg.ui.magnifier_modifier);
         let flushed_anns = state.anns.clone();
+        // The panel seeds from the same snapshot: last-used width
+        // (clamped) + collapsed-at-close flag.
+        let mut panel = panel::PanelState::default();
+        seed_panel_from_ui(&mut panel, &cfg.ui);
         let mut app = Self {
             statusbar_size: None,
             config: cfg.clone(),
@@ -391,7 +395,7 @@ impl EditorApp {
             page,
             open_settings: None,
             open_home: None,
-            panel: panel::PanelState::default(),
+            panel,
             ai: crate::ai_panel::AiConversation::default(),
             ai_dialog: crate::ai_dialog::AiDialog::default(),
             ai_transforms: Vec::new(),
@@ -527,8 +531,11 @@ impl EditorApp {
         }
     }
 
-    /// Persist the current `color` / `stroke_width` / `font_size` to
-    /// the user's config file (Task 15).
+    /// Persist the current `color` / `stroke_width` / `font_size` /
+    /// panel width + collapsed flag to the user's config file
+    /// (Task 15; the panel fields ride the same hooks — the
+    /// last-used-defaults timing, so an abrupt kill can lose the
+    /// last drag, matching the spec's accepted trade-off).
     ///
     /// Loads the existing config first so unrelated sections
     /// (`[capture]`, future tables) are preserved, then overwrites
@@ -551,6 +558,7 @@ impl EditorApp {
         cfg.ui.default_text_color = self.state.text_color;
         cfg.ui.default_stroke_width = self.state.stroke_width;
         cfg.ui.default_font_size = self.state.font_size;
+        persist_panel(&mut cfg, &self.panel);
         if let Err(e) = cfg.save() {
             tracing::warn!(
                 error = %e,
@@ -715,6 +723,10 @@ impl EditorApp {
     /// panel exactly fits the image; any other zoom belongs to
     /// [`Self::update_fit`]'s letterbox path (never resize — the
     /// window's size is stable, only the view transform moves).
+    ///
+    /// The panel contribution is the **live** width — 0 when
+    /// collapsed — via [`worker_window_size`] (no baked-in panel
+    /// constant in the fit path).
     #[allow(
         clippy::cast_precision_loss,
         reason = "image dims ≤ 2^24 are exact in f32"
@@ -738,17 +750,11 @@ impl EditorApp {
             return;
         }
         // The prior resize hasn't landed yet: keep issuing InnerSize
-        // until the panel reports the right size. GOTCHA: the old
-        // top-rail layout added the toolbar's height below
-        // `canvas_rect.min.y` here; the docked side panel instead
-        // reserves width to the *right* of the canvas, the topbar
-        // reserves a strip above and the statusbar below — the
-        // window is image + the panel width and image +
-        // [`topbar::TOPBAR_HEIGHT`] + [`statusbar::STATUSBAR_HEIGHT`]
-        // tall.
-        let new_size = egui::vec2(
-            target_w + panel::PANEL_WIDTH,
-            target_h + crate::topbar::TOPBAR_HEIGHT + crate::statusbar::STATUSBAR_HEIGHT,
+        // until the panel reports the right size.
+        let new_size = worker_window_size(
+            current_dims,
+            ppp,
+            fit_panel_width(self.panel.is_collapsed(), self.panel.live_width()),
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(new_size));
         ctx.request_repaint();
@@ -1131,6 +1137,16 @@ impl EditorApp {
         // doesn't translate N) and before the tool keys, so plain N
         // still switches tools while the chord starts a capture.
         if self.new_capture_shortcut(ctx, modifiers) {
+            return;
+        }
+
+        // Ctrl+B (panel collapse toggle) — shell-owned like Ctrl+N:
+        // the panel is an egui concern core never sees. Before the
+        // tool keys so plain B keeps its Blur meaning, and never
+        // phase-gated: the selection-first phase gates tools, not
+        // panel toggling. Text-editing mode returned early above, so
+        // a mid-draft Ctrl+B belongs to the draft until it commits.
+        if self.panel_toggle_shortcut(ctx, modifiers) {
             return;
         }
 
@@ -2225,6 +2241,21 @@ impl EditorApp {
         false
     }
 
+    /// Ctrl+B: toggle the right panel's collapse. The chord is
+    /// shell-owned (the panel is an egui surface core never models)
+    /// and the documented reopen path while collapsed.
+    fn panel_toggle_shortcut(&mut self, ctx: &Context, modifiers: Modifiers) -> bool {
+        let ctrl_only = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        if modifiers == ctrl_only && ctx.input(|i| i.key_pressed(egui::Key::B)) {
+            self.panel.toggle_collapse();
+            return true;
+        }
+        false
+    }
+
     /// Save button / Ctrl+S handler: compose the image per the
     /// phase contract ([`compose_for_save`] — selection-aware while
     /// the selection-first phase is live), prompt for a path via
@@ -2638,6 +2669,48 @@ pub(crate) fn ai_follow_up_messages(
 /// own the clipboard OS-side, so closing is safe there.
 fn close_after_copy(os_owns_clipboard: bool) -> bool {
     os_owns_clipboard
+}
+
+/// Seed the panel's cross-frame state from the `[ui]` config — the
+/// last-used width (through the clamp) and the collapsed-at-close
+/// flag. Pure seam so the seeding policy is pinned headlessly.
+fn seed_panel_from_ui(panel: &mut panel::PanelState, ui: &flintshot_core::UiConfig) {
+    panel.seed(ui.panel_width_clamped(), ui.panel_collapsed);
+}
+
+/// The panel width the worker fit path accounts for: the live width,
+/// or 0 when collapsed (the freed strip belongs to the canvas).
+fn fit_panel_width(collapsed: bool, width: f32) -> f32 {
+    if collapsed {
+        0.0
+    } else {
+        width
+    }
+}
+
+/// Write the panel's live state into a loaded config's `[ui]` — the
+/// mapping behind `persist_ui_config`'s panel fields. Pure seam.
+fn persist_panel(cfg: &mut Config, panel: &panel::PanelState) {
+    cfg.ui.panel_width = panel.live_width();
+    cfg.ui.panel_collapsed = panel.is_collapsed();
+}
+
+/// The worker window's image-sized target (the `clamp_default_size`
+/// precedent: a pure seam so the composition tests without a
+/// display): image physical dims ÷ ppp, plus the cutout ring and
+/// canvas padding on every side, plus the live panel width to the
+/// right and the topbar + statusbar strips vertically.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "image dims ≤ 2^24 are exact in f32"
+)]
+fn worker_window_size(dims: (u32, u32), ppp: f32, panel_width: f32) -> egui::Vec2 {
+    let target_w = dims.0 as f32 / ppp + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD;
+    let target_h = dims.1 as f32 / ppp + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD;
+    egui::vec2(
+        target_w + panel_width,
+        target_h + crate::topbar::TOPBAR_HEIGHT + crate::statusbar::STATUSBAR_HEIGHT,
+    )
 }
 
 /// The "Copied" hero state's window: visible for this long after a
@@ -5492,6 +5565,131 @@ mod tests {
         assert!(!app.canvas_drag_active, "no drag may survive the release");
     }
 
+    // --- sidebar-collapse-resize Task 004 --------------------------
+
+    /// A press on the panel's resize separator must never start a
+    /// canvas gesture — the separator belongs to egui's resize
+    /// interaction, and the pointer-gating strip outside the cached
+    /// canvas rect keeps it gesture-free too.
+    #[test]
+    fn press_on_the_resize_separator_never_starts_a_gesture() {
+        let ctx = egui::Context::default();
+        let mut state = move_state_with_ann();
+        state.tool = Tool::Rect;
+        state.selected.clear();
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        let canvas = app.canvas_rect.expect("fixture: canvas rect cached");
+        // The separator sits on the panel's left edge: a hair right
+        // of the canvas rect's right edge.
+        let on_separator = egui::pos2(canvas.max.x + 2.0, canvas.min.y + 60.0);
+        let into_canvas = egui::pos2(canvas.min.x + 30.0, canvas.min.y + 30.0);
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(on_separator),
+                egui::Event::PointerButton {
+                    pos: on_separator,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(into_canvas),
+                egui::Event::PointerButton {
+                    pos: into_canvas,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(
+            app.state.pending.is_none() && app.state.anns.len() == 1,
+            "a separator press must not begin a rect annotation"
+        );
+        assert!(!app.canvas_drag_active, "no drag may survive the release");
+    }
+
+    /// With the panel collapsed, a press on the freed strip (where
+    /// the panel used to sit) is an ordinary canvas press — the
+    /// gesture starts, drags, and commits.
+    #[test]
+    fn collapsed_panel_press_across_the_freed_strip_starts_the_gesture() {
+        let ctx = egui::Context::default();
+        // A big enough image that its fitted box covers the freed
+        // strip once the canvas widens (a 64×64 fixture letterboxes
+        // into a small centered box the strip never overlaps).
+        let mut state = blank_state(400, 300);
+        state.tool = Tool::Rect;
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        let expanded = app.canvas_rect.expect("fixture: canvas rect cached");
+        ctrl_b_frame(&ctx, &mut app);
+        editor_frame(&ctx, &mut app, vec![]);
+        let collapsed = app.canvas_rect.expect("fixture: canvas rect cached");
+        assert!(
+            collapsed.max.x > expanded.max.x,
+            "fixture: the canvas reclaimed the strip"
+        );
+        // A point that sat on the panel before the collapse: near the
+        // image's right edge, mapped through the live view like
+        // `canvas_drag` does (view-independent fixtures).
+        let freed = app
+            .canvas
+            .view_over(collapsed)
+            .image_to_logical(flintshot_core::Point::new(350.0, 100.0));
+        assert!(
+            freed.x > expanded.max.x,
+            "fixture: the press point sat on the panel strip, freed {freed:?} vs {}",
+            expanded.max.x
+        );
+        let into = app
+            .canvas
+            .view_over(collapsed)
+            .image_to_logical(flintshot_core::Point::new(320.0, 80.0));
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(freed),
+                egui::Event::PointerButton {
+                    pos: freed,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert!(
+            app.state.pending.is_some(),
+            "a press on the freed strip starts the gesture"
+        );
+        editor_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(into)]);
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: into,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert_eq!(
+            app.state.anns.len(),
+            1,
+            "the gesture across the freed strip committed"
+        );
+        assert!(!app.canvas_drag_active, "no drag may survive the release");
+    }
+
     /// The direct-save path composes dir + rendered template + ext.
     /// Collision handling: the second save at the same target gets
     /// a `-2` suffix before the extension.
@@ -6463,6 +6661,212 @@ mod tests {
             app.state.selection_range(),
             Some(0..5),
             "drag-select inside a re-edit session"
+        );
+    }
+
+    // --- sidebar-collapse-resize Task 003 --------------------------
+
+    /// A Ctrl+B press event carrying `mods` (the event's own copy).
+    fn ctrl_b(mods: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::B,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: mods,
+        }
+    }
+
+    /// One full editor frame (logic + ui) with a Ctrl+B chord, the
+    /// modifiers set both on the event and on the `RawInput` state
+    /// (the `ctrl_n` precedent: `translate_modifiers` reads the
+    /// state, winit-shaped).
+    fn ctrl_b_frame(ctx: &egui::Context, app: &mut EditorApp) {
+        let mods = ctrl_as_winit_reports_it();
+        let raw = egui::RawInput {
+            events: vec![ctrl_b(mods)],
+            modifiers: mods,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(640.0, 480.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+    }
+
+    /// The last `InnerSize` command's size, if the frame issued one.
+    fn inner_size_commanded(full: &egui::FullOutput) -> Option<egui::Vec2> {
+        full.viewport_output
+            .values()
+            .flat_map(|v| v.commands.iter())
+            .find_map(|c| match c {
+                egui::ViewportCommand::InnerSize(size) => Some(*size),
+                _ => None,
+            })
+    }
+
+    /// Ctrl+B toggles the panel collapse without switching tools;
+    /// plain B still switches to the Blur tool.
+    #[test]
+    fn ctrl_b_toggles_panel_collapse_and_plain_b_stays_blur() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        ctrl_b_frame(&ctx, &mut app);
+        assert!(app.panel.is_collapsed(), "Ctrl+B collapses");
+        assert_eq!(
+            app.state.tool,
+            Tool::Select,
+            "the chord must not switch tools"
+        );
+        ctrl_b_frame(&ctx, &mut app);
+        assert!(!app.panel.is_collapsed(), "Ctrl+B re-expands");
+
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::B,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(app.state.tool, Tool::Blur, "plain B keeps the tool key");
+        assert!(!app.panel.is_collapsed(), "plain B never touches the panel");
+    }
+
+    /// The selection-first phase gates tools but never the panel
+    /// toggle.
+    #[test]
+    fn ctrl_b_toggles_during_the_selection_first_phase() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(blank_state(64, 64), &ctx, Rc::new(RefCell::new(None)), true);
+        assert!(app.phase_active(), "fixture: the phase is live");
+        ctrl_b_frame(&ctx, &mut app);
+        assert!(app.panel.is_collapsed(), "the panel toggles mid-phase");
+        assert!(
+            app.phase_active(),
+            "the toggle must not end the phase either"
+        );
+    }
+
+    /// The worker window size composes image + chrome + the live
+    /// panel width — including 0 when collapsed.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the composition is assigned arithmetic over consts, never computed drift"
+    )]
+    fn worker_window_size_composes_chrome_and_live_panel_width() {
+        let size = worker_window_size((100, 50), 1.0, 236.0);
+        assert_eq!(size.x, 100.0 + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD + 236.0);
+        assert_eq!(
+            size.y,
+            50.0 + 2.0 * CANVAS_RING
+                + 2.0 * CANVAS_PAD
+                + crate::topbar::TOPBAR_HEIGHT
+                + crate::statusbar::STATUSBAR_HEIGHT
+        );
+        assert_eq!(
+            worker_window_size((100, 50), 1.0, 0.0).x,
+            100.0 + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD,
+            "collapsed contributes no panel term"
+        );
+        assert_eq!(
+            worker_window_size((200, 100), 2.0, 200.0).x,
+            200.0 / 2.0 + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD + 200.0,
+            "physical dims divide by pixels_per_point"
+        );
+    }
+
+    /// The collapsed→0 mapping the fit path consumes.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the mapping is a passthrough of the assigned literal"
+    )]
+    fn fit_panel_width_maps_collapsed_to_zero() {
+        assert_eq!(fit_panel_width(true, 320.0), 0.0);
+        assert_eq!(fit_panel_width(false, 320.0), 320.0);
+    }
+
+    /// The seed wiring: a hand-edited out-of-range width clamps
+    /// through `panel_width_clamped` before seeding the panel.
+    #[test]
+    fn panel_seed_from_ui_config_clamps() {
+        let mut ui = flintshot_core::UiConfig::default();
+        ui.panel_width = 9000.0;
+        ui.panel_collapsed = true;
+        let mut panel = panel::PanelState::default();
+        seed_panel_from_ui(&mut panel, &ui);
+        assert!(panel.is_collapsed());
+        assert!((panel.live_width() - flintshot_core::PANEL_MAX_WIDTH).abs() < 1e-6);
+
+        let mut ui = flintshot_core::UiConfig::default();
+        ui.panel_width = 280.0;
+        ui.panel_collapsed = false;
+        let mut panel = panel::PanelState::default();
+        seed_panel_from_ui(&mut panel, &ui);
+        assert!(!panel.is_collapsed());
+        assert!((panel.live_width() - 280.0).abs() < 1e-6);
+    }
+
+    /// The persistence mapping: the panel's live state lands in the
+    /// loaded config's `[ui]` fields.
+    #[test]
+    fn persist_panel_writes_live_state_into_config() {
+        let mut panel = panel::PanelState::default();
+        panel.seed(320.0, false);
+        panel.toggle_collapse();
+        let mut cfg = Config::default();
+        persist_panel(&mut cfg, &panel);
+        assert!((cfg.ui.panel_width - 320.0).abs() < 1e-6);
+        assert!(cfg.ui.panel_collapsed);
+    }
+
+    /// The worker resize-to-fit commands the live panel width — and
+    /// drops the panel term entirely once collapsed.
+    #[test]
+    fn worker_resize_commands_live_panel_width_including_collapsed() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        let full = editor_frame_output(&ctx, &mut app, vec![]);
+        let size = inner_size_commanded(&full).expect("the expanded worker resizes");
+        assert!(
+            (size.x - (64.0 + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD + 236.0)).abs() < 1.0,
+            "expanded: image + chrome + the live 236 panel, got {}",
+            size.x
+        );
+
+        ctrl_b_frame(&ctx, &mut app);
+        let full = editor_frame_output(&ctx, &mut app, vec![]);
+        let size = inner_size_commanded(&full).expect("the collapsed worker resizes");
+        assert!(
+            (size.x - (64.0 + 2.0 * CANVAS_RING + 2.0 * CANVAS_PAD)).abs() < 1.0,
+            "collapsed: no panel term, got {}",
+            size.x
         );
     }
 }

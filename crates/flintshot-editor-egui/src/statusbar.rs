@@ -42,8 +42,9 @@ pub(crate) fn dims_label(dims: (u32, u32), size_bytes: u64) -> String {
 }
 
 /// The statusbar's kbd chips, in the binding table's order: undo,
-/// redo, save, delete.
-const KEYS: [&str; 4] = ["Ctrl+Z", "Ctrl+Y", "Ctrl+S", "Del"];
+/// redo, save, delete, and the panel toggle (the collapsed panel's
+/// only discoverable reopen path).
+const KEYS: [&str; 5] = ["Ctrl+Z", "Ctrl+Y", "Ctrl+S", "Del", "Ctrl+B"];
 
 /// Draw the statusbar across the bottom of `ui`. Call it before the
 /// side panels and the central panel (draw order: top → bottom →
@@ -81,7 +82,7 @@ pub(crate) fn show(ui: &mut egui::Ui, dims: (u32, u32), tool: Tool, size_bytes: 
                 // The per-tool hint, gold and centered in the
                 // leftover span between the dims and the keys.
                 let hint = crate::panel::tool_hint(tool);
-                let keys_width: f32 = 240.0;
+                let keys_width: f32 = 300.0;
                 let hint_galley = ui.painter().layout_no_wrap(
                     hint.to_owned(),
                     egui::FontId::proportional(theme::TYPE_XS),
@@ -229,8 +230,8 @@ mod tests {
         );
     }
 
-    /// The four binding chips render: the real binding table's
-    /// Ctrl+Z / Ctrl+Y / Ctrl+S / Del all paint.
+    /// The binding chips render: the real binding table's
+    /// Ctrl+Z / Ctrl+Y / Ctrl+S / Del / Ctrl+B all paint.
     #[test]
     fn kbd_chips_carry_the_binding_table() {
         let ctx = egui::Context::default();
@@ -252,5 +253,29 @@ mod tests {
                 .any(|cs| matches!(&cs.shape, egui::Shape::Text(t) if t.galley.job.text == key));
             assert!(painted, "kbd chip {key} paints");
         }
+    }
+
+    /// The statusbar names the panel toggle: a `Ctrl+B` kbd chip
+    /// paints, so the reopen path is discoverable before the first
+    /// collapse (the collapsed panel has no clickable affordance).
+    #[test]
+    fn statusbar_names_the_ctrl_b_panel_toggle() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(640.0, 480.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let out = ctx.run_ui(raw, |ui| {
+            show(ui, (100, 100), Tool::Pencil, 100 * 100 * 4);
+        });
+        let painted = out
+            .shapes
+            .iter()
+            .any(|cs| matches!(&cs.shape, egui::Shape::Text(t) if t.galley.job.text == "Ctrl+B"));
+        assert!(painted, "the Ctrl+B chip paints on the statusbar");
     }
 }
