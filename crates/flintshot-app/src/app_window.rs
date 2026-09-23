@@ -2090,6 +2090,10 @@ struct PageBridge {
 struct AiHost {
     rx: Option<std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>>,
     queue: std::collections::VecDeque<flintshot_editor_egui::AiEvent>,
+    /// A test-connection worker's channel (the AI settings page's
+    /// Test connection row — deliberately separate from the
+    /// conversation pipeline).
+    test_rx: Option<std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>>,
 }
 
 impl EditorPageBridge for PageBridge {
@@ -2206,6 +2210,50 @@ impl EditorPageBridge for PageBridge {
 
     fn request_ai_config_route(&mut self) {
         self.shared.set_route_ai_config();
+    }
+
+    fn ai_key_saved(&mut self, provider: &str) -> bool {
+        crate::ai::ai_key_entry(provider).is_some_and(|entry| entry.get_password().is_ok())
+    }
+
+    fn ai_save_key(&mut self, provider: &str, key: &str) {
+        // Immediate keyring write (never on the config debounce; the
+        // key never logs).
+        if let Err(e) = crate::ai::store_ai_key(provider, key) {
+            tracing::warn!("storing the {provider} API key: {e}");
+        }
+    }
+
+    fn ai_test_connection(&mut self, provider: &str, model: &str, base_url: &str) {
+        // A minimal text-only round-trip on the Task 007 worker —
+        // keyless custom endpoints test exactly as they run.
+        let api_key = crate::ai::load_ai_key(provider).unwrap_or_default();
+        let resolved = crate::ai::worker::ResolvedAi {
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            api_key,
+        };
+        self.ai.test_rx = Some(crate::ai::worker::spawn_chat_worker(
+            resolved,
+            vec![flintshot_core::ChatMessage::User {
+                content: vec![flintshot_core::text_part(
+                    "Reply with the single word: ready",
+                )],
+            }],
+        ));
+    }
+
+    fn poll_ai_test_result(&mut self) -> Option<Result<String, String>> {
+        if let Some(rx) = self.ai.test_rx.as_ref() {
+            if let Ok(result) = rx.try_recv() {
+                self.ai.test_rx = None;
+                return Some(match result {
+                    Ok(_) => Ok("Connection works".into()),
+                    Err(err) => Err(crate::ai::worker::ai_error_copy(&err)),
+                });
+            }
+        }
+        None
     }
 }
 
@@ -4120,6 +4168,61 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert!(bridge.poll_ai_event().is_none(), "exactly one event");
+    }
+
+    /// Test connection rides the worker pipeline (a mock endpoint
+    /// answering a text-only round-trip) and returns copy-mapped
+    /// results — pass on 2xx, actionable copy on auth failure.
+    #[test]
+    fn test_connection_round_trips_mapped_results() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ready"},"finish_reason":"stop"}]}"#)
+            .create();
+
+        let (shared, _dir) = shared_with_session();
+        let shared = std::sync::Arc::new(shared);
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::clone(&shared),
+            ai: AiHost::default(),
+        };
+
+        bridge.ai_test_connection("custom", "m", &server.url());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut result = None;
+        while result.is_none() && std::time::Instant::now() < deadline {
+            result = bridge.poll_ai_test_result();
+        }
+        assert_eq!(
+            result,
+            Some(Ok("Connection works".to_string())),
+            "a 2xx round-trip passes"
+        );
+        assert!(bridge.poll_ai_test_result().is_none(), "drains once");
+
+        // An auth failure maps to the key-rejected copy.
+        server.reset();
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "bad key"}}"#)
+            .create();
+        bridge.ai_test_connection("custom", "m", &server.url());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut result = None;
+        while result.is_none() && std::time::Instant::now() < deadline {
+            result = bridge.poll_ai_test_result();
+        }
+        match result {
+            Some(Err(copy)) => assert!(copy.contains("key"), "copy was: {copy}"),
+            other => panic!("expected a mapped failure, got {other:?}"),
+        }
     }
 
     /// Uploads, copies, and cancels deliberately keep the entry

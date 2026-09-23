@@ -311,7 +311,7 @@ impl WindowApp {
             None
         };
         let ai_config = if matches!(route, Route::AiConfig { .. }) {
-            Some(Self::build_ai_config(&mut home))
+            Some(Self::build_ai_config(&mut home, &page_bridge))
         } else {
             None
         };
@@ -360,9 +360,17 @@ impl WindowApp {
     }
 
     /// Snapshot the AI settings page from the home bridge (every
-    /// `AiConfig` entry shares it).
-    fn build_ai_config(home: &mut crate::home::HomeApp) -> crate::ai_config::AiConfigApp {
-        crate::ai_config::AiConfigApp::new(home.load_config())
+    /// `AiConfig` entry shares it), seeding the key-status row from
+    /// the page bridge.
+    fn build_ai_config(
+        home: &mut crate::home::HomeApp,
+        bridge: &PageBridgeSlot,
+    ) -> crate::ai_config::AiConfigApp {
+        let mut app = crate::ai_config::AiConfigApp::new(home.load_config());
+        let provider = app.config().ai.provider.clone();
+        let saved = bridge.borrow_mut().ai_key_saved(&provider);
+        app.set_key_saved(&provider, saved);
+        app
     }
 
     /// Swap the route in place: construct / drop the route's app and
@@ -431,7 +439,7 @@ impl WindowApp {
             Route::AiConfig { .. } => {
                 self.editor = None;
                 self.settings = None;
-                self.ai_config = Some(Self::build_ai_config(&mut self.home));
+                self.ai_config = Some(Self::build_ai_config(&mut self.home, &self.page_bridge));
             }
         }
         self.route = route.clone();
@@ -748,6 +756,37 @@ impl WindowApp {
                     let escape = panel.inner;
                     if let Some(config) = page.drain_save(now) {
                         self.home.save_config(&config);
+                    }
+                    // The page's actions: the bridge services keyring
+                    // writes and test connections (the page stays pure
+                    // data + queue).
+                    let mut actions = Vec::new();
+                    while let Some(action) = page.drain_action() {
+                        actions.push(action);
+                    }
+                    for action in actions {
+                        match action {
+                            crate::ai_config::AiConfigAction::SaveKey { provider, key } => {
+                                self.page_bridge.borrow_mut().ai_save_key(&provider, &key);
+                            }
+                            crate::ai_config::AiConfigAction::ProviderChanged { provider } => {
+                                let saved = self.page_bridge.borrow_mut().ai_key_saved(&provider);
+                                page.set_key_saved(&provider, saved);
+                            }
+                            crate::ai_config::AiConfigAction::TestConnection {
+                                provider,
+                                model,
+                                base_url,
+                            } => {
+                                self.page_bridge
+                                    .borrow_mut()
+                                    .ai_test_connection(&provider, &model, &base_url);
+                            }
+                        }
+                    }
+                    // The test result poll (copy-mapped app-side).
+                    if let Some(result) = self.page_bridge.borrow_mut().poll_ai_test_result() {
+                        page.set_test_result(result);
                     }
                     if escape {
                         // Esc / breadcrumb: the parked editor returns
@@ -1204,6 +1243,21 @@ mod tests {
     #[derive(Clone, Default)]
     struct StubPageBridge {
         statuses: Rc<RefCell<Vec<String>>>,
+        saved_keys: Rc<RefCell<Vec<(String, String)>>>,
+        key_saved_answers: Rc<RefCell<std::collections::HashMap<String, bool>>>,
+        key_queries: Rc<RefCell<Vec<String>>>,
+        tests: Rc<RefCell<Vec<(String, String, String)>>>,
+    }
+
+    impl StubPageBridge {
+        /// Seed a key-status answer for a provider (the bridge-side
+        /// keyring truth the page queries).
+        #[allow(dead_code, reason = "a convenience seam for future AI-page tests")]
+        fn set_key_saved(&self, provider: &str, saved: bool) {
+            self.key_saved_answers
+                .borrow_mut()
+                .insert(provider.to_string(), saved);
+        }
     }
 
     impl EditorPageBridge for StubPageBridge {
@@ -1223,6 +1277,27 @@ mod tests {
 
         fn request_paste(&mut self) -> bool {
             false
+        }
+
+        fn ai_key_saved(&mut self, provider: &str) -> bool {
+            self.key_queries.borrow_mut().push(provider.to_string());
+            self.key_saved_answers
+                .borrow()
+                .get(provider)
+                .copied()
+                .unwrap_or(false)
+        }
+
+        fn ai_save_key(&mut self, provider: &str, key: &str) {
+            self.saved_keys
+                .borrow_mut()
+                .push((provider.to_string(), key.to_string()));
+        }
+
+        fn ai_test_connection(&mut self, provider: &str, model: &str, base_url: &str) {
+            self.tests
+                .borrow_mut()
+                .push((provider.into(), model.into(), base_url.into()));
         }
     }
 
@@ -1596,6 +1671,53 @@ mod tests {
         assert_eq!(g.size, egui::vec2(1024.0, 640.0));
         assert!(g.resizable);
         assert_eq!(g.title, "flintshot — annotate");
+    }
+
+    /// The AI page's actions reach the page bridge (keyring writes,
+    /// provider key-status refreshes, test connections) — one
+    /// `ui_impl` frame drains the queue.
+    #[test]
+    fn aiconfig_actions_service_through_the_page_bridge() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, bridge, _host) = window_app_start(
+            WindowStart::AiConfig,
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        // Default provider (openai) key status seeds from the bridge.
+        assert_eq!(
+            bridge.key_queries.borrow().as_slice(),
+            ["openai".to_string()],
+            "page build seeds the key status for the config's provider"
+        );
+
+        let page = app
+            .ai_config
+            .as_mut()
+            .expect("the AiConfig start builds the page");
+        page.set_key_draft("sk-test");
+        page.commit_key_draft();
+        page.config_mut().ai.model = "gpt-4o-mini".into();
+        page.test_connection();
+
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(screen),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+
+        let saved = bridge.saved_keys.borrow().clone();
+        assert_eq!(
+            saved,
+            vec![("openai".to_string(), "sk-test".to_string())],
+            "the key commit reaches the keyring seam once"
+        );
+        let tests = bridge.tests.borrow().clone();
+        assert_eq!(tests.len(), 1, "the test connection fires");
+        assert_eq!(tests[0].1, "gpt-4o-mini");
+        assert_eq!(tests[0].2, "https://api.openai.com/v1");
     }
 
     fn window_app() -> WindowApp {

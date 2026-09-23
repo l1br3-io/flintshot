@@ -41,3 +41,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# The AI page's config round-trip test serializes the [ai] section.
+toml = { workspace = true }

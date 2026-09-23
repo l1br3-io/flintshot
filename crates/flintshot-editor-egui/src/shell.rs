@@ -191,6 +191,29 @@ pub trait EditorPageBridge {
     /// to the AI settings page (the router parks this editor and
     /// restores it on Esc). Default no-op (headless tests).
     fn request_ai_config_route(&mut self) {}
+
+    /// Whether a keyring entry exists for the provider (the AI
+    /// settings page's key status row). Default: no key.
+    fn ai_key_saved(&mut self, _provider: &str) -> bool {
+        false
+    }
+
+    /// Store a provider's API key (the AI settings page's
+    /// Replace-key commit — immediate, never on the config debounce).
+    /// Default no-op.
+    fn ai_save_key(&mut self, _provider: &str, _key: &str) {}
+
+    /// Fire a text-only test connection against the AI settings
+    /// page's working provider settings; the result arrives on
+    /// [`Self::poll_ai_test_result`]. Default no-op.
+    fn ai_test_connection(&mut self, _provider: &str, _model: &str, _base_url: &str) {}
+
+    /// Take an arrived test-connection result, copy-mapped
+    /// (`Ok` = pass line, `Err` = the error's next-step copy).
+    /// Default: always `None`.
+    fn poll_ai_test_result(&mut self) -> Option<Result<String, String>> {
+        None
+    }
 }
 
 /// An arrived Ask-the-shot result, host → page. Mirrors
