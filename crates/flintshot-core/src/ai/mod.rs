@@ -379,6 +379,27 @@ pub fn png_data_url(png_bytes: &[u8]) -> String {
     format!("data:image/png;base64,{encoded}")
 }
 
+/// A 1×1 opaque white PNG as a data URL — the smallest payload that
+/// still makes a provider exercise its image-input path. The
+/// `vision_probe` test decodes it, so a mangled constant fails CI
+/// rather than every connection test.
+const PROBE_IMAGE_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=";
+
+/// The connection-probe conversation: one user message pairing the
+/// one-word-answer prompt with an inline PNG — the exact
+/// `image_url` content-part shape the transform path sends. A
+/// passing round-trip therefore proves the configured model accepts
+/// image input, not merely text.
+#[must_use]
+pub fn vision_probe_messages() -> Vec<ChatMessage> {
+    vec![ChatMessage::User {
+        content: vec![
+            text_part("Reply with the single word: ready"),
+            image_part(PROBE_IMAGE_URL),
+        ],
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,5 +628,29 @@ mod tests {
     fn png_data_url_prefixes_and_encodes() {
         // base64 of b"hello" is aGVsbG8=
         assert_eq!(png_data_url(b"hello"), "data:image/png;base64,aGVsbG8=");
+    }
+
+    #[test]
+    fn vision_probe_pairs_prompt_with_a_real_inline_png() {
+        use base64::Engine as _;
+        let messages = vision_probe_messages();
+        let [ChatMessage::User { content }] = messages.as_slice() else {
+            panic!("the probe is exactly one user message");
+        };
+        // Same order as the transform path: text first, image second.
+        assert!(matches!(content[0], ContentPart::Text { .. }));
+        let ContentPart::ImageUrl { image_url } = &content[1] else {
+            panic!("the second part carries the image");
+        };
+        let payload = image_url
+            .url
+            .strip_prefix("data:image/png;base64,")
+            .expect("data URL prefix");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .expect("valid base64");
+        // A mangled constant would make every connection test a
+        // provider-side bad-request — hold it to a real decodable PNG.
+        image::load_from_memory(&bytes).expect("decodes as a PNG");
     }
 }

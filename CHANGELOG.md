@@ -189,6 +189,14 @@ Categories used below:
 
 ### Changed
 
+- **AI settings: *Test connection* now verifies image input** (effort
+  `ai-transforms`, task 013). The probe sends a tiny inline PNG + a
+  one-word prompt — the exact `image_url` content-part shape a real
+  transform sends — instead of a text-only round-trip. A passing test
+  therefore proves the configured model is vision-capable, catching a
+  text-only model id (e.g. plain `llama3.2`) at configuration time
+  rather than on the first failed transform. The pass line reads
+  "Connection works — image input verified".
 - **Tray: *Show/Hide flintshot* replaces *Open app window*** (effort
   `tray-show-hide-toggle`). One static toggle item — the
   Telegram/Discord tray convention — sends the new
@@ -272,6 +280,18 @@ Categories used below:
 
 ### Fixed
 
+- **Typing into text fields inside settings sections works** (fix
+  for the Ask-the-shot effort). Every collapsible section
+  (`widgets::section` — the editor panel, Settings, AI settings)
+  measured its body through an invisible probe pass each frame;
+  egui treats widgets registered by an invisible pass as
+  "not interested in focus" and *surrenders their keyboard focus*
+  on registration, so a `TextEdit` inside a section (the AI
+  transform prompt/name, model fields, API key, settings filename
+  template) lost focus one frame after click and accepted no
+  typing. The section now draws its body exactly once (the probe
+  runs only on the first frame after an open, when a measurement
+  is needed) and re-measures from the visible pass itself.
 - **Settings edits to `[output]` (and three `[ui]` keys) never
   reached disk** (effort `recent-captures-v2`). Saving into an
   existing `config.toml` merged only the early `[ui]`/`[capture]`/

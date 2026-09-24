@@ -47,8 +47,10 @@ pub(crate) enum AiConfigAction {
         /// The newly selected provider id.
         provider: String,
     },
-    /// Test connection clicked: a text-only round-trip against the
-    /// page's working provider settings.
+    /// Test connection clicked: a vision round-trip (a tiny inline
+    /// PNG + one-word prompt — the same `image_url` content part the
+    /// transform path sends) against the page's working provider
+    /// settings.
     TestConnection {
         /// Provider id.
         provider: String,
@@ -64,7 +66,7 @@ pub(crate) enum AiConfigAction {
 pub(crate) enum TestStatus {
     /// A request is in flight.
     Pending,
-    /// The round-trip answered ("Connection works").
+    /// The round-trip answered (image input accepted).
     Passed,
     /// The mapped failure copy.
     Failed(String),
@@ -398,6 +400,14 @@ impl AiConfigApp {
         }
     }
 
+    /// The inline editor's open draft, if any (assertion accessor
+    /// for tests).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn editing_prompt(&self) -> Option<&str> {
+        self.editing.as_ref().map(|draft| draft.prompt.as_str())
+    }
+
     /// Persist the transforms store (atomic save). A failure logs —
     /// the list stays usable in-memory and the next write retries.
     fn persist_transforms(&self) {
@@ -551,7 +561,7 @@ fn test_row(ui: &mut egui::Ui, page: &mut AiConfigApp) {
     match page.test.as_ref() {
         None => {}
         Some(TestStatus::Pending) => status_line(ui, "Testing…"),
-        Some(TestStatus::Passed) => status_line(ui, "Connection works"),
+        Some(TestStatus::Passed) => status_line(ui, "Connection works — image input verified"),
         Some(TestStatus::Failed(copy)) => status_line(ui, copy),
     }
 }
@@ -1086,5 +1096,123 @@ mod tests {
         assert!(!page.commit_transform(), "a nameless draft stays open");
         assert!(page.editing.is_some(), "the draft survives for input");
         assert!(page.transforms().is_empty());
+    }
+
+    // --- Typing harness: real egui frames into the page ---
+
+    fn page_frame(ctx: &egui::Context, page: &mut AiConfigApp, events: Vec<egui::Event>) -> bool {
+        let raw = egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 768.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let mut escape = false;
+        let _ = ctx.run_ui(raw, |ui| {
+            let surface = crate::topbar::Surface::Settings;
+            let enable = crate::topbar::enable_for(surface);
+            let _ = crate::topbar::show(ui, surface, None, enable, false, false);
+            let panel = egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(crate::theme::palette::PAPER_CREAM))
+                .show(ui, |ui| AiConfigPage::show(ui, page, ui.input(|i| i.time)));
+            escape = panel.inner;
+        });
+        escape
+    }
+
+    fn click_events(at: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(at),
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    #[test]
+    fn typing_lands_in_the_transform_prompt_field() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut page, _dir) = page_with_store();
+        page.begin_create_transform();
+        for _ in 0..3 {
+            let _ = page_frame(&ctx, &mut page, vec![]);
+        }
+        let field = ctx
+            .read_response(egui::Id::new("ai-transform-prompt"))
+            .expect("the prompt field registers");
+        let _ = page_frame(&ctx, &mut page, click_events(field.rect.center()));
+        let _ = page_frame(&ctx, &mut page, vec![]);
+        let _ = page_frame(&ctx, &mut page, vec![egui::Event::Text("ocr it".into())]);
+        assert_eq!(
+            page.editing.as_ref().expect("draft open").prompt,
+            "ocr it",
+            "a focused prompt field accepts typed text"
+        );
+    }
+
+    #[test]
+    fn char_by_char_typing_survives_quiet_frames() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut page, _dir) = page_with_store();
+        page.begin_create_transform();
+        let mut t = 0.0;
+        let mut step = |ctx: &egui::Context, page: &mut AiConfigApp, events: Vec<egui::Event>| {
+            t += 1.0 / 60.0;
+            let raw = egui::RawInput {
+                time: Some(t),
+                predicted_dt: 1.0 / 60.0,
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 768.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| {
+                let _ = AiConfigPage::show(ui, page, ui.input(|i| i.time));
+            });
+        };
+        for _ in 0..30 {
+            step(&ctx, &mut page, vec![]);
+        }
+        let field = ctx
+            .read_response(egui::Id::new("ai-transform-prompt"))
+            .expect("the prompt field registers")
+            .rect;
+        step(&ctx, &mut page, click_events(field.center()));
+        // The quiet frames are the regression: the section body used
+        // to run through an invisible measuring probe that
+        // surrendered the field's keyboard focus every frame, so a
+        // click kept focus for at most the next frame and typing
+        // landed nothing (the section-render fix runs the body once).
+        for _ in 0..5 {
+            step(&ctx, &mut page, vec![]);
+        }
+        assert_eq!(
+            ctx.memory(egui::Memory::focused),
+            Some(egui::Id::new("ai-transform-prompt")),
+            "a field inside a section holds focus across quiet frames"
+        );
+        for ch in ["o", "c", "r"] {
+            step(&ctx, &mut page, vec![egui::Event::Text(ch.into())]);
+        }
+        assert_eq!(
+            page.editing.as_ref().expect("draft open").prompt,
+            "ocr",
+            "every typed char lands, not just the first"
+        );
     }
 }

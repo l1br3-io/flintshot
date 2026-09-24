@@ -3129,6 +3129,54 @@ mod tests {
         assert!(save_dialog_dir(&flintshot_core::OutputConfig::default()).ends_with("Flintshot"));
     }
 
+    /// Full-editor repro: open the Ask-the-shot dialog via `I`,
+    /// then type — the chars must land in the dialog's prompt draft
+    /// through the real editor UI stack.
+    #[test]
+    fn dialog_typing_lands_through_the_full_editor() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        let raw = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(640.0, 480.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        };
+        let key = |k: egui::Key| {
+            vec![egui::Event::Key {
+                key: k,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+        // Production order: logic then ui, one pass per frame.
+        for events in [vec![], key(egui::Key::I), vec![], vec![]] {
+            let _ = ctx.run_ui(raw(events), |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            });
+        }
+        assert!(app.ai_dialog.is_open(), "I opened the dialog");
+        let _ = ctx.run_ui(raw(vec![egui::Event::Text("hi".into())]), |ui| {
+            app.ui_impl(ui);
+        });
+        assert_eq!(
+            app.ai_dialog.prompt(),
+            "hi",
+            "typed text lands in the dialog's prompt"
+        );
+    }
+
     /// Construct an all-white `EditorState` of the given pixel size.
     fn blank_state(w: u32, h: u32) -> EditorState {
         let img = image::RgbaImage::from_raw(w, h, vec![255; (w as usize) * (h as usize) * 4])

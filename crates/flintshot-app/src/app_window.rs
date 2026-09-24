@@ -2225,8 +2225,11 @@ impl EditorPageBridge for PageBridge {
     }
 
     fn ai_test_connection(&mut self, provider: &str, model: &str, base_url: &str) {
-        // A minimal text-only round-trip on the Task 007 worker —
-        // keyless custom endpoints test exactly as they run.
+        // A minimal vision round-trip on the Task 007 worker — the
+        // probe's inline PNG rides the exact `image_url` content
+        // part the transform path uses, so a pass proves the model
+        // accepts image input. Keyless custom endpoints test exactly
+        // as they run.
         let api_key = crate::ai::load_ai_key(provider).unwrap_or_default();
         let resolved = crate::ai::worker::ResolvedAi {
             base_url: base_url.to_string(),
@@ -2235,11 +2238,7 @@ impl EditorPageBridge for PageBridge {
         };
         self.ai.test_rx = Some(crate::ai::worker::spawn_chat_worker(
             resolved,
-            vec![flintshot_core::ChatMessage::User {
-                content: vec![flintshot_core::text_part(
-                    "Reply with the single word: ready",
-                )],
-            }],
+            flintshot_core::vision_probe_messages(),
         ));
     }
 
@@ -4171,8 +4170,9 @@ mod tests {
     }
 
     /// Test connection rides the worker pipeline (a mock endpoint
-    /// answering a text-only round-trip) and returns copy-mapped
-    /// results — pass on 2xx, actionable copy on auth failure.
+    /// answering the vision probe) and returns copy-mapped results —
+    /// pass on 2xx with the probe image on the wire, actionable copy
+    /// on auth failure.
     #[test]
     fn test_connection_round_trips_mapped_results() {
         use flintshot_editor_egui::EditorPageBridge as _;
@@ -4180,6 +4180,9 @@ mod tests {
         let mut server = mockito::Server::new();
         server
             .mock("POST", "/chat/completions")
+            // The probe must exercise image input, not just text —
+            // the whole point of the test connection.
+            .match_body(mockito::Matcher::Regex(r#""type":"image_url""#.into()))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ready"},"finish_reason":"stop"}]}"#)

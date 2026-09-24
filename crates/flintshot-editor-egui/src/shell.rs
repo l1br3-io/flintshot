@@ -203,8 +203,9 @@ pub trait EditorPageBridge {
     /// Default no-op.
     fn ai_save_key(&mut self, _provider: &str, _key: &str) {}
 
-    /// Fire a text-only test connection against the AI settings
-    /// page's working provider settings; the result arrives on
+    /// Fire a test connection (a vision probe: tiny inline PNG +
+    /// one-word prompt) against the AI settings page's working
+    /// provider settings; the result arrives on
     /// [`Self::poll_ai_test_result`]. Default no-op.
     fn ai_test_connection(&mut self, _provider: &str, _model: &str, _base_url: &str) {}
 

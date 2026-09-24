@@ -608,6 +608,28 @@ mod tests {
     }
 
     #[test]
+    fn typing_lands_in_the_prompt_field() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut dialog = AiDialog::default();
+        dialog.open();
+        let transforms = transforms();
+        settle(&ctx, &mut dialog, &transforms, true);
+        let _ = frame(
+            &ctx,
+            &mut dialog,
+            &transforms,
+            true,
+            vec![egui::Event::Text("hi".into())],
+        );
+        assert_eq!(
+            dialog.prompt(),
+            "hi",
+            "focus landed on open; typing inserts"
+        );
+    }
+
+    #[test]
     fn esc_closes_without_side_effects() {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);

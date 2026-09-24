@@ -329,15 +329,14 @@ pub(crate) fn section(
 
     let mut body_height = 0.0;
     if open || eased > 0.0 {
-        // Measure the body with an invisible probe laid out at the
-        // real position, then draw it clipped to the animated fold.
-        // GOTCHA: the probe must share the real pass's origin, width,
-        // and layout — it registers the same widget ids as the visible
-        // pass, and egui's duplicate-id detector only stays quiet
-        // when both registrations land on the same rects (an
-        // offscreen probe paints red "used twice" overlays on every
-        // row in debug builds, unclipped, over the topbar).
         let avail_w = ui.available_width();
+        let measured_id = id.with("measured");
+        // The probe child is created every frame — with an empty
+        // body once a measurement is cached — so the visible body's
+        // auto ids never shift: egui salts a child ui's auto ids by
+        // the parent's child counter, and a one-off child would
+        // re-id every auto-id'd widget in the body the frame after
+        // the first, dropping their state mid-gesture.
         let probe_rect = egui::Rect::from_min_max(
             ui.cursor().min,
             egui::pos2(ui.max_rect().right(), ui.max_rect().bottom()),
@@ -348,13 +347,42 @@ pub(crate) fn section(
                 .invisible()
                 .layout(*ui.layout()),
         );
-        body(&mut probe);
-        let measured = probe.min_rect().height().max(1.0);
-        body_height = measured * eased;
-        ui.allocate_ui(egui::vec2(avail_w, body_height), |child| {
-            child.set_clip_rect(child.max_rect());
-            body(child);
-        });
+        let measured = if let Some(prev) = ui.ctx().data_mut(|d| d.get_temp::<f32>(measured_id)) {
+            // Steady state: draw the body exactly once, clipped
+            // to the animated fold, and re-measure from the same
+            // pass (`min_rect`). Running the body through the
+            // probe here as well would re-register its widgets
+            // with `enabled=false`, and that registration
+            // *surrenders keyboard focus* for every focusable
+            // widget in the body (`Context::create_widget`) — a
+            // TextEdit inside a section could never hold focus
+            // past one frame after its click.
+            let mut m = prev;
+            ui.allocate_ui(egui::vec2(avail_w, (prev * eased).max(1.0)), |child| {
+                child.set_clip_rect(child.max_rect());
+                body(child);
+                m = child.min_rect().height().max(1.0);
+            });
+            body_height = m * eased;
+            m
+        } else {
+            // First open ever: no cached measurement, and laying
+            // the body out inside a stub fold deadlocks
+            // height-clamping layouts at the stub (they never
+            // grow past their max_rect, so `min_rect` never
+            // measures full). Measure once through the probe —
+            // the one frame where its focus-surrendering
+            // registration is paid — then draw the real pass.
+            body(&mut probe);
+            let m = probe.min_rect().height().max(1.0);
+            body_height = m * eased;
+            ui.allocate_ui(egui::vec2(avail_w, body_height.max(1.0)), |child| {
+                child.set_clip_rect(child.max_rect());
+                body(child);
+            });
+            m
+        };
+        ui.ctx().data_mut(|d| d.insert_temp(measured_id, measured));
     }
 
     ui.ctx().data_mut(|d| d.insert_temp(id, open));

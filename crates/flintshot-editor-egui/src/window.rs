@@ -1662,6 +1662,103 @@ mod tests {
         );
     }
 
+    /// Full-window typing regression: open the transform editor on
+    /// the `AiConfig` route, click the prompt field, let quiet frames
+    /// pass, then type — the draft must receive the text. Frames
+    /// advance time so section fold animations settle like a real
+    /// window; the quiet frames pin that the field keeps keyboard
+    /// focus across frames (the section body's old invisible
+    /// measuring probe used to surrender it every frame).
+    #[test]
+    fn aiconfig_typing_reaches_the_transform_prompt_through_the_window() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, _bridge, _host) = window_app_start(
+            WindowStart::AiConfig,
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let mut t = 0.0_f32;
+        let frame =
+            |t: &mut f32, ctx: &egui::Context, app: &mut WindowApp, events: Vec<egui::Event>| {
+                *t += 1.0 / 60.0;
+                let raw = egui::RawInput {
+                    time: Some(f64::from(*t)),
+                    predicted_dt: 1.0 / 60.0,
+                    screen_rect: Some(screen),
+                    events,
+                    ..egui::RawInput::default()
+                };
+                let _ = ctx.run_ui(raw, |ui| {
+                    app.logic_impl(ui.ctx());
+                    app.ui_impl(ui);
+                });
+            };
+        let click = |t: &mut f32, ctx: &egui::Context, app: &mut WindowApp, at: egui::Pos2| {
+            frame(
+                t,
+                ctx,
+                app,
+                vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        };
+
+        for _ in 0..30 {
+            frame(&mut t, &ctx, &mut app, vec![]);
+        }
+        let new_pill = ctx
+            .read_response(egui::Id::new("ai-transform-new"))
+            .expect("the New transform pill registers")
+            .rect;
+        click(&mut t, &ctx, &mut app, new_pill.center());
+        assert!(
+            app.ai_config
+                .as_ref()
+                .and_then(|page| page.editing_prompt())
+                .is_some(),
+            "the New transform click opened the inline editor"
+        );
+        for _ in 0..30 {
+            frame(&mut t, &ctx, &mut app, vec![]);
+        }
+        let field = ctx
+            .read_response(egui::Id::new("ai-transform-prompt"))
+            .expect("the editor's prompt field registers")
+            .rect;
+        click(&mut t, &ctx, &mut app, field.center());
+        for _ in 0..5 {
+            frame(&mut t, &ctx, &mut app, vec![]);
+        }
+        frame(
+            &mut t,
+            &ctx,
+            &mut app,
+            vec![egui::Event::Text("ocr it".into())],
+        );
+
+        let prompt = app
+            .ai_config
+            .as_ref()
+            .and_then(|page| page.editing_prompt())
+            .expect("the editor stayed open");
+        assert_eq!(prompt, "ocr it", "typed text lands in the prompt draft");
+    }
+
     /// `AiConfig` shares the stable geometry (the Settings precedent).
     #[test]
     fn aiconfig_route_uses_the_stable_geometry() {
