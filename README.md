@@ -117,9 +117,10 @@ Product & design:
 
 - [`docs/VISION.md`](docs/VISION.md) — product vision, scope, non-goals
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone index (thin)
-- [`docs/specs/phase-1-capture-editor/`](docs/specs/phase-1-capture-editor/) — current effort spec, plan, and task checklist (Phase 1)
+- [`docs/specs/`](docs/specs/) — per-effort spec, plan, and task checklists (one dir per effort)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — workspace, crates, dependencies, data model
 - [`docs/adrs/`](docs/adrs/) — technical decision records (ADRs)
+- [`docs/REFERENCES.md`](docs/REFERENCES.md) — open-source reference projects (comparables, agents, chat/streaming UI, Rust AI infra)
 - [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md) — cross-platform manual QA grid
 
 Working in the repo:

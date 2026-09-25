@@ -133,8 +133,8 @@ pub struct UiConfig {
     #[serde(default = "default_panel_width")]
     pub panel_width: f32,
     /// Whether the right panel starts collapsed. Reopened with
-    /// `Ctrl+B` (the collapsed state exposes no clickable
-    /// affordance by design).
+    /// `Ctrl+B` or the expand chip floating at the canvas's
+    /// top-right corner (the editor shell owns both affordances).
     #[serde(default)]
     pub panel_collapsed: bool,
 }

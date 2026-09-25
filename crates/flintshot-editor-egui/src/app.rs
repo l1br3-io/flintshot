@@ -1801,15 +1801,7 @@ impl EditorApp {
         // loupe over the caret.
         self.paint_magnifier_if_active(ui.ctx(), ui.painter());
 
-        // Floating quick cluster (undo / redo / magnifier / view
-        // zoom) over the canvas's top-left corner. The chip rects
-        // feed the next frame's press gate.
-        let canvas_rect = self.canvas_rect;
-        let (floating_action, chip_rects) = canvas_rect.map_or((None, Vec::new()), |rect| {
-            floating::show(ui.ctx(), rect, self.magnifier_always_on)
-        });
-        self.floating_rects = chip_rects;
-        self.handle_floating_action(floating_action);
+        self.draw_floating_controls(ui);
 
         // The Ask-the-shot dialog floats over everything (Middle
         // order); while open it is modal — the press gate below
@@ -1955,11 +1947,30 @@ impl EditorApp {
         self.config = config.clone();
     }
 
+    /// The floating quick cluster (undo / redo / magnifier / view
+    /// zoom) over the canvas's top-left corner, plus — while the
+    /// panel is collapsed — its expand chip at the top-right. The
+    /// chip rects feed the next frame's press gate.
+    fn draw_floating_controls(&mut self, ui: &mut egui::Ui) {
+        let (floating_action, chip_rects) = self.canvas_rect.map_or((None, Vec::new()), |rect| {
+            floating::show(
+                ui.ctx(),
+                rect,
+                self.magnifier_always_on,
+                self.panel.is_collapsed(),
+            )
+        });
+        self.floating_rects = chip_rects;
+        self.handle_floating_action(floating_action);
+    }
+
     /// Apply a floating-cluster action: Undo / Redo replay the same
     /// dispatches their keyboard twins produce, the magnifier chip
-    /// flips the always-on flag, and the zoom chips step the view
+    /// flips the always-on flag, the zoom chips step the view
     /// zoom (the fit transform applies it on the next
-    /// [`Self::update_fit`] pass).
+    /// [`Self::update_fit`] pass), and the expand chip reopens the
+    /// collapsed panel (the « twin of the header's collapse
+    /// chevron).
     fn handle_floating_action(&mut self, action: Option<floating::FloatingAction>) {
         match action {
             Some(floating::FloatingAction::Undo) => {
@@ -1988,6 +1999,9 @@ impl EditorApp {
             }
             Some(floating::FloatingAction::ZoomOut) => {
                 self.view_zoom = (self.view_zoom - VIEW_ZOOM_STEP).max(VIEW_ZOOM_MIN);
+            }
+            Some(floating::FloatingAction::ExpandPanel) => {
+                self.panel.toggle_collapse();
             }
             None => {}
         }
@@ -2242,8 +2256,9 @@ impl EditorApp {
     }
 
     /// Ctrl+B: toggle the right panel's collapse. The chord is
-    /// shell-owned (the panel is an egui surface core never models)
-    /// and the documented reopen path while collapsed.
+    /// shell-owned (the panel is an egui surface core never models);
+    /// while collapsed it reopens alongside the floating « chip at
+    /// the canvas's top-right corner (`crate::floating`).
     fn panel_toggle_shortcut(&mut self, ctx: &Context, modifiers: Modifiers) -> bool {
         let ctrl_only = Modifiers {
             ctrl: true,
@@ -6916,5 +6931,49 @@ mod tests {
             "collapsed: no panel term, got {}",
             size.x
         );
+    }
+
+    /// The collapsed panel's floating expand chip reopens it — the
+    /// sidebar-collapse spec shipped Ctrl+B-only and deferred the
+    /// visible reopen affordance; the chip is that follow-up. Its
+    /// press is gated like every floating chip's: no canvas
+    /// gesture may start beneath the click.
+    #[test]
+    fn expand_chip_click_reopens_the_collapsed_panel() {
+        let ctx = egui::Context::default();
+        let mut state = blank_state(400, 300);
+        state.tool = Tool::Rect;
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        editor_frame(&ctx, &mut app, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("expand-panel")).is_none(),
+            "no expand chip while the panel is expanded"
+        );
+        ctrl_b_frame(&ctx, &mut app);
+        assert!(app.panel.is_collapsed(), "fixture: the panel is collapsed");
+        // Settle passes: the hosting Area places on the sizing pass
+        // and pins on the next, so the chip rect read here is the
+        // final one (the floating-cluster test cadence).
+        editor_frame(&ctx, &mut app, vec![]);
+        editor_frame(&ctx, &mut app, vec![]);
+        let chip = ctx
+            .read_response(egui::Id::new("expand-panel"))
+            .expect("the expand chip registers while collapsed");
+        let at = chip.rect.center();
+        editor_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+        editor_frame(
+            &ctx,
+            &mut app,
+            vec![primary_button(at, true), primary_button(at, false)],
+        );
+        assert!(
+            !app.panel.is_collapsed(),
+            "the chip click re-expanded the panel"
+        );
+        assert!(
+            app.state.pending.is_none() && !app.canvas_drag_active,
+            "the chip press must not start a canvas gesture"
+        );
+        assert_eq!(app.state.tool, Tool::Rect, "the tool is untouched");
     }
 }

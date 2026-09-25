@@ -63,7 +63,7 @@ recent-captures-limit = 50
 panel-width = 236.0
 
 # Whether the editor's right panel starts collapsed. Reopen it with
-# Ctrl+B (the collapsed state has no clickable affordance).
+# Ctrl+B or the « chip floating at the canvas's top-right corner.
 panel-collapsed = false
 
 [capture]

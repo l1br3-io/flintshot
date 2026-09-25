@@ -3,12 +3,14 @@
 //! A small cutout-chip row pinned to the canvas's top-left corner:
 //! undo / redo, the magnifier always-on toggle, and the canvas
 //! view's zoom in / out (the shell applies the factor to the fit
-//! transform). The chips float *over* the screenshot (they are
-//! canvas chrome, not panel furniture), so [`show`] also publishes
-//! the cluster's rect — the shell must treat presses that begin
-//! there as non-canvas (see `crate::app`'s pointer gating), while
-//! every pointer-miss passes through to annotation gestures
-//! untouched.
+//! transform). While the side panel is collapsed, a « expand chip
+//! pins to the canvas's top-right corner — the panel's visible
+//! reopen affordance. The chips float *over* the screenshot (they
+//! are canvas chrome, not panel furniture), so [`show`] also
+//! publishes the cluster's rect — the shell must treat presses
+//! that begin there as non-canvas (see `crate::app`'s pointer
+//! gating), while every pointer-miss passes through to annotation
+//! gestures untouched.
 
 use crate::panel;
 use crate::rail;
@@ -31,6 +33,9 @@ pub(crate) enum FloatingAction {
     ZoomIn,
     /// Step the canvas view's zoom factor down one stop.
     ZoomOut,
+    /// Reopen the collapsed side panel (the « chip at the canvas's
+    /// top-right corner; the shell owns the panel state).
+    ExpandPanel,
 }
 
 /// Which canvas corner a cluster pins to.
@@ -38,6 +43,8 @@ pub(crate) enum FloatingAction {
 pub(crate) enum Corner {
     /// Inside the top-left edge.
     TopLeft,
+    /// Inside the top-right edge.
+    TopRight,
     /// Inside the bottom-right edge.
     BottomRight,
 }
@@ -52,6 +59,10 @@ pub(crate) fn corner_anchor(
 ) -> egui::Pos2 {
     match corner {
         Corner::TopLeft => canvas_rect.left_top() + egui::vec2(CLUSTER_MARGIN, CLUSTER_MARGIN),
+        Corner::TopRight => egui::pos2(
+            canvas_rect.right_top().x - CLUSTER_MARGIN - size.x,
+            canvas_rect.right_top().y + CLUSTER_MARGIN,
+        ),
         Corner::BottomRight => {
             canvas_rect.right_bottom() - egui::vec2(CLUSTER_MARGIN, CLUSTER_MARGIN) - size
         }
@@ -95,15 +106,19 @@ fn run_cluster(
 
 /// Draw the floating clusters over `canvas_rect`: undo / redo at
 /// the top-left corner, the magnifier toggle + view zoom chips at
-/// the bottom-right (the mockup's arrangement). Returns the fired
-/// action (if any) and the chip rects for the shell's press gating —
-/// chip rects only: a pointer-miss between chips passes through to
-/// the canvas (the spec's passthrough contract). The zoom actions
-/// are the shell's to apply (the fit transform lives there).
+/// the bottom-right, and — while `panel_collapsed` — the side
+/// panel's expand chip at the top-right (the reopen affordance;
+/// the mockup's arrangement). Returns the fired action (if any)
+/// and the chip rects for the shell's press gating — chip rects
+/// only: a pointer-miss between chips passes through to the
+/// canvas (the spec's passthrough contract). The zoom and expand
+/// actions are the shell's to apply (the fit transform and the
+/// panel state live there).
 pub(crate) fn show(
     ctx: &egui::Context,
     canvas_rect: egui::Rect,
     magnifier_always_on: bool,
+    panel_collapsed: bool,
 ) -> (Option<FloatingAction>, Vec<egui::Rect>) {
     let mut action = None;
     let mut chip_rects = Vec::new();
@@ -122,6 +137,10 @@ pub(crate) fn show(
     );
     let mag_size = egui::vec2(
         3.0 * CHIP_SIZE + 2.0 * theme::SPACE_SCALE[1] + 2.0 * f32::from(theme::POD_PAD),
+        CHIP_SIZE + 2.0 * f32::from(theme::POD_PAD),
+    );
+    let expand_size = egui::vec2(
+        CHIP_SIZE + 2.0 * f32::from(theme::POD_PAD),
         CHIP_SIZE + 2.0 * f32::from(theme::POD_PAD),
     );
     egui::Area::new(egui::Id::new("floating_controls"))
@@ -189,6 +208,25 @@ pub(crate) fn show(
                     ),
                 ],
             );
+            if panel_collapsed {
+                let expand_rect = egui::Rect::from_min_size(
+                    corner_anchor(canvas_rect, expand_size, Corner::TopRight),
+                    expand_size,
+                );
+                run_cluster(
+                    ui,
+                    expand_rect,
+                    &mut chip_rects,
+                    &mut action,
+                    vec![(
+                        "expand-panel",
+                        "Show panel · Ctrl+B",
+                        false,
+                        panel::g_panel_expand,
+                        Some(FloatingAction::ExpandPanel),
+                    )],
+                );
+            }
         });
 
     (action, chip_rects)
@@ -276,7 +314,7 @@ mod tests {
 
     /// One frame of the cluster over a roomy canvas; returns the
     /// context for response reads.
-    fn frame(events: Vec<egui::Event>, always_on: bool) -> egui::Context {
+    fn frame(events: Vec<egui::Event>, always_on: bool, panel_collapsed: bool) -> egui::Context {
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
             events,
@@ -284,7 +322,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on);
+            let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on, panel_collapsed);
         });
         ctx
     }
@@ -294,8 +332,12 @@ mod tests {
     /// (Area-hosted widgets hit-test a pass behind their layout).
     /// All passes share one context — `frame` above constructs a
     /// fresh one per call, so settle passes run inline.
-    fn action_after_click_on(id: &str, always_on: bool) -> Option<FloatingAction> {
-        let ctx = frame(vec![], always_on);
+    fn action_after_click_on(
+        id: &str,
+        always_on: bool,
+        panel_collapsed: bool,
+    ) -> Option<FloatingAction> {
+        let ctx = frame(vec![], always_on, panel_collapsed);
         // Settle passes first, THEN read the settled rect: Areas
         // place on the sizing pass and pin on the next.
         let raw = egui::RawInput {
@@ -303,7 +345,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on);
+            let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on, panel_collapsed);
         });
         let chip = ctx
             .read_response(egui::Id::new(id))
@@ -316,7 +358,7 @@ mod tests {
                 ..egui::RawInput::default()
             };
             let _ = ctx.run_ui(raw, |ui| {
-                let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on);
+                let _ = show(ui.ctx(), canvas(800.0, 600.0), always_on, panel_collapsed);
             });
         };
         // Settle passes: Areas place on the sizing pass and pin on
@@ -346,7 +388,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let (a, _) = show(ui.ctx(), canvas(800.0, 600.0), always_on);
+            let (a, _) = show(ui.ctx(), canvas(800.0, 600.0), always_on, panel_collapsed);
             action = a;
         });
         action
@@ -355,7 +397,7 @@ mod tests {
     #[test]
     fn undo_chip_fires_undo() {
         assert_eq!(
-            action_after_click_on("undo", false),
+            action_after_click_on("undo", false, false),
             Some(FloatingAction::Undo)
         );
     }
@@ -363,14 +405,14 @@ mod tests {
     #[test]
     fn redo_chip_fires_redo() {
         assert_eq!(
-            action_after_click_on("redo", false),
+            action_after_click_on("redo", false, false),
             Some(FloatingAction::Redo)
         );
     }
 
     #[test]
     fn undo_chip_reports_hover() {
-        let ctx = frame(vec![], false);
+        let ctx = frame(vec![], false, false);
         // Settle passes: the Area places on the sizing pass and pins
         // on the next, so the chip rect read here is the final one.
         for _ in 0..2 {
@@ -380,7 +422,7 @@ mod tests {
                     ..egui::RawInput::default()
                 },
                 |ui| {
-                    let _ = show(ui.ctx(), canvas(800.0, 600.0), false);
+                    let _ = show(ui.ctx(), canvas(800.0, 600.0), false, false);
                 },
             );
         }
@@ -392,7 +434,7 @@ mod tests {
             ..egui::RawInput::default()
         };
         let _ = ctx.run_ui(raw, |ui| {
-            let _ = show(ui.ctx(), canvas(800.0, 600.0), false);
+            let _ = show(ui.ctx(), canvas(800.0, 600.0), false, false);
         });
         let after = ctx
             .read_response(egui::Id::new("undo"))
@@ -403,7 +445,7 @@ mod tests {
     #[test]
     fn magnifier_chip_fires_the_toggle() {
         assert_eq!(
-            action_after_click_on("magnifier-toggle", false),
+            action_after_click_on("magnifier-toggle", false, false),
             Some(FloatingAction::ToggleMagnifier)
         );
     }
@@ -413,11 +455,11 @@ mod tests {
     #[test]
     fn zoom_chips_report_view_zoom_actions() {
         assert_eq!(
-            action_after_click_on("zoom-in", false),
+            action_after_click_on("zoom-in", false, false),
             Some(FloatingAction::ZoomIn)
         );
         assert_eq!(
-            action_after_click_on("zoom-out", false),
+            action_after_click_on("zoom-out", false, false),
             Some(FloatingAction::ZoomOut)
         );
     }
@@ -442,6 +484,16 @@ mod tests {
         assert!(mag.zoom() >= 1.0, "never degenerate");
     }
 
+    /// The expand chip fires while the panel is collapsed — the
+    /// sidebar-collapse spec's deferred reopen affordance.
+    #[test]
+    fn expand_chip_fires_expand_panel_while_collapsed() {
+        assert_eq!(
+            action_after_click_on("expand-panel", false, true),
+            Some(FloatingAction::ExpandPanel)
+        );
+    }
+
     /// The cluster publishes its chip rects — the shell's press
     /// gate consumes them (a chip press must never start a canvas
     /// gesture; misses between chips pass through).
@@ -460,6 +512,12 @@ mod tests {
             egui::pos2(800.0 - 8.0 - 112.0, 600.0 - 8.0 - 40.0),
             "bottom-right: margin inside minus the cluster's size"
         );
+        let tr = corner_anchor(canvas, size, Corner::TopRight);
+        assert_eq!(
+            tr,
+            egui::pos2(800.0 - 8.0 - 112.0, 8.0),
+            "top-right: margin inside, flush with the top band"
+        );
     }
 
     #[test]
@@ -471,10 +529,10 @@ mod tests {
         };
         let mut chips = Vec::new();
         let _ = ctx.run_ui(raw, |ui| {
-            let (_, rects) = show(ui.ctx(), canvas(800.0, 600.0), false);
+            let (_, rects) = show(ui.ctx(), canvas(800.0, 600.0), false, false);
             chips = rects;
         });
-        assert_eq!(chips.len(), 5, "one rect per chip");
+        assert_eq!(chips.len(), 5, "one rect per chip, no expand chip expanded");
         for chip in &chips {
             assert!(chip.width() > 0.0 && chip.height() > 0.0);
             assert!(
@@ -482,5 +540,39 @@ mod tests {
                 "every chip must stay inside the canvas rect"
             );
         }
+    }
+
+    /// Collapsed, the sixth chip joins the press-gate set — pinned
+    /// to the canvas's top-right corner, clear of the top-left
+    /// history cluster.
+    #[test]
+    fn collapsed_panel_adds_the_expand_chip_at_the_top_right() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(canvas(800.0, 600.0)),
+            ..egui::RawInput::default()
+        };
+        let mut chips = Vec::new();
+        let _ = ctx.run_ui(raw, |ui| {
+            let (_, rects) = show(ui.ctx(), canvas(800.0, 600.0), false, true);
+            chips = rects;
+        });
+        assert_eq!(chips.len(), 6, "the expand chip joins the set");
+        let expand = ctx
+            .read_response(egui::Id::new("expand-panel"))
+            .expect("the expand chip registers");
+        assert!(
+            canvas(800.0, 600.0).contains_rect(expand.rect),
+            "the expand chip stays inside the canvas rect"
+        );
+        let undo = ctx
+            .read_response(egui::Id::new("undo"))
+            .expect("the undo chip registers");
+        assert!(
+            expand.rect.left() > undo.rect.right(),
+            "top-right chip clears the top-left cluster: {:?} vs {:?}",
+            expand.rect,
+            undo.rect
+        );
     }
 }

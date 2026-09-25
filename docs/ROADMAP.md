@@ -6,11 +6,11 @@ status-flipped in place when shipped). For the narrative "why", see
 [`VISION.md`](VISION.md); for decision rationale, see
 [`adrs/`](adrs/).
 
-**CURRENT MILESTONE: all planned phases shipped** (Phase 6, Wayland
-global hotkeys, shipped 2026-08-20; see
-[`specs/phase-6-wayland-hotkeys/`](specs/phase-6-wayland-hotkeys/)).
-With Phase 4 landed, the `1.0.0` clock is running: tag once we have
-30 days of dogfooding (earliest 2026-09-14).
+**CURRENT MILESTONE: Ask-the-shot shipped** (2026-09-25; see
+[`specs/ai-transforms/`](specs/ai-transforms/)). All planned phases
+through Phase 6 are shipped. Next up: Phase 7 (AI v2 — streaming
+first). The `1.0.0` clock is running: tag once we have 30 days of
+dogfooding (earliest 2026-09-14).
 
 ## Milestones
 
@@ -25,6 +25,29 @@ With Phase 4 landed, the `1.0.0` clock is running: tag once we have
 | Phase 4 — Upload                               | Shipped       |
 | Phase 5 — Live overlay (Flameshot-style)       | Shipped       |
 | Phase 6 — Wayland global hotkeys via `ashpd`   | Shipped       |
+| Ask-the-shot — AI transforms over the canvas (`ai-transforms`, ADR-0069) | Shipped |
+
+## Phase 7 — Ask-the-shot v2 (next)
+
+Prioritized from the v1 non-goals list
+([`specs/ai-transforms/spec.md`](specs/ai-transforms/)):
+
+1. **Streaming responses** — SSE on the OpenAI-compatible endpoint;
+   token-by-token render in the AI tab, with a **Stop** control to
+   cancel mid-generation (table-stakes pairing in every reference
+   chat app). Biggest perceived-latency win: vision round-trips run
+   5–30 s and today land all at once. Implementation reference:
+   `async-openai`'s SSE event loop (see
+   [`REFERENCES.md`](REFERENCES.md)).
+2. **Remember last-used transform** — pre-select it in the transform
+   dialog; most users run the same 1–2 transforms repeatedly.
+3. **Live-provider verification pass** — spec success criteria 2–5
+   still need a manual pass against a real endpoint (real key,
+   OCR round-trip, model-sees-the-annotation, follow-up thread).
+
+Still deferred (re-prioritize after Phase 7): image references in
+follow-ups, multiple concurrent providers, transform prompt
+templating, AI-generated image edits, fuller chatbox.
 
 ## Versioning
 
@@ -38,6 +61,12 @@ With Phase 4 landed, the `1.0.0` clock is running: tag once we have
 ## Stretch goals (post-1.0)
 
 - OCR via `tesseract` or `rusty-tesseract`
+- Searchable capture history — OCR-index the session capture store
+  (ADR-0067) so every past shot is text-searchable, local-only
+  (screenpipe / Screenotate precedent)
+- Configurable after-capture actions — user-defined pipeline per
+  capture: copy / save / upload / AI transform / OCR (ShareX
+  pattern; our upload + AI pieces already exist)
 - GIF / short-video capture (probably out of scope; consider
   `gpu-screen-recorder` integration instead)
 - Annotation presets (named combinations of color + width + font)
@@ -46,6 +75,15 @@ With Phase 4 landed, the `1.0.0` clock is running: tag once we have
 - Windows packaging via MSI, macOS via notarized `.app`
 - Alternative editor shells: `flintshot-editor-iced`,
   `flintshot-editor-slint` (exercise the abstraction)
+- MCP server surface: expose `capture` as an MCP tool so agents
+  (goose, Cline, OpenClaw…) can request screenshots from flintshot
+
+## Reference projects (open source)
+
+Consolidated in [`REFERENCES.md`](REFERENCES.md): product
+comparables (screenpipe, NormCap, peekaboo…), the "goose" agent
+family, chat/streaming UI references for Phase 7, and Rust AI infra
+(async-openai, rig, RMCP).
 
 ## How we plan
 

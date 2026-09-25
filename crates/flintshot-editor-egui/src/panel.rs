@@ -2,7 +2,9 @@
 //!
 //! Right-docked, grain-textured cream paper, resizable by dragging
 //! its inner (left) edge and collapsible via the header chevron or
-//! `Ctrl+B` (the shell owns the chord; see `crate::app`). The first
+//! `Ctrl+B` (the shell owns the chord; see `crate::app`). While
+//! collapsed, a mirror « chip floats at the canvas's top-right
+//! corner as the reopen affordance (`crate::floating`). The first
 //! row is the `PROPS | HIST | AI` tab header (segmented
 //! chips — cutout at rest, ink-filled when active) with the collapse
 //! chevron at its right end. The Properties tab is the contextual
@@ -102,9 +104,9 @@ pub(crate) struct PanelState {
     /// The active tab (Properties by default).
     tab: PanelTab,
     /// Whether the panel is collapsed (not rendered at all; the
-    /// canvas reclaims the strip). Reopened with `Ctrl+B` or
-    /// [`Self::toggle_collapse`] — by design there is no clickable
-    /// affordance while collapsed.
+    /// canvas reclaims the strip). Reopened with `Ctrl+B`, the
+    /// floating expand chip at the canvas's top-right corner
+    /// (`crate::floating`), or [`Self::toggle_collapse`].
     collapsed: bool,
     /// The live panel width, logical px — the seed for the panel's
     /// `default_width` and the read-back the app's fit path and
@@ -482,9 +484,10 @@ fn tab_header(ui: &mut egui::Ui, panel: &mut PanelState) {
 
 /// The header's collapse chevron: a quiet double-chevron chip
 /// pointing at the panel's fixed (right) edge — the collapse
-/// direction. Clicking hides the panel; `Ctrl+B` (named in the
-/// tooltip, the only reopen affordance once collapsed) brings it
-/// back. Returns whether it was clicked.
+/// direction. Clicking hides the panel; `Ctrl+B` or the mirror
+/// chip floating at the canvas's top-right corner (see
+/// `crate::floating`) brings it back. Returns whether it was
+/// clicked.
 fn collapse_chevron(ui: &mut egui::Ui) -> bool {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
     let resp = ui
@@ -1852,6 +1855,18 @@ pub(crate) fn g_x(p: &egui::Painter, r: egui::Rect, c: Color32) {
 pub(crate) fn g_plus(p: &egui::Painter, r: egui::Rect, c: Color32) {
     seg(p, r, (-4.0, 0.0), (4.0, 0.0), c, 2.0);
     seg(p, r, (0.0, -4.0), (0.0, 4.0), c, 2.0);
+}
+
+/// Left-pointing double-chevron: the collapsed panel's reopen
+/// affordance — the mirror image of the header's collapse chevron
+/// (which points right, at the panel's fixed edge). Lives on the
+/// floating chip pinned to the canvas's top-right corner (see
+/// `crate::floating`).
+pub(crate) fn g_panel_expand(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    for dx in [0.0, 6.0] {
+        seg(p, r, (4.0 - dx, -4.0), (-dx, 0.0), c, 2.0);
+        seg(p, r, (-dx, 0.0), (4.0 - dx, 4.0), c, 2.0);
+    }
 }
 
 #[cfg(test)]

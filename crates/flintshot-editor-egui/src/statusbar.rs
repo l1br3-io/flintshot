@@ -42,8 +42,8 @@ pub(crate) fn dims_label(dims: (u32, u32), size_bytes: u64) -> String {
 }
 
 /// The statusbar's kbd chips, in the binding table's order: undo,
-/// redo, save, delete, and the panel toggle (the collapsed panel's
-/// only discoverable reopen path).
+/// redo, save, delete, and the panel toggle (the keyboard reopen
+/// path while collapsed — the floating « chip is the pointer one).
 const KEYS: [&str; 5] = ["Ctrl+Z", "Ctrl+Y", "Ctrl+S", "Del", "Ctrl+B"];
 
 /// Draw the statusbar across the bottom of `ui`. Call it before the
@@ -256,8 +256,9 @@ mod tests {
     }
 
     /// The statusbar names the panel toggle: a `Ctrl+B` kbd chip
-    /// paints, so the reopen path is discoverable before the first
-    /// collapse (the collapsed panel has no clickable affordance).
+    /// paints, so the keyboard reopen path is discoverable before
+    /// the first collapse (the floating « chip covers the pointer
+    /// path once collapsed).
     #[test]
     fn statusbar_names_the_ctrl_b_panel_toggle() {
         let ctx = egui::Context::default();
