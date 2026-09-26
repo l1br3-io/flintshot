@@ -443,13 +443,21 @@ impl AiConfigPage {
         egui::ScrollArea::vertical()
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                let column = 640.0_f32.min(ui.available_width());
-                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                    ui.set_min_width(column);
-                    ui.add_space(theme::SPACE_SCALE[3]);
-                    model_section(ui, page, now);
-                    transforms_section(ui, page);
-                    ui.add_space(theme::SPACE_SCALE[3]);
+                // A real centered column: cap the content width so
+                // wide windows center the 680 px column instead of
+                // stretching the cards edge-to-edge.
+                let column = 680.0_f32.min(ui.available_width());
+                let inset = ((ui.available_width() - column) / 2.0).max(0.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(inset);
+                    ui.vertical(|ui| {
+                        ui.set_min_width(column);
+                        ui.set_max_width(column);
+                        ui.add_space(theme::SPACE_SCALE[3]);
+                        model_section(ui, page, now);
+                        transforms_section(ui, page);
+                        ui.add_space(theme::SPACE_SCALE[3]);
+                    });
                 });
             });
         escape
@@ -467,7 +475,7 @@ fn model_section(ui: &mut egui::Ui, page: &mut AiConfigApp, now: f64) {
                 egui::TextEdit::singleline(&mut page.config.ai.model)
                     .id(egui::Id::new("ai-model"))
                     .hint_text(hint)
-                    .desired_width(240.0),
+                    .desired_width(ui.available_width()),
             );
             if response.changed() {
                 page.mark_dirty(now);
@@ -483,7 +491,7 @@ fn model_section(ui: &mut egui::Ui, page: &mut AiConfigApp, now: f64) {
                     } else {
                         preset.base_url
                     })
-                    .desired_width(240.0),
+                    .desired_width(ui.available_width()),
             );
             if response.changed() {
                 page.mark_dirty(now);
@@ -535,7 +543,7 @@ fn key_row(ui: &mut egui::Ui, page: &mut AiConfigApp) {
                 .id(egui::Id::new("ai-key"))
                 .password(true)
                 .hint_text("Replace key…")
-                .desired_width(240.0),
+                .desired_width(ui.available_width()),
         );
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             page.commit_key_draft();
@@ -570,7 +578,7 @@ fn test_row(ui: &mut egui::Ui, page: &mut AiConfigApp) {
 fn status_line(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .size(theme::TYPE_XS)
+            .size(theme::TYPE_SM)
             .color(theme::palette::INK_SOFT),
     );
     ui.add_space(theme::SPACE_SCALE[1]);
@@ -642,60 +650,96 @@ fn transform_row(
     egui::Frame::new()
         .fill(theme::palette::PAPER_DIM)
         .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
-        .inner_margin(egui::Margin::same(8))
+        .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(transform.name.clone())
-                            .size(theme::TYPE_SM)
-                            .color(theme::palette::INK),
-                    );
-                    ui.label(
-                        egui::RichText::new(prompt_excerpt(&transform.prompt))
-                            .size(theme::TYPE_XS)
-                            .color(theme::palette::INK_SOFT),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ghost_pill(
-                        ui,
-                        egui::Id::new(("ai-transform-del", transform.id.clone())),
-                        "Delete",
-                        true,
-                    ) {
-                        page.cancel_transform_edit();
-                        page.delete_transform(&transform.id);
-                    }
-                    if !editing_this
-                        && ghost_pill(
-                            ui,
-                            egui::Id::new(("ai-transform-edit", transform.id.clone())),
-                            "Edit",
-                            true,
-                        )
-                    {
-                        page.begin_edit_transform(&transform.id);
-                    }
-                    if ghost_pill(
-                        ui,
-                        egui::Id::new(("ai-transform-down", transform.id.clone())),
-                        "↓",
-                        true,
-                    ) {
-                        page.move_transform(&transform.id, 1);
-                    }
-                    if ghost_pill(
-                        ui,
-                        egui::Id::new(("ai-transform-up", transform.id.clone())),
-                        "↑",
-                        true,
-                    ) {
-                        page.move_transform(&transform.id, -1);
-                    }
-                });
-            });
+            // One exact allocation for the whole row; the labels
+            // paint left and the pill strip places itself from the
+            // right edge. Nested layout children (a vertical label
+            // column, a right_to_left control column) mis-place in
+            // egui's flow here — the controls ended up on their own
+            // row below the card.
+            let w = ui.available_width();
+            let sx = ui.spacing().item_spacing.x;
+            let sy = ui.spacing().item_spacing.y;
+            let name_galley = ui.painter().layout_no_wrap(
+                transform.name.clone(),
+                egui::FontId::proportional(theme::TYPE_MD),
+                theme::palette::INK,
+            );
+            let excerpt_galley = ui.painter().layout_no_wrap(
+                prompt_excerpt(&transform.prompt),
+                egui::FontId::proportional(theme::TYPE_SM),
+                theme::palette::INK_SOFT,
+            );
+            let labels_h = name_galley.size().y + sy + excerpt_galley.size().y;
+            let h = labels_h.max(theme::CONTROL_H).max(32.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+            let name_h = name_galley.size().y;
+            ui.painter().galley(
+                egui::pos2(rect.left(), rect.center().y - labels_h / 2.0),
+                name_galley,
+                theme::palette::INK,
+            );
+            ui.painter().galley(
+                egui::pos2(rect.left(), rect.center().y - labels_h / 2.0 + name_h + sy),
+                excerpt_galley,
+                theme::palette::INK_SOFT,
+            );
+            let half = theme::CONTROL_H / 2.0;
+            let mut right = rect.right();
+            let pill_rect = |right: f32, w: f32| {
+                egui::Rect::from_min_max(
+                    egui::pos2(right - w, rect.center().y - half),
+                    egui::pos2(right, rect.center().y + half),
+                )
+            };
+            let del_w = pill_width(ui, "Delete");
+            if pill_at(
+                ui,
+                pill_rect(right, del_w),
+                egui::Id::new(("ai-transform-del", transform.id.clone())),
+                "Delete",
+                true,
+            ) {
+                page.cancel_transform_edit();
+                page.delete_transform(&transform.id);
+            }
+            right -= del_w + sx;
+            if !editing_this {
+                let edit_w = pill_width(ui, "Edit");
+                if pill_at(
+                    ui,
+                    pill_rect(right, edit_w),
+                    egui::Id::new(("ai-transform-edit", transform.id.clone())),
+                    "Edit",
+                    true,
+                ) {
+                    page.begin_edit_transform(&transform.id);
+                }
+                right -= edit_w + sx;
+            }
+            let down_w = pill_width(ui, "↓");
+            if pill_at(
+                ui,
+                pill_rect(right, down_w),
+                egui::Id::new(("ai-transform-down", transform.id.clone())),
+                "↓",
+                true,
+            ) {
+                page.move_transform(&transform.id, 1);
+            }
+            right -= down_w + sx;
+            let up_w = pill_width(ui, "↑");
+            if pill_at(
+                ui,
+                pill_rect(right, up_w),
+                egui::Id::new(("ai-transform-up", transform.id.clone())),
+                "↑",
+                true,
+            ) {
+                page.move_transform(&transform.id, -1);
+            }
         });
     ui.add_space(theme::SPACE_SCALE[1]);
 }
@@ -708,7 +752,7 @@ fn transform_editor(ui: &mut egui::Ui, draft: &mut EditingTransform) -> EditorIn
     egui::Frame::new()
         .fill(theme::palette::PAPER)
         .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
-        .inner_margin(egui::Margin::same(8))
+        .inner_margin(egui::Margin::same(10))
         .stroke(theme::HAIRLINE_STROKE)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -721,7 +765,7 @@ fn transform_editor(ui: &mut egui::Ui, draft: &mut EditingTransform) -> EditorIn
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.name)
                         .id(egui::Id::new("ai-transform-name"))
-                        .desired_width(160.0),
+                        .desired_width(ui.available_width()),
                 );
             });
             ui.add_space(theme::SPACE_SCALE[0]);
@@ -766,7 +810,7 @@ fn set_row(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::Ui)) 
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(label)
-                .size(theme::TYPE_SM)
+                .size(theme::TYPE_MD)
                 .color(theme::palette::INK),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
@@ -774,20 +818,29 @@ fn set_row(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::Ui)) 
     ui.add_space(theme::SPACE_SCALE[1]);
 }
 
-/// A quiet action pill (the Test connection button): forest fill
-/// when armed, dim + inert when not. Returns whether it fired.
-fn ghost_pill(ui: &mut egui::Ui, id: egui::Id, label: &str, enabled: bool) -> bool {
+/// Measure a [`ghost_pill`] for its label (pads included) — rows
+/// that lay their own geometry budget their controls first.
+fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        egui::FontId::proportional(theme::TYPE_SM),
+        egui::FontId::proportional(theme::TYPE_MD),
+        theme::palette::CREAM_TEXT,
+    );
+    14.0 + galley.size().x + 14.0
+}
+
+/// Paint a [`ghost_pill`] into an exact rect (rows that lay their
+/// own geometry). Returns whether it fired.
+fn pill_at(ui: &mut egui::Ui, rect: egui::Rect, id: egui::Id, label: &str, enabled: bool) -> bool {
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(theme::TYPE_MD),
         if enabled {
             theme::palette::CREAM_TEXT
         } else {
             theme::palette::LOCK_GREY
         },
     );
-    let w = 12.0 + galley.size().x + 12.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 24.0), egui::Sense::hover());
     let sense = if enabled {
         egui::Sense::click()
     } else {
@@ -810,7 +863,7 @@ fn ghost_pill(ui: &mut egui::Ui, id: egui::Id, label: &str, enabled: bool) -> bo
             rect.center().x - galley.size().x / 2.0,
             rect.center().y - galley.size().y / 2.0,
         ),
-        galley.clone(),
+        galley,
         if enabled {
             theme::palette::CREAM_TEXT
         } else {
@@ -820,12 +873,21 @@ fn ghost_pill(ui: &mut egui::Ui, id: egui::Id, label: &str, enabled: bool) -> bo
     resp.clicked() && enabled
 }
 
+/// A quiet action pill (the Test connection button): forest fill
+/// when armed, dim + inert when not. Returns whether it fired.
+fn ghost_pill(ui: &mut egui::Ui, id: egui::Id, label: &str, enabled: bool) -> bool {
+    let w = pill_width(ui, label);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, theme::CONTROL_H), egui::Sense::hover());
+    pill_at(ui, rect, id, label, enabled)
+}
+
 /// One cutout section card (the settings page's).
 fn section_card(ui: &mut egui::Ui, title: &str, body: impl FnMut(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(theme::palette::PAPER_CREAM)
         .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
-        .inner_margin(egui::Margin::same(theme::POD_PAD + 2))
+        // SPACE_SCALE[2] — generous card gutters on the bumped scale.
+        .inner_margin(egui::Margin::same(14))
         .stroke(theme::HAIRLINE_STROKE)
         .shadow(theme::SHADOW_RESTING)
         .show(ui, |ui| {
@@ -1138,6 +1200,125 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    /// The page pins the density bump: the centered 680 px column,
+    /// full-row model field, `CONTROL_H` pills, and transform rows
+    /// whose controls sit inside a ≥ 32 px card at `TYPE_MD`.
+    #[test]
+    fn aiconfig_page_pins_the_density_bump() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let (mut page, _dir) = page_with_store();
+        let _id = create(&mut page, "Extract text", "Extract the text");
+        // One more pass than `page_frame`'s shape: every render uses
+        // the same harness (topbar + central panel) so response
+        // rects and painted shapes describe the same layout.
+        let shapes_frame = |page: &mut AiConfigApp| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 768.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            ctx.run_ui(raw, |ui| {
+                let surface = crate::topbar::Surface::Settings;
+                let enable = crate::topbar::enable_for(surface);
+                let _ = crate::topbar::show(ui, surface, None, enable, false, false);
+                let panel = egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(crate::theme::palette::PAPER_CREAM))
+                    .show(ui, |ui| AiConfigPage::show(ui, page, ui.input(|i| i.time)));
+                let _ = panel.inner;
+            })
+            .shapes
+        };
+        let _ = shapes_frame(&mut page);
+        let _ = shapes_frame(&mut page);
+        let out = shapes_frame(&mut page);
+
+        // The Model section card spans the centered 680 px column
+        // (minus its gutters).
+        let section = ctx
+            .read_response(egui::Id::new(("ai-settings-section", "Model")))
+            .expect("the Model section header registers")
+            .rect;
+        assert!(
+            (section.width() - (680.0 - 28.0)).abs() < 12.0,
+            "the section spans the 680 px column: {}",
+            section.width()
+        );
+        assert!(
+            section.left() > 100.0 && section.right() < 900.0,
+            "the column centers in the 1024 px window: {section:?}"
+        );
+
+        // The model field fills its row (no fixed 240 px width).
+        let model = ctx
+            .read_response(egui::Id::new("ai-model"))
+            .expect("the model field registers")
+            .rect;
+        assert!(
+            model.width() > 400.0,
+            "the model field fills the row: {}",
+            model.width()
+        );
+
+        // Pills at the control height.
+        let test = ctx
+            .read_response(egui::Id::new("ai-test-connection"))
+            .expect("the test pill registers")
+            .rect;
+        assert!(
+            (test.height() - theme::CONTROL_H).abs() < 0.5,
+            "test pill height {}",
+            test.height()
+        );
+
+        // The transform row: a PAPER_DIM card clearing 32 px with
+        // its enabled (forest) pills inside — the controls ride the
+        // row, never a stray line below the card.
+        let pills: Vec<egui::Rect> = out
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r) if r.fill == theme::palette::FOREST_MID => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        let row_card = out
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r) if r.fill == theme::palette::PAPER_DIM => Some(r.rect),
+                _ => None,
+            })
+            .find(|card| {
+                // A row card clears 32 px and carries the whole
+                // control strip (the provider well's selected
+                // segment also paints forest, but rides alone).
+                card.height() >= 32.0
+                    && pills.iter().filter(|p| card.contains_rect(**p)).count() >= 4
+            })
+            .expect("the transform row's card paints with its pills");
+        assert!(
+            row_card.height() >= 32.0,
+            "the transform row clears 32 px: {}",
+            row_card.height()
+        );
+        let inside = pills.iter().filter(|p| row_card.contains_rect(**p)).count();
+        assert!(inside >= 4, "the row's controls sit inside the card");
+
+        let name_size = out.iter().find_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) if t.galley.job.text == "Extract text" => {
+                t.galley.job.sections.first().map(|s| s.format.font_id.size)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            name_size,
+            Some(theme::TYPE_MD),
+            "transform names paint at TYPE_MD"
+        );
     }
 
     #[test]
