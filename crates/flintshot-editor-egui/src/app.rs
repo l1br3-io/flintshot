@@ -1678,15 +1678,11 @@ impl EditorApp {
         self.draw_statusbar(ui);
         // Tool rail: the left zone (draw order: top → bottom → left
         // → right). Tool switching mutates the shared state directly;
-        // the gate reflects the selection-first phase. The return is
-        // the Ask-the-shot spark chip (an action — the tool is
-        // untouched).
+        // the gate reflects the selection-first phase. The rail is
+        // tools-only — Ask-the-shot lives in the topbar AI hero and
+        // the `I` shortcut.
         let gate = self.rail_gate();
-        let ai_pressed = rail::show(ui, &mut self.state, gate, &mut self.rail);
-        if ai_pressed {
-            self.refresh_ai_transforms();
-            self.ai_dialog.open();
-        }
+        rail::show(ui, &mut self.state, gate, &mut self.rail);
         // Properties panel. Must come before CentralPanel so egui
         // reserves the right-hand strip. The plain call (no closure)
         // keeps the borrow of `&mut self.state` disjoint from the
