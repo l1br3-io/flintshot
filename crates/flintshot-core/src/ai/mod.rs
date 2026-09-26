@@ -163,6 +163,23 @@ pub struct AiRequest {
     /// Generation cap. Sent only when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// SSE streaming flag. Sent only when set — the non-streaming
+    /// Test-connection probe omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// Streaming options; meaningful only together with
+    /// `stream: true` (per the `OpenAI` chat/create reference the
+    /// field must not appear otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<AiStreamOptions>,
+}
+
+/// The `stream_options` object of a streaming request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiStreamOptions {
+    /// Ask the provider to stream a final usage-only chunk before
+    /// `[DONE]`. All four in-scope providers support it.
+    pub include_usage: bool,
 }
 
 /// One choice in a chat-completions response envelope.
@@ -209,6 +226,105 @@ impl AiResponse {
             .first()
             .and_then(|choice| choice.message.content.as_deref())
     }
+}
+
+/// Token-usage accounting, on a completion envelope or (with
+/// `include_usage`) a stream's final chunk.
+///
+/// xAI attaches `usage` to *every* streaming chunk, cumulative —
+/// parse each and let the last non-null one win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiUsage {
+    /// Tokens in the prompt side.
+    pub prompt_tokens: u64,
+    /// Tokens generated.
+    pub completion_tokens: u64,
+    /// `prompt_tokens + completion_tokens`.
+    pub total_tokens: u64,
+}
+
+/// The `delta` of a streaming choice — the assistant message as it
+/// grows. Unknown members (xAI's `reasoning_content`, tool-call
+/// fields) are ignored rather than rejected.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AiStreamDelta {
+    /// `"assistant"` on the first chunk, absent after.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// The text delta; `None` on role-only and terminal chunks.
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+/// One choice of a `chat.completion.chunk`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AiStreamChoice {
+    /// Position of this choice in `choices` (we request one).
+    #[serde(default)]
+    pub index: u32,
+    /// The growing message.
+    pub delta: AiStreamDelta,
+    /// `None` on content chunks; `"stop"`/`"length"`/… on the
+    /// terminal chunk, whose `delta` is empty.
+    #[serde(default)]
+    pub finish_reason: Option<String>,
+}
+
+/// One SSE `data:` payload of a streaming chat completion
+/// (`object: "chat.completion.chunk"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AiStreamChunk {
+    /// Provider-side completion id.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Growing choices; empty on the usage-only final chunk that
+    /// `include_usage` requests.
+    #[serde(default)]
+    pub choices: Vec<AiStreamChoice>,
+    /// Usage accounting — `None` on content chunks (`OpenAI`), on
+    /// every chunk (xAI, cumulative), or on the final chunk.
+    #[serde(default)]
+    pub usage: Option<AiUsage>,
+}
+
+/// One parsed streaming event (the worker's payload after parsing).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum AiStreamEvent {
+    /// A content delta to append to the streaming turn.
+    Token(String),
+    /// Usage accounting (xAI sends it on every chunk, cumulative —
+    /// the last one wins; parsed for tolerance, not yet displayed).
+    Usage(AiUsage),
+    /// The provider finished (`[DONE]` or a clean stream close —
+    /// both are valid ends).
+    Done,
+}
+
+/// Parse one SSE `data:` payload. `data: [DONE]` → `Done`; a
+/// usage-only chunk (empty `choices`) → `Usage`; a content chunk →
+/// `Token` when it carries text, else `None` (role-only chunks,
+/// keepalives, unknown fields are skipped without failing).
+///
+/// Malformed or unknown payloads return `None` — a data line is
+/// never a fatal point in the stream loop.
+#[must_use]
+pub fn parse_stream_data_line(payload: &str) -> Option<AiStreamEvent> {
+    if payload == "[DONE]" {
+        return Some(AiStreamEvent::Done);
+    }
+    let chunk: AiStreamChunk = serde_json::from_str(payload).ok()?;
+    if chunk.choices.is_empty() {
+        return chunk.usage.map(AiStreamEvent::Usage);
+    }
+    chunk
+        .choices
+        .into_iter()
+        .next()?
+        .delta
+        .content
+        .filter(|text| !text.is_empty())
+        .map(AiStreamEvent::Token)
 }
 
 /// Provider error envelope: `{"error": {"message": "...", ...}}`.
@@ -420,6 +536,8 @@ mod tests {
                 ],
             }],
             max_tokens: Some(1024),
+            stream: None,
+            stream_options: None,
         };
         let json = serde_json::to_value(&request).expect("serialize");
         // {
@@ -502,6 +620,8 @@ mod tests {
             model: "m".into(),
             messages: vec![],
             max_tokens: None,
+            stream: None,
+            stream_options: None,
         };
         let json = serde_json::to_value(&request).expect("serialize");
         assert!(json.get("max_tokens").is_none());
@@ -628,6 +748,189 @@ mod tests {
     fn png_data_url_prefixes_and_encodes() {
         // base64 of b"hello" is aGVsbG8=
         assert_eq!(png_data_url(b"hello"), "data:image/png;base64,aGVsbG8=");
+    }
+
+    // Streaming fixtures hand-checked against the SSE wire shapes in
+    // docs/research/2026-09-26-phase7-adaptation-research.md §1
+    // (OpenAI CreateChatCompletionStreamResponse schema, xAI's
+    // streaming guide divergences, Gemini/Ollama compat pages).
+
+    #[test]
+    fn streaming_request_serializes_stream_fields() {
+        // OpenAI chat/create: stream_options must only be set when
+        // streaming. The worker always sets both together.
+        let request = AiRequest {
+            model: "gpt-4o-mini".into(),
+            messages: vec![ChatMessage::User {
+                content: vec![text_part("summarize")],
+            }],
+            max_tokens: Some(1024),
+            stream: Some(true),
+            stream_options: Some(AiStreamOptions {
+                include_usage: true,
+            }),
+        };
+        let json = serde_json::to_value(&request).expect("serialize");
+        // {
+        //   ...,
+        //   "stream": true,
+        //   "stream_options": {"include_usage": true}
+        // }
+        assert_eq!(json["stream"], true);
+        assert_eq!(json["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn stream_fields_omitted_when_none() {
+        // The non-streaming Test-connection probe sends neither field.
+        let request = AiRequest {
+            model: "m".into(),
+            messages: vec![],
+            max_tokens: None,
+            stream: None,
+            stream_options: None,
+        };
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert!(json.get("stream").is_none());
+        assert!(json.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn baseline_content_chunk_parses_and_yields_token() {
+        // OpenAI baseline content chunk (object chat.completion.chunk):
+        // {
+        //   "id": "chatcmpl-abc",
+        //   "object": "chat.completion.chunk",
+        //   "created": 1234567890,
+        //   "model": "gpt-4o-mini",
+        //   "choices": [{
+        //     "index": 0,
+        //     "delta": {"content": "Hel"},
+        //     "finish_reason": null
+        //   }],
+        //   "usage": null
+        // }
+        let payload = r#"{
+            "id": "chatcmpl-abc",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "Hel"},
+                "finish_reason": null
+            }],
+            "usage": null
+        }"#;
+        let chunk: AiStreamChunk = serde_json::from_str(payload).expect("parse chunk");
+        let [choice] = chunk.choices.as_slice() else {
+            panic!("one choice");
+        };
+        assert_eq!(choice.index, 0);
+        assert_eq!(choice.delta.content.as_deref(), Some("Hel"));
+        assert_eq!(choice.finish_reason, None);
+        assert_eq!(chunk.usage, None);
+
+        assert_eq!(
+            parse_stream_data_line(payload),
+            Some(AiStreamEvent::Token("Hel".into()))
+        );
+    }
+
+    #[test]
+    fn role_only_and_terminal_chunks_yield_none() {
+        // First chunk carries only the role (no text yet) — skipped.
+        assert_eq!(
+            parse_stream_data_line(
+                r#"{"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]}"#
+            ),
+            None
+        );
+        // Terminal chunk: empty delta + finish_reason set — the text
+        // is done; [DONE] (or a clean close) ends the stream, not this.
+        assert_eq!(
+            parse_stream_data_line(
+                r#"{"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}"#
+            ),
+            None
+        );
+        // Empty-string content carries no text — skipped.
+        assert_eq!(
+            parse_stream_data_line(
+                r#"{"choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": null}]}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn usage_only_chunk_yields_usage() {
+        // OpenAI with include_usage: the final usage chunk arrives
+        // before [DONE]; its choices is ALWAYS an empty array.
+        // {
+        //   "choices": [],
+        //   "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+        // }
+        let event = parse_stream_data_line(
+            r#"{"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}}"#,
+        );
+        assert_eq!(
+            event,
+            Some(AiStreamEvent::Usage(AiUsage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                total_tokens: 120,
+            }))
+        );
+    }
+
+    #[test]
+    fn empty_choices_with_null_usage_yields_none() {
+        // A chunk with no choices and no usage (xAI-style padding or a
+        // provider keepalive) is skipped, not an error.
+        assert_eq!(
+            parse_stream_data_line(r#"{"choices": [], "usage": null}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn done_sentinel_yields_done() {
+        assert_eq!(parse_stream_data_line("[DONE]"), Some(AiStreamEvent::Done));
+    }
+
+    #[test]
+    fn xai_chunk_with_usage_and_reasoning_content_tolerated() {
+        // xAI divergences (streaming guide): usage on EVERY chunk
+        // (cumulative — the last one would win) and
+        // delta.reasoning_content on reasoning models. Content wins the
+        // event; the extras parse without failing. Ollama sends the
+        // same cumulative-usage shape at stream end.
+        let payload = r#"{
+            "id": "chunk-1",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "wor", "reasoning_content": "internal deliberation"},
+                "finish_reason": null
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        }"#;
+        let chunk: AiStreamChunk = serde_json::from_str(payload).expect("parse");
+        assert_eq!(chunk.usage.map(|u| u.total_tokens), Some(15));
+        assert_eq!(
+            parse_stream_data_line(payload),
+            Some(AiStreamEvent::Token("wor".into()))
+        );
+    }
+
+    #[test]
+    fn malformed_line_yields_none_never_panics() {
+        // A malformed or unknown payload is skipped — the parser must
+        // never be a fatal point in the stream loop.
+        assert_eq!(parse_stream_data_line("not json"), None);
+        assert_eq!(parse_stream_data_line(r#"{"unexpected": true}"#), None);
+        assert_eq!(parse_stream_data_line(""), None);
     }
 
     #[test]

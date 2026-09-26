@@ -164,6 +164,8 @@ mod tests {
                 ],
             }],
             max_tokens: Some(1024),
+            stream: None,
+            stream_options: None,
         }
     }
 
