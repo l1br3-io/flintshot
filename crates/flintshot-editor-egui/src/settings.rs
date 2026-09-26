@@ -522,10 +522,10 @@ fn link(ui: &mut egui::Ui, id: egui::Id, label: &str) -> bool {
     use crate::theme::palette as p;
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        egui::FontId::proportional(theme::TYPE_SM),
+        egui::FontId::proportional(theme::TYPE_MD),
         p::GOLD_DEEP,
     );
-    let size = egui::vec2(galley.size().x + 6.0, 26.0);
+    let size = egui::vec2(galley.size().x + 10.0, theme::CONTROL_H);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     // The id-ed interact is the link's one true hit target (the
     // allocation above senses hover only, so it cannot steal the
@@ -540,7 +540,7 @@ fn link(ui: &mut egui::Ui, id: egui::Id, label: &str) -> bool {
     };
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
-        egui::FontId::proportional(theme::TYPE_SM),
+        egui::FontId::proportional(theme::TYPE_MD),
         color,
     );
     let pos = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
@@ -582,7 +582,8 @@ fn section_card(ui: &mut egui::Ui, title: &str, body: impl FnMut(&mut egui::Ui))
     egui::Frame::new()
         .fill(theme::palette::PAPER_CREAM)
         .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
-        .inner_margin(egui::Margin::same(theme::POD_PAD + 2))
+        // SPACE_SCALE[2] — generous card gutters on the bumped scale.
+        .inner_margin(egui::Margin::same(14))
         .stroke(theme::HAIRLINE_STROKE)
         .shadow(theme::SHADOW_RESTING)
         .show(ui, |ui| {
@@ -601,7 +602,7 @@ fn set_row(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::Ui)) 
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(label)
-                .size(theme::TYPE_SM)
+                .size(theme::TYPE_MD)
                 .color(theme::palette::INK),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
@@ -615,11 +616,11 @@ fn readonly_value(ui: &mut egui::Ui, value: &str) {
     use crate::theme::palette as p;
     let galley = ui.painter().layout_no_wrap(
         format!("🔒 {value}"),
-        egui::FontId::proportional(theme::TYPE_SM),
+        egui::FontId::proportional(theme::TYPE_MD),
         p::LOCK_GREY,
     );
     let w = 14.0 + galley.size().x + 14.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, theme::CONTROL_H), egui::Sense::hover());
     let dashed = egui::Stroke::new(1.0, p::with_alpha(p::LOCK_GREY, 180));
     ui.painter().rect(
         rect,
@@ -679,6 +680,63 @@ mod tests {
             SettingsPage::show(ui, page, 0.0);
         });
         ctx
+    }
+
+    /// [`frame`] returning the painted shapes (for type-scale
+    /// assertions on galleys the form paints).
+    fn frame_shapes(page: &mut SettingsApp) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        widgets::set_animations(&ctx, false);
+        theme::apply(&ctx);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 900.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        ctx.run_ui(raw, |ui| {
+            SettingsPage::show(ui, page, 0.0);
+        })
+        .shapes
+    }
+
+    /// The form pins the density bump: `CONTROL_H` segments, links,
+    /// and `TYPE_MD` row labels.
+    #[test]
+    fn settings_form_pins_the_density_bump() {
+        let mut page = page();
+        let ctx = frame(&mut page);
+        let seg = ctx
+            .read_response(egui::Id::new("set-default-mode").with(0))
+            .expect("mode segment")
+            .rect;
+        assert!(
+            (seg.height() - theme::CONTROL_H).abs() < 0.5,
+            "segment height {}",
+            seg.height()
+        );
+        let edit = ctx
+            .read_response(egui::Id::new("set-edit-config"))
+            .expect("edit-config link")
+            .rect;
+        assert!(
+            edit.height() >= theme::CONTROL_H - 0.5,
+            "link hit area {}",
+            edit.height()
+        );
+        let shapes = frame_shapes(&mut page);
+        let label_size = shapes.iter().find_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) if t.galley.job.text == "Default mode" => {
+                t.galley.job.sections.first().map(|s| s.format.font_id.size)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            label_size,
+            Some(theme::TYPE_MD),
+            "row labels paint at TYPE_MD"
+        );
     }
 
     /// Every mapping-table row renders its control, and the readonly

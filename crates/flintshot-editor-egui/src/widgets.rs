@@ -138,8 +138,8 @@ pub(crate) fn well_row(
     selected: usize,
 ) -> Option<usize> {
     use crate::theme::palette as p;
-    let seg_h = 26.0;
-    let seg_pad = 10.0;
+    let seg_h = theme::CONTROL_H;
+    let seg_pad = 12.0;
     let gap = 4.0;
     let well_pad = 3.0;
     let font = egui::FontId::proportional(theme::TYPE_SM);
@@ -212,8 +212,8 @@ pub(crate) struct SwitchResponse {
 /// render at 55% opacity and ignore input.
 pub(crate) fn switch(ui: &mut egui::Ui, id: egui::Id, on: bool, locked: bool) -> SwitchResponse {
     use crate::theme::palette as p;
-    const TRACK: egui::Vec2 = egui::vec2(34.0, 20.0);
-    let knob_d = 14.0;
+    const TRACK: egui::Vec2 = egui::vec2(40.0, 22.0);
+    let knob_d = 16.0;
     let knob_pad = 3.0;
     let (rect, _) = ui.allocate_exact_size(TRACK, egui::Sense::hover());
     let resp = ui.interact(
@@ -292,7 +292,7 @@ pub(crate) fn section(
         .data_mut(|d| d.get_temp::<bool>(id))
         .unwrap_or(default_open);
 
-    let header_h = 26.0;
+    let header_h = theme::CONTROL_H;
     let (header_rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), header_h),
         egui::Sense::hover(),
@@ -317,7 +317,7 @@ pub(crate) fn section(
     ));
     let galley = ui.painter().layout_no_wrap(
         title.to_owned(),
-        egui::FontId::proportional(theme::TYPE_MD),
+        egui::FontId::proportional(theme::TYPE_LG),
         p::INK,
     );
     ui.painter().galley(
@@ -400,7 +400,7 @@ pub(crate) fn kbd_chip(ui: &mut egui::Ui, keys: &str) {
         egui::FontId::proportional(theme::TYPE_XS),
         p::INK_SOFT,
     );
-    let pad_x = 6.0;
+    let pad_x = 8.0;
     let size = egui::vec2(galley.size().x + pad_x * 2.0, galley.size().y + 4.0);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().rect(
@@ -513,6 +513,70 @@ mod tests {
         );
         assert_eq!(HERO_PAD_X.to_bits(), 14.0_f32.to_bits());
         assert_eq!(GLYPH_EDGE.to_bits(), 16.0_f32.to_bits());
+    }
+
+    /// The widget kit pins the density bump: `CONTROL_H` well
+    /// segments and section headers, taller switches.
+    #[test]
+    fn widget_kit_pins_the_density_bump() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        run(&ctx, 0.0, vec![], |ui| {
+            let _ = well_row(ui, egui::Id::new("wr"), &["a", "b"], 0);
+            let _ = switch(ui, egui::Id::new("sw"), false, false);
+            let _ = section(ui, egui::Id::new("sec"), "Title", true, |_| {});
+        });
+        let seg = ctx
+            .read_response(egui::Id::new("wr").with(0))
+            .expect("segment")
+            .rect;
+        assert!(
+            (seg.height() - theme::CONTROL_H).abs() < 0.5,
+            "segment height {}",
+            seg.height()
+        );
+        let sw = ctx.read_response(egui::Id::new("sw")).expect("switch").rect;
+        assert!(
+            (sw.width() - 40.0).abs() < 0.5 && (sw.height() - 22.0).abs() < 0.5,
+            "switch {sw:?}"
+        );
+        let header = ctx
+            .read_response(egui::Id::new("sec"))
+            .expect("section header")
+            .rect;
+        assert!(
+            (header.height() - theme::CONTROL_H).abs() < 0.5,
+            "header height {}",
+            header.height()
+        );
+    }
+
+    /// Section headings render at `TYPE_LG` — the density bump's
+    /// card hierarchy.
+    #[test]
+    fn section_headings_pin_the_new_type_scale() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        set_animations(&ctx, false);
+        let out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                let _ = section(ui, egui::Id::new("sec-lg"), "Heading", true, |_| {});
+            },
+        );
+        let size = out.shapes.iter().find_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) if t.galley.job.text == "Heading" => {
+                t.galley.job.sections.first().map(|s| s.format.font_id.size)
+            }
+            _ => None,
+        });
+        assert_eq!(size, Some(theme::TYPE_LG));
     }
 
     #[test]
