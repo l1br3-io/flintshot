@@ -1,6 +1,6 @@
 //! The left tool rail — zone 2 of the five-zone editor (mockup
-//! `zone-map.html`): a 48 px forest-mid strip carrying the ten real
-//! tools as 36×36 chips, grouped by the five semantic pods with
+//! `zone-map.html`): a 56 px forest-mid strip carrying the ten real
+//! tools as 40×40 chips, grouped by the five semantic pods with
 //! hairline separators.
 //!
 //! The active tool pops: gold fill, cream border, pop shadow, and a
@@ -18,9 +18,9 @@ use crate::theme;
 use crate::widgets;
 
 /// Rail width, logical px — the mockup's zone contract.
-pub(crate) const RAIL_WIDTH: f32 = 48.0;
-/// Rail tool chip edge, logical px (mockup: rail tool 36×36).
-pub(crate) const RAIL_TOOL: f32 = 36.0;
+pub(crate) const RAIL_WIDTH: f32 = 56.0;
+/// Rail tool chip edge, logical px (mockup: rail tool 40×40).
+pub(crate) const RAIL_TOOL: f32 = 40.0;
 
 /// Paint a glyph inside the chip rect. Coordinates are glyph-space:
 /// `(0, 0)` is the rect centre, `±7` the edges, +Y is down — matching
@@ -547,7 +547,7 @@ fn stamp_grain(ui: &mut egui::Ui, rail: &mut RailState) {
     }
 }
 
-/// One 36×36 rail chip. Active: gold fill, cream border, pop
+/// One 40×40 rail chip. Active: gold fill, cream border, pop
 /// shadow, and a spring bounce on switch (through the animation
 /// gate). Gated-off: lock-grey, hover-only.
 fn tool_chip(ui: &mut egui::Ui, state: &mut EditorState, gate: ToolGate, spec: &ToolSpec) {
@@ -832,9 +832,9 @@ mod tests {
     // --- Rail geometry + styling ---
 
     /// The rail is a left strip: the central panel starts at its
-    /// 48 px edge, full height.
+    /// 56 px edge, full height.
     #[test]
-    fn rail_is_a_48px_left_strip() {
+    fn rail_is_a_56px_left_strip() {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let mut state = blank_state();
@@ -860,6 +860,14 @@ mod tests {
             RAIL_WIDTH,
             central_left.get()
         );
+    }
+
+    /// Rail metrics pin the density bump (spec table: width 56,
+    /// chip 40).
+    #[test]
+    fn rail_metrics_pin_the_density_bump() {
+        assert_eq!(RAIL_WIDTH.to_bits(), 56.0_f32.to_bits());
+        assert_eq!(RAIL_TOOL.to_bits(), 40.0_f32.to_bits());
     }
 
     /// All ten tools render as chips and a click on each switches

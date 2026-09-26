@@ -23,7 +23,7 @@ use egui::{Context, CornerRadius, Stroke};
 
 /// The spacing scale, logical px — the only distances layout code
 /// may use between pods, sections, and controls.
-pub(crate) const SPACE_SCALE: [f32; 5] = [4.0, 8.0, 12.0, 16.0, 24.0];
+pub(crate) const SPACE_SCALE: [f32; 5] = [6.0, 10.0, 14.0, 18.0, 28.0];
 
 /// Corner radius of a cutout — cards, bars, sections, popovers —
 /// logical px (spec: cutout 10).
@@ -88,24 +88,21 @@ pub(crate) const SHADOW_PAPER: egui::Shadow = egui::Shadow {
     color: palette::SHADOW_PAPER,
 };
 
-/// The six-step type ramp, logical px (spec: xs 10.5 · sm 12 ·
-/// md 13.5 · lg 16 · xl 21 · hero 30). Plus Jakarta Sans; the
+/// The six-step type ramp, logical px (spec: xs 12 · sm 13.5 ·
+/// md 15 · lg 18 · xl 24 · hero 34). Plus Jakarta Sans; the
 /// display weight for hero / title lives in [`FAMILY_DISPLAY`].
-// TYPE_XS: settings kbd chips + overflow notes (tasks 005/009).
-// TYPE_HERO: welcome hero card (task 010).
-#[allow(dead_code)]
-pub(crate) const TYPE_XS: f32 = 10.5;
+pub(crate) const TYPE_XS: f32 = 12.0;
 /// Small text: captions, hints, kbd chips.
-pub(crate) const TYPE_SM: f32 = 12.0;
+pub(crate) const TYPE_SM: f32 = 13.5;
 /// Body and control-label size.
-pub(crate) const TYPE_MD: f32 = 13.5;
+pub(crate) const TYPE_MD: f32 = 15.0;
 /// Title / heading size.
-pub(crate) const TYPE_LG: f32 = 16.0;
+pub(crate) const TYPE_LG: f32 = 18.0;
 /// Extra-large display text.
-pub(crate) const TYPE_XL: f32 = 21.0;
+pub(crate) const TYPE_XL: f32 = 24.0;
 /// Hero display text.
 #[allow(dead_code)]
-pub(crate) const TYPE_HERO: f32 = 30.0;
+pub(crate) const TYPE_HERO: f32 = 34.0;
 
 /// Inner padding between a pod island's edge and its chips, logical
 /// px (i8 to match egui's `Margin`).
@@ -118,7 +115,25 @@ pub(crate) const POD_GAP: f32 = 8.0;
 
 /// Widget button padding — visibly airier than the compact
 /// instrument-panel density it replaces.
-pub(crate) const BUTTON_PADDING: egui::Vec2 = egui::Vec2::new(10.0, 6.0);
+pub(crate) const BUTTON_PADDING: egui::Vec2 = egui::Vec2::new(12.0, 8.0);
+
+/// Painted control height — segmented-well rows, list rows, pills:
+/// the click-target baseline every surface's controls share.
+// Consumed by the chrome / widget sweep (ai-ux-refresh tasks 2–4).
+#[allow(dead_code)]
+pub(crate) const CONTROL_H: f32 = 30.0;
+
+/// Hero control height — the topbar's hero buttons, taller than
+/// [`CONTROL_H`] to carry their glyph + label pair.
+// Consumed by the chrome sweep (ai-ux-refresh task 2).
+#[allow(dead_code)]
+pub(crate) const HERO_H: f32 = 34.0;
+
+/// Standard modal dialog width — the AI transform dialog and any
+/// future cutout dialogs.
+// Consumed by the dialogs sweep (ai-ux-refresh task 4).
+#[allow(dead_code)]
+pub(crate) const DIALOG_W: f32 = 400.0;
 
 /// Move-tool hover outline (see `crate::chrome`): 1 px dashed white —
 /// the "grab me" invitation, legible over any screenshot.
@@ -226,7 +241,7 @@ pub(crate) fn apply(ctx: &Context) {
     ctx.style_mut_of(egui::Theme::Light, |style| {
         style.spacing.button_padding = BUTTON_PADDING;
         style.spacing.item_spacing = egui::vec2(SPACE_SCALE[1], SPACE_SCALE[1]);
-        style.spacing.interact_size = egui::vec2(26.0, 26.0);
+        style.spacing.interact_size = egui::vec2(CONTROL_H, CONTROL_H);
         style.spacing.slider_width = 120.0;
         style.spacing.slider_rail_height = 6.0;
     });
@@ -301,7 +316,7 @@ mod tests {
     /// off-scale distances may sneak in as constants.
     #[test]
     fn spacing_scale_is_exactly_the_five_steps() {
-        let want = [4.0_f32, 8.0, 12.0, 16.0, 24.0];
+        let want = [6.0_f32, 10.0, 14.0, 18.0, 28.0];
         for (got, want) in SPACE_SCALE.iter().zip(want) {
             assert_eq!(got.to_bits(), want.to_bits(), "step must be exact");
         }
@@ -351,15 +366,44 @@ mod tests {
     }
 
     /// The type ramp is exactly the six spec sizes, strictly
-    /// increasing.
+    /// increasing, and nothing on the ramp drops below the 12 px
+    /// legibility floor.
     #[test]
     fn type_ramp_is_exactly_the_six_spec_sizes() {
         let ramp = [TYPE_XS, TYPE_SM, TYPE_MD, TYPE_LG, TYPE_XL, TYPE_HERO];
-        let want = [10.5_f32, 12.0, 13.5, 16.0, 21.0, 30.0];
+        let want = [12.0_f32, 13.5, 15.0, 18.0, 24.0, 34.0];
         for (got, want) in ramp.iter().zip(want) {
             assert_eq!(got.to_bits(), want.to_bits(), "ramp step must be exact");
         }
         assert!(ramp.windows(2).all(|w| w[0] < w[1]));
+        assert!(
+            ramp.iter().all(|&s| s >= 12.0),
+            "no UI text below the 12 px floor"
+        );
+    }
+
+    /// Control-metric tokens pin the density bump: control/pill
+    /// height, hero control height, dialog width, and the exact
+    /// button padding. Painted controls read these, never literals.
+    #[test]
+    fn control_metric_tokens_pin_the_density_bump() {
+        assert_eq!(CONTROL_H.to_bits(), 30.0_f32.to_bits());
+        assert_eq!(HERO_H.to_bits(), 34.0_f32.to_bits());
+        assert_eq!(DIALOG_W.to_bits(), 400.0_f32.to_bits());
+        assert_eq!(BUTTON_PADDING, egui::Vec2::new(12.0, 8.0));
+    }
+
+    /// `apply` installs the control-height interact size so
+    /// egui-native widgets land on the same click target as the
+    /// painted ones.
+    #[test]
+    fn apply_installs_the_denser_interact_size() {
+        let ctx = Context::default();
+        apply(&ctx);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Light).spacing.interact_size,
+            egui::vec2(CONTROL_H, CONTROL_H)
+        );
     }
 
     /// Stroke presets stay strictly increasing and in slider range.

@@ -3003,13 +3003,14 @@ mod tests {
         );
         // Yank far right (would be ~0 px wide) → clamped to 200.
         // egui's min is content-aware: the no-wrap title can push a
-        // few px past the floor, but the drag itself stops there.
+        // few px past the floor (more at the bumped type scale),
+        // but the drag itself stops there.
         let at = default_separator_pos(&ctx);
         separator_drag(&ctx, &mut state, &mut panel, at, egui::pos2(SCREEN_W, at.y));
         let right = draw_measuring(&ctx, &mut state, &mut panel, vec![]);
         let reserved = SCREEN_W - right;
         assert!(
-            (200.0..=205.0).contains(&reserved),
+            (200.0..=210.0).contains(&reserved),
             "min 200 (content-aware), reserved {reserved}"
         );
     }

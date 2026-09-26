@@ -1,4 +1,4 @@
-//! The topbar — zone 1 of the five-zone window: a 44 px forest-deep
+//! The topbar — zone 1 of the five-zone window: a 48 px forest-deep
 //! cutout bar with the flame brand + the `Flintshot | Home > Editor`
 //! breadcrumb
 //! identity (the breadcrumb's past stages are links home, the
@@ -18,7 +18,7 @@ use crate::theme;
 use crate::widgets;
 
 /// Topbar height, logical px — the mockup's zone contract.
-pub(crate) const TOPBAR_HEIGHT: f32 = 44.0;
+pub(crate) const TOPBAR_HEIGHT: f32 = 48.0;
 
 /// Which surface the topbar serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1014,9 +1014,9 @@ mod tests {
     }
 
     /// The topbar is a top strip: the central panel starts at its
-    /// 44 px edge.
+    /// 48 px edge.
     #[test]
-    fn topbar_is_a_44px_top_strip() {
+    fn topbar_is_a_48px_top_strip() {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         let central_top = std::cell::Cell::new(0.0_f32);
@@ -1033,6 +1033,12 @@ mod tests {
             TOPBAR_HEIGHT,
             central_top.get()
         );
+    }
+
+    /// The bar height pins the density bump (spec table: 48 px).
+    #[test]
+    fn topbar_height_pins_the_density_bump() {
+        assert_eq!(TOPBAR_HEIGHT.to_bits(), 48.0_f32.to_bits());
     }
 
     /// The heroes + the overflow register on every surface; the AI
