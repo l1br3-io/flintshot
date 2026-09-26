@@ -12,7 +12,7 @@
 //! entry, inert until the settings route lands). Worker editor
 //! windows draw the same bar themselves.
 
-use egui::Color32;
+use egui::{Color32, Stroke};
 
 use crate::theme;
 use crate::widgets;
@@ -56,6 +56,9 @@ pub(crate) enum TopbarAction {
     Capture,
     /// The hero Copy button.
     Copy,
+    /// The hero AI button — opens the Ask-the-shot dialog (the
+    /// `I` shortcut's pointer twin).
+    Ai,
     /// The hero Open button.
     Open,
     /// The overflow's Save item.
@@ -87,18 +90,24 @@ impl Enable {
     pub(crate) const CAPTURE: u8 = 1;
     /// The hero Copy button.
     pub(crate) const COPY: u8 = 1 << 1;
+    /// The hero AI button.
+    pub(crate) const AI: u8 = 1 << 2;
     /// The hero Open button.
-    pub(crate) const OPEN: u8 = 1 << 2;
+    pub(crate) const OPEN: u8 = 1 << 3;
     /// The overflow's Save / Upload / Paste items (editor routes).
-    pub(crate) const EDITOR_ITEMS: u8 = 1 << 3;
+    pub(crate) const EDITOR_ITEMS: u8 = 1 << 4;
 
     /// All actions live (the routed editor surface).
     pub(crate) const ALL: Enable =
-        Enable(Self::CAPTURE | Self::COPY | Self::OPEN | Self::EDITOR_ITEMS);
+        Enable(Self::CAPTURE | Self::COPY | Self::AI | Self::OPEN | Self::EDITOR_ITEMS);
 
     /// The worker editor: Open / Paste have no bridge, so they stay
-    /// disabled; Capture / Copy / Save / Upload are local.
-    pub(crate) const WORKER: Enable = Enable(Self::CAPTURE | Self::COPY);
+    /// disabled; Capture / Copy / Save / Upload are local. AI is
+    /// live too — the worker shell is the same `EditorApp` as the
+    /// routed page, so the AI run bridge (dialog + conversation +
+    /// transforms refresh) is lifecycle-independent (spec Open
+    /// Question 1, resolved by inspection).
+    pub(crate) const WORKER: Enable = Enable(Self::CAPTURE | Self::COPY | Self::AI);
 
     /// Nothing live.
     pub(crate) const NONE: Enable = Enable(0);
@@ -164,6 +173,19 @@ pub(crate) fn show(
                         false,
                         &mut fired,
                     );
+                    let ai_resp = hero(
+                        ui,
+                        "topbar-ai",
+                        g_spark_gold,
+                        "AI",
+                        false,
+                        enable.has(Enable::AI),
+                        false,
+                        &mut fired,
+                    );
+                    if surface == Surface::Home && !enable.has(Enable::AI) {
+                        ai_resp.on_hover_text("No image is open — AI is available in the editor");
+                    }
                     let copy_resp = hero(
                         ui,
                         "topbar-copy",
@@ -336,6 +358,7 @@ fn hero(
     let action = match id {
         "topbar-capture" => TopbarAction::Capture,
         "topbar-copy" => TopbarAction::Copy,
+        "topbar-ai" => TopbarAction::Ai,
         _ => TopbarAction::Open,
     };
     let resp = ui
@@ -452,6 +475,75 @@ fn g_chevron(p: &egui::Painter, r: egui::Rect, c: Color32) {
         c,
         egui::Stroke::NONE,
     ));
+}
+
+/// Four-point spark — the Ask-the-shot mark: a diamond star of four
+/// tapered points. Relocated from the rail chip to the topbar's
+/// glyph kit (the AI hero's icon; the rail chip retires with this
+/// effort).
+pub(crate) fn g_spark(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    // Centre cross of four lines out to the tips, plus a smaller
+    // rotated square for the star's body.
+    let ct = r.center();
+    let long = 7.0;
+    let short = 2.2;
+    p.line_segment(
+        [
+            egui::pos2(ct.x - long, ct.y),
+            egui::pos2(ct.x - short, ct.y),
+        ],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [
+            egui::pos2(ct.x + short, ct.y),
+            egui::pos2(ct.x + long, ct.y),
+        ],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [
+            egui::pos2(ct.x, ct.y - long),
+            egui::pos2(ct.x, ct.y - short),
+        ],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [
+            egui::pos2(ct.x, ct.y + short),
+            egui::pos2(ct.x, ct.y + long),
+        ],
+        Stroke::new(1.8, c),
+    );
+    let body = short * std::f32::consts::FRAC_1_SQRT_2;
+    p.line_segment(
+        [egui::pos2(ct.x - body, ct.y), egui::pos2(ct.x, ct.y - body)],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [egui::pos2(ct.x, ct.y - body), egui::pos2(ct.x + body, ct.y)],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [egui::pos2(ct.x + body, ct.y), egui::pos2(ct.x, ct.y + body)],
+        Stroke::new(1.8, c),
+    );
+    p.line_segment(
+        [egui::pos2(ct.x, ct.y + body), egui::pos2(ct.x - body, ct.y)],
+        Stroke::new(1.8, c),
+    );
+}
+
+/// The AI hero's mark: the spark in gold — the retired rail chip's
+/// color carried into the topbar. Disabled heroes pass their dim
+/// ink through untouched.
+fn g_spark_gold(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    let ink = if c == theme::palette::CREAM_TEXT {
+        theme::palette::GOLD
+    } else {
+        c
+    };
+    g_spark(p, r, ink);
 }
 
 /// The dots overflow: an about note + route-varying items. Editor
@@ -1130,11 +1222,17 @@ mod tests {
         );
     }
 
-    /// The heroes + the overflow register on every surface; the AI
-    /// slot never returns.
+    /// The heroes + the overflow register on every surface — the AI
+    /// hero included (disabled surfaces swallow input, they never
+    /// reshuffle the bar).
     #[test]
-    fn heroes_and_overflow_register_ai_stays_gone() {
-        for surface in [Surface::Home, Surface::Editor, Surface::Loading] {
+    fn heroes_and_overflow_register_on_every_surface() {
+        for surface in [
+            Surface::Home,
+            Surface::Editor,
+            Surface::Loading,
+            Surface::Settings,
+        ] {
             let ctx = egui::Context::default();
             theme::apply(&ctx);
             let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
@@ -1143,6 +1241,7 @@ mod tests {
             for id in [
                 "topbar-capture",
                 "topbar-copy",
+                "topbar-ai",
                 "topbar-open",
                 "topbar-overflow",
             ] {
@@ -1151,11 +1250,66 @@ mod tests {
                     "{surface:?}: {id} registers"
                 );
             }
-            assert!(
-                ctx.read_response(egui::Id::new("header-ai")).is_none()
-                    && ctx.read_response(egui::Id::new("topbar-ai")).is_none(),
-                "{surface:?}: the AI slot stays hidden"
+        }
+    }
+
+    /// The AI hero fires its action when enabled and swallows the
+    /// click when disabled — Copy's grammar.
+    #[test]
+    fn ai_hero_fires_when_enabled_and_swallows_when_disabled() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            let _ = show(ui, Surface::Editor, None, Enable::ALL, false, true);
+        });
+        let hero = ctx
+            .read_response(egui::Id::new("topbar-ai"))
+            .expect("ai hero")
+            .rect;
+        let fired = std::cell::Cell::new(None);
+        let _ = ctx.run_ui(screen(0.016, click_events(hero.center())), |ui| {
+            fired.set(show(ui, Surface::Editor, None, Enable::ALL, false, true));
+        });
+        assert_eq!(fired.get(), Some(TopbarAction::Ai));
+
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            let _ = show(
+                ui,
+                Surface::Home,
+                None,
+                enable_for(Surface::Home),
+                false,
+                true,
             );
+        });
+        let hero = ctx
+            .read_response(egui::Id::new("topbar-ai"))
+            .expect("ai hero")
+            .rect;
+        let fired = std::cell::Cell::new(None);
+        let _ = ctx.run_ui(screen(0.016, click_events(hero.center())), |ui| {
+            fired.set(show(
+                ui,
+                Surface::Home,
+                None,
+                enable_for(Surface::Home),
+                false,
+                true,
+            ));
+        });
+        assert_eq!(fired.get(), None, "Home keeps AI dim — the click swallows");
+    }
+
+    /// AI enablement mirrors Copy: live on Editor and the worker
+    /// shell, off on Home / Settings / Loading.
+    #[test]
+    fn ai_enablement_mirrors_copy() {
+        assert!(enable_for(Surface::Editor).has(Enable::AI));
+        assert!(Enable::WORKER.has(Enable::AI));
+        for surface in [Surface::Home, Surface::Settings, Surface::Loading] {
+            assert!(!enable_for(surface).has(Enable::AI), "{surface:?}");
         }
     }
 

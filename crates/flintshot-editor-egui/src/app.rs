@@ -1879,6 +1879,13 @@ impl EditorApp {
                 self.handle_new_capture(mode, ctx);
             }
             TopbarAction::Copy => self.handle_copy(ctx),
+            // The AI hero: refresh the saved transforms, then open
+            // the Ask-the-shot dialog — the same path the rail
+            // spark chip and the `I` shortcut take.
+            TopbarAction::Ai => {
+                self.refresh_ai_transforms();
+                self.ai_dialog.open();
+            }
             TopbarAction::Save => self.handle_save(ctx),
             TopbarAction::Upload => self.handle_upload(ctx),
             TopbarAction::Open => self.handle_page_open(ctx),
@@ -4702,6 +4709,52 @@ mod tests {
         assert!(
             (image.min.x - panel.min.x - 28.0).abs() < 1e-3,
             "the image anchor carries the ring + pad inset"
+        );
+    }
+
+    /// A page bridge answering one saved transform — the routed-
+    /// editor AI hero path's refresh source.
+    struct TransformsBridge;
+
+    impl crate::shell::EditorPageBridge for TransformsBridge {
+        fn report_outcome(&mut self, _outcome: &EditorOutcome) {}
+        fn set_status(&mut self, _status: &str) {}
+        fn poll_directive(&mut self) -> Option<crate::home::HomeDirective> {
+            None
+        }
+        fn open_image(&mut self, _path: std::path::PathBuf) -> bool {
+            false
+        }
+        fn request_paste(&mut self) -> bool {
+            false
+        }
+        fn ai_transforms(&mut self) -> Vec<flintshot_core::AiTransform> {
+            vec![flintshot_core::AiTransform {
+                id: "t9".into(),
+                name: "Nine".into(),
+                prompt: "p".into(),
+            }]
+        }
+    }
+
+    /// The topbar's AI hero opens the Ask-the-shot dialog through
+    /// the shared action path — refreshing the saved transforms on
+    /// routed pages first (the retired rail chip's behavior).
+    #[test]
+    fn topbar_ai_action_refreshes_transforms_and_opens_the_dialog() {
+        let ctx = egui::Context::default();
+        let mut app = EditorApp::new(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        app.page = Some(Rc::new(RefCell::new(Box::new(TransformsBridge))));
+        app.handle_topbar_action(TopbarAction::Ai, &ctx);
+        assert!(app.ai_dialog.is_open(), "the AI hero opens the dialog");
+        assert!(
+            app.ai_transforms.iter().any(|t| t.id == "t9"),
+            "the hero refreshes the saved transforms first"
         );
     }
 

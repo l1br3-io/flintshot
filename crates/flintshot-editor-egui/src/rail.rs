@@ -514,63 +514,13 @@ fn spark_chip(ui: &mut egui::Ui) -> bool {
         egui::Stroke::NONE,
         egui::StrokeKind::Middle,
     );
-    paint_glyph(ui.painter(), chip_rect, g_spark, theme::palette::GOLD);
+    paint_glyph(
+        ui.painter(),
+        chip_rect,
+        crate::topbar::g_spark,
+        theme::palette::GOLD,
+    );
     resp.clicked()
-}
-
-/// Four-point spark — the Ask-the-shot mark: a diamond star of four
-/// tapered points, gold on the forest rail.
-fn g_spark(p: &egui::Painter, r: egui::Rect, c: Color32) {
-    // Centre cross of four lines out to the tips, plus a smaller
-    // rotated square for the star's body — reads at 28 px.
-    let ct = r.center();
-    let long = 7.0;
-    let short = 2.2;
-    p.line_segment(
-        [
-            egui::pos2(ct.x - long, ct.y),
-            egui::pos2(ct.x - short, ct.y),
-        ],
-        Stroke::new(1.8, c),
-    );
-    p.line_segment(
-        [
-            egui::pos2(ct.x + short, ct.y),
-            egui::pos2(ct.x + long, ct.y),
-        ],
-        Stroke::new(1.8, c),
-    );
-    p.line_segment(
-        [
-            egui::pos2(ct.x, ct.y - long),
-            egui::pos2(ct.x, ct.y - short),
-        ],
-        Stroke::new(1.8, c),
-    );
-    p.line_segment(
-        [
-            egui::pos2(ct.x, ct.y + short),
-            egui::pos2(ct.x, ct.y + long),
-        ],
-        Stroke::new(1.8, c),
-    );
-    let body = short * std::f32::consts::FRAC_1_SQRT_2;
-    p.line_segment(
-        [egui::pos2(ct.x - body, ct.y), egui::pos2(ct.x, ct.y - body)],
-        Stroke::new(1.8, c),
-    );
-    p.line_segment(
-        [egui::pos2(ct.x, ct.y - body), egui::pos2(ct.x + body, ct.y)],
-        Stroke::new(1.8, c),
-    );
-    p.line_segment(
-        [egui::pos2(ct.x + body, ct.y), egui::pos2(ct.x, ct.y + body)],
-        Stroke::new(1.8, c),
-    );
-    p.line_segment(
-        [egui::pos2(ct.x, ct.y + body), egui::pos2(ct.x - body, ct.y)],
-        Stroke::new(1.8, c),
-    );
 }
 
 /// Stamp the grain tile under the chips — first widget call in the
