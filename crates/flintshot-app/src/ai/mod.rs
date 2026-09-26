@@ -69,6 +69,26 @@ impl OpenAiCompatClient {
     pub fn new(base_url: &str, api_key: &str) -> Self {
         Self::with_base_url_and_key(base_url, api_key)
     }
+
+    /// A streaming client for an explicit base URL and key.
+    ///
+    /// GOTCHA (timeouts): `ClientBuilder::timeout` is a *total*
+    /// deadline — wrong for a 5–30 s vision stream, which would be
+    /// killed mid-flight while still alive. `read_timeout` applies to
+    /// each read and resets after every successful one: it detects
+    /// stalled connections without capping total duration (added in
+    /// reqwest 0.12.4). Streaming requests carry no total timeout.
+    #[must_use]
+    pub fn streaming_with_base_url_and_key(base_url: &str, api_key: &str) -> Self {
+        Self {
+            http: reqwest::Client::builder()
+                .read_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+        }
+    }
 }
 
 /// Full request URL: `{base}/chat/completions` (trailing base-URL
@@ -83,6 +103,37 @@ pub fn chat_url(base_url: &str) -> String {
 #[must_use]
 pub fn bearer_header(api_key: &str) -> Option<String> {
     (!api_key.is_empty()).then(|| format!("Bearer {api_key}"))
+}
+
+impl OpenAiCompatClient {
+    /// POST a streaming chat request and return the raw response.
+    ///
+    /// A non-2xx status is read and classified here — the provider's
+    /// error message surfaces through [`AiError::from_status_and_body`],
+    /// never as a bare transport string. The caller owns SSE parsing.
+    ///
+    /// # Errors
+    /// Transport failure, or a non-2xx status with its body parsed
+    /// into a classified [`AiError`].
+    pub async fn post_stream(&self, request: &AiRequest) -> Result<reqwest::Response, AiError> {
+        let mut outbound = self.http.post(chat_url(&self.base_url)).json(request);
+        if let Some(auth) = bearer_header(&self.api_key) {
+            outbound = outbound.header("Authorization", auth);
+        }
+        let response = outbound
+            .send()
+            .await
+            .map_err(|e| AiError::Transport(e.to_string()))?;
+        if !(200..300).contains(&response.status().as_u16()) {
+            let status = response.status().as_u16();
+            let body = response
+                .text()
+                .await
+                .map_err(|e| AiError::Transport(format!("reading the error body: {e}")))?;
+            return Err(AiError::from_status_and_body(status, &body));
+        }
+        Ok(response)
+    }
 }
 
 impl AiClient for OpenAiCompatClient {

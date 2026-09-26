@@ -12,7 +12,10 @@
 
 use std::sync::mpsc;
 
-use flintshot_core::{AiClient, AiError, AiRequest, ChatMessage, Config, ProviderPreset};
+use flintshot_core::{
+    parse_stream_data_line, AiClient, AiError, AiRequest, AiStreamEvent, AiStreamOptions,
+    ChatMessage, Config, ProviderPreset,
+};
 
 use super::OpenAiCompatClient;
 
@@ -128,6 +131,129 @@ pub fn ai_error_copy(error: &AiError) -> String {
     }
 }
 
+/// One streamed event from a chat-stream worker.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum StreamMsg {
+    /// A text delta to append to the growing assistant turn.
+    Delta(String),
+    /// The stream ended (`[DONE]` or a clean close — both valid).
+    Done,
+    /// The stream failed with a classified error.
+    Failed(AiError),
+}
+
+/// Spawn the streaming request worker: same shape as
+/// [`spawn_chat_worker`] (own thread + current-thread runtime), but
+/// the POST carries `stream: true` and the SSE response is forwarded
+/// as [`StreamMsg::Delta`]s. Returns the receiver plus the thread
+/// handle (tests join it; production drops it).
+///
+/// GOTCHA (drop-to-cancel): reqwest has no cancel API — dropping the
+/// response/stream is the only mechanism. The UI's Stop drops the
+/// receiver; this worker's next `send` fails, the loop returns, the
+/// response drops, and the connection is torn down. Partial text
+/// already delivered stays with the caller.
+pub fn spawn_chat_stream_worker(
+    resolved: ResolvedAi,
+    messages: Vec<ChatMessage>,
+) -> (mpsc::Receiver<StreamMsg>, std::thread::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::Builder::new()
+        .name("flintshot-ai-stream".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(StreamMsg::Failed(AiError::Transport(format!(
+                        "building the stream runtime: {e}"
+                    ))));
+                    return;
+                }
+            };
+            let request = AiRequest {
+                model: resolved.model,
+                messages,
+                max_tokens: Some(MAX_TOKENS),
+                stream: Some(true),
+                stream_options: Some(AiStreamOptions {
+                    include_usage: true,
+                }),
+            };
+            let client = OpenAiCompatClient::streaming_with_base_url_and_key(
+                &resolved.base_url,
+                &resolved.api_key,
+            );
+            let outcome = rt.block_on(run_stream(&client, &request, &tx));
+            // The terminal event; a send failure here is the Stop
+            // case (receiver already gone) — ignored.
+            let _ = tx.send(match outcome {
+                Ok(()) => StreamMsg::Done,
+                Err(error) => StreamMsg::Failed(error),
+            });
+        })
+        .expect("spawning the AI stream worker thread");
+    (rx, handle)
+}
+
+/// Drive one SSE chat stream to its end, forwarding deltas.
+///
+/// Every path that stops consuming (`[DONE]`, clean close, Stop,
+/// error) returns here so the response — and with it the connection
+/// — drops exactly once, on the worker thread.
+async fn run_stream(
+    client: &OpenAiCompatClient,
+    request: &AiRequest,
+    tx: &mpsc::Sender<StreamMsg>,
+) -> Result<(), AiError> {
+    use eventsource_stream::Eventsource;
+    use futures_util::StreamExt;
+
+    let response = client.post_stream(request).await?;
+    let mut events = response.bytes_stream().eventsource();
+    while let Some(item) = events.next().await {
+        let event = match item {
+            Ok(event) => event,
+            // Transport errors from the underlying body stream
+            Err(eventsource_stream::EventStreamError::Transport(e)) => {
+                return Err(AiError::Transport(e.to_string()));
+            }
+            Err(other) => {
+                return Err(AiError::Transport(format!(
+                    "reading the event stream: {other}"
+                )));
+            }
+        };
+        // Keepalives arrive as named events or comment lines
+        // (comments are dropped by eventsource-stream already).
+        if event.event == "keepalive" || event.event == "ping" {
+            continue;
+        }
+        // Role-only chunks and unknown lines: skipped, never fatal.
+        let Some(event) = parse_stream_data_line(&event.data) else {
+            continue;
+        };
+        match event {
+            AiStreamEvent::Token(text) => {
+                let stopped = tx.send(StreamMsg::Delta(text)).is_err();
+                // Stop: the receiver is gone. Returning drops the
+                // stream — reqwest tears the connection down.
+                if stopped {
+                    return Ok(());
+                }
+            }
+            AiStreamEvent::Done => return Ok(()),
+            // Usage parses for provider tolerance (unshown in v2).
+            _ => {}
+        }
+    }
+    // Underlying body ended without `[DONE]` — also a clean close.
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +365,221 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the worker answers");
         assert!(matches!(result, Err(AiError::Auth(_))));
+    }
+
+    // ---- streaming worker (Task 002) ----
+
+    /// Join a worker thread under a timeout; panic on hang or panic.
+    fn join_with_timeout(handle: std::thread::JoinHandle<()>, timeout: std::time::Duration) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(handle.join());
+        });
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(())) => {}
+            Ok(Err(panic)) => panic!("worker thread panicked: {panic:?}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("worker thread did not exit within {timeout:?}");
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("join watcher exited without a result");
+            }
+        }
+    }
+
+    fn collect_stream(rx: &mpsc::Receiver<StreamMsg>) -> (String, Option<AiError>) {
+        let mut text = String::new();
+        let mut error = None;
+        while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            match msg {
+                StreamMsg::Delta(text_delta) => text.push_str(&text_delta),
+                StreamMsg::Done => return (text, error),
+                StreamMsg::Failed(e) => {
+                    error = Some(e);
+                    return (text, error);
+                }
+            }
+        }
+        panic!("stream ended without Done or Failed");
+    }
+
+    fn stream_resolved(server: &mockito::Server) -> ResolvedAi {
+        ResolvedAi {
+            base_url: server.url(),
+            model: "m".into(),
+            api_key: String::new(),
+        }
+    }
+
+    fn one_user_message() -> Vec<ChatMessage> {
+        vec![ChatMessage::User {
+            content: vec![flintshot_core::text_part("hi")],
+        }]
+    }
+
+    #[test]
+    fn stream_worker_happy_path_deltas_then_done() {
+        // OpenAI shape: role chunk, three content chunks, terminal
+        // finish_reason chunk, usage-only chunk, [DONE]. A ping event
+        // (Anthropic-style keepalive) and an OpenAI comment line ride
+        // along — both must be skipped, not fatal.
+        let mut server = mockito::Server::new();
+        let body = concat!(
+            ": OPENAI_PROCESSING\n\n",
+            "event: ping\n",
+            "data: {}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"!\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3,\"total_tokens\":12}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "stream": true,
+                "stream_options": {"include_usage": true}
+            })))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
+            .create();
+        let (rx, handle) = spawn_chat_stream_worker(stream_resolved(&server), one_user_message());
+        let (text, error) = collect_stream(&rx);
+        assert_eq!(text, "Hello!");
+        assert!(error.is_none(), "unexpected error: {error:?}");
+        mock.assert(); // request carried stream:true + include_usage
+        join_with_timeout(handle, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn stream_worker_treats_clean_close_without_done_as_done() {
+        // Servers exist that end the body without the [DONE]
+        // sentinel (async-openai issue #456): a clean stream close is
+        // a valid end, not an error.
+        let mut server = mockito::Server::new();
+        let body = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"?\"},\"finish_reason\":null}]}\n\n",
+        );
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
+            .create();
+        let (rx, handle) = spawn_chat_stream_worker(stream_resolved(&server), one_user_message());
+        let (text, error) = collect_stream(&rx);
+        assert_eq!(text, "ok?");
+        assert!(error.is_none(), "unexpected error: {error:?}");
+        join_with_timeout(handle, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn stream_worker_classifies_non_2xx_error_bodies() {
+        // The provider's error message surfaces as a classified
+        // AiError, never a bare transport string.
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "Incorrect API key provided"}}"#)
+            .create();
+        let (rx, handle) = spawn_chat_stream_worker(stream_resolved(&server), one_user_message());
+        let (_, error) = collect_stream(&rx);
+        match error {
+            Some(err @ AiError::Auth(_)) => {
+                assert!(err.to_string().contains("Incorrect API key"));
+            }
+            other => panic!("expected Auth, got {other:?}"),
+        }
+        join_with_timeout(handle, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn stream_worker_cancels_when_the_receiver_drops() {
+        // Stop = drop-to-cancel (reqwest has no cancel API): a raw
+        // SSE server keeps the stream open; dropping the receiver
+        // makes the worker's next send fail, the worker drops the
+        // response, and the OS tears the connection down — the
+        // server's next write errors. Nothing panics.
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        /// Consume the request head + body before responding — hyper
+        /// fails with "received unexpected message from connection"
+        /// if the answer races the request bytes.
+        fn drain_request(sock: &mut TcpStream) {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let headers_end = loop {
+                let n = sock.read(&mut chunk).expect("read request");
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&buf[..headers_end]).to_ascii_lowercase();
+            let len: usize = headers
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length: ")?.trim().parse().ok())
+                .unwrap_or(0);
+            while buf.len() < headers_end + len {
+                let n = sock.read(&mut chunk).expect("read body");
+                buf.extend_from_slice(&chunk[..n]);
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let torn_down = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&torn_down);
+
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            drain_request(&mut sock);
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+            )
+            .expect("write headers");
+            let chunk = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\".\"},\"finish_reason\":null}]}\n\n";
+            // ~12 s of live stream; the test drops the receiver long
+            // before this loop runs out.
+            for _ in 0..1_200 {
+                if sock.write_all(chunk).and_then(|()| sock.flush()).is_err() {
+                    flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let resolved = ResolvedAi {
+            base_url: format!("http://{addr}"),
+            model: "m".into(),
+            api_key: String::new(),
+        };
+        let (rx, handle) = spawn_chat_stream_worker(resolved, one_user_message());
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(StreamMsg::Delta(_)) => {}
+            other => panic!("expected a first delta, got {other:?}"),
+        }
+        drop(rx); // Stop
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !torn_down.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            torn_down.load(Ordering::SeqCst),
+            "the connection was not torn down after the receiver dropped"
+        );
+        join_with_timeout(handle, Duration::from_secs(10));
+        server.join().expect("server thread exits");
     }
 }
