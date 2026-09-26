@@ -355,6 +355,11 @@ pub struct AiConfig {
     /// Studio`, `OpenRouter`, ...).
     #[serde(default)]
     pub base_url: String,
+    /// Most-recently-used transform ids, head = last used (the
+    /// dialog's preselect + MRU ordering; Shift+I re-runs the head).
+    /// Capped at [`AiConfig::MAX_RECENT_TRANSFORMS`] on use.
+    #[serde(default)]
+    pub recent_transforms: Vec<String>,
 }
 
 impl Default for AiConfig {
@@ -363,11 +368,14 @@ impl Default for AiConfig {
             provider: default_ai_provider(),
             model: String::new(),
             base_url: String::new(),
+            recent_transforms: Vec::new(),
         }
     }
 }
 
 impl AiConfig {
+    /// How many transform ids `recent-transforms` keeps (MRU cap).
+    pub const MAX_RECENT_TRANSFORMS: usize = 8;
     /// The provider preset for use: unknown ids warn and resolve to
     /// custom — the stored value survives re-saves (string-tolerant
     /// policy, `interaction-mode` precedent).
@@ -393,6 +401,15 @@ impl AiConfig {
         } else {
             &self.base_url
         }
+    }
+
+    /// Record a transform as just used: move its id to the head,
+    /// drop any earlier duplicate, and cap the list at
+    /// [`AiConfig::MAX_RECENT_TRANSFORMS`].
+    pub fn note_recent_transform(&mut self, id: &str) {
+        self.recent_transforms.retain(|existing| existing != id);
+        self.recent_transforms.insert(0, id.to_string());
+        self.recent_transforms.truncate(Self::MAX_RECENT_TRANSFORMS);
     }
 }
 
@@ -828,6 +845,7 @@ impl Config {
         ensure_table(&mut doc, "hotkeys");
         ensure_table(&mut doc, "upload");
         ensure_table(&mut doc, "output");
+        ensure_table(&mut doc, "ai");
 
         if let Some(ui) = doc.get_mut("ui").and_then(|i| i.as_table_mut()) {
             self.merge_ui(ui);
@@ -889,6 +907,26 @@ impl Config {
                 "save-clipboard-copies",
                 toml_edit::Value::from(self.output.save_clipboard_copies),
             );
+        }
+
+        if let Some(ai) = doc.get_mut("ai").and_then(|i| i.as_table_mut()) {
+            // GOTCHA: every new `[ai]` field must be added here or
+            // saves into an existing config silently drop it — the
+            // v1 bug (AI settings edits never persisted once
+            // config.toml existed), fenced by the regression test.
+            set_value(
+                ai,
+                "provider",
+                toml_edit::Value::from(self.ai.provider.as_str()),
+            );
+            set_value(ai, "model", toml_edit::Value::from(self.ai.model.as_str()));
+            set_value(
+                ai,
+                "base-url",
+                toml_edit::Value::from(self.ai.base_url.as_str()),
+            );
+            let recent: toml_edit::Array = self.ai.recent_transforms.iter().cloned().collect();
+            set_value(ai, "recent-transforms", toml_edit::Value::Array(recent));
         }
 
         Ok(doc.to_string())
@@ -1923,6 +1961,93 @@ backend = \"portal\"
         assert_eq!(reloaded.ai.provider, "custom");
         assert_eq!(reloaded.ai.model, "llama3.2-vision");
         assert_eq!(reloaded.ai.base_url, "http://localhost:11434/v1");
+    }
+
+    /// The v1 bug (ask-the-shot-v2 Task 005): `merge_into_existing`
+    /// never wrote `[ai]` keys, so AI settings edits were silently
+    /// dropped whenever `config.toml` already existed. This test
+    /// fences the merge arm.
+    #[test]
+    fn ai_edits_merge_into_an_existing_file_with_comments_intact() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let existing = "\
+# my flintshot config
+
+[ui]
+default-color = \"#00ff00\"
+
+[ai]
+# my provider of choice
+provider = \"openai\"
+model = \"gpt-4o-mini\"
+base-url = \"\"
+";
+        fs::write(&path, existing).unwrap();
+
+        let mut config = Config::load_from(&path).unwrap_or_default();
+        config.ai.provider = "xai".into();
+        config.ai.model = "grok-2-vision-1212".into();
+        config.ai.base_url = "http://localhost:8080/v1".into();
+        config.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("# my flintshot config"),
+            "header lost:\n{written}"
+        );
+        assert!(
+            written.contains("# my provider of choice"),
+            "ai decor lost:\n{written}"
+        );
+        let reloaded = Config::load_from(&path).unwrap_or_else(|e| panic!("reload: {e}"));
+        assert_eq!(
+            reloaded.ai.provider, "xai",
+            "provider edit must persist:\n{written}"
+        );
+        assert_eq!(reloaded.ai.model, "grok-2-vision-1212");
+        assert_eq!(reloaded.ai.base_url, "http://localhost:8080/v1");
+    }
+
+    #[test]
+    fn recent_transforms_round_trip_and_note_semantics() {
+        // Loads from the kebab-case key, tolerant of its absence.
+        let mut config: Config =
+            toml::from_str("[ai]\nrecent-transforms = [\"a\", \"b\"]\n").unwrap();
+        assert_eq!(config.ai.recent_transforms, ["a", "b"]);
+
+        // Noting moves to head, dedupes, caps at 8.
+        config.ai.note_recent_transform("b");
+        assert_eq!(config.ai.recent_transforms, ["b", "a"]);
+        config.ai.note_recent_transform("c");
+        assert_eq!(config.ai.recent_transforms, ["c", "b", "a"]);
+
+        for i in 0..10 {
+            config.ai.note_recent_transform(&format!("t{i}"));
+        }
+        assert_eq!(
+            config.ai.recent_transforms.len(),
+            AiConfig::MAX_RECENT_TRANSFORMS,
+            "capped at 8"
+        );
+        assert_eq!(config.ai.recent_transforms[0], "t9", "head is most recent");
+        assert!(
+            !config.ai.recent_transforms.contains(&"a".to_string()),
+            "oldest entries fall off the tail"
+        );
+
+        // Fresh config: empty default.
+        assert!(Config::default().ai.recent_transforms.is_empty());
+
+        // And the key merges into an existing file.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[ai]\nprovider = \"openai\"\n").unwrap();
+        let mut config = Config::load_from(&path).unwrap_or_default();
+        config.ai.note_recent_transform("x");
+        config.save_to(&path).unwrap();
+        let reloaded = Config::load_from(&path).unwrap_or_default();
+        assert_eq!(reloaded.ai.recent_transforms, ["x"]);
     }
 
     #[test]

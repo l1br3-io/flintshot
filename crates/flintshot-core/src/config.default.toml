@@ -143,3 +143,4 @@ save-clipboard-copies = true
 # provider = "openai"
 # model = ""
 # base-url = ""
+# recent-transforms = []
