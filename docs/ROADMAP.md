@@ -49,6 +49,14 @@ Still deferred (re-prioritize after Phase 7): image references in
 follow-ups, multiple concurrent providers, transform prompt
 templating, AI-generated image edits, fuller chatbox.
 
+Post-Phase-7 order (evidence-backed, see
+[`research/2026-09-26-phase7-adaptation-research.md`](research/2026-09-26-phase7-adaptation-research.md)):
+**MCP capture tool** first (RMCP server is ~20 LOC + IPC plumbing;
+no Linux-native incumbent), then **OCR region → clipboard**
+(flameshot #702: 60👍 open since 2018; CLI-wrapper approach, no new
+link deps), then the action pipeline and searchable history that
+build on OCR.
+
 ## Versioning
 
 - `0.x.y` throughout development; no API stability guarantees.

@@ -121,6 +121,7 @@ Product & design:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — workspace, crates, dependencies, data model
 - [`docs/adrs/`](docs/adrs/) — technical decision records (ADRs)
 - [`docs/REFERENCES.md`](docs/REFERENCES.md) — open-source reference projects (comparables, agents, chat/streaming UI, Rust AI infra)
+- [`docs/research/`](docs/research/) — dated, source-cited research notes backing roadmap decisions
 - [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md) — cross-platform manual QA grid
 
 Working in the repo:

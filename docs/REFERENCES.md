@@ -6,7 +6,9 @@ curated by what each is a reference *for*. Tied to the directions in
 MCP stretch goals, and the capture/annotate core.
 
 Repos are `owner/name` on GitHub. Locations and licenses verified at
-time of writing (2026-09) — re-verify before copying code.
+time of writing (2026-09) — re-verify before copying code. Dated,
+source-cited deep-dives that back a specific decision live in
+[`research/`](research/).
 
 ## Capture + AI (closest product comparables)
 
