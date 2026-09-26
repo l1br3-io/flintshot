@@ -308,9 +308,10 @@ fn group_by_day(
 
 /// A recent card's size on a grid column of `card_w`: the thumbnail
 /// box is the card width minus an 8 px inset per side; the caption
-/// band keeps its 36 px.
+/// band keeps its 40 px (two `TYPE_XS` lines with air — the band
+/// yields before the type does).
 fn recent_card_size(card_w: f32) -> egui::Vec2 {
-    egui::vec2(card_w, (card_w - 16.0) + 36.0)
+    egui::vec2(card_w, (card_w - 16.0) + 40.0)
 }
 
 /// A decoded recent: the downscaled thumbnail texture plus the
@@ -912,8 +913,8 @@ impl HomeApp {
                     egui::FontId::proportional(crate::theme::TYPE_MD),
                     p::INK,
                 );
-                let w = 16.0 + 20.0 + 8.0 + galley.size().x + 16.0;
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::hover());
+                let w = 18.0 + 22.0 + 8.0 + galley.size().x + 18.0;
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 44.0), egui::Sense::hover());
                 let resp = ui
                     .interact(rect, egui::Id::new(id), egui::Sense::click())
                     .on_hover_text(label);
@@ -943,14 +944,14 @@ impl HomeApp {
                     egui::StrokeKind::Middle,
                 );
                 ui.painter().text(
-                    egui::pos2(card.left() + 16.0, card.center().y),
+                    egui::pos2(card.left() + 18.0, card.center().y),
                     egui::Align2::LEFT_CENTER,
                     icon,
                     egui::FontId::proportional(crate::theme::TYPE_MD),
                     p::INK,
                 );
                 let pos = egui::pos2(
-                    card.left() + 16.0 + 20.0 + 8.0,
+                    card.left() + 18.0 + 22.0 + 8.0,
                     card.center().y - galley.size().y / 2.0,
                 );
                 ui.painter().galley(pos, galley, p::INK);
@@ -1354,8 +1355,8 @@ impl HomeApp {
             egui::FontId::proportional(crate::theme::TYPE_XS),
             p::INK,
         );
-        let w = galley.size().x + 14.0;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 22.0), egui::Sense::hover());
+        let w = galley.size().x + 16.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::hover());
         let resp = ui
             .interact(rect, egui::Id::new(id), egui::Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1469,7 +1470,7 @@ impl HomeApp {
         ui.painter().galley(
             egui::pos2(
                 rect.center().x - name_galley.size().x / 2.0,
-                rect.bottom() - 34.0,
+                rect.bottom() - 38.0,
             ),
             name_galley,
             p::INK,
@@ -1477,7 +1478,7 @@ impl HomeApp {
         ui.painter().galley(
             egui::pos2(
                 rect.center().x - meta_galley.size().x / 2.0,
-                rect.bottom() - 17.0,
+                rect.bottom() - 19.0,
             ),
             meta_galley,
             p::INK_SOFT,
@@ -1543,7 +1544,7 @@ impl HomeApp {
         let y = rect.top() + 8.0;
         let mut chip_clicked = false;
         for (id, glyph, w) in chip_specs {
-            let chip_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, 22.0));
+            let chip_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, 26.0));
             x += w + 6.0;
             let chip_id = egui::Id::new((id, path_key));
             let chip = ui
@@ -2176,6 +2177,31 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ]
+    }
+
+    /// The home cards pin the density bump: 44 px hcards and a
+    /// 40 px caption band (room for two `TYPE_XS` lines without
+    /// clipping — padding yields before type does).
+    #[test]
+    fn home_cards_pin_the_density_bump() {
+        assert_eq!(
+            recent_card_size(200.0),
+            egui::vec2(200.0, (200.0 - 16.0) + 40.0),
+            "the caption band grows to 40 px"
+        );
+        let mut app = HomeApp::new(Box::new(RecordingBridge::default()), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let hcard = ctx
+            .read_response(egui::Id::new("home-open"))
+            .expect("an hcard registers")
+            .rect;
+        assert!(
+            (hcard.height() - 44.0).abs() < 0.5,
+            "hcard height {}",
+            hcard.height()
+        );
     }
 
     /// The hover chips' deterministic centers, mirrored from

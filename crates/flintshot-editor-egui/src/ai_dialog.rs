@@ -131,7 +131,7 @@ impl AiDialog {
                         // pills and hairline size off available_width,
                         // and a center-anchored Area wobbles while
                         // its size estimate changes.
-                        ui.set_width(340.0);
+                        ui.set_width(theme::DIALOG_W);
                         ui.heading(
                             RichText::new("Ask the shot")
                                 .size(theme::TYPE_LG)
@@ -242,7 +242,7 @@ fn saved_list(ui: &mut egui::Ui, transforms: &[AiTransform], selected: &mut Opti
 fn transform_pill(ui: &mut egui::Ui, id: egui::Id, name: &str, selected: bool) -> bool {
     let galley = ui.painter().layout_no_wrap(
         name.to_owned(),
-        egui::FontId::proportional(theme::TYPE_SM),
+        egui::FontId::proportional(theme::TYPE_MD),
         if selected {
             theme::palette::CREAM_TEXT
         } else {
@@ -250,7 +250,7 @@ fn transform_pill(ui: &mut egui::Ui, id: egui::Id, name: &str, selected: bool) -
         },
     );
     let w = ui.available_width();
-    let h = (galley.size().y + 10.0).max(24.0);
+    let h = (galley.size().y + 12.0).max(theme::CONTROL_H);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), Sense::hover());
     let resp = ui.interact(rect, id, Sense::click());
     ui.painter().rect(
@@ -265,7 +265,7 @@ fn transform_pill(ui: &mut egui::Ui, id: egui::Id, name: &str, selected: bool) -
         egui::StrokeKind::Middle,
     );
     ui.painter().galley(
-        egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
+        egui::pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
         galley,
         if selected {
             theme::palette::CREAM_TEXT
@@ -296,14 +296,14 @@ fn configure_link(ui: &mut egui::Ui) -> bool {
         egui::FontId::proportional(theme::TYPE_MD),
         theme::palette::FOREST_MID,
     );
-    let w = 8.0 + galley.size().x + 8.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 24.0), egui::Sense::hover());
+    let w = 10.0 + galley.size().x + 10.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, theme::CONTROL_H), egui::Sense::hover());
     let resp = ui.interact(
         rect,
         egui::Id::new("ai-configure-link"),
         egui::Sense::click(),
     );
-    let pos = egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0);
+    let pos = egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0);
     ui.painter()
         .galley(pos, galley.clone(), theme::palette::FOREST_MID);
     if resp.hovered() {
@@ -329,8 +329,8 @@ fn run_pill(ui: &mut egui::Ui, enabled: bool) -> bool {
             theme::palette::LOCK_GREY
         },
     );
-    let w = 16.0 + galley.size().x + 16.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 28.0), Sense::hover());
+    let w = 18.0 + galley.size().x + 18.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, theme::HERO_H), Sense::hover());
     let sense = if enabled {
         Sense::click()
     } else {
@@ -453,6 +453,68 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }]
+    }
+
+    /// The dialog pins the density bump: `DIALOG_W` content width,
+    /// `HERO_H` Run pill, transform pills at `TYPE_MD` clearing
+    /// `CONTROL_H`.
+    #[test]
+    fn dialog_pins_the_density_bump() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut dialog = AiDialog::default();
+        dialog.open();
+        let transforms = transforms();
+        settle(&ctx, &mut dialog, &transforms, true);
+        let run = ctx
+            .read_response(egui::Id::new("ai-dialog-run"))
+            .expect("run pill")
+            .rect;
+        assert!(
+            (run.height() - theme::HERO_H).abs() < 0.5,
+            "run pill height {}",
+            run.height()
+        );
+        let pill = ctx
+            .read_response(egui::Id::new(("ai-transform", "t1")))
+            .expect("transform pill")
+            .rect;
+        assert!(
+            pill.height() >= theme::CONTROL_H - 0.5,
+            "transform pill height {}",
+            pill.height()
+        );
+        let prompt = ctx
+            .read_response(egui::Id::new("ai-dialog-prompt"))
+            .expect("prompt field")
+            .rect;
+        assert!(
+            (prompt.width() - theme::DIALOG_W).abs() < 2.0,
+            "the field spans the dialog width: {}",
+            prompt.width()
+        );
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 768.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let out = ctx.run_ui(raw, |ui| {
+            let c = ui.ctx().clone();
+            let _ = dialog.show(&c, &transforms, true);
+        });
+        let label_size = out.shapes.iter().find_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) if t.galley.job.text == "Extract text" => {
+                t.galley.job.sections.first().map(|s| s.format.font_id.size)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            label_size,
+            Some(theme::TYPE_MD),
+            "transform pill labels paint at TYPE_MD"
+        );
     }
 
     #[test]

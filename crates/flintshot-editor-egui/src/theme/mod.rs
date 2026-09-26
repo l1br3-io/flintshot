@@ -244,6 +244,20 @@ pub(crate) fn apply(ctx: &Context) {
         style.spacing.interact_size = egui::vec2(CONTROL_H, CONTROL_H);
         style.spacing.slider_width = 120.0;
         style.spacing.slider_rail_height = 6.0;
+        // The native type ladder joins the ramp: body / button text
+        // at TYPE_MD, headings at TYPE_LG, small at TYPE_SM — so
+        // text fields, DragValues, markdown, and toast match the
+        // painted surfaces without per-site fonts.
+        for (style_key, size) in [
+            (egui::TextStyle::Body, TYPE_MD),
+            (egui::TextStyle::Button, TYPE_MD),
+            (egui::TextStyle::Heading, TYPE_LG),
+            (egui::TextStyle::Small, TYPE_SM),
+        ] {
+            if let Some(font) = style.text_styles.get_mut(&style_key) {
+                font.size = size;
+            }
+        }
     });
 }
 
@@ -404,6 +418,28 @@ mod tests {
             ctx.style_of(egui::Theme::Light).spacing.interact_size,
             egui::vec2(CONTROL_H, CONTROL_H)
         );
+    }
+
+    /// `apply` installs the native type ladder on the ramp: body /
+    /// button text at `TYPE_MD`, headings at `TYPE_LG`, small text
+    /// at `TYPE_SM` — native widgets (text fields, markdown, toast)
+    /// match the painted surfaces without per-site fonts.
+    #[test]
+    fn apply_installs_the_native_type_ladder() {
+        let ctx = Context::default();
+        apply(&ctx);
+        let styles = &ctx.style_of(egui::Theme::Light).text_styles;
+        let size = |style: egui::TextStyle| {
+            styles
+                .get(&style)
+                .map(|font| font.size)
+                .unwrap_or_default()
+                .to_bits()
+        };
+        assert_eq!(size(egui::TextStyle::Body), TYPE_MD.to_bits());
+        assert_eq!(size(egui::TextStyle::Button), TYPE_MD.to_bits());
+        assert_eq!(size(egui::TextStyle::Heading), TYPE_LG.to_bits());
+        assert_eq!(size(egui::TextStyle::Small), TYPE_SM.to_bits());
     }
 
     /// Stroke presets stay strictly increasing and in slider range.

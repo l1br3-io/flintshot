@@ -10,8 +10,9 @@ use std::time::Duration;
 /// How long a toast stays on screen.
 const LIFETIME_SECS: f64 = 2.5;
 
-/// Vertical offset below the topbar (44 px) the pill hangs at.
-const TOP_OFFSET: f32 = 56.0;
+/// Vertical offset below the topbar the pill hangs at: the bar's
+/// 48 px plus a 12 px breath.
+const TOP_OFFSET: f32 = 60.0;
 
 /// One transient notice.
 pub(crate) struct Toast {
@@ -63,7 +64,9 @@ pub(crate) fn show(ui: &mut egui::Ui, toast: &mut Option<Toast>) {
                 .corner_radius(egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS))
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new(&t.message).color(crate::theme::palette::PAPER_CREAM),
+                        egui::RichText::new(&t.message)
+                            .color(crate::theme::palette::PAPER_CREAM)
+                            .size(crate::theme::TYPE_SM),
                     );
                 });
         });

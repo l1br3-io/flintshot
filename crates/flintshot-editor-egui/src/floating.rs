@@ -71,7 +71,7 @@ pub(crate) fn corner_anchor(
 
 /// A floating chip's outer size (the 28 px glyph square plus the
 /// cream cutout's padding).
-const CHIP_SIZE: f32 = 28.0;
+const CHIP_SIZE: f32 = 32.0;
 
 fn run_cluster(
     ui: &mut egui::Ui,
@@ -538,6 +538,29 @@ mod tests {
             assert!(
                 canvas(800.0, 600.0).contains_rect(*chip),
                 "every chip must stay inside the canvas rect"
+            );
+        }
+    }
+
+    /// The floating chips pin the density bump: 32 px squares —
+    /// bigger canvas-corner targets on the bumped scale.
+    #[test]
+    fn floating_chips_pin_the_density_bump() {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(canvas(800.0, 600.0)),
+            ..egui::RawInput::default()
+        };
+        let mut chips = Vec::new();
+        let _ = ctx.run_ui(raw, |ui| {
+            let (_, rects) = show(ui.ctx(), canvas(800.0, 600.0), false, true);
+            chips = rects;
+        });
+        assert!(chips.len() >= 5, "the chip set renders");
+        for chip in &chips {
+            assert!(
+                (chip.width() - 32.0).abs() < 0.5 && (chip.height() - 32.0).abs() < 0.5,
+                "chip {chip:?} pins the 32 px square"
             );
         }
     }

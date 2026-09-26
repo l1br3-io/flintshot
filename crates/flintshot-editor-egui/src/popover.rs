@@ -79,10 +79,11 @@ fn labeled_color_chip(ui: &mut egui::Ui, color: Color, target: ColorTarget) -> e
         theme::palette::INK,
     );
     let galley_size = galley.size();
-    let swatch = 14.0;
+    let swatch = 16.0;
     let pad = 10.0;
     let width = pad + swatch + 8.0 + galley_size.x + pad;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, theme::CONTROL_H), egui::Sense::hover());
     let resp = ui
         .interact(rect, egui::Id::new(POD_ID), egui::Sense::click())
         .on_hover_text("Color and stroke width");

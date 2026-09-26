@@ -243,11 +243,11 @@ fn thumbnail(ui: &mut egui::Ui, thumb: &egui::TextureHandle) {
 fn user_chip(ui: &mut egui::Ui, _id: egui::Id, prompt: &str) {
     let galley = ui.painter().layout(
         prompt.to_owned(),
-        egui::FontId::proportional(theme::TYPE_SM),
+        egui::FontId::proportional(theme::TYPE_MD),
         theme::palette::INK,
         ui.available_width() - theme::SPACE_SCALE[3],
     );
-    let size = galley.size() + egui::vec2(16.0, 10.0);
+    let size = galley.size() + egui::vec2(18.0, 12.0);
     let row = ui.available_rect_before_wrap();
     let rect = egui::Rect::from_min_size(egui::pos2(row.right() - size.x, row.top()), size);
     let resp = ui.allocate_rect(rect, Sense::hover());
@@ -260,7 +260,7 @@ fn user_chip(ui: &mut egui::Ui, _id: egui::Id, prompt: &str) {
     );
     ui.painter().galley(
         egui::pos2(
-            resp.rect.left() + 8.0,
+            resp.rect.left() + 9.0,
             resp.rect.center().y - galley.size().y / 2.0,
         ),
         galley,
@@ -354,7 +354,7 @@ fn error_card(ui: &mut egui::Ui, id: egui::Id, message: &str) {
 fn pending_row(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         if crate::widgets::animate(ui.ctx()) {
-            ui.add(egui::Spinner::new().size(14.0));
+            ui.add(egui::Spinner::new().size(16.0));
         } else {
             ui.label(
                 RichText::new("···")
@@ -379,8 +379,8 @@ fn follow_up_row(
     disabled: bool,
 ) -> (egui::Response, bool) {
     let mut send_clicked = false;
-    let height = 26.0;
-    let send_w = 30.0;
+    let height = theme::CONTROL_H;
+    let send_w = theme::CONTROL_H;
     let row = ui.horizontal(|ui| {
         let edit = egui::TextEdit::singleline(draft)
             .id(id)
@@ -531,6 +531,48 @@ mod tests {
             (step(41.0, true) - 1.0).abs() < f32::EPSILON,
             "the gate jumps to rest"
         );
+    }
+
+    /// The conversation pins the density bump: user chips at
+    /// `TYPE_MD`, the follow-up send chip at `CONTROL_H`.
+    #[test]
+    fn conversation_pins_the_density_bump() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut conversation = AiConversation::default();
+        conversation.push_user("ocr it");
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(236.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let out = ctx.run_ui(raw.clone(), |ui| {
+            egui::Panel::right("test_ai_panel_density")
+                .resizable(false)
+                .exact_size(236.0)
+                .show(ui, |ui| show(ui, &mut conversation));
+        });
+        let chip_size = out.shapes.iter().find_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) if t.galley.job.text == "ocr it" => {
+                t.galley.job.sections.first().map(|s| s.format.font_id.size)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            chip_size,
+            Some(theme::TYPE_MD),
+            "user chips paint at TYPE_MD"
+        );
+        if let Some(resp) = ctx.read_response(egui::Id::new("ai-follow-up").with("send")) {
+            assert!(
+                resp.rect.height() >= theme::CONTROL_H - 0.5,
+                "send chip height {}",
+                resp.rect.height()
+            );
+        }
     }
 
     /// The markdown fixture renders: a heading, a fenced code block,

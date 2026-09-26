@@ -489,7 +489,7 @@ fn tab_header(ui: &mut egui::Ui, panel: &mut PanelState) {
 /// `crate::floating`) brings it back. Returns whether it was
 /// clicked.
 fn collapse_chevron(ui: &mut egui::Ui) -> bool {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
     let resp = ui
         .interact(rect, egui::Id::new("panel-collapse"), egui::Sense::click())
         .on_hover_text("Hide panel · Ctrl+B");
@@ -564,7 +564,10 @@ fn history_row(ui: &mut egui::Ui, id: egui::Id, label: &str, time: &str, future:
         egui::FontId::proportional(theme::TYPE_SM),
         ink,
     );
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), theme::CONTROL_H),
+        Sense::hover(),
+    );
     let resp = ui.interact(rect, id, Sense::click());
     if resp.hovered() {
         ui.painter().rect(
@@ -713,8 +716,8 @@ fn segmented_chip(ui: &mut egui::Ui, id: egui::Id, label: &str, selected: bool) 
             theme::palette::INK_SOFT
         },
     );
-    let w = 12.0 + galley.size().x + 12.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 24.0), egui::Sense::hover());
+    let w = 8.0 + galley.size().x + 8.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, theme::CONTROL_H), egui::Sense::hover());
     let resp = ui.interact(rect, id, egui::Sense::click());
     ui.painter().rect(
         rect,
@@ -1178,7 +1181,10 @@ pub(crate) fn chip(
     glyph: Glyph,
     enabled: bool,
 ) -> egui::Response {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(theme::CONTROL_H, theme::CONTROL_H),
+        Sense::hover(),
+    );
     let resp = ui
         .interact(
             rect,
@@ -1226,7 +1232,7 @@ pub(crate) fn chip(
 
 /// Glyph square edge inside a labeled chip — identical to a plain
 /// chip so adjacent glyphs align on the rail.
-const LABEL_GLYPH_EDGE: f32 = 28.0;
+const LABEL_GLYPH_EDGE: f32 = theme::CONTROL_H;
 
 /// Gap between the glyph square and the label text, logical px.
 const LABEL_GAP: f32 = 4.0;
@@ -1242,12 +1248,12 @@ fn labeled_chip_width(label_width: f32) -> f32 {
 }
 
 /// A labeled tool chip — [`chip`]'s glyph plus text, following the
-/// Copy-primary's glyph+label pattern (`copy_chip`): 28 px tall,
-/// galley-measured width, same rest / hover / selected visuals as
-/// `chip` (forest selected, white otherwise). The label is the
-/// emphasis, not new color. Renders the Hand chip in both rails.
-/// Disabled state mirrors [`chip`]'s (hairline border, dimmed,
-/// hover-only).
+/// Copy-primary's glyph+label pattern (`copy_chip`): `CONTROL_H`
+/// tall, galley-measured width, same rest / hover / selected
+/// visuals as `chip` (forest selected, white otherwise). The label
+/// is the emphasis, not new color. Renders the Hand chip in both
+/// rails. Disabled state mirrors [`chip`]'s (hairline border,
+/// dimmed, hover-only).
 pub(crate) fn labeled_chip(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -1264,7 +1270,7 @@ pub(crate) fn labeled_chip(
     );
     let galley_size = galley.size();
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(labeled_chip_width(galley_size.x), 28.0),
+        egui::vec2(labeled_chip_width(galley_size.x), theme::CONTROL_H),
         Sense::hover(),
     );
     let resp = ui
@@ -1308,7 +1314,8 @@ pub(crate) fn labeled_chip(
     } else {
         theme::palette::INK_SOFT
     };
-    let glyph_rect = egui::Rect::from_min_size(rect.min, egui::vec2(LABEL_GLYPH_EDGE, 28.0));
+    let glyph_rect =
+        egui::Rect::from_min_size(rect.min, egui::vec2(LABEL_GLYPH_EDGE, theme::CONTROL_H));
     glyph(ui.painter(), glyph_rect, color);
     let pos = egui::pos2(
         glyph_rect.right() + LABEL_GAP,
@@ -1331,7 +1338,7 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
     );
     let galley_size = galley.size();
     let width = 10.0 + 18.0 + 5.0 + galley_size.x + 10.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, theme::CONTROL_H), Sense::hover());
     let resp = ui
         .interact(rect, egui::Id::new("copy_action"), Sense::click())
         .on_hover_text("Copy · Ctrl+C");
@@ -1344,7 +1351,7 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
     );
     let glyph_rect = egui::Rect::from_min_size(
         egui::pos2(rect.left() + 9.0, rect.top()),
-        egui::vec2(18.0, 28.0),
+        egui::vec2(18.0, theme::CONTROL_H),
     );
     let glyph = if copied { g_check } else { g_copy };
     glyph(ui.painter(), glyph_rect, theme::palette::CREAM_TEXT);
@@ -1883,6 +1890,34 @@ mod tests {
         let img = image::RgbaImage::from_raw(64, 48, vec![255; 64 * 48 * 4])
             .expect("raw buffer matches 64*48*4");
         EditorState::new(img)
+    }
+
+    /// The panel's painted controls pin the density bump: segment
+    /// chips, glyph chips, and history rows all clear `CONTROL_H`.
+    #[test]
+    fn panel_widgets_pin_the_density_bump() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = ctx.run_ui(screen(1024.0, 768.0), |ui| {
+            let _ = segmented_chip(ui, egui::Id::new("seg-pin"), "PROPS", false);
+            let _ = chip(ui, egui::Id::new("gl-pin"), "tip", false, g_plus, true);
+            let _ = history_row(ui, egui::Id::new("hrow-pin"), "Label", "1s", false);
+        });
+        for (name, id) in [
+            ("segment chip", "seg-pin"),
+            ("glyph chip", "gl-pin"),
+            ("history row", "hrow-pin"),
+        ] {
+            let h = ctx
+                .read_response(egui::Id::new(id))
+                .unwrap_or_else(|| panic!("{name} registers"))
+                .rect
+                .height();
+            assert!(
+                h >= theme::CONTROL_H - 0.5,
+                "{name} height {h} clears CONTROL_H"
+            );
+        }
     }
 
     fn screen(w: f32, h: f32) -> egui::RawInput {
