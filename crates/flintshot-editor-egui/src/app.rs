@@ -2033,22 +2033,27 @@ impl EditorApp {
                 HomeDirective::SetStatus(_) => {}
             }
         }
-        // Ask-the-shot arrivals: the assistant turn (or error card)
-        // lands and the panel flips to the AI tab — the
-        // `FocusProperties` precedent.
+        // Ask-the-shot arrivals: tokens append to the growing card,
+        // Done commits it, Failed lands the error card (after any
+        // partial text) — and the panel flips to the AI tab
+        // (the `FocusProperties` precedent).
         while let Some(event) = bridge.borrow_mut().poll_ai_event() {
             match event {
-                crate::shell::AiEvent::Response(text) => self.ai.push_assistant(text),
-                crate::shell::AiEvent::Failed(message) => self.ai.push_error(message),
+                crate::shell::AiEvent::Token(text) => self.ai.push_token(&text),
+                crate::shell::AiEvent::Done => self.ai.finish_stream(),
+                crate::shell::AiEvent::Failed(message) => self.ai.fail_stream(message),
             }
             self.panel.focus_ai();
         }
-        // While a request is pending the response must arrive
-        // without user input: a short repaint timer carries the poll.
-        // No cross-thread `Context` clone — the worker signals only
-        // through the bridge's channel.
+        // While a request is pending tokens must render without user
+        // input: a 33 ms repaint cadence streams at ~30 fps while
+        // pending and costs nothing when idle (the egui
+        // `request_repaint_after` stopwatch idiom — repaint just
+        // often enough to show fresh content). No cross-thread
+        // `Context` clone — the worker signals only through the
+        // bridge's channel.
         if self.ai.is_pending() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 
@@ -2145,7 +2150,7 @@ impl EditorApp {
             self.ai.set_thumb(Some(texture));
         }
         self.ai.push_user(prompt);
-        self.ai.begin_pending();
+        self.ai.begin_stream();
         let messages = ai_run_messages(prompt, &png);
         if let Some(bridge) = self.page.clone() {
             bridge.borrow_mut().ai_request(messages);
@@ -2160,7 +2165,7 @@ impl EditorApp {
         }
         let messages = ai_follow_up_messages(self.ai.turns(), text);
         self.ai.push_user(text);
-        self.ai.begin_pending();
+        self.ai.begin_stream();
         if let Some(bridge) = self.page.clone() {
             bridge.borrow_mut().ai_request(messages);
         }

@@ -2082,13 +2082,13 @@ struct PageBridge {
     ai: AiHost,
 }
 
-/// The bridge's AI plumbing. One request at a time: a second request
+/// The bridge's AI plumbing. One stream at a time: a second request
 /// while one is pending replaces the receiver (the old worker's send
 /// fails into the void and its thread exits — the page only fires a
 /// second request after a turn landed, so this is defensive).
 #[derive(Default)]
 struct AiHost {
-    rx: Option<std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>>,
+    rx: Option<std::sync::mpsc::Receiver<crate::ai::worker::StreamMsg>>,
     queue: std::collections::VecDeque<flintshot_editor_egui::AiEvent>,
     /// A test-connection worker's channel (the AI settings page's
     /// Test connection row — deliberately separate from the
@@ -2170,7 +2170,12 @@ impl EditorPageBridge for PageBridge {
         let config = flintshot_core::Config::load().unwrap_or_default();
         match crate::ai::worker::resolve_ai(&config) {
             Ok(resolved) => {
-                self.ai.rx = Some(crate::ai::worker::spawn_chat_worker(resolved, messages));
+                // The streaming worker: deltas arrive on
+                // [`Self::poll_ai_event`]; dropping the returned
+                // join handle detaches the thread (its lifetime is
+                // bounded by the receiver or the stream itself).
+                let (rx, _join) = crate::ai::worker::spawn_chat_stream_worker(resolved, messages);
+                self.ai.rx = Some(rx);
             }
             // Unconfigured: an immediate failure with the same
             // actionable copy the Configure gate would have shown.
@@ -2183,17 +2188,51 @@ impl EditorPageBridge for PageBridge {
     }
 
     fn poll_ai_event(&mut self) -> Option<flintshot_editor_egui::AiEvent> {
-        // Drain arrived worker results into the queue, then hand
-        // back the oldest event.
-        if let Some(rx) = self.ai.rx.as_ref() {
-            while let Ok(result) = rx.try_recv() {
-                let event = match result {
-                    Ok(text) => flintshot_editor_egui::AiEvent::Response(text),
-                    Err(err) => flintshot_editor_egui::AiEvent::Failed(
-                        crate::ai::worker::ai_error_copy(&err),
-                    ),
-                };
-                self.ai.queue.push_back(event);
+        // Drain arrived worker events into the queue (many tokens
+        // coalesce per poll; the page appends them in order), then
+        // hand back the oldest event. A terminal event — or the
+        // channel going silent — releases the receiver.
+        if let Some(rx) = self.ai.rx.take() {
+            let mut finished = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(message) => {
+                        let event = match message {
+                            crate::ai::worker::StreamMsg::Delta(text) => {
+                                flintshot_editor_egui::AiEvent::Token(text)
+                            }
+                            crate::ai::worker::StreamMsg::Done => {
+                                finished = true;
+                                flintshot_editor_egui::AiEvent::Done
+                            }
+                            crate::ai::worker::StreamMsg::Failed(err) => {
+                                finished = true;
+                                flintshot_editor_egui::AiEvent::Failed(
+                                    crate::ai::worker::ai_error_copy(&err),
+                                )
+                            }
+                        };
+                        self.ai.queue.push_back(event);
+                        if finished {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // The worker exited without a terminal event
+                        // (a crash guard — the run loop always sends
+                        // one). Surface it; pending must never hang.
+                        finished = true;
+                        self.ai
+                            .queue
+                            .push_back(flintshot_editor_egui::AiEvent::Failed(
+                                "The stream ended unexpectedly — retry.".into(),
+                            ));
+                    }
+                }
+            }
+            if !finished {
+                self.ai.rx = Some(rx);
             }
         }
         self.ai.queue.pop_front()
@@ -4167,6 +4206,55 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert!(bridge.poll_ai_event().is_none(), "exactly one event");
+    }
+
+    /// Stream worker events drain in order into the page's event
+    /// queue; the terminal event releases the channel.
+    #[test]
+    fn stream_worker_events_drain_in_order_and_clear_the_channel() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (shared, _dir) = shared_with_session();
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::new(shared),
+            ai: AiHost::default(),
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::ai::worker::StreamMsg::Delta("He".into()))
+            .expect("send delta");
+        tx.send(crate::ai::worker::StreamMsg::Delta("y".into()))
+            .expect("send delta");
+        tx.send(crate::ai::worker::StreamMsg::Done)
+            .expect("send done");
+        bridge.ai.rx = Some(rx);
+        assert!(matches!(
+            bridge.poll_ai_event(),
+            Some(flintshot_editor_egui::AiEvent::Token(text)) if text == "He"
+        ));
+        assert!(matches!(
+            bridge.poll_ai_event(),
+            Some(flintshot_editor_egui::AiEvent::Token(text)) if text == "y"
+        ));
+        assert!(matches!(
+            bridge.poll_ai_event(),
+            Some(flintshot_editor_egui::AiEvent::Done)
+        ));
+        assert!(bridge.poll_ai_event().is_none(), "the queue drained");
+        assert!(bridge.ai.rx.is_none(), "the receiver is released on Done");
+
+        // A failure maps through the same copy mapper as v1.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::ai::worker::StreamMsg::Failed(
+            flintshot_core::AiError::Auth("bad key".into()),
+        ))
+        .expect("send failure");
+        bridge.ai.rx = Some(rx);
+        assert!(matches!(
+            bridge.poll_ai_event(),
+            Some(flintshot_editor_egui::AiEvent::Failed(message)) if message.contains("key")
+        ));
+        assert!(bridge.ai.rx.is_none(), "the receiver is released on Failed");
     }
 
     /// Test connection rides the worker pipeline (a mock endpoint

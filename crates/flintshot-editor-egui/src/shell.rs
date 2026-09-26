@@ -217,14 +217,19 @@ pub trait EditorPageBridge {
     }
 }
 
-/// An arrived Ask-the-shot result, host → page. Mirrors
-/// [`HomeDirective`]'s poll-directive choreography.
+/// One streamed Ask-the-shot event, host → page. Mirrors
+/// [`HomeDirective`]'s poll-directive choreography: the page drains
+/// these each frame at the pending repaint cadence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AiEvent {
-    /// The assistant's response text (markdown).
-    Response(String),
+    /// One content delta for the growing assistant card.
+    Token(String),
+    /// The stream finished (`[DONE]` or a clean close — both valid
+    /// ends): commit the streamed text as the assistant turn.
+    Done,
     /// The request failed; the message is one-line actionable copy.
+    /// Partial text already delivered stays as the assistant turn.
     Failed(String),
 }
 

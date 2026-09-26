@@ -62,8 +62,13 @@ pub(crate) enum AiTurn {
 pub(crate) struct AiConversation {
     /// The conversation so far, oldest first.
     turns: Vec<AiTurn>,
-    /// Whether a request is in flight (the quiet spinner row).
+    /// Whether a request is in flight (the spinner row / growing
+    /// card).
     pending: bool,
+    /// The in-flight stream's text so far — appended per token,
+    /// committed as the assistant turn on `Done` (or kept as partial
+    /// text on failure).
+    streaming: String,
     /// The follow-up input's draft text.
     draft: String,
     /// The initiating shot's thumbnail texture.
@@ -119,15 +124,49 @@ impl AiConversation {
         self.pending = false;
     }
 
-    /// Mark a request in flight (the spinner row shows).
-    pub(crate) fn begin_pending(&mut self) {
+    /// Mark a request in flight and arm a fresh streaming buffer (a
+    /// stale one from an interrupted exchange never bleeds into the
+    /// next card).
+    pub(crate) fn begin_stream(&mut self) {
         self.pending = true;
+        self.streaming.clear();
     }
 
     /// Whether a request is in flight.
     #[must_use]
     pub(crate) fn is_pending(&self) -> bool {
         self.pending
+    }
+
+    /// Append one streamed token to the growing card.
+    pub(crate) fn push_token(&mut self, token: impl Into<String>) {
+        self.streaming.push_str(&token.into());
+    }
+
+    /// The in-flight stream's text so far ("" before the first
+    /// token — the spinner row's gate).
+    #[must_use]
+    pub(crate) fn streaming_text(&self) -> &str {
+        &self.streaming
+    }
+
+    /// Commit the streamed text as the assistant turn (the `Done`
+    /// event): pending clears and the arrival hairline arms — the
+    /// one motion moment fires at stream end, not per token.
+    pub(crate) fn finish_stream(&mut self) {
+        let text = std::mem::take(&mut self.streaming);
+        self.push_assistant(text);
+    }
+
+    /// Land a failure: partial text received so far commits as an
+    /// assistant card first (Stop semantics — it stays), then the
+    /// error card carries the actionable copy.
+    pub(crate) fn fail_stream(&mut self, message: impl Into<String>) {
+        let partial = std::mem::take(&mut self.streaming);
+        if !partial.is_empty() {
+            self.push_assistant(partial);
+        }
+        self.push_error(message);
     }
 
     /// Start a fresh conversation: turns, draft, pending, and
@@ -137,6 +176,7 @@ impl AiConversation {
         self.turns.clear();
         self.draft.clear();
         self.pending = false;
+        self.streaming.clear();
         self.thumb = None;
         self.outbox = None;
         self.fresh_arrival = false;
@@ -166,6 +206,7 @@ impl AiConversation {
 pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
     let thumb = conversation.thumb.clone();
     let turns = conversation.turns().to_vec();
+    let streaming_text = conversation.streaming_text().to_owned();
     let fresh_arrival = conversation.take_fresh_arrival();
     let empty = conversation.is_empty() && !conversation.is_pending();
     let pending = conversation.is_pending();
@@ -195,7 +236,24 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
                 }
             }
             if pending {
-                pending_row(ui);
+                if streaming_text.is_empty() {
+                    pending_row(ui);
+                } else {
+                    // The growing card: tokens render in place at the
+                    // repaint cadence; the hairline stays at rest
+                    // until `Done` commits (fresh_arrival arms then).
+                    assistant_card(
+                        ui,
+                        md_cache,
+                        egui::Id::new("ai-streaming-card"),
+                        &streaming_text,
+                        false,
+                    );
+                    // Card height grows per token — keep the bottom
+                    // edge visible so the newest text never shifts
+                    // out of view.
+                    ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                }
             }
         });
 
@@ -445,7 +503,7 @@ mod tests {
     fn turns_land_in_order_and_clear_pending() {
         let mut conversation = AiConversation::default();
         conversation.push_user("Extract the text");
-        conversation.begin_pending();
+        conversation.begin_stream();
         assert!(conversation.is_pending());
         conversation.push_assistant("## Extracted");
         assert!(!conversation.is_pending(), "arrival ends the wait");
@@ -471,7 +529,7 @@ mod tests {
     fn reset_clears_turns_and_draft() {
         let mut conversation = AiConversation::default();
         conversation.push_user("p");
-        conversation.begin_pending();
+        conversation.begin_stream();
         conversation.draft = "leftover".into();
         conversation.reset();
         assert!(conversation.is_empty());
@@ -483,7 +541,7 @@ mod tests {
     #[test]
     fn pending_survives_until_a_turn_lands() {
         let mut conversation = AiConversation::default();
-        conversation.begin_pending();
+        conversation.begin_stream();
         assert!(conversation.is_pending());
         conversation.push_user("queued prompt");
         assert!(
@@ -492,6 +550,70 @@ mod tests {
         );
         conversation.push_assistant("answer");
         assert!(!conversation.is_pending());
+    }
+
+    #[test]
+    fn tokens_stream_into_a_growing_card_and_done_commits() {
+        let mut conversation = AiConversation::default();
+        conversation.push_user("extract");
+        conversation.begin_stream();
+        assert!(conversation.is_pending());
+        assert_eq!(conversation.streaming_text(), "");
+        conversation.push_token("Hel");
+        conversation.push_token("lo");
+        assert_eq!(conversation.streaming_text(), "Hello");
+        // No assistant turn lands before Done.
+        assert!(matches!(
+            conversation.turns().last(),
+            Some(AiTurn::User { .. })
+        ));
+        conversation.finish_stream();
+        assert!(!conversation.is_pending());
+        assert_eq!(
+            conversation.streaming_text(),
+            "",
+            "the buffer drains on commit"
+        );
+        let Some(AiTurn::Assistant { text }) = conversation.turns().last() else {
+            panic!("Done commits the streaming text as the assistant turn");
+        };
+        assert_eq!(text, "Hello");
+        assert!(
+            conversation.take_fresh_arrival(),
+            "the arrival hairline arms at stream end, not per token"
+        );
+    }
+
+    #[test]
+    fn failure_keeps_partial_text_then_lands_the_error_card() {
+        let mut conversation = AiConversation::default();
+        conversation.begin_stream();
+        conversation.push_token("partial");
+        conversation.fail_stream("the copy");
+        assert!(!conversation.is_pending());
+        let turns = conversation.turns();
+        assert!(matches!(&turns[0], AiTurn::Assistant { text } if text == "partial"));
+        assert!(matches!(&turns[1], AiTurn::Error { message } if message == "the copy"));
+
+        // No partial text: just the error card, no empty assistant.
+        let mut conversation = AiConversation::default();
+        conversation.begin_stream();
+        conversation.fail_stream("boom");
+        assert_eq!(conversation.turns().len(), 1);
+        assert!(matches!(
+            conversation.turns().last(),
+            Some(AiTurn::Error { .. })
+        ));
+    }
+
+    #[test]
+    fn begin_stream_resets_stale_streaming_text() {
+        let mut conversation = AiConversation::default();
+        conversation.begin_stream();
+        conversation.push_token("leftover");
+        conversation.finish_stream();
+        conversation.begin_stream();
+        assert_eq!(conversation.streaming_text(), "");
     }
 
     /// The arrival hairline: a fresh arrival starts thin and settles
