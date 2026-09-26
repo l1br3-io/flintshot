@@ -656,6 +656,19 @@ impl WindowApp {
                 self.settings = Some(Self::build_settings(&mut self.home));
                 self.request_route(ui.ctx(), Route::Settings);
             }
+            // The overflow's AI settings entry: the Configure
+            // link's routing from the topbar — `request_route`
+            // parks the live editor when routing from Editor, and
+            // Esc restores it (the existing AiConfig contract).
+            Some(crate::topbar::TopbarAction::AiSettings) => {
+                self.ai_config = Some(Self::build_ai_config(&mut self.home, &self.page_bridge));
+                self.request_route(
+                    ui.ctx(),
+                    Route::AiConfig {
+                        parked_editor: None,
+                    },
+                );
+            }
             // The breadcrumb's Home link: back to the home route
             // from any stage that can navigate (mirrors the editor
             // Esc path — the page swaps in place, same window).
@@ -1121,6 +1134,73 @@ mod tests {
         assert!(
             matches!(app.route, Route::Settings),
             "the overflow's Settings entry routed the editor page to Settings"
+        );
+    }
+
+    /// The overflow's **AI settings** entry routes the editor page to
+    /// the AI config page with the live editor parked — the Configure
+    /// link's parking semantics from the topbar.
+    #[test]
+    fn overflow_ai_settings_routes_and_parks_the_editor() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, _bridge, _host) = window_app_start(
+            WindowStart::Editor(Box::new(RoutedEditor {
+                state: editor_state(),
+                selection_first: false,
+                session_id: None,
+            })),
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let frame = |ctx: &egui::Context, app: &mut WindowApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        };
+        let click = |pos: egui::Pos2| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let ovf = ctx
+            .read_response(egui::Id::new("topbar-overflow"))
+            .expect("the routed editor's overflow registers")
+            .rect;
+        frame(&ctx, &mut app, click(ovf.center()));
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let row = ctx
+            .read_response(egui::Id::new("topbar-ai-settings"))
+            .expect("the AI settings entry renders in the editor overflow")
+            .rect;
+        frame(&ctx, &mut app, click(row.center()));
+        assert!(
+            matches!(
+                &app.route,
+                Route::AiConfig {
+                    parked_editor: Some(_)
+                }
+            ),
+            "the overflow's AI settings entry parks the live editor"
         );
     }
 

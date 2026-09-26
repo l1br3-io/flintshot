@@ -1882,6 +1882,11 @@ impl EditorApp {
                 self.refresh_ai_transforms();
                 self.ai_dialog.open();
             }
+            // The overflow's AI settings row never renders on worker
+            // topbars (Enable::WORKER omits the bit), so this arm is
+            // unreachable there — routed surfaces route in the
+            // window router before actions forward here.
+            TopbarAction::AiSettings => {}
             TopbarAction::Save => self.handle_save(ctx),
             TopbarAction::Upload => self.handle_upload(ctx),
             TopbarAction::Open => self.handle_page_open(ctx),

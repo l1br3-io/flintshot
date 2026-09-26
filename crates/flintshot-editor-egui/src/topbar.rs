@@ -74,6 +74,10 @@ pub(crate) enum TopbarAction {
     Resize,
     /// The overflow's Settings entry.
     Settings,
+    /// The overflow's **AI settings** entry — routes to the AI
+    /// config page (routed surfaces only; worker topbars keep the
+    /// Settings-only grammar).
+    AiSettings,
     /// The breadcrumb's Home link — leave the current stage for
     /// home (route home in-window; worker windows close, matching
     /// Esc).
@@ -96,10 +100,15 @@ impl Enable {
     pub(crate) const OPEN: u8 = 1 << 3;
     /// The overflow's Save / Upload / Paste items (editor routes).
     pub(crate) const EDITOR_ITEMS: u8 = 1 << 4;
+    /// The overflow's AI settings row — present on every routed
+    /// surface, absent from worker topbars (their Settings row
+    /// already owns the delegate+close choreography).
+    pub(crate) const AI_SETTINGS: u8 = 1 << 5;
 
     /// All actions live (the routed editor surface).
-    pub(crate) const ALL: Enable =
-        Enable(Self::CAPTURE | Self::COPY | Self::AI | Self::OPEN | Self::EDITOR_ITEMS);
+    pub(crate) const ALL: Enable = Enable(
+        Self::CAPTURE | Self::COPY | Self::AI | Self::OPEN | Self::EDITOR_ITEMS | Self::AI_SETTINGS,
+    );
 
     /// The worker editor: Open / Paste have no bridge, so they stay
     /// disabled; Capture / Copy / Save / Upload are local. AI is
@@ -110,6 +119,9 @@ impl Enable {
     pub(crate) const WORKER: Enable = Enable(Self::CAPTURE | Self::COPY | Self::AI);
 
     /// Nothing live.
+    // Test-only today (worker/loading frames pin it); kept as the
+    // matrix's zero value.
+    #[allow(dead_code)]
     pub(crate) const NONE: Enable = Enable(0);
 
     /// Whether `flag` is enabled.
@@ -122,14 +134,14 @@ impl Enable {
 /// The per-route enablement matrix (spec §Routes): Home wires
 /// Capture + Open (Copy has no image to copy — the mockup's
 /// disabled tooltip explains); Editor is fully live; Settings keeps
-/// Capture only; Loading disables everything while a grab is in
-/// flight.
+/// Capture only; Loading disables everything but the overflow's AI
+/// settings row while a grab is in flight.
 pub(crate) fn enable_for(surface: Surface) -> Enable {
     match surface {
-        Surface::Home => Enable(Enable::CAPTURE | Enable::OPEN),
+        Surface::Home => Enable(Enable::CAPTURE | Enable::OPEN | Enable::AI_SETTINGS),
         Surface::Editor => Enable::ALL,
-        Surface::Settings => Enable(Enable::CAPTURE),
-        Surface::Loading => Enable::NONE,
+        Surface::Settings => Enable(Enable::CAPTURE | Enable::AI_SETTINGS),
+        Surface::Loading => Enable(Enable::AI_SETTINGS),
     }
 }
 
@@ -610,6 +622,11 @@ fn overflow(
             om_row_about(ui, g_about, "About Flintshot");
             om_note(ui, status);
             om_separator(ui);
+            if enable.has(Enable::AI_SETTINGS)
+                && om_row(ui, "topbar-ai-settings", g_spark, "AI settings", None)
+            {
+                *fired = Some(TopbarAction::AiSettings);
+            }
             if om_row(ui, "topbar-settings", g_settings, "Settings", None) {
                 *fired = Some(TopbarAction::Settings);
             }
@@ -1530,12 +1547,12 @@ mod tests {
     fn enable_matrix_matches_the_spec() {
         let e = |s: Surface| enable_for(s);
         for (surface, matrix) in [
-            (Surface::Home, (true, false, true, false)),
-            (Surface::Editor, (true, true, true, true)),
-            (Surface::Settings, (true, false, false, false)),
-            (Surface::Loading, (false, false, false, false)),
+            (Surface::Home, (true, false, true, false, true)),
+            (Surface::Editor, (true, true, true, true, true)),
+            (Surface::Settings, (true, false, false, false, true)),
+            (Surface::Loading, (false, false, false, false, true)),
         ] {
-            let (capture, copy, open, editor_items) = matrix;
+            let (capture, copy, open, editor_items, ai_settings) = matrix;
             assert_eq!(
                 e(surface).has(Enable::CAPTURE),
                 capture,
@@ -1548,7 +1565,87 @@ mod tests {
                 editor_items,
                 "{surface:?}: editor items"
             );
+            assert_eq!(
+                e(surface).has(Enable::AI_SETTINGS),
+                ai_settings,
+                "{surface:?}: the overflow's AI settings row"
+            );
         }
+        assert!(
+            !Enable::WORKER.has(Enable::AI_SETTINGS),
+            "worker topbars keep the Settings-only grammar"
+        );
+    }
+
+    /// The overflow's AI settings row: registers on every routed
+    /// surface directly above Settings, fires its action, and never
+    /// renders under the worker enable set.
+    #[test]
+    fn overflow_ai_settings_row_registers_routes_and_sits_above_settings() {
+        for surface in [
+            Surface::Home,
+            Surface::Editor,
+            Surface::Loading,
+            Surface::Settings,
+        ] {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx);
+            let draw = |events: Vec<egui::Event>| {
+                let _ = ctx.run_ui(screen(0.0, events), |ui| {
+                    let _ = show(ui, surface, None, enable_for(surface), false, true);
+                });
+            };
+            draw(vec![]);
+            let ovf = ctx
+                .read_response(egui::Id::new("topbar-overflow"))
+                .expect("overflow chip")
+                .rect;
+            draw(click_events(ovf.center()));
+            draw(vec![]);
+            draw(vec![]);
+            let row = ctx
+                .read_response(egui::Id::new("topbar-ai-settings"))
+                .unwrap_or_else(|| panic!("{surface:?}: the AI settings row registers"));
+            let settings = ctx
+                .read_response(egui::Id::new("topbar-settings"))
+                .expect("the Settings row registers")
+                .rect;
+            assert!(
+                row.rect.bottom() <= settings.top() + 0.5,
+                "{surface:?}: AI settings sits above Settings"
+            );
+            let fired = std::cell::Cell::new(None);
+            let _ = ctx.run_ui(screen(0.032, click_events(row.rect.center())), |ui| {
+                fired.set(show(ui, surface, None, enable_for(surface), false, true));
+            });
+            assert_eq!(
+                fired.get(),
+                Some(TopbarAction::AiSettings),
+                "{surface:?}: the row fires its action"
+            );
+        }
+
+        // Worker enable set: the row never renders.
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let draw = |events: Vec<egui::Event>| {
+            let _ = ctx.run_ui(screen(0.0, events), |ui| {
+                let _ = show(ui, Surface::Editor, None, Enable::WORKER, false, true);
+            });
+        };
+        draw(vec![]);
+        let ovf = ctx
+            .read_response(egui::Id::new("topbar-overflow"))
+            .expect("overflow chip")
+            .rect;
+        draw(click_events(ovf.center()));
+        draw(vec![]);
+        draw(vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("topbar-ai-settings"))
+                .is_none(),
+            "worker topbars carry no AI settings row"
+        );
     }
 
     /// The breadcrumb's current stage paints gold; on the editor it
