@@ -2045,6 +2045,12 @@ impl EditorApp {
             }
             self.panel.focus_ai();
         }
+        // Queue-don't-lock: a finished run hands the queue's head to
+        // the send wiring (nothing fires while a new request is
+        // already in flight — `take_next_queued` guards on pending).
+        if let Some(queued) = self.ai.take_next_queued() {
+            self.handle_ai_follow_up(&queued);
+        }
         // While a request is pending tokens must render without user
         // input: a 33 ms repaint cadence streams at ~30 fps while
         // pending and costs nothing when idle (the egui
@@ -2129,6 +2135,15 @@ impl EditorApp {
         if let Some(text) = self.ai.take_outbox() {
             self.handle_ai_follow_up(&text);
         }
+        if self.ai.take_stop_request() {
+            // Stop: the conversation settles (partial text commits,
+            // the queue clears) and the host drops the receiver —
+            // drop-to-cancel tears the connection down.
+            self.ai.stop();
+            if let Some(bridge) = self.page.clone() {
+                bridge.borrow_mut().ai_stop();
+            }
+        }
     }
 
     /// Fire an Ask-the-shot run (the dialog's Run): flatten via the
@@ -2159,6 +2174,8 @@ impl EditorApp {
 
     /// Fire a follow-up: text-only history (no image part — by
     /// construction in [`ai_follow_up_messages`]) plus the new turn.
+    /// The pending-guard is defense in depth only — the queue, not
+    /// the pill, owns submits while a request is in flight.
     fn handle_ai_follow_up(&mut self, text: &str) {
         if self.ai.is_pending() {
             return;

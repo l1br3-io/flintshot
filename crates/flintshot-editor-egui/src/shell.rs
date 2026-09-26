@@ -169,6 +169,12 @@ pub trait EditorPageBridge {
     /// no-op (headless tests): requests just never answer.
     fn ai_request(&mut self, _messages: Vec<flintshot_core::ChatMessage>) {}
 
+    /// Cancel the in-flight Ask-the-shot request (the Stop glyph):
+    /// drop the receiver so the worker's next send fails (Task 002's
+    /// drop-to-cancel). Partial text already delivered stays with the
+    /// page. Default no-op (headless tests).
+    fn ai_stop(&mut self) {}
+
     /// Take one arrived AI event (oldest first). `None` when no
     /// response is pending. Default: always `None`.
     fn poll_ai_event(&mut self) -> Option<AiEvent> {

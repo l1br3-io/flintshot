@@ -81,6 +81,12 @@ pub(crate) struct AiConversation {
     /// (submitted inside `panel::show`'s borrow; consumed right
     /// after via [`AiConversation::take_outbox`]).
     outbox: Option<String>,
+    /// Follow-ups submitted while a request was in flight; FIFO —
+    /// the head auto-sends when the run finishes (queue-don't-lock).
+    queue: Vec<String>,
+    /// The Stop glyph fired (consumed by the page right after
+    /// `panel::show`, like the outbox).
+    stop_requested: bool,
     /// Whether an assistant response just landed (the arrival
     /// hairline's one-shot trigger; the first render of the fresh
     /// card consumes it).
@@ -169,6 +175,53 @@ impl AiConversation {
         self.push_error(message);
     }
 
+    /// Stop the in-flight request: partial text stays as the
+    /// assistant turn (no card when zero tokens arrived) and —
+    /// GOTCHA — the queue clears. An explicit stop halts this line
+    /// of asking; auto-sending a queued follow-up right after the
+    /// user said "stop" would relaunch exactly what they cancelled.
+    pub(crate) fn stop(&mut self) {
+        let partial = std::mem::take(&mut self.streaming);
+        if !partial.is_empty() {
+            self.push_assistant(partial);
+        }
+        self.pending = false;
+        self.queue.clear();
+    }
+
+    /// Queue a follow-up submitted while a request is in flight (the
+    /// pill stays enabled; Enter queues instead of locking).
+    pub(crate) fn queue_message(&mut self, text: impl Into<String>) {
+        self.queue.push(text.into());
+    }
+
+    /// Take the head of the queue when a run has finished — the
+    /// auto-send's handoff into the page's send wiring. `None` while
+    /// anything is pending or when the queue is empty.
+    pub(crate) fn take_next_queued(&mut self) -> Option<String> {
+        if self.pending || self.queue.is_empty() {
+            return None;
+        }
+        Some(self.queue.remove(0))
+    }
+
+    /// The queued follow-ups, oldest first (render + assertions).
+    #[must_use]
+    pub(crate) fn queued(&self) -> &[String] {
+        &self.queue
+    }
+
+    /// Record the Stop glyph's click (consumed by the page after
+    /// `panel::show`, like the outbox).
+    pub(crate) fn request_stop(&mut self) {
+        self.stop_requested = true;
+    }
+
+    /// Take the pending stop request, if any.
+    pub(crate) fn take_stop_request(&mut self) -> bool {
+        std::mem::take(&mut self.stop_requested)
+    }
+
     /// Start a fresh conversation: turns, draft, pending, and
     /// thumbnail all reset (running a new transform replaces the
     /// thread — spec).
@@ -179,6 +232,8 @@ impl AiConversation {
         self.streaming.clear();
         self.thumb = None;
         self.outbox = None;
+        self.queue.clear();
+        self.stop_requested = false;
         self.fresh_arrival = false;
     }
 
@@ -207,6 +262,7 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
     let thumb = conversation.thumb.clone();
     let turns = conversation.turns().to_vec();
     let streaming_text = conversation.streaming_text().to_owned();
+    let queued = conversation.queued().to_vec();
     let fresh_arrival = conversation.take_fresh_arrival();
     let empty = conversation.is_empty() && !conversation.is_pending();
     let pending = conversation.is_pending();
@@ -223,7 +279,9 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
             }
             for (i, turn) in turns.iter().enumerate() {
                 match turn {
-                    AiTurn::User { prompt } => user_chip(ui, egui::Id::new(("ai-turn", i)), prompt),
+                    AiTurn::User { prompt } => {
+                        user_chip(ui, egui::Id::new(("ai-turn", i)), prompt, false);
+                    }
                     AiTurn::Assistant { text } => {
                         // The arrival hairline: only the card a
                         // response just landed into animates.
@@ -255,25 +313,54 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
                     ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
                 }
             }
+            for (i, queued_text) in queued.iter().enumerate() {
+                user_chip(ui, egui::Id::new(("ai-queued", i)), queued_text, true);
+            }
+            if !queued.is_empty() {
+                crate::panel::hint(ui, "Queued…");
+            }
         });
 
     ui.add_space(theme::SPACE_SCALE[1]);
     // The follow-up pill always renders (the tab's furniture); it's
-    // inert until a conversation exists and no request is pending —
-    // a follow-up with no thread has nowhere to go.
-    let inert = conversation.is_pending() || conversation.is_empty();
+    // inert only with no conversation to follow up on — while a
+    // request is pending, Enter queues (queue-don't-lock) and the
+    // send glyph flips to a Stop square.
+    let inert = conversation.is_empty();
+    let pending = conversation.is_pending();
+    let mut stop_requested = false;
     let mut draft = std::mem::take(&mut conversation.draft);
-    let (edit_response, send_clicked) =
-        follow_up_row(ui, egui::Id::new("ai-follow-up"), &mut draft, inert);
+    let (edit_response, action) = follow_up_row(
+        ui,
+        egui::Id::new("ai-follow-up"),
+        &mut draft,
+        inert,
+        pending,
+    );
     let enter_pressed = edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    if (send_clicked || enter_pressed) && !draft.trim().is_empty() && !inert {
-        conversation.outbox = Some(draft.trim().to_string());
-        draft.clear();
+    match action {
+        FollowUpAction::Stop => {
+            stop_requested = true;
+        }
+        action => {
+            let submitted = action == FollowUpAction::Send || enter_pressed;
+            if submitted && !draft.trim().is_empty() && !inert {
+                if pending {
+                    conversation.queue_message(draft.trim());
+                } else {
+                    conversation.outbox = Some(draft.trim().to_string());
+                }
+                draft.clear();
+            }
+        }
     }
     if !edit_response.has_focus() && enter_pressed {
         edit_response.request_focus();
     }
     conversation.draft = draft;
+    if stop_requested {
+        conversation.request_stop();
+    }
 }
 
 /// The initiating shot as a small paper-shadowed thumbnail.
@@ -297,12 +384,17 @@ fn thumbnail(ui: &mut egui::Ui, thumb: &egui::TextureHandle) {
     ui.add_space(theme::SPACE_SCALE[1]);
 }
 
-/// One user turn: a quiet cream chip, right-aligned.
-fn user_chip(ui: &mut egui::Ui, _id: egui::Id, prompt: &str) {
+/// One user turn: a quiet cream chip, right-aligned. `dimmed` is the
+/// queued variant (`INK_SOFT` text, no stroke — waiting, not yet sent).
+fn user_chip(ui: &mut egui::Ui, _id: egui::Id, prompt: &str, dimmed: bool) {
     let galley = ui.painter().layout(
         prompt.to_owned(),
         egui::FontId::proportional(theme::TYPE_SM),
-        theme::palette::INK,
+        if dimmed {
+            theme::palette::INK_SOFT
+        } else {
+            theme::palette::INK
+        },
         ui.available_width() - theme::SPACE_SCALE[3],
     );
     let size = galley.size() + egui::vec2(16.0, 10.0);
@@ -313,7 +405,11 @@ fn user_chip(ui: &mut egui::Ui, _id: egui::Id, prompt: &str) {
         resp.rect,
         CornerRadius::same(theme::POD_RADIUS),
         theme::palette::PAPER_CREAM,
-        theme::HAIRLINE_STROKE,
+        if dimmed {
+            egui::Stroke::NONE
+        } else {
+            theme::HAIRLINE_STROKE
+        },
         egui::StrokeKind::Middle,
     );
     ui.painter().galley(
@@ -428,15 +524,28 @@ fn pending_row(ui: &mut egui::Ui) {
     });
 }
 
-/// The follow-up pill: single-line input + send glyph. Disabled
-/// while pending. Returns `(edit response, send clicked)`.
+/// What the follow-up row asked for this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowUpAction {
+    /// Nothing submitted.
+    None,
+    /// Send the draft (or queue it while pending).
+    Send,
+    /// Stop the in-flight request.
+    Stop,
+}
+
+/// The follow-up pill: single-line input + send glyph. Enabled while
+/// pending (Enter queues); the glyph flips to a berry Stop square
+/// while a request is in flight. Returns `(edit response, action)`.
 fn follow_up_row(
     ui: &mut egui::Ui,
     id: egui::Id,
     draft: &mut String,
     disabled: bool,
-) -> (egui::Response, bool) {
-    let mut send_clicked = false;
+    pending: bool,
+) -> (egui::Response, FollowUpAction) {
+    let mut action = FollowUpAction::None;
     let height = 26.0;
     let send_w = 30.0;
     let row = ui.horizontal(|ui| {
@@ -444,11 +553,19 @@ fn follow_up_row(
             .id(id)
             .desired_width(ui.available_width() - send_w - theme::SPACE_SCALE[1])
             .margin(egui::Margin::symmetric(8, 4))
-            .hint_text("Ask a follow-up…")
+            .hint_text(if pending {
+                "Ask a follow-up — Enter queues…"
+            } else {
+                "Ask a follow-up…"
+            })
             .desired_rows(1);
         let resp = ui.add_enabled(!disabled, edit);
+        // The glyph: send ➤ at rest, a Stop square while in flight
+        // (always reachable, composer focus or not — it is its own
+        // interact rect beside the input).
+        let glyph = if pending { "■" } else { "➤" };
         let galley = ui.painter().layout_no_wrap(
-            "➤".to_owned(),
+            glyph.to_owned(),
             egui::FontId::proportional(theme::TYPE_SM),
             if disabled {
                 theme::palette::LOCK_GREY
@@ -457,12 +574,18 @@ fn follow_up_row(
             },
         );
         let (rect, _) = ui.allocate_exact_size(egui::vec2(send_w, height), Sense::hover());
-        let btn = ui.interact(rect, id.with("send"), Sense::click());
+        let btn = ui.interact(
+            rect,
+            id.with(if pending { "stop" } else { "send" }),
+            Sense::click(),
+        );
         ui.painter().rect(
             rect,
             CornerRadius::same(theme::POD_RADIUS),
             if disabled {
                 theme::palette::PAPER_DIM
+            } else if pending {
+                theme::palette::BERRY_RED
             } else {
                 theme::palette::FOREST_MID
             },
@@ -481,10 +604,16 @@ fn follow_up_row(
                 theme::palette::CREAM_TEXT
             },
         );
-        send_clicked = btn.clicked() && !disabled;
+        if btn.clicked() && !disabled {
+            action = if pending {
+                FollowUpAction::Stop
+            } else {
+                FollowUpAction::Send
+            };
+        }
         resp
     });
-    (row.inner, send_clicked)
+    (row.inner, action)
 }
 
 #[cfg(test)]
@@ -614,6 +743,54 @@ mod tests {
         conversation.finish_stream();
         conversation.begin_stream();
         assert_eq!(conversation.streaming_text(), "");
+    }
+
+    #[test]
+    fn follow_ups_queue_while_pending_and_drain_fifo_on_completion() {
+        let mut conversation = AiConversation::default();
+        conversation.push_user("run");
+        conversation.begin_stream();
+        conversation.queue_message("first");
+        conversation.queue_message("second");
+        assert!(
+            conversation.take_next_queued().is_none(),
+            "nothing drains while a request is in flight"
+        );
+        conversation.finish_stream(); // Done
+        assert_eq!(conversation.take_next_queued().as_deref(), Some("first"));
+        conversation.begin_stream(); // the auto-send arms a new stream
+        assert!(conversation.take_next_queued().is_none());
+        conversation.finish_stream();
+        assert_eq!(conversation.take_next_queued().as_deref(), Some("second"));
+        assert!(conversation.take_next_queued().is_none());
+    }
+
+    #[test]
+    fn stop_keeps_partial_text_and_clears_the_queue() {
+        let mut conversation = AiConversation::default();
+        conversation.begin_stream();
+        conversation.push_token("part");
+        conversation.queue_message("never sent");
+        conversation.stop();
+        assert!(!conversation.is_pending());
+        assert!(
+            matches!(conversation.turns().last(), Some(AiTurn::Assistant { text }) if text == "part"),
+            "partial text stays as the assistant turn"
+        );
+        assert!(
+            conversation.take_next_queued().is_none(),
+            "Stop halts this line of asking — the queue clears"
+        );
+        assert_eq!(conversation.streaming_text(), "");
+    }
+
+    #[test]
+    fn stop_before_the_first_token_lands_no_card() {
+        let mut conversation = AiConversation::default();
+        conversation.begin_stream();
+        conversation.stop();
+        assert!(!conversation.is_pending());
+        assert!(conversation.turns().is_empty(), "no empty assistant card");
     }
 
     /// The arrival hairline: a fresh arrival starts thin and settles
