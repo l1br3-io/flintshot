@@ -30,6 +30,11 @@ pub struct AiTransform {
     pub name: String,
     /// The instruction sent with the image.
     pub prompt: String,
+    /// Marks the non-deletable built-in starters (duplicable into
+    /// the user store, never stored there). Serde-defaulted and
+    /// skipped when false so user files stay clean.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub builtin: bool,
 }
 
 /// File envelope: `[[transform]]` tables under the hood.
@@ -167,6 +172,7 @@ impl TransformStore {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.into(),
             prompt: prompt.into(),
+            builtin: false,
         };
         self.transforms.push(transform.clone());
         transform
@@ -255,6 +261,12 @@ mod tests {
         assert!(body.starts_with("[[transform]]"), "body was:\n{body}");
         assert!(body.contains("name = \"OCR\""));
         assert!(body.contains("prompt = \"read it\""));
+        // The builtin flag is serde-defaulted and skipped when false:
+        // user files stay clean of the implementation detail.
+        assert!(
+            !body.contains("builtin"),
+            "user store must not carry a builtin key:\n{body}"
+        );
     }
 
     #[test]

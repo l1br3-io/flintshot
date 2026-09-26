@@ -38,10 +38,10 @@ pub mod text;
 pub mod upload;
 
 pub use ai::{
-    image_part, parse_stream_data_line, png_data_url, text_part, transform_store_path,
-    vision_probe_messages, AiChoice, AiClient, AiError, AiRequest, AiResponse, AiResponseMessage,
-    AiStreamEvent, AiStreamOptions, AiTransform, ChatMessage, ContentPart, ImageUrl,
-    ProviderPreset, TransformStore,
+    builtin_transforms, image_part, merge_transforms_mru_first, parse_stream_data_line,
+    png_data_url, text_part, transform_store_path, vision_probe_messages, AiChoice, AiClient,
+    AiError, AiRequest, AiResponse, AiResponseMessage, AiStreamEvent, AiStreamOptions, AiTransform,
+    ChatMessage, ContentPart, ImageUrl, ProviderPreset, TransformStore,
 };
 #[cfg(target_os = "linux")]
 pub use capture::PortalScreenshotCapturer;

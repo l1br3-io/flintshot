@@ -26,14 +26,17 @@ pub(crate) enum AiDialogAction {
         /// The effective prompt (custom text wins over the selected
         /// transform's template).
         prompt: String,
+        /// The selected transform's id (saved or built-in) — `None`
+        /// for custom prompts. The page records it in the MRU.
+        transform_id: Option<String>,
     },
     /// Route to the AI config page (unconfigured mode's link).
     Configure,
 }
 
-/// The dialog's cross-frame state. Kept over opens? No — every
-/// [`AiDialog::open`] resets the selection and the draft (spec Open
-/// Question 3: no remembered transform in v1).
+/// The dialog's cross-frame state. Every [`AiDialog::open`] resets
+/// the draft — but the selection preselects the last-used transform
+/// (the `[ai] recent-transforms` head; ask-the-shot-v2).
 #[derive(Default)]
 pub(crate) struct AiDialog {
     /// Whether the dialog shows.
@@ -47,11 +50,12 @@ pub(crate) struct AiDialog {
 }
 
 impl AiDialog {
-    /// Open with fresh state (no remembered transform — spec Open
-    /// Question 3's default).
-    pub(crate) fn open(&mut self) {
+    /// Open with fresh state, preselecting the last-used transform
+    /// when the host has one (the MRU head — its pill carries the
+    /// selected style on the very first frame).
+    pub(crate) fn open(&mut self, preselect: Option<&str>) {
         self.open = true;
-        self.selected = None;
+        self.selected = preselect.map(str::to_string);
         self.prompt.clear();
         self.focus_prompt = true;
     }
@@ -139,7 +143,7 @@ impl AiDialog {
                         );
                         ui.add_space(theme::SPACE_SCALE[1]);
 
-                        field_label(ui, "SAVED TRANSFORMS");
+                        field_label(ui, "TRANSFORMS");
                         saved_list(ui, transforms, &mut self.selected);
                         ui.add_space(theme::SPACE_SCALE[1]);
                         hairline(ui);
@@ -169,7 +173,10 @@ impl AiDialog {
                             let can_run = self.effective_prompt(transforms).is_some();
                             if run_pill(ui, can_run) {
                                 if let Some(prompt) = self.effective_prompt(transforms) {
-                                    action = Some(AiDialogAction::Run { prompt });
+                                    action = Some(AiDialogAction::Run {
+                                        prompt,
+                                        transform_id: self.selected.clone(),
+                                    });
                                 }
                             }
                         } else if configure_link(ui) {
@@ -195,7 +202,10 @@ impl AiDialog {
             && ctx.input(|i| i.key_pressed(egui::Key::Enter))
         {
             if let Some(prompt) = self.effective_prompt(transforms) {
-                action = Some(AiDialogAction::Run { prompt });
+                action = Some(AiDialogAction::Run {
+                    prompt,
+                    transform_id: self.selected.clone(),
+                });
             }
         }
         if action.is_some() {
@@ -373,11 +383,13 @@ mod tests {
                 id: "t1".into(),
                 name: "Extract text".into(),
                 prompt: "Extract the text inside this image".into(),
+                builtin: false,
             },
             AiTransform {
                 id: "t2".into(),
                 name: "Summarize".into(),
                 prompt: "Summarize this screenshot".into(),
+                builtin: false,
             },
         ]
     }
@@ -456,24 +468,33 @@ mod tests {
     }
 
     #[test]
-    fn open_resets_state_and_close_is_side_effect_free() {
+    fn open_resets_draft_and_preselects_the_last_used_transform() {
         let mut dialog = AiDialog::default();
         assert!(!dialog.is_open());
-        dialog.open();
+        dialog.open(None);
         dialog.select("t1");
         dialog.prompt = "draft".into();
         dialog.close();
         assert!(!dialog.is_open());
-        dialog.open();
+        dialog.open(Some("t2"));
         assert!(dialog.is_open());
-        assert_eq!(dialog.selected_id(), None, "open resets the selection");
+        assert_eq!(
+            dialog.selected_id(),
+            Some("t2"),
+            "the preselect lands on the first frame"
+        );
         assert!(dialog.prompt().is_empty(), "open resets the draft");
+
+        // No MRU entry: nothing preselected.
+        dialog.close();
+        dialog.open(None);
+        assert_eq!(dialog.selected_id(), None);
     }
 
     #[test]
     fn effective_prompt_prefers_custom_then_selected_template() {
         let mut dialog = AiDialog::default();
-        dialog.open();
+        dialog.open(None);
         assert_eq!(dialog.effective_prompt(&transforms()), None);
 
         dialog.select("t1");
@@ -493,7 +514,7 @@ mod tests {
     #[test]
     fn select_clears_the_prompt_mutual_exclusivity() {
         let mut dialog = AiDialog::default();
-        dialog.open();
+        dialog.open(None);
         dialog.prompt = "draft".into();
         dialog.select("t1");
         assert!(dialog.prompt().is_empty());
@@ -514,7 +535,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut dialog = AiDialog::default();
-        dialog.open();
+        dialog.open(None);
         let transforms = transforms();
         settle(&ctx, &mut dialog, &transforms, true);
         let pill = center(&ctx, egui::Id::new(("ai-transform", "t1")));
@@ -526,10 +547,23 @@ mod tests {
         assert_eq!(
             action,
             Some(AiDialogAction::Run {
-                prompt: "Extract the text inside this image".into()
+                prompt: "Extract the text inside this image".into(),
+                transform_id: Some("t1".into()),
             })
         );
         assert!(!dialog.is_open(), "Run closes the dialog");
+    }
+
+    #[test]
+    fn custom_prompt_run_carries_no_transform_id() {
+        let mut dialog = AiDialog::default();
+        dialog.open(None);
+        dialog.prompt = "ad-hoc".into();
+        let action = dialog.effective_prompt(&transforms());
+        assert_eq!(action, Some("ad-hoc".into()));
+        // The Run action's id is the selection, which typing clears.
+        dialog.prompt = "ad-hoc".into();
+        assert_eq!(dialog.selected_id(), None);
     }
 
     #[test]
@@ -537,7 +571,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut dialog = AiDialog::default();
-        dialog.open();
+        dialog.open(None);
         let transforms = transforms();
         settle(&ctx, &mut dialog, &transforms, true);
         let run = center(&ctx, egui::Id::new("ai-dialog-run"));
@@ -551,7 +585,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut dialog = AiDialog::default();
-        dialog.open();
+        dialog.open(None);
         let transforms = transforms();
         let _ = frame(&ctx, &mut dialog, &transforms, false, vec![]);
         assert!(
@@ -570,7 +604,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut dialog = AiDialog::default();
-        dialog.open();
+        dialog.open(None);
         let transforms = transforms();
         settle(&ctx, &mut dialog, &transforms, false);
         let link = ctx
@@ -592,7 +626,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut dialog = AiDialog::default();
-        dialog.open();
+        dialog.open(None);
         let empty = Vec::new();
         let _ = frame(&ctx, &mut dialog, &empty, true, vec![]);
         assert!(
@@ -612,7 +646,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut dialog = AiDialog::default();
-        dialog.open();
+        dialog.open(None);
         let transforms = transforms();
         settle(&ctx, &mut dialog, &transforms, true);
         let _ = frame(
@@ -634,7 +668,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut dialog = AiDialog::default();
-        dialog.open();
+        dialog.open(None);
         let transforms = transforms();
         let _ = frame(&ctx, &mut dialog, &transforms, true, vec![]);
         let pill = center(&ctx, egui::Id::new(("ai-transform", "t1")));

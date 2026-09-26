@@ -2249,7 +2249,33 @@ impl EditorPageBridge for PageBridge {
     }
 
     fn ai_transforms(&mut self) -> Vec<flintshot_core::AiTransform> {
-        flintshot_core::TransformStore::load().all().to_vec()
+        // Built-ins + user store, MRU-first (the `[ai]
+        // recent-transforms` order; stale ids filtered by the merge).
+        let user = flintshot_core::TransformStore::load();
+        let recent = flintshot_core::Config::load()
+            .unwrap_or_default()
+            .ai
+            .recent_transforms;
+        flintshot_core::merge_transforms_mru_first(user.all(), &recent)
+    }
+
+    fn ai_last_transform_id(&mut self) -> Option<String> {
+        flintshot_core::Config::load()
+            .unwrap_or_default()
+            .ai
+            .recent_transforms
+            .into_iter()
+            .next()
+    }
+
+    fn ai_note_transform_used(&mut self, id: &str) {
+        // MRU persist: load → note → save (one Run, one write; a
+        // failure only costs the preselect, so it warns, not fails).
+        let mut config = flintshot_core::Config::load().unwrap_or_default();
+        config.ai.note_recent_transform(id);
+        if let Err(e) = config.save() {
+            tracing::warn!(error = %e, "could not persist recent-transforms");
+        }
     }
 
     fn ai_configured(&mut self) -> bool {
