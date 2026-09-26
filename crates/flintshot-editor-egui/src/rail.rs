@@ -22,6 +22,15 @@ pub(crate) const RAIL_WIDTH: f32 = 56.0;
 /// Rail tool chip edge, logical px (mockup: rail tool 40×40).
 pub(crate) const RAIL_TOOL: f32 = 40.0;
 
+/// Inner margin centering the chip column in the rail strip:
+/// `(RAIL_WIDTH − RAIL_TOOL) / 2`, so a future scale bump cannot
+/// desync the chips from their strip.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "rail metrics are whole px; the subtraction keeps the value tiny"
+)]
+const RAIL_PAD: i8 = ((RAIL_WIDTH - RAIL_TOOL) / 2.0) as i8;
+
 /// Paint a glyph inside the chip rect. Coordinates are glyph-space:
 /// `(0, 0)` is the rect centre, `±7` the edges, +Y is down — matching
 /// egui's screen space so glyphs can be reasoned about like the
@@ -206,6 +215,16 @@ pub(crate) fn pt(rect: egui::Rect, x: f32, y: f32) -> Pos2 {
     egui::pos2(rect.center().x + x, rect.center().y + y)
 }
 
+/// The glyph design grid half-edge: glyph fns paint a ±7 cell (a
+/// 14×14 design square) in raw px around the rect's centre — the
+/// coordinate system every [`Glyph`] shares.
+const GLYPH_GRID: f32 = 7.0;
+
+/// How much of a rail chip the glyph design cell fills after
+/// scaling: icons grow with the 40 px chips instead of floating at
+/// the fixed 14 px cell inside them.
+const RAIL_GLYPH_FILL: f32 = 0.55;
+
 /// Glyph-space line segment from `a` to `b` (glyph coords, see
 /// [`pt`]).
 pub(crate) fn seg(
@@ -220,6 +239,29 @@ pub(crate) fn seg(
         [pt(rect, from.0, from.1), pt(rect, to.0, to.1)],
         Stroke::new(width, color),
     );
+}
+
+/// Paint `glyph` centred in `chip` at the rail's glyph scale.
+///
+/// Glyph fns paint their ±[`GLYPH_GRID`] design cell in raw px, so
+/// growth cannot come from passing a different rect — instead the
+/// shapes the glyph paints are scaled in place around the chip
+/// centre: positions, stroke widths, and text scale together, in
+/// this one seam. No per-glyph edits.
+pub(crate) fn paint_glyph(p: &egui::Painter, chip: egui::Rect, glyph: Glyph, color: Color32) {
+    let edge = chip.width().min(chip.height());
+    let scale = edge * RAIL_GLYPH_FILL / (GLYPH_GRID * 2.0);
+    let start = p.ctx().graphics_mut(|g| g.entry(p.layer_id()).next_idx());
+    glyph(p, chip, color);
+    p.ctx().graphics_mut(|g| {
+        let list = g.entry(p.layer_id());
+        let end = list.next_idx();
+        let c = chip.center();
+        let around_centre = egui::emath::TSTransform::from_translation(c.to_vec2())
+            * egui::emath::TSTransform::from_scaling(scale)
+            * egui::emath::TSTransform::from_translation(-c.to_vec2());
+        list.transform_range(start, end, around_centre);
+    });
 }
 
 /// Two 45° barbs behind `tip`, for arrow / undo / redo / save glyphs.
@@ -393,7 +435,7 @@ pub(crate) fn show(
         .frame(
             egui::Frame::new()
                 .fill(theme::palette::FOREST_MID)
-                .inner_margin(egui::Margin::same(6)),
+                .inner_margin(egui::Margin::same(RAIL_PAD)),
         )
         .show(ui, |ui| {
             stamp_grain(ui, rail);
@@ -472,7 +514,7 @@ fn spark_chip(ui: &mut egui::Ui) -> bool {
         egui::Stroke::NONE,
         egui::StrokeKind::Middle,
     );
-    g_spark(ui.painter(), chip_rect, theme::palette::GOLD);
+    paint_glyph(ui.painter(), chip_rect, g_spark, theme::palette::GOLD);
     resp.clicked()
 }
 
@@ -612,7 +654,7 @@ fn tool_chip(ui: &mut egui::Ui, state: &mut EditorState, gate: ToolGate, spec: &
         stroke,
         egui::StrokeKind::Inside,
     );
-    (spec.glyph)(ui.painter(), chip_rect, glyph_color);
+    paint_glyph(ui.painter(), chip_rect, spec.glyph, glyph_color);
 
     if resp.clicked() {
         state.set_tool(spec.tool);
@@ -868,6 +910,45 @@ mod tests {
     fn rail_metrics_pin_the_density_bump() {
         assert_eq!(RAIL_WIDTH.to_bits(), 56.0_f32.to_bits());
         assert_eq!(RAIL_TOOL.to_bits(), 40.0_f32.to_bits());
+    }
+
+    /// Glyphs scale with the chip: through the rail's paint seam
+    /// the ±7 design cell fills ~55% of the chip — bigger than the
+    /// old fixed 14 px cell, still inside the chip.
+    #[test]
+    fn rail_glyphs_scale_with_the_chip() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let chip =
+            egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(RAIL_TOOL, RAIL_TOOL));
+        let out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 480.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                paint_glyph(ui.painter(), chip, g_select, theme::palette::CREAM_TEXT);
+            },
+        );
+        let ink = out
+            .shapes
+            .iter()
+            .map(|s| s.shape.visual_bounding_rect())
+            .filter(|b| b.intersects(chip))
+            .fold(egui::Rect::NOTHING, egui::Rect::union);
+        assert!(ink.is_positive(), "the glyph painted");
+        assert!(
+            ink.width() > GLYPH_GRID * 2.0,
+            "icon grew past the old fixed cell: {}",
+            ink.width()
+        );
+        assert!(
+            chip.expand(1.0).contains_rect(ink),
+            "icon stays inside the chip: ink {ink:?} chip {chip:?}"
+        );
     }
 
     /// All ten tools render as chips and a click on each switches

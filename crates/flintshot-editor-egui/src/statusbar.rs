@@ -1,4 +1,4 @@
-//! The statusbar — the 30 px forest footer under the editor's five
+//! The statusbar — the 34 px forest footer under the editor's five
 //! zones (worker editor windows and routed editor pages alike; home
 //! and settings have none, per the mockups).
 //!
@@ -11,8 +11,9 @@ use crate::theme;
 use crate::widgets;
 use flintshot_core::Tool;
 
-/// Fixed statusbar height, logical px — the mockup's zone contract.
-pub(crate) const STATUSBAR_HEIGHT: f32 = 30.0;
+/// Fixed statusbar height, logical px — the mockup's zone contract,
+/// tall enough for the `TYPE_SM` readouts the density bump carries.
+pub(crate) const STATUSBAR_HEIGHT: f32 = 34.0;
 
 // The size estimate lives in `flintshot_core::estimate_size_bytes`
 // (heuristic `w × h × 4` or an exact PNG encode), selected by the
@@ -65,7 +66,7 @@ pub(crate) fn show(ui: &mut egui::Ui, dims: (u32, u32), tool: Tool, size_bytes: 
                 // Dims + estimated size, cream-bold.
                 let galley = ui.painter().layout_no_wrap(
                     dims_label(dims, size_bytes),
-                    egui::FontId::proportional(theme::TYPE_XS),
+                    egui::FontId::proportional(theme::TYPE_SM),
                     p::CREAM_TEXT,
                 );
                 let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
@@ -75,17 +76,17 @@ pub(crate) fn show(ui: &mut egui::Ui, dims: (u32, u32), tool: Tool, size_bytes: 
                     ui.cursor().min,
                     egui::Align2::LEFT_CENTER,
                     "•",
-                    egui::FontId::proportional(theme::TYPE_XS),
+                    egui::FontId::proportional(theme::TYPE_SM),
                     p::with_alpha(p::CREAM_TEXT, 115),
                 );
                 ui.add_space(12.0);
                 // The per-tool hint, gold and centered in the
                 // leftover span between the dims and the keys.
                 let hint = crate::panel::tool_hint(tool);
-                let keys_width: f32 = 300.0;
+                let keys_width: f32 = 330.0;
                 let hint_galley = ui.painter().layout_no_wrap(
                     hint.to_owned(),
-                    egui::FontId::proportional(theme::TYPE_XS),
+                    egui::FontId::proportional(theme::TYPE_SM),
                     p::GOLD,
                 );
                 let span = (ui.available_width() - keys_width).max(0.0);
@@ -117,6 +118,38 @@ pub(crate) fn show(ui: &mut egui::Ui, dims: (u32, u32), tool: Tool, size_bytes: 
 mod tests {
     use super::*;
     use crate::theme::palette as p;
+
+    /// The bar pins the density bump: 34 px tall, and the dims
+    /// readout paints at `TYPE_SM` (the bigger readouts the taller
+    /// bar exists to carry).
+    #[test]
+    fn statusbar_pins_the_density_bump() {
+        assert_eq!(STATUSBAR_HEIGHT.to_bits(), 34.0_f32.to_bits());
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(640.0, 480.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        let out = ctx.run_ui(raw, |ui| {
+            show(ui, (1920, 1080), Tool::Pencil, 1920 * 1080 * 4);
+        });
+        let label = dims_label((1920, 1080), 1920 * 1080 * 4);
+        let readout_size = out.shapes.iter().find_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) if t.galley.job.text == label => {
+                t.galley.job.sections.first().map(|s| s.format.font_id.size)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            readout_size,
+            Some(theme::TYPE_SM),
+            "the dims readout paints at TYPE_SM"
+        );
+    }
 
     #[test]
     fn humanize_spans_the_b_kib_mib_boundaries() {
@@ -152,10 +185,10 @@ mod tests {
     }
 
     /// The statusbar spans the full window width and strips exactly
-    /// its 30 px zone off the bottom: the central panel above it
-    /// ends at `screen_h − 30`.
+    /// its height zone off the bottom: the central panel above it
+    /// ends at `screen_h − STATUSBAR_HEIGHT`.
     #[test]
-    fn statusbar_is_a_full_width_30px_bottom_strip() {
+    fn statusbar_is_a_full_width_bottom_strip() {
         const W: f32 = 640.0;
         const H: f32 = 480.0;
         let ctx = egui::Context::default();
@@ -180,7 +213,7 @@ mod tests {
             );
             assert!(
                 (r.bottom() - (H - STATUSBAR_HEIGHT)).abs() < 1.0,
-                "the statusbar strips its 30 px zone off the bottom, bottom {}",
+                "the statusbar strips its zone off the bottom, bottom {}",
                 r.bottom()
             );
         });

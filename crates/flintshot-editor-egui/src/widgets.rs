@@ -53,9 +53,12 @@ fn eased(ctx: &egui::Context, id: egui::Id, target: f32, duration: f32) -> f32 {
 /// foreground to gold: the Copy hero's ~2 s "Copied" state. Icons
 /// are painted vector glyphs, never text — the font chain's exotic
 /// codepoints are tofu (ux-redesign-regressions cmap scan).
-/// The painted glyph slot edge, logical px — `rail`'s ±7 glyph
-/// space plus padding.
-const GLYPH_EDGE: f32 = 14.0;
+/// The painted glyph slot edge, logical px — the glyph design cell
+/// plus stroke overhang, grown with the density bump's chips.
+const GLYPH_EDGE: f32 = 16.0;
+
+/// Hero side padding, logical px — the density bump's wider gutters.
+const HERO_PAD_X: f32 = 14.0;
 
 /// One hero ghost button; registers under `id` and reports clicks.
 pub(crate) fn ghost_button(
@@ -76,11 +79,10 @@ pub(crate) fn ghost_button(
     };
     let font = egui::FontId::proportional(theme::TYPE_MD);
     let label_galley = ui.painter().layout_no_wrap(label.to_owned(), font, fg);
-    let pad_x = 12.0;
     let gap = 6.0;
     let size = egui::vec2(
-        pad_x + GLYPH_EDGE + gap + label_galley.size().x + pad_x,
-        30.0,
+        HERO_PAD_X + GLYPH_EDGE + gap + label_galley.size().x + HERO_PAD_X,
+        theme::HERO_H,
     );
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let sense = if ui.is_enabled() {
@@ -483,6 +485,34 @@ mod tests {
         assert!(!animate(&ctx), "the setter must flip the gate");
         set_animations(&ctx, true);
         assert!(animate(&ctx));
+    }
+
+    /// The hero metrics pin the density bump: height on `HERO_H`,
+    /// 14 px side padding, and the glyph slot grown with the chip.
+    #[test]
+    fn ghost_button_pins_the_density_bump_metrics() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let height = std::cell::Cell::new(0.0_f32);
+        run(&ctx, 0.0, vec![], |ui| {
+            let resp = ghost_button(
+                ui,
+                egui::Id::new("hero-metrics"),
+                crate::panel::g_copy,
+                "Copy",
+                false,
+                false,
+            );
+            height.set(resp.rect.height());
+        });
+        assert!(
+            (height.get() - crate::theme::HERO_H).abs() < 0.5,
+            "hero height {} vs HERO_H {}",
+            height.get(),
+            crate::theme::HERO_H
+        );
+        assert_eq!(HERO_PAD_X.to_bits(), 14.0_f32.to_bits());
+        assert_eq!(GLYPH_EDGE.to_bits(), 16.0_f32.to_bits());
     }
 
     #[test]

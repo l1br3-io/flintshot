@@ -1765,7 +1765,7 @@ mod tests {
         let g = route_geometry(&Route::AiConfig {
             parked_editor: None,
         });
-        assert_eq!(g.size, egui::vec2(1024.0, 640.0));
+        assert_eq!(g.size, EDITOR_PAGE_DEFAULT_SIZE);
         assert!(g.resizable);
         assert_eq!(g.title, "flintshot — annotate");
     }
@@ -1853,7 +1853,7 @@ mod tests {
         // pre-redesign compact window — Home shares the stable page
         // geometry with Editor / Loading / Settings.
         let g = route_geometry(&Route::Home);
-        assert_eq!(g.size, egui::vec2(1024.0, 640.0));
+        assert_eq!(g.size, EDITOR_PAGE_DEFAULT_SIZE);
         assert!(g.resizable);
         assert_eq!(g.title, "flintshot");
     }
@@ -1865,7 +1865,7 @@ mod tests {
             selection_first: false,
             session_id: None,
         })));
-        assert_eq!(g.size, egui::vec2(1024.0, 640.0));
+        assert_eq!(g.size, EDITOR_PAGE_DEFAULT_SIZE);
         assert!(g.resizable);
         assert_eq!(g.title, "flintshot — annotate");
     }
@@ -1910,7 +1910,7 @@ mod tests {
             );
         });
         let commands = transition_commands(&full);
-        assert!(commands.contains(&egui::ViewportCommand::InnerSize(egui::vec2(1024.0, 640.0))));
+        assert!(commands.contains(&egui::ViewportCommand::InnerSize(EDITOR_PAGE_DEFAULT_SIZE)));
         assert!(commands.contains(&egui::ViewportCommand::Resizable(true)));
         assert!(
             commands.contains(&egui::ViewportCommand::Title(

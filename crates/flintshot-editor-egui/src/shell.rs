@@ -29,7 +29,9 @@ pub(crate) const HOME_WINDOW_TITLE: &str = "flintshot";
 /// roomy enough for the toolbar plus annotation chrome, small
 /// enough for any laptop panel. The image fits inside (Task 003's
 /// transform) — the window no longer tracks image dimensions.
-pub(crate) const EDITOR_PAGE_DEFAULT_SIZE: egui::Vec2 = egui::vec2(1024.0, 640.0);
+/// Grown by the density bump's chrome (rail +8, topbar +4,
+/// statusbar +4) so the canvas keeps its old room.
+pub(crate) const EDITOR_PAGE_DEFAULT_SIZE: egui::Vec2 = egui::vec2(1032.0, 648.0);
 
 /// Margin reserved against the monitor edge when clamping the
 /// default editor-page size — approximates WM panels and
@@ -742,8 +744,10 @@ mod tests {
     #[test]
     fn editor_page_default_size_is_pinned() {
         // OQ-2's decision: ~1024×640 logical — big enough for the
-        // toolbar + annotation chrome, small enough for any laptop.
-        assert_eq!(EDITOR_PAGE_DEFAULT_SIZE, egui::vec2(1024.0, 640.0));
+        // toolbar + annotation chrome, small enough for any laptop
+        // — grown by the density bump's chrome (rail +8, topbar +4,
+        // statusbar +4) so the canvas keeps its old room.
+        assert_eq!(EDITOR_PAGE_DEFAULT_SIZE, egui::vec2(1032.0, 648.0));
     }
 
     #[test]
@@ -762,7 +766,7 @@ mod tests {
         );
         // Exactly at the margin boundary: still fits.
         assert_eq!(
-            clamp_default_size(EDITOR_PAGE_DEFAULT_SIZE, Some(egui::vec2(1072.0, 688.0))),
+            clamp_default_size(EDITOR_PAGE_DEFAULT_SIZE, Some(egui::vec2(1080.0, 696.0))),
             EDITOR_PAGE_DEFAULT_SIZE
         );
     }
@@ -778,7 +782,7 @@ mod tests {
         // Only one axis too small: the other keeps the default.
         assert_eq!(
             clamp_default_size(EDITOR_PAGE_DEFAULT_SIZE, Some(egui::vec2(4000.0, 600.0))),
-            egui::vec2(1024.0, 552.0)
+            egui::vec2(1032.0, 552.0)
         );
     }
 

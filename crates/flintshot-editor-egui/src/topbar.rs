@@ -20,6 +20,20 @@ use crate::widgets;
 /// Topbar height, logical px — the mockup's zone contract.
 pub(crate) const TOPBAR_HEIGHT: f32 = 48.0;
 
+/// The topbar's horizontal inner margin, logical px — the frame's
+/// gutter and the overflow chip's right inset.
+const BAR_MARGIN: i8 = 14;
+
+/// The overflow chip's edge — and the overflow menu's row height:
+/// the bar's compact control size, one step past [`theme::CONTROL_H`]
+/// for the hero-height click targets the density bump carries.
+const OVERFLOW_EDGE: f32 = theme::CONTROL_H + 4.0;
+
+/// An overflow row's glyph-slot centre and label start, from the
+/// row's left edge: 12 px pad + 8 px half-slot, then an 8 px gap.
+const ROW_GLYPH_AT: f32 = 20.0;
+const ROW_LABEL_AT: f32 = 36.0;
+
 /// Which surface the topbar serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Surface {
@@ -131,7 +145,7 @@ pub(crate) fn show(
         .frame(
             egui::Frame::new()
                 .fill(p::FOREST_DEEP)
-                .inner_margin(egui::Margin::symmetric(14, 0)),
+                .inner_margin(egui::Margin::symmetric(BAR_MARGIN, 0)),
         )
         .show(ui, |ui| {
             ui.set_min_height(TOPBAR_HEIGHT - 4.0);
@@ -452,7 +466,10 @@ fn overflow(
     resize_live: bool,
     fired: &mut Option<TopbarAction>,
 ) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(OVERFLOW_EDGE, OVERFLOW_EDGE),
+        egui::Sense::hover(),
+    );
     let resp = ui
         .interact(rect, egui::Id::new("topbar-overflow"), egui::Sense::click())
         .on_hover_text("More");
@@ -628,15 +645,16 @@ pub(crate) fn resize_popover(
     apply
 }
 
-/// The overflow chip's rect (top-right, 30×30 inside the topbar) —
-/// the anchor the popover hangs below like a submenu. Built from the
-/// screen rect because the menu row's painted response dies with the
-/// closed menu.
+/// The overflow chip's rect (top-right, `OVERFLOW_EDGE` square
+/// centered in the bar) — the anchor the popover hangs below like a
+/// submenu. Built from the screen rect because the menu row's
+/// painted response dies with the closed menu.
 fn overflow_chip_rect(ctx: &egui::Context) -> egui::Rect {
     let screen = ctx.viewport_rect();
+    let pad = (TOPBAR_HEIGHT - OVERFLOW_EDGE) / 2.0;
     egui::Rect::from_min_size(
-        egui::pos2(screen.right() - 44.0, 7.0),
-        egui::vec2(30.0, 30.0),
+        egui::pos2(screen.right() - f32::from(BAR_MARGIN) - OVERFLOW_EDGE, pad),
+        egui::vec2(OVERFLOW_EDGE, OVERFLOW_EDGE),
     )
 }
 
@@ -746,8 +764,10 @@ fn om_row_enabled(
     enabled: bool,
 ) -> bool {
     use crate::theme::palette as p;
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), OVERFLOW_EDGE),
+        egui::Sense::hover(),
+    );
     let resp = if enabled {
         ui.interact(rect, egui::Id::new(id), egui::Sense::click())
     } else {
@@ -767,12 +787,12 @@ fn om_row_enabled(
         egui::StrokeKind::Middle,
     );
     let glyph_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + 17.0, rect.center().y),
-        egui::vec2(14.0, 14.0),
+        egui::pos2(rect.left() + ROW_GLYPH_AT, rect.center().y),
+        egui::vec2(16.0, 16.0),
     );
     glyph(ui.painter(), glyph_rect, ink);
     ui.painter().text(
-        egui::pos2(rect.left() + 32.0, rect.center().y),
+        egui::pos2(rect.left() + ROW_LABEL_AT, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(theme::TYPE_SM),
@@ -780,7 +800,7 @@ fn om_row_enabled(
     );
     if let Some(kbd) = kbd {
         ui.painter().text(
-            egui::pos2(rect.right() - 10.0, rect.center().y),
+            egui::pos2(rect.right() - 12.0, rect.center().y),
             egui::Align2::RIGHT_CENTER,
             kbd,
             egui::FontId::proportional(theme::TYPE_XS),
@@ -794,15 +814,17 @@ fn om_row_enabled(
 /// itself), so hover-only with the same row styling.
 fn om_row_about(ui: &mut egui::Ui, glyph: crate::rail::Glyph, label: &str) {
     use crate::theme::palette as p;
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), OVERFLOW_EDGE),
+        egui::Sense::hover(),
+    );
     let glyph_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + 17.0, rect.center().y),
-        egui::vec2(14.0, 14.0),
+        egui::pos2(rect.left() + ROW_GLYPH_AT, rect.center().y),
+        egui::vec2(16.0, 16.0),
     );
     glyph(ui.painter(), glyph_rect, p::INK);
     ui.painter().text(
-        egui::pos2(rect.left() + 32.0, rect.center().y),
+        egui::pos2(rect.left() + ROW_LABEL_AT, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(theme::TYPE_SM),
@@ -1039,6 +1061,73 @@ mod tests {
     #[test]
     fn topbar_height_pins_the_density_bump() {
         assert_eq!(TOPBAR_HEIGHT.to_bits(), 48.0_f32.to_bits());
+    }
+
+    /// The overflow chip pins the density bump: 34×34, centered in
+    /// the 48 px bar, and the popover anchor agrees with the painted
+    /// chip (both derive from the bar tokens, never literals).
+    #[test]
+    fn overflow_chip_pins_and_centers_in_the_bar() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let _ = ctx.run_ui(screen(0.0, vec![]), |ui| {
+            let _ = show(ui, Surface::Editor, None, Enable::ALL, false, true);
+        });
+        let chip = ctx
+            .read_response(egui::Id::new("topbar-overflow"))
+            .expect("overflow chip")
+            .rect;
+        for edge in [chip.width(), chip.height()] {
+            assert!((edge - 34.0).abs() < 0.5, "chip edge {edge}");
+        }
+        assert!(
+            chip.center().y - TOPBAR_HEIGHT / 2.0 < 1.0,
+            "chip centers vertically: {chip:?}"
+        );
+        let anchor = overflow_chip_rect(&ctx);
+        assert!(
+            (anchor.left() - chip.left()).abs() < 1.0 && (anchor.top() - chip.top()).abs() < 1.0,
+            "anchor {anchor:?} must agree with the painted chip {chip:?}"
+        );
+    }
+
+    /// Overflow menu rows clear the 34 px control height at the new
+    /// `TYPE_SM`.
+    #[test]
+    fn overflow_menu_rows_clear_the_control_height() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let draw = |events: Vec<egui::Event>| {
+            let _ = ctx.run_ui(screen(0.0, events), |ui| {
+                let _ = show(
+                    ui,
+                    Surface::Editor,
+                    Some("connected"),
+                    Enable::ALL,
+                    false,
+                    true,
+                );
+            });
+        };
+        draw(vec![]);
+        let ovf = ctx
+            .read_response(egui::Id::new("topbar-overflow"))
+            .expect("overflow chip")
+            .rect;
+        // Open the menu, then settle passes while the popup
+        // re-anchors (the quirk the overflow item tests document).
+        draw(click_events(ovf.center()));
+        draw(vec![]);
+        draw(vec![]);
+        let save = ctx
+            .read_response(egui::Id::new("topbar-save"))
+            .expect("save row")
+            .rect;
+        assert!(
+            save.height() >= 34.0,
+            "row height {} must clear the 34 px control height",
+            save.height()
+        );
     }
 
     /// The heroes + the overflow register on every surface; the AI
