@@ -1,8 +1,5 @@
 {
-  // Migrated from V1 format to native V2 on 2026-09-26.
-  // V1 original: opencode.jsonc.v1-backup-20260926-022853
   "$schema": "https://opencode.ai/config.json",
-  "instructions": [".opencode/harness/rules/tech.md"],
   "mcp": {
     "servers": {
       "chrome-devtools": {
