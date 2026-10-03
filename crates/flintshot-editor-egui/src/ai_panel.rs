@@ -64,6 +64,10 @@ pub(crate) struct AiConversation {
     turns: Vec<AiTurn>,
     /// Whether a request is in flight (the quiet spinner row).
     pending: bool,
+    /// The in-flight stream's partial text, appended per delta and
+    /// rendered as the growing card. Replaced by the worker's
+    /// authoritative full text on finalize.
+    streaming: Option<String>,
     /// The follow-up input's draft text.
     draft: String,
     /// The initiating shot's thumbnail texture.
@@ -110,6 +114,51 @@ impl AiConversation {
         std::mem::take(&mut self.fresh_arrival)
     }
 
+    /// Append a streamed delta to the in-progress assistant card
+    /// (starts the card on the first delta). The run stays pending —
+    /// only a terminal ([`AiConversation::finish_stream`] or
+    /// [`AiConversation::fail_stream`]) ends the wait.
+    pub(crate) fn push_delta(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        match &mut self.streaming {
+            Some(partial) => partial.push_str(&text),
+            None => self.streaming = Some(text),
+        }
+    }
+
+    /// Whether a stream is in flight (the growing card + caret).
+    #[must_use]
+    pub(crate) fn is_streaming(&self) -> bool {
+        self.streaming.is_some()
+    }
+
+    /// The in-flight partial text, if any (assertion accessor for
+    /// tests).
+    pub(crate) fn streaming_text(&self) -> Option<&str> {
+        self.streaming.as_deref()
+    }
+
+    /// Finalize the stream: the worker's authoritative full text
+    /// replaces the locally accumulated partial and lands as the
+    /// (markdown) assistant card. A `Response` with no prior delta —
+    /// the fallback path — lands identically.
+    pub(crate) fn finish_stream(&mut self, full: impl Into<String>) {
+        self.streaming = None;
+        self.push_assistant(full);
+    }
+
+    /// A failure mid-stream keeps the partial: it lands as a
+    /// finished assistant card and the error card appends after it.
+    /// With no partial, only the error card lands (today's shape).
+    pub(crate) fn fail_stream(&mut self, message: impl Into<String>) {
+        if let Some(partial) = self.streaming.take() {
+            if !partial.is_empty() {
+                self.turns.push(AiTurn::Assistant { text: partial });
+            }
+        }
+        self.push_error(message);
+    }
+
     /// Append an error card and clear the pending flag — a surfaced
     /// failure also ends the wait.
     pub(crate) fn push_error(&mut self, message: impl Into<String>) {
@@ -137,6 +186,7 @@ impl AiConversation {
         self.turns.clear();
         self.draft.clear();
         self.pending = false;
+        self.streaming = None;
         self.thumb = None;
         self.outbox = None;
         self.fresh_arrival = false;
@@ -174,9 +224,10 @@ fn empty_hint() -> &'static str {
 pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
     let thumb = conversation.thumb.clone();
     let turns = conversation.turns().to_vec();
+    let streaming = conversation.streaming_text().map(str::to_owned);
     let fresh_arrival = conversation.take_fresh_arrival();
     let empty = conversation.is_empty() && !conversation.is_pending();
-    let pending = conversation.is_pending();
+    let pending = conversation.is_pending() && !conversation.is_streaming();
     let md_cache = &mut conversation.md_cache;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -202,7 +253,12 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
                     }
                 }
             }
-            if pending {
+            // The growing card renders where the response card lands;
+            // while it grows it replaces the spinner row (the caret
+            // is the activity signal).
+            if let Some(partial) = &streaming {
+                streaming_card(ui, partial);
+            } else if pending {
                 pending_row(ui);
             }
         });
@@ -353,6 +409,53 @@ fn error_card(ui: &mut egui::Ui, id: egui::Id, message: &str) {
                     .size(theme::TYPE_SM)
                     .color(theme::palette::INK),
             );
+        });
+    ui.add_space(theme::SPACE_SCALE[1]);
+}
+
+/// The in-flight stream's growing card: plain wrapped text (the
+/// markdown parse waits for the complete text — an unclosed fence
+/// mid-stream would render wrong) on the same cream paper as a
+/// finished card, with a static painted caret block after the last
+/// row. The caret is a painted vector, not a font codepoint (the
+/// tofu ban), and never blinks — the pending repaint loop is the
+/// only cadence.
+fn streaming_card(ui: &mut egui::Ui, partial: &str) {
+    egui::Frame::new()
+        .fill(theme::palette::PAPER_CREAM)
+        .corner_radius(CornerRadius::same(theme::POD_RADIUS))
+        .inner_margin(egui::Margin::same(10))
+        .stroke(theme::HAIRLINE_STROKE)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let galley = ui.painter().layout(
+                partial.to_owned(),
+                egui::FontId::proportional(theme::TYPE_MD),
+                theme::palette::INK,
+                ui.available_width(),
+            );
+            let (rect, _) =
+                ui.allocate_exact_size(galley.size() + egui::vec2(8.0, 0.0), Sense::hover());
+            ui.painter()
+                .galley(rect.min, galley.clone(), theme::palette::INK);
+            // The caret rides the last row's right edge (a trailing
+            // newline leaves an empty last row, so it lands at the
+            // fresh line's start — exactly where typing continues).
+            if let Some(row) = galley.rows.last() {
+                let row_rect = row.rect();
+                let height = (row_rect.height() - 3.0).max(8.0);
+                let caret = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(row_rect.right() + 4.0, row_rect.top() + 1.5),
+                    egui::vec2(3.0, height),
+                );
+                ui.painter().rect(
+                    caret,
+                    CornerRadius::same(1),
+                    theme::palette::GOLD,
+                    egui::Stroke::NONE,
+                    egui::StrokeKind::Middle,
+                );
+            }
         });
     ui.add_space(theme::SPACE_SCALE[1]);
 }
@@ -632,5 +735,180 @@ mod tests {
         assert!(shapes > 4, "the fixture painted shapes: {shapes}");
         // Two identical render passes don't collide on the shared
         // cache (the per-turn keying criterion's smoke form).
+    }
+
+    // --- streaming (Task 006) ---
+
+    fn render_once(ctx: &egui::Context, conversation: &mut AiConversation) -> egui::FullOutput {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(236.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        ctx.run_ui(raw, |ui| {
+            egui::Panel::right("test_ai_panel_streaming")
+                .resizable(false)
+                .exact_size(236.0)
+                .show(ui, |ui| show(ui, conversation));
+        })
+    }
+
+    fn frame_texts(out: &egui::FullOutput) -> Vec<&str> {
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.job.text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The streaming caret: a small filled gold rect (a painted
+    /// vector — the tofu ban bars a font codepoint) — narrow and
+    /// tall, unlike any card fill or hairline stroke.
+    fn caret_present(out: &egui::FullOutput) -> bool {
+        out.shapes.iter().any(|cs| match &cs.shape {
+            egui::Shape::Rect(r) => {
+                r.fill == theme::palette::GOLD
+                    && (2.0..=5.0).contains(&r.rect.width())
+                    && r.rect.height() >= 6.0
+            }
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn push_delta_appends_to_the_in_progress_card() {
+        let mut conversation = AiConversation::default();
+        conversation.push_delta("Hel");
+        assert_eq!(conversation.streaming_text(), Some("Hel"));
+        conversation.push_delta("lo");
+        assert_eq!(conversation.streaming_text(), Some("Hello"));
+        assert!(conversation.is_streaming());
+    }
+
+    #[test]
+    fn deltas_grow_the_rendered_text_with_a_static_caret_until_finalize() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut conversation = AiConversation::default();
+        conversation.push_user("ocr it");
+        conversation.begin_pending();
+        conversation.push_delta("Hel");
+        let first = render_once(&ctx, &mut conversation);
+        assert!(
+            frame_texts(&first).iter().any(|t| t.contains("Hel")),
+            "the first delta renders"
+        );
+        assert!(caret_present(&first), "the caret paints while streaming");
+
+        conversation.push_delta("lo");
+        let second = render_once(&ctx, &mut conversation);
+        assert!(
+            frame_texts(&second).iter().any(|t| t.contains("Hello")),
+            "the rendered text grows across frames"
+        );
+        assert!(caret_present(&second));
+
+        conversation.finish_stream("Hello world");
+        let third = render_once(&ctx, &mut conversation);
+        assert!(
+            frame_texts(&third)
+                .iter()
+                .any(|t| t.contains("Hello world")),
+            "the finalized card carries the full text"
+        );
+        assert!(!caret_present(&third), "the caret is gone after finalize");
+        assert!(!conversation.is_pending(), "finalize re-arms Run");
+    }
+
+    #[test]
+    fn finish_stream_finalizes_with_the_authoritative_text() {
+        let mut conversation = AiConversation::default();
+        conversation.begin_pending();
+        conversation.push_delta("local accumulation");
+        conversation.finish_stream("authoritative");
+        assert_eq!(
+            conversation.turns(),
+            &[AiTurn::Assistant {
+                text: "authoritative".into()
+            }],
+            "the worker's full text replaces the local accumulation"
+        );
+        assert!(!conversation.is_streaming());
+        assert!(!conversation.is_pending());
+    }
+
+    #[test]
+    fn failure_mid_stream_keeps_the_partial_and_appends_the_error_card() {
+        let mut conversation = AiConversation::default();
+        conversation.begin_pending();
+        conversation.push_delta("partial answer");
+        conversation.fail_stream("The provider rejected the key — replace it in AI settings.");
+        assert_eq!(
+            conversation.turns(),
+            &[
+                AiTurn::Assistant {
+                    text: "partial answer".into()
+                },
+                AiTurn::Error {
+                    message: "The provider rejected the key — replace it in AI settings.".into()
+                },
+            ],
+            "the partial stays rendered and the error card appends"
+        );
+        assert!(!conversation.is_streaming());
+        assert!(!conversation.is_pending());
+    }
+
+    #[test]
+    fn response_without_a_prior_delta_lands_as_a_plain_arrival() {
+        // The fallback path (non-streaming retry) answers in one
+        // shot: identical to today's pre-streaming render.
+        let mut conversation = AiConversation::default();
+        conversation.begin_pending();
+        conversation.finish_stream("whole answer");
+        assert_eq!(
+            conversation.turns(),
+            &[AiTurn::Assistant {
+                text: "whole answer".into()
+            }]
+        );
+        assert!(!conversation.is_pending());
+    }
+
+    #[test]
+    fn pending_spinner_hides_while_the_streaming_card_grows() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut conversation = AiConversation::default();
+        conversation.push_user("ocr it");
+        conversation.begin_pending();
+        let waiting = render_once(&ctx, &mut conversation);
+        assert!(
+            frame_texts(&waiting).iter().any(|t| t.contains("Thinking")),
+            "the pending row shows before the first delta"
+        );
+        conversation.push_delta("text");
+        let streaming = render_once(&ctx, &mut conversation);
+        assert!(
+            !frame_texts(&streaming)
+                .iter()
+                .any(|t| t.contains("Thinking")),
+            "the growing card replaces the spinner row"
+        );
+    }
+
+    #[test]
+    fn reset_clears_the_streaming_state() {
+        let mut conversation = AiConversation::default();
+        conversation.push_delta("half");
+        conversation.reset();
+        assert!(!conversation.is_streaming());
+        assert_eq!(conversation.streaming_text(), None);
     }
 }

@@ -2041,13 +2041,16 @@ impl EditorApp {
                 HomeDirective::SetStatus(_) => {}
             }
         }
-        // Ask-the-shot arrivals: the assistant turn (or error card)
-        // lands and the panel flips to the AI tab — the
-        // `FocusProperties` precedent.
+        // Ask-the-shot arrivals: deltas grow the streaming card,
+        // the response finalizes it (or lands whole on the fallback
+        // path), failures keep the partial and append the error
+        // card — and the panel flips to the AI tab (the
+        // `FocusProperties` precedent).
         while let Some(event) = bridge.borrow_mut().poll_ai_event() {
             match event {
-                crate::shell::AiEvent::Response(text) => self.ai.push_assistant(text),
-                crate::shell::AiEvent::Failed(message) => self.ai.push_error(message),
+                crate::shell::AiEvent::Delta(text) => self.ai.push_delta(text),
+                crate::shell::AiEvent::Response(text) => self.ai.finish_stream(text),
+                crate::shell::AiEvent::Failed(message) => self.ai.fail_stream(message),
             }
             self.panel.focus_ai();
         }

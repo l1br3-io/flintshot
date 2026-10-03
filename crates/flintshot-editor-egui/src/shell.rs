@@ -219,14 +219,21 @@ pub trait EditorPageBridge {
     }
 }
 
-/// An arrived Ask-the-shot result, host → page. Mirrors
+/// An Ask-the-shot event, host → page. Mirrors
 /// [`HomeDirective`]'s poll-directive choreography.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AiEvent {
-    /// The assistant's response text (markdown).
+    /// A streamed text delta, in arrival order — zero or more while
+    /// a run is in flight.
+    Delta(String),
+    /// The assistant's final response text (markdown): the finalize
+    /// signal, carrying the worker's authoritative full text (not
+    /// the page's local accumulation).
     Response(String),
     /// The request failed; the message is one-line actionable copy.
+    /// Text already streamed stays rendered; this appends the error
+    /// card.
     Failed(String),
 }
 
