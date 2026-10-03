@@ -2088,11 +2088,12 @@ struct PageBridge {
 /// second request after a turn landed, so this is defensive).
 #[derive(Default)]
 struct AiHost {
-    rx: Option<std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>>,
+    rx: Option<std::sync::mpsc::Receiver<crate::ai::worker::ChatWorkerEvent>>,
     queue: std::collections::VecDeque<flintshot_editor_egui::AiEvent>,
     /// A test-connection worker's channel (the AI settings page's
     /// Test connection row — deliberately separate from the
-    /// conversation pipeline).
+    /// conversation pipeline; the probe stays one-shot
+    /// non-streaming).
     test_rx: Option<std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>>,
 }
 
@@ -2170,7 +2171,10 @@ impl EditorPageBridge for PageBridge {
         let config = flintshot_core::Config::load().unwrap_or_default();
         match crate::ai::worker::resolve_ai(&config) {
             Ok(resolved) => {
-                self.ai.rx = Some(crate::ai::worker::spawn_chat_worker(resolved, messages));
+                // The stop handle is dropped here for now (Task 005
+                // stores it beside the receiver for cancel-and-rerun).
+                let (rx, _stop) = crate::ai::worker::spawn_chat_worker(resolved, messages);
+                self.ai.rx = Some(rx);
             }
             // Unconfigured: an immediate failure with the same
             // actionable copy the Configure gate would have shown.
@@ -2188,10 +2192,20 @@ impl EditorPageBridge for PageBridge {
         if let Some(rx) = self.ai.rx.as_ref() {
             while let Ok(result) = rx.try_recv() {
                 let event = match result {
-                    Ok(text) => flintshot_editor_egui::AiEvent::Response(text),
-                    Err(err) => flintshot_editor_egui::AiEvent::Failed(
-                        crate::ai::worker::ai_error_copy(&err),
-                    ),
+                    // Deltas hold no queue event yet — Task 006 wires
+                    // AiEvent::Delta so they stream into the panel.
+                    // The authoritative full text rides Done, so
+                    // dropping them here keeps today's behavior
+                    // exact.
+                    crate::ai::worker::ChatWorkerEvent::Delta(_) => continue,
+                    crate::ai::worker::ChatWorkerEvent::Done(text) => {
+                        flintshot_editor_egui::AiEvent::Response(text)
+                    }
+                    crate::ai::worker::ChatWorkerEvent::Failed(err) => {
+                        flintshot_editor_egui::AiEvent::Failed(crate::ai::worker::ai_error_copy(
+                            &err,
+                        ))
+                    }
                 };
                 self.ai.queue.push_back(event);
             }
@@ -2236,7 +2250,7 @@ impl EditorPageBridge for PageBridge {
             model: model.to_string(),
             api_key,
         };
-        self.ai.test_rx = Some(crate::ai::worker::spawn_chat_worker(
+        self.ai.test_rx = Some(crate::ai::worker::spawn_probe_worker(
             resolved,
             flintshot_core::vision_probe_messages(),
         ));

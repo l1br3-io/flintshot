@@ -10,15 +10,294 @@
 //! Closing the editor while pending is safe: the receiver drops, the
 //! sender's failure is ignored, the thread exits on its own.
 
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 
-use flintshot_core::{AiClient, AiError, AiRequest, ChatMessage, Config, ProviderPreset};
+use flintshot_core::{
+    AiClient, AiError, AiRequest, ChatMessage, Config, ProviderPreset, SseDecoder, SseEvent,
+};
 
-use super::OpenAiCompatClient;
+use super::{ChatStreamStart, OpenAiCompatClient};
 
 /// The cap for `max_tokens`. xAI requires the field; everyone else
 /// accepts it. Generous enough for OCR of a dense screenshot.
 const MAX_TOKENS: u32 = 1024;
+
+/// One event from a streaming chat worker.
+///
+/// Protocol invariant: zero or more [`Delta`](ChatWorkerEvent::Delta)
+/// events in arrival order, then **exactly one** terminal
+/// ([`Done`](ChatWorkerEvent::Done) or
+/// [`Failed`](ChatWorkerEvent::Failed)), then the channel closes. The
+/// worker is the accumulation authority — `Done` carries the
+/// authoritative full text (every delta it emitted, concatenated), so
+/// the UI never drifts from what was received.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ChatWorkerEvent {
+    /// A text delta, in arrival order.
+    Delta(String),
+    /// Terminal success: the full final text.
+    Done(String),
+    /// Terminal failure: the stream (or the fallback) failed. Text
+    /// already delivered via `Delta` stays valid — the UI keeps the
+    /// partial and appends the error card.
+    Failed(AiError),
+}
+
+/// The user-facing stop signal for a streaming worker: set the flag
+/// and the pump ends the run at its next observation (between chunks
+/// immediately; within the silence tick once Task 005 races the
+/// awaits). Clone-cheap, idempotent, safe to call after the worker
+/// finished — a late signal just lands on a dead flag.
+#[derive(Debug, Clone, Default)]
+pub struct StopHandle {
+    flag: Arc<AtomicBool>,
+}
+
+impl StopHandle {
+    /// A fresh, un-set handle (the worker thread holds a clone).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signal the worker to stop. Stopping finalizes the partial
+    /// text as the response — it is a user action, never an error.
+    pub fn stop(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+
+    fn stopped(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+}
+
+/// The worker's byte-source seam: `next_chunk` returns the next body
+/// chunk, a transport error, or `None` once the body is delivered
+/// cleanly. The HTTP implementation adapts
+/// [`reqwest::Response::chunk`]; tests hand-build sources — the pump
+/// is unit-testable with no server at all.
+///
+/// (App-crate-private by design: core stays I/O-free.)
+trait ChunkSource {
+    fn next_chunk(&mut self)
+        -> impl std::future::Future<Output = Option<Result<Vec<u8>, AiError>>>;
+}
+
+/// The HTTP [`ChunkSource`]: owns the streaming response. Dropping it
+/// (pump return, stop, worker exit) closes the connection.
+struct HttpResponseSource {
+    response: reqwest::Response,
+}
+
+impl ChunkSource for HttpResponseSource {
+    async fn next_chunk(&mut self) -> Option<Result<Vec<u8>, AiError>> {
+        match self.response.chunk().await {
+            Ok(Some(bytes)) => Some(Ok(bytes.to_vec())),
+            Ok(None) => None,
+            Err(e) => Some(Err(AiError::Transport(e.to_string()))),
+        }
+    }
+}
+
+/// Forward decoded SSE events over the channel, accumulating the
+/// authoritative text. Malformed payloads are skipped (logged), not
+/// fatal — the decoder stays usable for subsequent lines. Returns
+/// whether the `[DONE]` sentinel was seen.
+fn forward_events(
+    events: impl IntoIterator<Item = SseEvent>,
+    tx: &mpsc::Sender<ChatWorkerEvent>,
+    accumulated: &mut String,
+) -> bool {
+    let mut done = false;
+    for event in events {
+        match event {
+            SseEvent::Delta(text) => {
+                accumulated.push_str(&text);
+                let _ = tx.send(ChatWorkerEvent::Delta(text));
+            }
+            SseEvent::Done => done = true,
+            SseEvent::Malformed(message) => {
+                tracing::debug!("skipping malformed SSE payload: {message}");
+            }
+            // `SseEvent` is non_exhaustive; unknown future events
+            // carry no text and no terminal — ignoring is correct.
+            _ => {}
+        }
+    }
+    done
+}
+
+/// The streaming pump: bytes in from a [`ChunkSource`], decoder
+/// events out over the channel. Returns the accumulated full text on
+/// a clean end (sentinel or EOF), the transport error on a mid-stream
+/// failure, or [`AiError::EmptyResponse`] when a naturally-ended
+/// stream carried no text at all. A stop signal ends the run as a
+/// success carrying whatever partial text arrived (possibly none).
+async fn pump_stream<S: ChunkSource>(
+    mut source: S,
+    tx: &mpsc::Sender<ChatWorkerEvent>,
+    stop: &AtomicBool,
+) -> Result<String, AiError> {
+    let mut decoder = SseDecoder::new();
+    let mut accumulated = String::new();
+    let mut sse_events = Vec::new();
+    let mut sentinel_seen = false;
+    while !stop.load(Ordering::SeqCst) {
+        let Some(chunk) = source.next_chunk().await else {
+            break;
+        };
+        let bytes = chunk?;
+        decoder.feed(&bytes, &mut sse_events);
+        if forward_events(sse_events.drain(..), tx, &mut accumulated) {
+            sentinel_seen = true;
+            break;
+        }
+    }
+    if !sentinel_seen && !stop.load(Ordering::SeqCst) {
+        // Clean end-of-body without the sentinel: flush any trailing
+        // unterminated event the decoder still holds.
+        decoder.finish(&mut sse_events);
+        forward_events(sse_events.drain(..), tx, &mut accumulated);
+    }
+    if accumulated.is_empty() && !stop.load(Ordering::SeqCst) {
+        return Err(AiError::EmptyResponse(
+            "the stream carried no assistant text".into(),
+        ));
+    }
+    Ok(accumulated)
+}
+
+/// Non-streaming completion over the same event channel: the
+/// transparent fallback (a 2xx non-SSE body) and the shared request
+/// body builder. Emits one `Delta` carrying the whole text so a
+/// fallback-completed run looks exactly like a (fast) stream.
+async fn complete_non_streaming(
+    client: &OpenAiCompatClient,
+    request: &AiRequest,
+    tx: &mpsc::Sender<ChatWorkerEvent>,
+) -> Result<String, AiError> {
+    let mut request = request.clone();
+    request.stream = None;
+    let response = client.chat(&request).await?;
+    let text = response.first_text().unwrap_or_default().to_string();
+    if !text.is_empty() {
+        let _ = tx.send(ChatWorkerEvent::Delta(text.clone()));
+    }
+    Ok(text)
+}
+
+/// Drive one streaming run to its terminal outcome (the thread body
+/// after runtime construction): open the stream, pump it, or fall
+/// back when the provider answers 2xx with a non-SSE body.
+async fn run_stream(
+    client: &OpenAiCompatClient,
+    request: &AiRequest,
+    tx: &mpsc::Sender<ChatWorkerEvent>,
+    stop: &AtomicBool,
+) -> Result<String, AiError> {
+    match client.chat_stream(request).await? {
+        ChatStreamStart::Sse(response) => {
+            pump_stream(HttpResponseSource { response }, tx, stop).await
+        }
+        ChatStreamStart::NotSse(response) => {
+            // The provider ignored `stream: true`. Drain the body
+            // (closing it) and retry non-streaming — invisible to
+            // the conversation.
+            drop(response);
+            complete_non_streaming(client, request, tx).await
+        }
+    }
+}
+
+fn build_request(model: String, messages: Vec<ChatMessage>, stream: bool) -> AiRequest {
+    AiRequest {
+        model,
+        messages,
+        max_tokens: Some(MAX_TOKENS),
+        stream: stream.then_some(true),
+    }
+}
+
+/// Spawn the request worker: a `std::thread` with its own
+/// current-thread tokio runtime that streams the chat completion and
+/// forwards [`ChatWorkerEvent`]s — zero or more `Delta`s, then
+/// exactly one terminal (`Done` with the authoritative full text, or
+/// `Failed`), then the channel closes. The [`StopHandle`] ends the
+/// run as a success carrying the partial. Sender failure (receiver
+/// dropped — the editor closed) is ignored by construction: `send`
+/// returns `Err` and the thread simply exits.
+pub fn spawn_chat_worker(
+    resolved: ResolvedAi,
+    messages: Vec<ChatMessage>,
+) -> (mpsc::Receiver<ChatWorkerEvent>, StopHandle) {
+    let (tx, rx) = mpsc::channel();
+    let stop = StopHandle::new();
+    let stop_flag = Arc::clone(&stop.flag);
+    std::thread::Builder::new()
+        .name("flintshot-ai-request".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(ChatWorkerEvent::Failed(AiError::Transport(format!(
+                        "building the request runtime: {e}"
+                    ))));
+                    return;
+                }
+            };
+            let request = build_request(resolved.model, messages, true);
+            let client =
+                OpenAiCompatClient::with_base_url_and_key(&resolved.base_url, &resolved.api_key);
+            let result = rt.block_on(run_stream(&client, &request, &tx, &stop_flag));
+            let _ = tx.send(match result {
+                Ok(text) => ChatWorkerEvent::Done(text),
+                Err(err) => ChatWorkerEvent::Failed(err),
+            });
+        })
+        .expect("spawning the AI request worker thread");
+    (rx, stop)
+}
+
+/// Spawn the one-shot, non-streaming probe worker
+/// (`ai_test_connection`): same thread + runtime shape, but a single
+/// `Result<String, AiError>` — the probe wants a whole answer and a
+/// one-shot receiver, never a stream.
+pub fn spawn_probe_worker(
+    resolved: ResolvedAi,
+    messages: Vec<ChatMessage>,
+) -> mpsc::Receiver<Result<String, AiError>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("flintshot-ai-probe".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(Err(AiError::Transport(format!(
+                        "building the probe runtime: {e}"
+                    ))));
+                    return;
+                }
+            };
+            let request = build_request(resolved.model, messages, false);
+            let client =
+                OpenAiCompatClient::with_base_url_and_key(&resolved.base_url, &resolved.api_key);
+            let result = rt
+                .block_on(client.chat(&request))
+                .map(|response| response.first_text().unwrap_or_default().to_string());
+            let _ = tx.send(result);
+        })
+        .expect("spawning the AI probe worker thread");
+    rx
+}
 
 /// A resolved, ready-to-use provider configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,48 +343,6 @@ pub fn resolve_ai(config: &Config) -> Result<ResolvedAi, String> {
 #[must_use]
 pub fn ai_configured(config: &Config) -> bool {
     resolve_ai(config).is_ok()
-}
-
-/// Spawn the request worker: a `std::thread` with its own
-/// current-thread tokio runtime that block-ons the chat call and
-/// sends exactly one result. Sender failure (receiver dropped — the
-/// editor closed) is ignored by construction: `send` returns `Err`
-/// and the thread simply exits.
-pub fn spawn_chat_worker(
-    resolved: ResolvedAi,
-    messages: Vec<ChatMessage>,
-) -> mpsc::Receiver<Result<String, AiError>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("flintshot-ai-request".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = tx.send(Err(AiError::Transport(format!(
-                        "building the request runtime: {e}"
-                    ))));
-                    return;
-                }
-            };
-            let request = AiRequest {
-                model: resolved.model,
-                messages,
-                max_tokens: Some(MAX_TOKENS),
-                stream: None,
-            };
-            let client =
-                OpenAiCompatClient::with_base_url_and_key(&resolved.base_url, &resolved.api_key);
-            let result = rt
-                .block_on(client.chat(&request))
-                .map(|response| response.first_text().unwrap_or_default().to_string());
-            let _ = tx.send(result);
-        })
-        .expect("spawning the AI request worker thread");
-    rx
 }
 
 /// Map a provider error to one-line, next-step copy for the AI tab's
@@ -188,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_round_trips_against_a_mock_server() {
+    fn probe_worker_round_trips_against_a_mock_server() {
         let mut server = mockito::Server::new();
         let mock = server
             .mock("POST", "/chat/completions")
@@ -201,7 +438,7 @@ mod tests {
             model: "m".into(),
             api_key: String::new(),
         };
-        let rx = spawn_chat_worker(
+        let rx = spawn_probe_worker(
             resolved,
             vec![flintshot_core::ChatMessage::User {
                 content: vec![flintshot_core::text_part("hi")],
@@ -215,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_surfaces_provider_errors() {
+    fn probe_worker_surfaces_provider_errors() {
         let mut server = mockito::Server::new();
         server
             .mock("POST", "/chat/completions")
@@ -228,7 +465,7 @@ mod tests {
             model: "m".into(),
             api_key: "k".into(),
         };
-        let rx = spawn_chat_worker(
+        let rx = spawn_probe_worker(
             resolved,
             vec![flintshot_core::ChatMessage::User {
                 content: vec![flintshot_core::text_part("hi")],
@@ -238,5 +475,292 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the worker answers");
         assert!(matches!(result, Err(AiError::Auth(_))));
+    }
+
+    // --- streaming worker (Task 004) ---
+
+    /// A scripted byte source for seam tests: yields each scripted
+    /// chunk in order; an error surfaces as-is; exhaustion is a
+    /// clean end-of-body. No HTTP required.
+    struct ScriptedSource {
+        script: std::collections::VecDeque<Result<Vec<u8>, AiError>>,
+    }
+
+    impl ScriptedSource {
+        fn chunks(chunks: &[&[u8]]) -> Self {
+            Self {
+                script: chunks.iter().map(|c| Ok((*c).to_vec())).collect(),
+            }
+        }
+    }
+
+    impl ChunkSource for ScriptedSource {
+        async fn next_chunk(&mut self) -> Option<Result<Vec<u8>, AiError>> {
+            self.script.pop_front()
+        }
+    }
+
+    fn sse(text: &str) -> Vec<u8> {
+        format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n").into_bytes()
+    }
+
+    fn collect_events(rx: &mpsc::Receiver<ChatWorkerEvent>) -> Vec<ChatWorkerEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn delta_texts(events: &[ChatWorkerEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ChatWorkerEvent::Delta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn terminal_count(events: &[ChatWorkerEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, ChatWorkerEvent::Done(_) | ChatWorkerEvent::Failed(_)))
+            .count()
+    }
+
+    fn user_message() -> Vec<flintshot_core::ChatMessage> {
+        vec![flintshot_core::ChatMessage::User {
+            content: vec![flintshot_core::text_part("hi")],
+        }]
+    }
+
+    fn sse_body() -> String {
+        use std::fmt::Write as _;
+        let mut body = String::new();
+        for text in ["Hel", "lo, ", "world"] {
+            let _ = write!(
+                body,
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n"
+            );
+        }
+        body.push_str("data: [DONE]\n\n");
+        body
+    }
+
+    #[tokio::test]
+    async fn pump_concatenates_split_feed_deltas_in_arrival_order() {
+        let (tx, rx) = mpsc::channel();
+        let source = ScriptedSource::chunks(&[
+            &sse("Hel"),
+            b"data: {\"choices\":[{\"delta\":{\"con",
+            b"tent\":\"lo\"}}]}\n\n",
+            &sse(" world"),
+            b"data: [DONE]\n\n",
+        ]);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let full = pump_stream(source, &tx, &stop).await.expect("clean stream");
+        assert_eq!(full, "Hello world");
+        assert_eq!(
+            delta_texts(&collect_events(&rx)),
+            ["Hel", "lo", " world"],
+            "the terminal rides the return value, not the channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_mid_stream_transport_error_is_terminal_after_deltas() {
+        let (tx, rx) = mpsc::channel();
+        let mut script = ScriptedSource::chunks(&[&sse("a"), &sse("b")]).script;
+        script.push_back(Err(AiError::Transport("connection reset".into())));
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let result = pump_stream(ScriptedSource { script }, &tx, &stop).await;
+        assert!(
+            matches!(result, Err(AiError::Transport(_))),
+            "got {result:?}"
+        );
+        assert_eq!(
+            delta_texts(&collect_events(&rx)),
+            ["a", "b"],
+            "deltas already delivered stay delivered"
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_skips_malformed_lines_without_aborting() {
+        let (tx, rx) = mpsc::channel();
+        let source =
+            ScriptedSource::chunks(&[b"data: not-json\n\n", &sse("ok"), b"data: [DONE]\n\n"]);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let full = pump_stream(source, &tx, &stop).await.expect("clean");
+        assert_eq!(full, "ok");
+        assert_eq!(delta_texts(&collect_events(&rx)), ["ok"]);
+    }
+
+    #[tokio::test]
+    async fn pump_clean_eof_without_sentinel_still_completes() {
+        let (tx, rx) = mpsc::channel();
+        let source = ScriptedSource::chunks(&[&sse("tail")]);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let full = pump_stream(source, &tx, &stop)
+            .await
+            .expect("clean EOF is a successful end");
+        assert_eq!(full, "tail");
+        assert_eq!(delta_texts(&collect_events(&rx)), ["tail"]);
+    }
+
+    #[tokio::test]
+    async fn pump_empty_stream_maps_to_empty_response_error() {
+        let (tx, _rx) = mpsc::channel();
+        let source = ScriptedSource::chunks(&[
+            b"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            b"data: [DONE]\n\n",
+        ]);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let result = pump_stream(source, &tx, &stop).await;
+        assert!(
+            matches!(result, Err(AiError::EmptyResponse(_))),
+            "got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_stop_between_chunks_finalizes_the_partial() {
+        use std::sync::atomic::Ordering;
+
+        /// Yields the scripted chunks but flips the stop flag while
+        /// yielding the first — the pump must deliver that chunk,
+        /// then finalize without reading further.
+        struct FlagOnYieldSource {
+            chunks: std::collections::VecDeque<Vec<u8>>,
+            stop: Arc<AtomicBool>,
+        }
+        impl ChunkSource for FlagOnYieldSource {
+            async fn next_chunk(&mut self) -> Option<Result<Vec<u8>, AiError>> {
+                let chunk = self.chunks.pop_front()?;
+                self.stop.store(true, Ordering::SeqCst);
+                Some(Ok(chunk))
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let source = FlagOnYieldSource {
+            chunks: std::collections::VecDeque::from(vec![sse("part"), sse(" never")]),
+            stop: Arc::clone(&stop),
+        };
+        let full = pump_stream(source, &tx, &stop)
+            .await
+            .expect("stop is a user action, not an error");
+        assert_eq!(full, "part", "the post-stop chunk must not be read");
+        assert_eq!(delta_texts(&collect_events(&rx)), ["part"]);
+    }
+
+    #[tokio::test]
+    async fn pump_stop_with_zero_deltas_yields_empty_done_not_error() {
+        let (tx, _rx) = mpsc::channel();
+        let source = ScriptedSource::chunks(&[]);
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let full = pump_stream(source, &tx, &stop)
+            .await
+            .expect("stop with nothing received is still not an error");
+        assert_eq!(full, "");
+    }
+
+    #[test]
+    fn streaming_worker_streams_deltas_then_done() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body())
+            .create();
+        let resolved = ResolvedAi {
+            base_url: server.url(),
+            model: "m".into(),
+            api_key: String::new(),
+        };
+        let (rx, _stop) = spawn_chat_worker(resolved, user_message());
+        let mut events = Vec::new();
+        while let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            events.push(event);
+        }
+        assert_eq!(
+            delta_texts(&events),
+            ["Hel", "lo, ", "world"],
+            "deltas arrive in order: {events:?}"
+        );
+        assert_eq!(
+            terminal_count(&events),
+            1,
+            "exactly one terminal: {events:?}"
+        );
+        assert!(
+            matches!(&events[3], ChatWorkerEvent::Done(text) if text == "Hello, world"),
+            "Done carries the authoritative concatenation: {events:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_worker_falls_back_to_non_streaming_on_json_body() {
+        // A 2xx JSON body (stream-rejecting proxy shape) retries via
+        // non-streaming chat() and pipes the result through the same
+        // protocol: Delta(full) + Done(full), no error surfaced.
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}"#)
+            .create();
+        let resolved = ResolvedAi {
+            base_url: server.url(),
+            model: "m".into(),
+            api_key: String::new(),
+        };
+        let (rx, _stop) = spawn_chat_worker(resolved, user_message());
+        let mut events = Vec::new();
+        while let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            events.push(event);
+        }
+        assert_eq!(
+            terminal_count(&events),
+            1,
+            "exactly one terminal: {events:?}"
+        );
+        assert_eq!(delta_texts(&events), ["hello"]);
+        assert!(
+            matches!(&events[1], ChatWorkerEvent::Done(text) if text == "hello"),
+            "fallback completes transparently: {events:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_worker_maps_provider_errors_to_failed() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "bad key"}}"#)
+            .create();
+        let resolved = ResolvedAi {
+            base_url: server.url(),
+            model: "m".into(),
+            api_key: "k".into(),
+        };
+        let (rx, _stop) = spawn_chat_worker(resolved, user_message());
+        let mut events = Vec::new();
+        while let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            events.push(event);
+        }
+        assert_eq!(
+            terminal_count(&events),
+            1,
+            "exactly one terminal: {events:?}"
+        );
+        assert!(matches!(&events[0], ChatWorkerEvent::Failed(_)));
+        assert!(delta_texts(&events).is_empty());
     }
 }
