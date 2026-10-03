@@ -20,6 +20,29 @@ Categories used below:
 
 ### Added
 
+- **Live-streamed Ask-the-shot responses** (effort `ai-streaming`).
+  The AI tab's response card grows token-by-token while the run is
+  in flight — plain text with a static gold caret while streaming,
+  the identical markdown card on completion (the worker's
+  authoritative full text finalizes the card, never the page's
+  local accumulation). A **Stop** pill in the gold hero grammar
+  (AI tab footer) aborts the stream within ~100 ms — even against
+  a silent provider — finalizing whatever partial text arrived;
+  starting a new run mid-stream cancels the prior one first.
+  Mid-stream failures keep the partial and append the actionable
+  error card; providers that reject `stream: true` (an HTTP 400
+  naming streaming) or answer 2xx non-SSE retry non-streaming
+  invisibly. The connection probe stays one-shot non-streaming and
+  the non-streaming golden request body is byte-identical. Pinned
+  by: core `ai::stream` decoder tests (WHATWG SSE framing, the
+  documented EOF-flush divergence, the OpenAI/Gemini chunk
+  shapes), worker `pump_*` seam + `streaming_worker_*` mockito
+  suites, panel
+  `deltas_grow_the_rendered_text_with_a_static_caret_until_finalize`
+  and `stop_pill_*` frame tests, bridge
+  `poll_ai_event_maps_all_three_event_kinds_in_order` and
+  `new_run_stops_a_prior_live_worker_before_spawning`.
+
 - **AI hero in the topbar** (effort `ai-ux-refresh`). The editor's
   topbar reads `Capture · Copy · AI · Open`: a plain **AI** hero —
   carrying the gold four-point spark the rail chip wore — opens the
@@ -51,6 +74,15 @@ Categories used below:
   dialog width. Sizing reads theme tokens — the next scale pass is
   a one-file change. Annotation on-canvas rendering stays
   pixel-identical.
+
+### Fixed
+
+- **The AI tab's footer rendered below the fold** (effort
+  `ai-streaming`). The follow-up row laid out after a full-height
+  scroll area (measured at y = 618 on a 600 px screen — always
+  clipped). The footer now draws as a bottom panel that reserves
+  its exact height, making the follow-up row — and the new Stop
+  pill — actually visible while the conversation scrolls above.
 
 ### Removed
 
