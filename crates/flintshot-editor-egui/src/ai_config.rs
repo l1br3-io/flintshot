@@ -245,8 +245,45 @@ impl AiConfigApp {
         } else if self.key_saved {
             "Key saved in your system's secret store."
         } else {
-            "No key stored yet — paste one below for this provider."
+            "No key stored yet — paste a key above and press Save key."
         }
+    }
+
+    /// The key field's context-aware hint (shown only while the
+    /// draft is empty): the replace copy once a key is stored for
+    /// the current provider, otherwise a paste prompt naming the
+    /// provider — the preset's display name with any parenthetical
+    /// suffix stripped, so "xAI (Grok)" reads `xAI`. Stale (post
+    /// provider-switch) and store-failed states keep the paste
+    /// prompt: neither changes what the field wants. Never includes
+    /// key material.
+    ///
+    /// Test-only until ai-key-save Task 002 wires the hint into
+    /// `key_row` (canvas.rs/rail.rs use the same `cfg_attr` bridge for
+    /// test-first helpers).
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[must_use]
+    pub(crate) fn key_hint_text(&self) -> String {
+        if self.key_saved && !self.key_status_stale() {
+            "Paste a new key to replace the stored one…".to_string()
+        } else {
+            let name = self.config.ai.preset().name;
+            let short = name.split(" (").next().unwrap_or(name);
+            format!("Paste your {short} API key…")
+        }
+    }
+
+    /// Whether the Save-key pill is armed: the draft holds content
+    /// beyond whitespace (the same bar [`AiConfigApp::commit_key_draft`]
+    /// applies, so an armed click always commits something).
+    ///
+    /// Test-only until ai-key-save Task 002 wires the pill into
+    /// `key_row` (canvas.rs/rail.rs use the same `cfg_attr` bridge for
+    /// test-first helpers).
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[must_use]
+    pub(crate) fn key_save_armed(&self) -> bool {
+        !self.key_draft.trim().is_empty()
     }
 
     /// The effective base URL (override or preset) — the value a
@@ -996,7 +1033,7 @@ mod tests {
         // bad key.
         assert_eq!(
             page.key_status_text(),
-            "No key stored yet — paste one below for this provider.",
+            "No key stored yet — paste a key above and press Save key.",
             "no optimistic saved copy before the bridge answers"
         );
         page.set_key_saved("openai", true);
@@ -1007,6 +1044,75 @@ mod tests {
         );
         // The status copy surface never contains key material.
         assert!(!page.key_status_text().contains("sk-secret"));
+    }
+
+    #[test]
+    fn key_save_armed_requires_content_beyond_whitespace() {
+        let mut page = AiConfigApp::new(Config::default());
+        assert!(!page.key_save_armed(), "an empty draft keeps the pill dim");
+        page.set_key_draft("   ");
+        assert!(!page.key_save_armed(), "whitespace-only stays dim");
+        page.set_key_draft("sk-fake-key");
+        assert!(page.key_save_armed(), "real content arms the pill");
+    }
+
+    #[test]
+    fn key_hint_prompts_for_the_current_provider_when_nothing_is_stored() {
+        let mut page = AiConfigApp::new(Config::default());
+        page.set_key_draft("sk-fake-key");
+        assert_eq!(
+            page.key_hint_text(),
+            "Paste your OpenAI API key…",
+            "the default page names its provider"
+        );
+        // The hint surface never echoes key material.
+        assert!(!page.key_hint_text().contains("sk-fake"));
+    }
+
+    #[test]
+    fn key_hint_switches_to_replace_copy_once_a_key_is_stored() {
+        let mut page = AiConfigApp::new(Config::default());
+        page.set_key_saved("openai", true);
+        assert_eq!(
+            page.key_hint_text(),
+            "Paste a new key to replace the stored one…"
+        );
+    }
+
+    #[test]
+    fn key_hint_retargets_to_the_new_provider_while_stale() {
+        let mut page = AiConfigApp::new(Config::default());
+        page.set_key_saved("openai", true);
+        page.select_provider("xai", 1.0);
+        assert!(
+            page.key_status_stale(),
+            "the bridge hasn't answered for xai"
+        );
+        // A stored key for the *old* provider must not leak the
+        // replace copy — the field wants a key for the new one.
+        assert_eq!(page.key_hint_text(), "Paste your xAI API key…");
+    }
+
+    #[test]
+    fn key_hint_keeps_the_paste_prompt_after_a_store_failure() {
+        let mut page = AiConfigApp::new(Config::default());
+        page.set_key_store_failed("openai");
+        assert_eq!(
+            page.key_hint_text(),
+            "Paste your OpenAI API key…",
+            "a failed store doesn't change what the field wants"
+        );
+    }
+
+    #[test]
+    fn key_hint_strips_parenthetical_suffixes_from_preset_names() {
+        let mut page = AiConfigApp::new(Config::default());
+        page.select_provider("custom", 1.0);
+        assert_eq!(
+            page.key_hint_text(),
+            "Paste your Custom API key…",
+            "'Custom (OpenAI-compatible)' shortens to 'Custom'"
+        );
     }
 
     #[test]
