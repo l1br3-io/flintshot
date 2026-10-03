@@ -10,8 +10,10 @@
 //! trait live here; the reqwest implementation lives in
 //! `flintshot-app`. No GUI toolkit types appear in this module.
 
+pub mod stream;
 pub mod transform;
 
+pub use stream::{AiStreamChunk, SseDecoder, SseEvent};
 pub use transform::{transform_store_path, AiTransform, TransformStore};
 
 use serde::{Deserialize, Serialize};
