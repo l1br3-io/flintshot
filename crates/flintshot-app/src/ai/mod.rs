@@ -69,6 +69,56 @@ impl OpenAiCompatClient {
     pub fn new(base_url: &str, api_key: &str) -> Self {
         Self::with_base_url_and_key(base_url, api_key)
     }
+
+    /// POST one chat-completions request and hand back the response
+    /// the moment its headers arrive, before any body bytes are
+    /// consumed.
+    ///
+    /// The contract: the caller sets `stream: Some(true)` on the
+    /// request (this method sends the body verbatim); a non-2xx maps
+    /// through [`AiError::from_status_and_body`] exactly like
+    /// [`AiClient::chat`]; a 2xx inspects the content type —
+    /// `text/event-stream` (parameters tolerated) yields
+    /// [`ChatStreamStart::Sse`] whose `bytes_stream()` the worker
+    /// owns until completion, stop, or drop; anything else yields
+    /// [`ChatStreamStart::NotSse`] so the worker can fall back.
+    ///
+    /// # Errors
+    /// [`AiError::Transport`] on connection or header-read failure;
+    /// the [`AiError`] status mapping above on non-2xx.
+    pub async fn chat_stream(&self, request: &AiRequest) -> Result<ChatStreamStart, AiError> {
+        let mut outbound = self.http.post(chat_url(&self.base_url)).json(request);
+        if let Some(auth) = bearer_header(&self.api_key) {
+            outbound = outbound.header("Authorization", auth);
+        }
+        let response = outbound
+            .send()
+            .await
+            .map_err(|e| AiError::Transport(e.to_string()))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = response
+                .text()
+                .await
+                .map_err(|e| AiError::Transport(format!("reading error body: {e}")))?;
+            return Err(AiError::from_status_and_body(status, &body));
+        }
+        let media_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if media_type == "text/event-stream" {
+            Ok(ChatStreamStart::Sse(response))
+        } else {
+            Ok(ChatStreamStart::NotSse(response))
+        }
+    }
 }
 
 /// Full request URL: `{base}/chat/completions` (trailing base-URL
@@ -76,6 +126,24 @@ impl OpenAiCompatClient {
 #[must_use]
 pub fn chat_url(base_url: &str) -> String {
     format!("{}/chat/completions", base_url.trim_end_matches('/'))
+}
+
+/// What [`OpenAiCompatClient::chat_stream`] hands back once the
+/// response headers are in — the headers-then-body split. Byte-level
+/// errors *after* this point surface while draining the body stream
+/// (the worker maps them to transport errors).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ChatStreamStart {
+    /// 2xx + `text/event-stream`: the SSE body, owned by the caller.
+    /// `bytes_stream()` yields the raw chunks; dropping the response
+    /// closes the connection (the stop path's abort mechanism).
+    Sse(reqwest::Response),
+    /// 2xx with any other content type: the provider ignored
+    /// `stream: true`. The worker falls back to non-streaming; the
+    /// body rides along and is readable once (drain it, or parse it
+    /// as a `chat.completion` and skip the retry round-trip).
+    NotSse(reqwest::Response),
 }
 
 /// Header value for the key, or `None` when keyless. The key is
@@ -326,5 +394,168 @@ mod tests {
             matches!(err, AiError::EmptyResponse(_)),
             "expected EmptyResponse, got {err:?}"
         );
+    }
+
+    // --- chat_stream (Task 003) ---
+
+    fn streaming_request() -> AiRequest {
+        let mut request = vision_request();
+        request.stream = Some(true);
+        request
+    }
+
+    fn sse_body() -> String {
+        use std::fmt::Write as _;
+        let mut body = String::new();
+        for text in ["Hel", "lo, ", "world"] {
+            let _ = write!(
+                body,
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n"
+            );
+        }
+        body.push_str("data: [DONE]\n\n");
+        body
+    }
+
+    #[tokio::test]
+    async fn chat_stream_streams_sse_body_bytes() {
+        use futures_util::StreamExt as _;
+
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body())
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "sk-test");
+        let start = client
+            .chat_stream(&streaming_request())
+            .await
+            .expect("2xx SSE");
+        let ChatStreamStart::Sse(response) = start else {
+            panic!("text/event-stream must yield Sse, got {start:?}");
+        };
+        // Drain the owned byte stream — all chunks arrive in order.
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk.expect("chunk"));
+        }
+        let body = String::from_utf8(bytes).expect("utf-8 body");
+        for text in ["Hel", "lo, ", "world", "[DONE]"] {
+            assert!(body.contains(text), "body must carry {text:?}: {body:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_reports_not_sse_for_json_content_type() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"id":"chatcmpl-1","choices":[{"index":0,"message":{"role":"assistant","content":"whole"},"finish_reason":"stop"}]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "sk-test");
+        let start = client.chat_stream(&streaming_request()).await.expect("2xx");
+        let ChatStreamStart::NotSse(response) = start else {
+            panic!("application/json must yield NotSse, got {start:?}");
+        };
+        // The body stays readable once — the fallback consumes it.
+        let body = response.text().await.expect("body readable once");
+        let parsed: flintshot_core::AiResponse =
+            serde_json::from_str(&body).expect("non-streaming body parses");
+        assert_eq!(parsed.first_text(), Some("whole"));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_maps_unauthorized_to_auth_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "Incorrect API key provided"}}"#)
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "sk-bad");
+        let err = client
+            .chat_stream(&streaming_request())
+            .await
+            .expect_err("401 errors");
+        assert!(
+            matches!(err, AiError::Auth(ref m) if m == "Incorrect API key provided"),
+            "expected Auth, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_maps_rate_limit_to_rate_limited_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(429)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "Rate limit reached"}}"#)
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "k");
+        let err = client
+            .chat_stream(&streaming_request())
+            .await
+            .expect_err("429 errors");
+        assert!(
+            matches!(err, AiError::RateLimited(ref m) if m == "Rate limit reached"),
+            "expected RateLimited, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_maps_server_error_to_provider_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "Internal server error"}}"#)
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "k");
+        let err = client
+            .chat_stream(&streaming_request())
+            .await
+            .expect_err("500 errors");
+        assert!(
+            matches!(err, AiError::Provider { status: 500, ref message } if message == "Internal server error"),
+            "expected Provider, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn keyless_stream_sends_no_authorization_header() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body())
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "");
+        let start = client.chat_stream(&streaming_request()).await.expect("ok");
+        drop(start); // release the connection before the mock asserts
+        mock.assert_async().await;
     }
 }
