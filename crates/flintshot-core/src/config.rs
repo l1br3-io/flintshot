@@ -828,6 +828,7 @@ impl Config {
         ensure_table(&mut doc, "hotkeys");
         ensure_table(&mut doc, "upload");
         ensure_table(&mut doc, "output");
+        ensure_table(&mut doc, "ai");
 
         if let Some(ui) = doc.get_mut("ui").and_then(|i| i.as_table_mut()) {
             self.merge_ui(ui);
@@ -888,6 +889,19 @@ impl Config {
                 out,
                 "save-clipboard-copies",
                 toml_edit::Value::from(self.output.save_clipboard_copies),
+            );
+        }
+        if let Some(ai) = doc.get_mut("ai").and_then(|i| i.as_table_mut()) {
+            set_value(
+                ai,
+                "provider",
+                toml_edit::Value::from(self.ai.provider.as_str()),
+            );
+            set_value(ai, "model", toml_edit::Value::from(self.ai.model.as_str()));
+            set_value(
+                ai,
+                "base-url",
+                toml_edit::Value::from(self.ai.base_url.as_str()),
             );
         }
 
@@ -2165,6 +2179,70 @@ backend = \"portal\"
         );
         assert!(
             written.contains("save-dir = \"/new\""),
+            "value updated in place:\n{written}"
+        );
+    }
+
+    /// Regression: the merge path dropped `[ai]` entirely — provider,
+    /// model, and base-URL set in AI settings vanished on every save
+    /// once a config file existed (only the fresh-file path wrote
+    /// them), so the page started blank on every launch.
+    #[test]
+    fn ai_section_merges_into_an_existing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[output]\nformat = \"png\"\n").unwrap();
+
+        let mut cfg = Config::default();
+        cfg.ai.provider = "custom".into();
+        cfg.ai.model = "llama3.2-vision".into();
+        cfg.ai.base_url = "http://localhost:11434/v1".into();
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("[ai]"), "no [ai] table:\n{written}");
+        assert!(
+            written.contains("provider = \"custom\""),
+            "provider lost:\n{written}"
+        );
+        assert!(
+            written.contains("model = \"llama3.2-vision\""),
+            "model lost:\n{written}"
+        );
+        assert!(
+            written.contains("base-url = \"http://localhost:11434/v1\""),
+            "base-url lost:\n{written}"
+        );
+        // And it loads back (round-trip through strict TOML).
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.ai.provider, "custom");
+        assert_eq!(back.ai.model, "llama3.2-vision");
+        assert_eq!(back.ai.base_url, "http://localhost:11434/v1");
+    }
+
+    /// The merge preserves an existing `[ai]` entry's comments while
+    /// rewriting its values (same decor semantics as `[output]`).
+    #[test]
+    fn ai_merge_preserves_existing_comments() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[ai]\n# my local box\nbase-url = \"http://old:11434/v1\"\n",
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.ai.base_url = "http://new:11434/v1".into();
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("# my local box"),
+            "comment on base-url lost:\n{written}"
+        );
+        assert!(
+            written.contains("base-url = \"http://new:11434/v1\""),
             "value updated in place:\n{written}"
         );
     }
