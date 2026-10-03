@@ -2098,6 +2098,24 @@ struct AiHost {
     /// conversation pipeline; the probe stays one-shot
     /// non-streaming).
     test_rx: Option<std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>>,
+    /// Test seam: when set, AI requests resolve against this
+    /// snapshot instead of the platform config file. Hermetic
+    /// tests — a dev machine's real `config.toml` may be (and on an
+    /// active install, is) configured, which used to flip the
+    /// "unconfigured" test premises.
+    config_override: Option<flintshot_core::Config>,
+}
+
+impl PageBridge {
+    /// The config AI requests resolve against: the test override
+    /// when set, else the platform file (defaulting on load
+    /// failure, as ever).
+    fn ai_config(&self) -> flintshot_core::Config {
+        self.ai
+            .config_override
+            .clone()
+            .unwrap_or_else(|| flintshot_core::Config::load().unwrap_or_default())
+    }
 }
 
 impl EditorPageBridge for PageBridge {
@@ -2180,7 +2198,7 @@ impl EditorPageBridge for PageBridge {
             }
             drop(prior);
         }
-        let config = flintshot_core::Config::load().unwrap_or_default();
+        let config = self.ai_config();
         match crate::ai::worker::resolve_ai(&config) {
             Ok(resolved) => {
                 let (rx, stop) = crate::ai::worker::spawn_chat_worker(resolved, messages);
@@ -2243,7 +2261,7 @@ impl EditorPageBridge for PageBridge {
     }
 
     fn ai_configured(&mut self) -> bool {
-        let config = flintshot_core::Config::load().unwrap_or_default();
+        let config = self.ai_config();
         crate::ai::worker::ai_configured(&config)
     }
 
@@ -4183,7 +4201,9 @@ mod tests {
 
     /// An unconfigured Ask-the-shot request fails immediately with
     /// actionable copy (no worker spawn), surfaced through the same
-    /// `poll_ai_event` queue a worker result would ride.
+    /// `poll_ai_event` queue a worker result would ride. Pinned to a
+    /// default-config override — the dev machine's real config is
+    /// typically configured, which would flip this premise.
     #[test]
     fn unconfigured_ai_request_fails_immediately_with_copy() {
         use flintshot_editor_egui::EditorPageBridge as _;
@@ -4192,7 +4212,10 @@ mod tests {
         let shared = std::sync::Arc::new(shared);
         let mut bridge = PageBridge {
             shared: std::sync::Arc::clone(&shared),
-            ai: AiHost::default(),
+            ai: AiHost {
+                config_override: Some(flintshot_core::Config::default()),
+                ..AiHost::default()
+            },
         };
 
         // Default config: no model set ⇒ unconfigured, and the
@@ -4361,6 +4384,7 @@ mod tests {
             ai: AiHost {
                 rx: Some(rx),
                 stop: Some(stop.clone()),
+                config_override: Some(flintshot_core::Config::default()),
                 ..AiHost::default()
             },
         };
