@@ -399,8 +399,12 @@ pub fn ai_error_copy(error: &AiError) -> String {
         AiError::Transport(_) => {
             "Couldn't reach the provider — check the base URL and network, then retry.".into()
         }
-        AiError::Auth(_) => "The provider rejected the key — replace it in AI settings.".into(),
-        AiError::RateLimited(_) => "Rate limited — wait a moment, then retry.".into(),
+        AiError::Auth(detail) => format!(
+            "The provider rejected the key — replace it in AI settings. Provider said: {detail}"
+        ),
+        AiError::RateLimited(detail) => {
+            format!("Rate limited — wait a moment, then retry. Provider said: {detail}")
+        }
         AiError::EmptyResponse(_) => {
             "The model returned no text — retry, or pick another model in AI settings.".into()
         }
@@ -468,6 +472,31 @@ mod tests {
         assert!(ai_error_copy(&AiError::Auth("x".into())).contains("key"));
         assert!(ai_error_copy(&AiError::RateLimited("x".into())).contains("Rate"));
         assert!(ai_error_copy(&AiError::EmptyResponse("x".into())).contains("no text"));
+    }
+
+    /// Regression: the Auth and RateLimited copies discarded the
+    /// provider's message, making 401s undiscoverable from the UI —
+    /// "replace the key" vs "no access to this model" vs a keyless
+    /// probe all rendered identically. The detail now rides along
+    /// after the actionable headline.
+    #[test]
+    fn auth_and_rate_limit_copy_carry_the_provider_detail() {
+        let copy = ai_error_copy(&AiError::Auth("Invalid API key provided".into()));
+        assert!(
+            copy.contains("replace it in AI settings"),
+            "headline stays: {copy}"
+        );
+        assert!(
+            copy.contains("Invalid API key provided"),
+            "provider detail rides along: {copy}"
+        );
+
+        let copy = ai_error_copy(&AiError::RateLimited("quota exhausted".into()));
+        assert!(copy.contains("wait a moment"), "headline stays: {copy}");
+        assert!(
+            copy.contains("quota exhausted"),
+            "detail rides along: {copy}"
+        );
     }
 
     #[test]
