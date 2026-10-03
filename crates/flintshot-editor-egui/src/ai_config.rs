@@ -2,7 +2,7 @@
 //! home.
 //!
 //! The settings page's grammar: labelled cutout section cards in a
-//! centered column. Two sections — **Model** (provider preset,
+//! centered 680 px column. Two sections — **Model** (provider preset,
 //! model id, base-URL override, the masked Replace-key affordance,
 //! Test connection) and **Transforms** (the saved-transform CRUD,
 //! Task 011) — over the page's config snapshot + save-debounce
@@ -15,8 +15,10 @@
 //! status copy ("Key saved in your system's secret store") and a
 //! masked Replace-key field.
 //!
-//! Reached from a Settings link row, the transform dialog's
-//! **Configure AI…** link (the editor parks and returns on Esc), and
+//! Reached from the topbar overflow's **AI settings** row (every
+//! routed surface; routing from the editor parks it, and Esc
+//! restores the annotated editor), a Settings link row, the
+//! transform dialog's **Configure AI…** link, and
 //! `app --route ai-config` (cold start).
 
 use flintshot_core::{Config, ProviderPreset, TransformStore};

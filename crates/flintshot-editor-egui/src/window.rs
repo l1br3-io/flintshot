@@ -76,15 +76,19 @@ pub enum Route {
     /// The settings page (Task 010): reached from every route's
     /// dots overflow; Escape returns to Home.
     Settings,
-    /// The AI settings page (Ask-the-shot): reached from Settings'
-    /// link row, the transform dialog's **Configure AI…** link, or
-    /// `app --route ai-config`. Escaping returns to the parked
-    /// editor when the dialog routed from one (annotations intact),
-    /// else Home.
+    /// The AI settings page (Ask-the-shot): reached from the
+    /// topbar overflow's **AI settings** row (every routed
+    /// surface), Settings' link row, the transform dialog's
+    /// **Configure AI…** link, or `app --route ai-config`.
+    /// Escaping returns to the parked
+    /// editor when an editor-route entry parked one (annotations
+    /// intact), else Home.
     AiConfig {
-        /// The editor session parked by the Configure link — the
-        /// live state (not the route's construction snapshot),
-        /// restored on Esc / breadcrumb.
+        /// The editor session parked by an entry that routed from
+        /// the editor (the dialog's Configure link or the
+        /// overflow's AI settings row) — the live state (not the
+        /// route's construction snapshot), restored on Esc /
+        /// breadcrumb.
         parked_editor: Option<Box<RoutedEditor>>,
     },
 }

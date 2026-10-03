@@ -3,6 +3,10 @@
 //! tools as 40×40 chips, grouped by the five semantic pods with
 //! hairline separators.
 //!
+//! Tools-only: the Ask-the-shot spark chip that once rode a bottom
+//! pod here is retired — the topbar's AI hero and the `I` shortcut
+//! are the entry points.
+//!
 //! The active tool pops: gold fill, cream border, pop shadow, and a
 //! spring bounce (through the animation gate). Gated-off tools stay
 //! visible in lock-grey — hover-only, layout stable — so the

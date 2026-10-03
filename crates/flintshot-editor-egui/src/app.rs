@@ -1876,8 +1876,8 @@ impl EditorApp {
             }
             TopbarAction::Copy => self.handle_copy(ctx),
             // The AI hero: refresh the saved transforms, then open
-            // the Ask-the-shot dialog — the same path the rail
-            // spark chip and the `I` shortcut take.
+            // the Ask-the-shot dialog — the same path the `I`
+            // shortcut takes.
             TopbarAction::Ai => {
                 self.refresh_ai_transforms();
                 self.ai_dialog.open();

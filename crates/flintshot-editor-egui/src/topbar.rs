@@ -1,16 +1,19 @@
 //! The topbar — zone 1 of the five-zone window: a 48 px forest-deep
 //! cutout bar with the flame brand + the `Flintshot | Home > Editor`
-//! breadcrumb
 //! identity (the breadcrumb's past stages are links home, the
-//! current stage gold + bold), exactly three hero ghost buttons —
-//! **Capture** and **Copy** with the gold hero-key border,
-//! **Open** plain — and the dots overflow chip.
+//! current stage gold + bold), four hero ghost buttons —
+//! **Capture** and **Copy** with the gold hero-key border, **AI**
+//! and **Open** plain (the AI hero's spark glyph is gold — the mark
+//! the retired rail chip wore) — and the dots overflow chip.
 //!
 //! One component serves every routed surface ([`Surface`]): the
 //! heroes stay, the overflow contents vary by route (editor:
-//! Save/Upload/Paste; home/loading: about + note; all: the Settings
-//! entry, inert until the settings route lands). Worker editor
-//! windows draw the same bar themselves.
+//! Save/Upload/Paste/Resize; home/loading: about + note; every
+//! routed surface carries the **AI settings** row directly above
+//! the Settings entry). Worker editor windows draw the same bar
+//! themselves — minus the AI settings row (their Settings entry
+//! already owns the delegate+close choreography) and with the AI
+//! hero disabled (no run bridge there).
 
 use egui::{Color32, Stroke};
 

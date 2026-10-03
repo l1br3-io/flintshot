@@ -1,6 +1,6 @@
 //! The Ask-the-shot transform dialog — a modal over the canvas.
 //!
-//! Opened by the rail's spark chip (`crate::rail`) or the `I` key.
+//! Opened by the topbar's AI hero (`crate::topbar`) or the `I` key.
 //! Pod language: cream paper on a paper shadow, `POD_RADIUS`,
 //! `POD_PAD`. Body: the saved-transform pill list (radio-select
 //! from the store snapshot), a hairline, the custom-prompt field

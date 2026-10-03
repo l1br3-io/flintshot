@@ -20,6 +20,47 @@ Categories used below:
 
 ### Added
 
+- **AI hero in the topbar** (effort `ai-ux-refresh`). The editor's
+  topbar reads `Capture · Copy · AI · Open`: a plain **AI** hero —
+  carrying the gold four-point spark the rail chip wore — opens the
+  Ask-the-shot transform dialog. Enablement mirrors Copy (AI needs
+  an image): Home/Settings/Loading render it dim with a
+  "No image is open" tooltip, and worker editor windows keep it
+  disabled (no run bridge there). The `I` shortcut is unchanged.
+- **AI settings in the overflow menu** (effort `ai-ux-refresh`).
+  Every routed surface's `⋯` overflow gains an **AI settings** row
+  directly above Settings — the AI config page is one click from
+  anywhere. Routing from the editor parks the live session
+  (annotations intact; Esc restores it); from Home/Settings/Loading,
+  Esc returns Home as before.
+
+### Changed
+
+- **AI settings page redesigned** (effort `ai-ux-refresh`). The
+  page keeps its grammar (cutout section cards in a centered
+  column, now 680 px) and its lifecycle (debounced config saves,
+  immediate keyring writes) but rebuilds on the new type scale:
+  full-width model and base-URL fields, a roomier provider well
+  row and Test-connection pill, and 32 px-plus transform rows with
+  reorder/edit/delete at the new hit-area size.
+- **Global type + density bump** (effort `ai-ux-refresh`). The
+  whole UI chrome is bigger and airier: every type-ramp step up
+  ~1.5–2 px (the smallest step is now 12 px), a 48 px topbar with
+  34 px heroes, a 56 px rail with 40 px tool chips (glyphs scale
+  with the chip), 30 px+ hit areas and well rows, and a 400 px
+  dialog width. Sizing reads theme tokens — the next scale pass is
+  a one-file change. Annotation on-canvas rendering stays
+  pixel-identical.
+
+### Removed
+
+- **The rail's Ask-the-shot spark chip** (effort `ai-ux-refresh`).
+  The gold spark chip and its bottom pod leave the left tool rail —
+  the rail is tools-only. The topbar's **AI** hero and the `I`
+  shortcut are the entry points.
+
+### Added
+
 - **Ask the shot — AI over your screenshots** (effort
   `ai-transforms`; ADR-0069). From the editor, send what you see to
   a vision-capable chat model and read the answer in-app:
