@@ -95,6 +95,7 @@ pub fn spawn_chat_worker(
                 model: resolved.model,
                 messages,
                 max_tokens: Some(MAX_TOKENS),
+                stream: None,
             };
             let client =
                 OpenAiCompatClient::with_base_url_and_key(&resolved.base_url, &resolved.api_key);

@@ -163,6 +163,11 @@ pub struct AiRequest {
     /// Generation cap. Sent only when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Request SSE token streaming (`"stream": true`). Skipped when
+    /// `None` so the non-streaming golden request body stays
+    /// byte-identical — only the streaming worker sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 /// One choice in a chat-completions response envelope.
@@ -420,6 +425,7 @@ mod tests {
                 ],
             }],
             max_tokens: Some(1024),
+            stream: None,
         };
         let json = serde_json::to_value(&request).expect("serialize");
         // {
@@ -502,9 +508,31 @@ mod tests {
             model: "m".into(),
             messages: vec![],
             max_tokens: None,
+            stream: None,
         };
         let json = serde_json::to_value(&request).expect("serialize");
         assert!(json.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn stream_flag_serializes_only_when_set() {
+        let base = AiRequest {
+            model: "m".into(),
+            messages: vec![],
+            max_tokens: None,
+            stream: None,
+        };
+        // None omits the key entirely — the non-streaming golden
+        // request body stays byte-identical.
+        let json = serde_json::to_value(&base).expect("serialize");
+        assert!(json.get("stream").is_none());
+
+        let streaming = AiRequest {
+            stream: Some(true),
+            ..base
+        };
+        let json = serde_json::to_value(&streaming).expect("serialize");
+        assert_eq!(json["stream"], true);
     }
 
     #[test]

@@ -71,7 +71,7 @@ postcard = { version = "1", features = ["alloc"] }
 # rustls-tls (not native-tls) avoids a libssl-dev build-time system dep —
 # CI installs xcap's native libs but not OpenSSL. Functionally identical
 # for HTTPS + multipart + json. See ADR-0026 (Task 010).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "stream"] }
 rfd = "0.17"
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
