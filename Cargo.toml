@@ -63,7 +63,13 @@ gtk = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 imageproc = { version = "0.25", default-features = false }
 interprocess = { version = "2", features = ["tokio"] }
-keyring = { version = "3", features = ["crypto-rust"] }
+# Store features are mandatory: with none compiled in, keyring v3
+# silently falls back to an in-process mock store (`pub use mock as
+# default`) — set/get "work" but keys vanish on exit and never reach
+# the OS keyring. `crypto-rust` alone is NOT a store; it only picks
+# the Secret Service crypto backend. Store deps are target-gated
+# inside keyring, so enabling every platform's feature is safe.
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "apple-native", "windows-native"] }
 mockito = "1"
 notify = "8"
 notify-rust = "4"

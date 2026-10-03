@@ -541,6 +541,28 @@ mod tests {
         );
     }
 
+    /// Regression: keyring v3 with no store feature compiled in
+    /// silently falls back to an in-process *mock* store
+    /// (`pub use mock as default`). Set/get "work" in-process, keys
+    /// vanish on exit, and nothing ever reaches the OS keyring —
+    /// AI keys were lost on every window close. This test fails if
+    /// the workspace loses a real store feature for this platform.
+    #[test]
+    fn keyring_backs_entries_with_a_real_store_not_the_mock() {
+        let entry = super::ai_key_entry("regression-check")
+            .expect("keyring::Entry::new failed for this platform");
+        let is_mock = entry
+            .get_credential()
+            .downcast_ref::<keyring::mock::MockCredential>()
+            .is_some();
+        assert!(
+            !is_mock,
+            "keyring fell back to its in-process mock store — keys \
+             would vanish on exit; enable a store feature in the \
+             workspace Cargo.toml"
+        );
+    }
+
     #[tokio::test]
     async fn keyless_stream_sends_no_authorization_header() {
         let mut server = mockito::Server::new_async().await;
