@@ -257,11 +257,6 @@ impl AiConfigApp {
     /// provider-switch) and store-failed states keep the paste
     /// prompt: neither changes what the field wants. Never includes
     /// key material.
-    ///
-    /// Test-only until ai-key-save Task 002 wires the hint into
-    /// `key_row` (canvas.rs/rail.rs use the same `cfg_attr` bridge for
-    /// test-first helpers).
-    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub(crate) fn key_hint_text(&self) -> String {
         if self.key_saved && !self.key_status_stale() {
@@ -276,11 +271,6 @@ impl AiConfigApp {
     /// Whether the Save-key pill is armed: the draft holds content
     /// beyond whitespace (the same bar [`AiConfigApp::commit_key_draft`]
     /// applies, so an armed click always commits something).
-    ///
-    /// Test-only until ai-key-save Task 002 wires the pill into
-    /// `key_row` (canvas.rs/rail.rs use the same `cfg_attr` bridge for
-    /// test-first helpers).
-    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub(crate) fn key_save_armed(&self) -> bool {
         !self.key_draft.trim().is_empty()
@@ -586,15 +576,28 @@ fn model_hint(page: &AiConfigApp) -> &str {
     }
 }
 
-/// The key affordance: masked Replace-key field (Enter commits),
-/// status copy beneath — a stored key never renders.
+/// The key affordance: a masked field plus a **Save key** pill to
+/// its right — the visible commit path, dim + inert until the draft
+/// holds content, with Enter kept as the keyboard shortcut. The
+/// field's hint is context-aware
+/// ([`AiConfigApp::key_hint_text`]); status copy beneath — a stored
+/// key never renders.
 fn key_row(ui: &mut egui::Ui, page: &mut AiConfigApp) {
     set_row(ui, "API key", |ui| {
+        // set_row lays the control right-to-left: reserve the pill
+        // first so it lands rightmost, then the field fills the rest.
+        let armed = page.key_save_armed();
+        if ghost_pill(ui, egui::Id::new("ai-key-save"), "Save key", armed) {
+            page.commit_key_draft();
+        }
+        // Hoist the hint before the mutable draft borrow (the Model
+        // row's idiom): the field borrows `key_draft` for the frame.
+        let hint = page.key_hint_text();
         let response = ui.add(
             egui::TextEdit::singleline(&mut page.key_draft)
                 .id(egui::Id::new("ai-key"))
                 .password(true)
-                .hint_text("Replace key…")
+                .hint_text(hint)
                 .desired_width(ui.available_width()),
         );
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
