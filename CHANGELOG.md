@@ -59,6 +59,26 @@ Categories used below:
 
 ### Added
 
+- **Save-key pill in AI settings** (effort `ai-key-save`). The
+  API-key row's only commit affordance was pressing Enter — nothing
+  on screen said so, leaving pasted keys stranded in a masked
+  field. The row now carries an always-visible **Save key** pill
+  right of the field, styled like Test connection (forest fill once
+  the draft has content, dim + inert while it's empty or
+  whitespace-only); clicking it commits through the exact Enter
+  path — keyring write via the page bridge, draft clears, and the
+  status line reports the store's real answer. The field's hint is
+  context-aware: a paste prompt naming the current provider
+  ("Paste your OpenAI API key…", parenthetical stripped so
+  "xAI (Grok)" reads `xAI`) when no key is stored, and
+  "Paste a new key to replace the stored one…" once one is. The
+  not-stored status line now points at the field and pill above it
+  ("paste a key above and press Save key") instead of directing
+  users below. Enter remains as the keyboard shortcut. Pinned by:
+  `key_hint_*` and `key_save_armed_*` unit tests (provider naming,
+  replace copy, stale/store-failed states, whitespace gating, and
+  no key material in any surfaced copy).
+
 - **Live-streamed Ask-the-shot responses** (effort `ai-streaming`).
   The AI tab's response card grows token-by-token while the run is
   in flight — plain text with a static gold caret while streaming,
