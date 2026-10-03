@@ -129,6 +129,11 @@ fn forward_events(
     done
 }
 
+/// How often the pump re-checks the stop flag while awaiting body
+/// chunks: stop must land within ~100 ms even against a fully
+/// silent provider.
+const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// The streaming pump: bytes in from a [`ChunkSource`], decoder
 /// events out over the channel. Returns the accumulated full text on
 /// a clean end (sentinel or EOF), the transport error on a mid-stream
@@ -145,10 +150,22 @@ async fn pump_stream<S: ChunkSource>(
     let mut sse_events = Vec::new();
     let mut sentinel_seen = false;
     while !stop.load(Ordering::SeqCst) {
-        let Some(chunk) = source.next_chunk().await else {
-            break;
+        // Race the chunk await against the stop tick: `biased` keeps
+        // a ready chunk winning, and a ticked read is re-issued next
+        // iteration (reqwest chunk reads are cancel-safe — an
+        // incomplete read consumes nothing from the connection).
+        let chunk = tokio::select! {
+            biased;
+            chunk = source.next_chunk() => Some(chunk),
+            () = tokio::time::sleep(STOP_POLL) => None,
         };
-        let bytes = chunk?;
+        let Some(chunk) = chunk else {
+            continue; // tick elapsed — loop head re-checks the flag
+        };
+        let Some(result) = chunk else {
+            break; // clean end-of-body
+        };
+        let bytes = result?;
         decoder.feed(&bytes, &mut sse_events);
         if forward_events(sse_events.drain(..), tx, &mut accumulated) {
             sentinel_seen = true;
@@ -188,26 +205,52 @@ async fn complete_non_streaming(
     Ok(text)
 }
 
+/// The fallback contract's subtlest clause — checked exactly here,
+/// before any delta can exist: retry non-streaming **only** when the
+/// stream never opened and the failure says the provider rejected
+/// streaming itself, i.e. an HTTP 400 whose provider message mentions
+/// `stream` (case-insensitive). A 400 about anything else (bad
+/// model, oversized image) would fail identically without streaming,
+/// so a retry would only double the bill. Mid-stream failures never
+/// reach this check — after any delta, failure is terminal.
+fn is_stream_rejection(err: &AiError) -> bool {
+    match err {
+        AiError::Provider {
+            status: 400,
+            message,
+        } => message.to_ascii_lowercase().contains("stream"),
+        _ => false,
+    }
+}
+
 /// Drive one streaming run to its terminal outcome (the thread body
 /// after runtime construction): open the stream, pump it, or fall
-/// back when the provider answers 2xx with a non-SSE body.
+/// back when the provider refuses streaming. Both fallback triggers
+/// occur before any delta is emitted, satisfying the spec's
+/// "zero deltas" precondition by construction.
 async fn run_stream(
     client: &OpenAiCompatClient,
     request: &AiRequest,
     tx: &mpsc::Sender<ChatWorkerEvent>,
     stop: &AtomicBool,
 ) -> Result<String, AiError> {
-    match client.chat_stream(request).await? {
-        ChatStreamStart::Sse(response) => {
+    match client.chat_stream(request).await {
+        Ok(ChatStreamStart::Sse(response)) => {
             pump_stream(HttpResponseSource { response }, tx, stop).await
         }
-        ChatStreamStart::NotSse(response) => {
+        Ok(ChatStreamStart::NotSse(response)) => {
             // The provider ignored `stream: true`. Drain the body
             // (closing it) and retry non-streaming — invisible to
             // the conversation.
             drop(response);
             complete_non_streaming(client, request, tx).await
         }
+        Err(err) if is_stream_rejection(&err) => {
+            // The provider rejected `stream: true` outright — same
+            // transparent non-streaming retry.
+            complete_non_streaming(client, request, tx).await
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -665,6 +708,169 @@ mod tests {
             .await
             .expect("stop with nothing received is still not an error");
         assert_eq!(full, "");
+    }
+
+    /// A provider that never sends a byte: `next_chunk` never
+    /// resolves. The stop tick must still end the pump.
+    struct SilentSource;
+
+    impl ChunkSource for SilentSource {
+        async fn next_chunk(&mut self) -> Option<Result<Vec<u8>, AiError>> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn pump_stop_during_silence_returns_within_the_tick_bound() {
+        use std::sync::atomic::Ordering;
+
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopper = Arc::clone(&stop);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            stopper.store(true, Ordering::SeqCst);
+        });
+        let started = std::time::Instant::now();
+        let full = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            pump_stream(SilentSource, &tx, &stop),
+        )
+        .await
+        .expect("stop must end an otherwise-silent pump")
+        .expect("stop is a user action, not an error");
+        assert_eq!(full, "");
+        assert!(
+            delta_texts(&collect_events(&rx)).is_empty(),
+            "no deltas may appear after stop during silence"
+        );
+        // ~50 ms tick + slack: well under the 500 ms timeout, and
+        // bounded far away from "never".
+        assert!(started.elapsed() < std::time::Duration::from_millis(400));
+    }
+
+    #[test]
+    fn streaming_worker_falls_back_on_a_400_that_mentions_stream() {
+        // The provider rejects `stream: true` with a 400 whose
+        // message names streaming — retried once, non-streaming,
+        // invisibly: Delta(full) + Done(full).
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/chat/completions")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "model": "m",
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                "max_tokens": 1024,
+                "stream": true
+            })))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "streaming is not supported for this model"}}"#)
+            .create();
+        server
+            .mock("POST", "/chat/completions")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "model": "m",
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                "max_tokens": 1024
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"whole"},"finish_reason":"stop"}]}"#)
+            .create();
+        let resolved = ResolvedAi {
+            base_url: server.url(),
+            model: "m".into(),
+            api_key: String::new(),
+        };
+        let (rx, _stop) = spawn_chat_worker(resolved, user_message());
+        let mut events = Vec::new();
+        while let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            events.push(event);
+        }
+        assert_eq!(
+            terminal_count(&events),
+            1,
+            "exactly one terminal: {events:?}"
+        );
+        assert_eq!(delta_texts(&events), ["whole"]);
+        assert!(
+            matches!(&events[1], ChatWorkerEvent::Done(text) if text == "whole"),
+            "the retry pipes through the same protocol: {events:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_worker_does_not_retry_a_plain_400() {
+        // A 400 that never mentions `stream` (e.g. a bad model id)
+        // is a plain provider error — no hidden second request.
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "The model `m` does not exist"}}"#)
+            .expect(1)
+            .create();
+        let resolved = ResolvedAi {
+            base_url: server.url(),
+            model: "m".into(),
+            api_key: String::new(),
+        };
+        let (rx, _stop) = spawn_chat_worker(resolved, user_message());
+        let mut events = Vec::new();
+        while let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            events.push(event);
+        }
+        assert_eq!(
+            terminal_count(&events),
+            1,
+            "exactly one terminal: {events:?}"
+        );
+        assert!(matches!(
+            &events[0],
+            ChatWorkerEvent::Failed(AiError::Provider { status: 400, .. })
+        ));
+        // The stream-rejection retry never fired: exactly one hit.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        mock.assert();
+    }
+
+    #[test]
+    fn receiver_drop_mid_stream_exits_the_worker_cleanly() {
+        // Editor close mid-stream: the receiver drops, the worker's
+        // sends fail into the void, the thread exits. No panic, no
+        // hang — and a fresh worker on the same endpoint still works.
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body())
+            .create();
+        let resolved = ResolvedAi {
+            base_url: server.url(),
+            model: "m".into(),
+            api_key: String::new(),
+        };
+        let (rx, _stop) = spawn_chat_worker(resolved.clone(), user_message());
+        // A delta arrives, then the "editor closes".
+        let first = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the stream starts");
+        assert!(matches!(first, ChatWorkerEvent::Delta(_)));
+        drop(rx);
+        // Let the worker run into its failed sends.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // The endpoint still serves a fresh worker (nothing wedged).
+        let (rx2, _stop2) = spawn_chat_worker(resolved, user_message());
+        let mut events = Vec::new();
+        while let Ok(event) = rx2.recv_timeout(std::time::Duration::from_secs(10)) {
+            events.push(event);
+        }
+        assert_eq!(terminal_count(&events), 1);
+        assert!(matches!(events.last(), Some(ChatWorkerEvent::Done(_))));
     }
 
     #[test]

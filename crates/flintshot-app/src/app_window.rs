@@ -2089,6 +2089,9 @@ struct PageBridge {
 #[derive(Default)]
 struct AiHost {
     rx: Option<std::sync::mpsc::Receiver<crate::ai::worker::ChatWorkerEvent>>,
+    /// The live run's stop handle — signals the prior worker when a
+    /// new run replaces it (its partial finalizes into the void).
+    stop: Option<crate::ai::worker::StopHandle>,
     queue: std::collections::VecDeque<flintshot_editor_egui::AiEvent>,
     /// A test-connection worker's channel (the AI settings page's
     /// Test connection row — deliberately separate from the
@@ -2168,13 +2171,21 @@ impl EditorPageBridge for PageBridge {
     }
 
     fn ai_request(&mut self, messages: Vec<flintshot_core::ChatMessage>) {
+        // A new run cancels any prior live one: signal stop (its
+        // partial finalizes and its thread exits), then drop the
+        // receiver so its sends fail into the void.
+        if let Some(prior) = self.ai.rx.take() {
+            if let Some(stop) = self.ai.stop.take() {
+                stop.stop();
+            }
+            drop(prior);
+        }
         let config = flintshot_core::Config::load().unwrap_or_default();
         match crate::ai::worker::resolve_ai(&config) {
             Ok(resolved) => {
-                // The stop handle is dropped here for now (Task 005
-                // stores it beside the receiver for cancel-and-rerun).
-                let (rx, _stop) = crate::ai::worker::spawn_chat_worker(resolved, messages);
+                let (rx, stop) = crate::ai::worker::spawn_chat_worker(resolved, messages);
                 self.ai.rx = Some(rx);
+                self.ai.stop = Some(stop);
             }
             // Unconfigured: an immediate failure with the same
             // actionable copy the Configure gate would have shown.
