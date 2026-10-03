@@ -474,7 +474,7 @@ mod tests {
         assert!(ai_error_copy(&AiError::EmptyResponse("x".into())).contains("no text"));
     }
 
-    /// Regression: the Auth and RateLimited copies discarded the
+    /// Regression: the `Auth` and `RateLimited` copies discarded the
     /// provider's message, making 401s undiscoverable from the UI —
     /// "replace the key" vs "no access to this model" vs a keyless
     /// probe all rendered identically. The detail now rides along
