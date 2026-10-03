@@ -782,24 +782,74 @@ impl Config {
     /// comments in the existing file via [`toml_edit`]. Creates the
     /// parent directory if it doesn't exist.
     ///
+    /// If the existing file is too broken to merge (or the merged
+    /// result would fail the strict loader), the original is copied
+    /// beside it as `*.toml.bak` and a fresh serialization is written
+    /// instead — a save must never leave the loader locked out of
+    /// the config (duplicate-key files froze every future save
+    /// before this guard, and every load fell back to defaults).
+    ///
     /// # Errors
-    /// - [`FlintshotError::Io`] on filesystem write failure.
-    /// - [`FlintshotError::Config`] if the existing file can't be parsed
-    ///   by `toml_edit` (which is more lenient than `toml::from_str` —
-    ///   it tolerates any syntactically valid TOML, including duplicate
-    ///   keys with explicit array-of-tables semantics).
+    /// [`FlintshotError::Io`] on filesystem write failure (the
+    /// best-effort backup logs instead of failing);
+    /// [`FlintshotError::Config`] if fresh serialization fails.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(FlintshotError::Io)?;
         }
 
         let body = match std::fs::read_to_string(path) {
-            Ok(existing) => self.merge_into_existing(&existing)?,
+            Ok(existing) => self.merged_or_healed(path, &existing)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.fresh_toml()?,
             Err(e) => return Err(FlintshotError::Io(e)),
         };
 
         std::fs::write(path, body).map_err(FlintshotError::Io)
+    }
+
+    /// Merge into the existing document, or — when the document is
+    /// unmergeable or its merge would not load — back it up and
+    /// rewrite fresh. Failure to merge is a warn-and-heal, never a
+    /// hard error: the caller is saving *now* and must not leave the
+    /// broken file in place for the next launch to trip over.
+    fn merged_or_healed(&self, path: &Path, existing: &str) -> Result<String> {
+        let broken = |stage: &str, detail: String| {
+            tracing::warn!(
+                stage = stage,
+                error = %detail,
+                backup = %path.with_extension("toml.bak").display(),
+                "existing config is unloadable; rewriting it fresh"
+            );
+        };
+        match self.merge_into_existing(existing) {
+            Ok(merged) => match toml::from_str::<Self>(&merged) {
+                Ok(_) => Ok(merged),
+                Err(e) => {
+                    broken("strict-validation", e.to_string());
+                    self.healed_toml(path, existing)
+                }
+            },
+            Err(e) => {
+                broken("merge", e.to_string());
+                self.healed_toml(path, existing)
+            }
+        }
+    }
+
+    /// The fresh-rewrite path: best-effort copy of the broken
+    /// original to `*.toml.bak`, then a clean serialization. A
+    /// failed backup logs and proceeds — the priority is a loadable
+    /// config on disk.
+    fn healed_toml(&self, path: &Path, existing: &str) -> Result<String> {
+        let backup = path.with_extension("toml.bak");
+        if let Err(e) = std::fs::write(&backup, existing) {
+            tracing::warn!(
+                backup = %backup.display(),
+                error = %e,
+                "backing up the broken config"
+            );
+        }
+        self.fresh_toml()
     }
 
     /// Render this config as a fresh TOML string (no existing-file
@@ -2245,6 +2295,74 @@ backend = \"portal\"
             written.contains("base-url = \"http://new:11434/v1\""),
             "value updated in place:\n{written}"
         );
+    }
+
+    /// Regression: a config file that the strict loader can't parse
+    /// (e.g. duplicate keys from an older write) made every save
+    /// preserve the corruption — the merge path never noticed — so
+    /// `Config::load` failed on every launch and callers fell back
+    /// to defaults forever. Saving must leave a loadable file
+    /// behind: when the merged document still fails strict parsing,
+    /// fall back to a fresh serialization (comments lost, data kept).
+    #[test]
+    fn save_self_heals_a_file_the_loader_cannot_parse() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Duplicate `save-dir` keys: lenient toml_edit may accept it,
+        // strict `toml` (the load path) rejects it.
+        fs::write(
+            &path,
+            "[output]\nformat = \"png\"\nsave-dir = \"\"\n\nsave-dir = \"/dup\"\n",
+        )
+        .unwrap();
+        assert!(
+            Config::load_from(&path).is_err(),
+            "fixture must be unloadable by the strict loader"
+        );
+
+        let mut cfg = Config::default();
+        cfg.ai.provider = "custom".into();
+        cfg.ai.model = "m".into();
+        cfg.output.save_dir = "/healed".into();
+        cfg.save_to(&path).unwrap();
+
+        let back = Config::load_from(&path).expect("the healed file must load");
+        assert_eq!(back.ai.provider, "custom");
+        assert_eq!(back.ai.model, "m");
+        assert_eq!(back.output.save_dir, "/healed");
+
+        // The broken original is preserved beside it for inspection.
+        let backup = fs::read_to_string(dir.path().join("config.toml.bak")).unwrap();
+        assert!(
+            backup.contains("save-dir = \"/dup\""),
+            "backup must carry the broken original:\n{backup}"
+        );
+    }
+
+    /// The heal fallback never fires on a healthy file: unknown
+    /// fields and comments survive a normal save (no fresh-rewrite).
+    #[test]
+    fn save_keeps_unknown_fields_and_comments_on_healthy_files() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            // `future-key` is unknown to this build (forward-compat).
+            "[output]\n# my note\nformat = \"png\"\nfuture-key = \"keep\"\n",
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.output.jpeg_quality = 80;
+        cfg.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# my note"), "comment lost:\n{written}");
+        assert!(
+            written.contains("future-key = \"keep\""),
+            "unknown field dropped:\n{written}"
+        );
+        assert!(written.contains("jpeg-quality = 80"));
     }
 
     // ── sidebar-collapse-resize Task 001 ──────────────────────────
