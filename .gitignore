@@ -7,3 +7,5 @@ Cargo.lock.bak
 .idea/
 .DS_Store
 *.swp
+SPEC*.md
+/tasks
