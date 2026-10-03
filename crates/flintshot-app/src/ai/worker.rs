@@ -68,7 +68,10 @@ impl StopHandle {
         self.flag.store(true, Ordering::SeqCst);
     }
 
-    fn stopped(&self) -> bool {
+    /// Whether stop was signalled (observable state; the UI's Stop
+    /// pill wiring and tests use it).
+    #[must_use]
+    pub fn is_stopped(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
     }
 }

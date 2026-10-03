@@ -80,6 +80,9 @@ pub(crate) struct AiConversation {
     /// (submitted inside `panel::show`'s borrow; consumed right
     /// after via [`AiConversation::take_outbox`]).
     outbox: Option<String>,
+    /// The Stop pill's one-shot click flag (consumed by the page
+    /// right after the render, like the outbox).
+    stop_requested: bool,
     /// Whether an assistant response just landed (the arrival
     /// hairline's one-shot trigger; the first render of the fresh
     /// card consumes it).
@@ -159,6 +162,21 @@ impl AiConversation {
         self.push_error(message);
     }
 
+    /// Record the Stop pill's click: the page consumes it right
+    /// after the panel render and fires the bridge's stop wiring.
+    pub(crate) fn request_stop(&mut self) {
+        self.stop_requested = true;
+    }
+
+    /// Take the pending stop request, if any (one-shot handoff to
+    /// the bridge's `ai_stop`).
+    pub(crate) fn take_stop_request(&mut self) -> Option<bool> {
+        self.stop_requested.then(|| {
+            self.stop_requested = false;
+            true
+        })
+    }
+
     /// Append an error card and clear the pending flag — a surfaced
     /// failure also ends the wait.
     pub(crate) fn push_error(&mut self, message: impl Into<String>) {
@@ -189,6 +207,7 @@ impl AiConversation {
         self.streaming = None;
         self.thumb = None;
         self.outbox = None;
+        self.stop_requested = false;
         self.fresh_arrival = false;
     }
 
@@ -228,7 +247,42 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
     let fresh_arrival = conversation.take_fresh_arrival();
     let empty = conversation.is_empty() && !conversation.is_pending();
     let pending = conversation.is_pending() && !conversation.is_streaming();
-    let md_cache = &mut conversation.md_cache;
+
+    // The footer draws FIRST as a bottom panel so it reserves its
+    // exact height — the scroll area above can never push it (or
+    // the Stop pill) below the fold, which the old trailing layout
+    // allowed (a full-height auto_shrink scroll area starves later
+    // siblings).
+    egui::Panel::bottom(egui::Id::new("ai-footer"))
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| {
+            ui.add_space(theme::SPACE_SCALE[1]);
+            // While a stream is live the footer leads with the Stop
+            // pill (spec default: footer row): the gold hero grammar
+            // compressed, firing the page's stop wiring on click.
+            if conversation.is_streaming() && stop_pill(ui, egui::Id::new("ai-stop")) {
+                conversation.request_stop();
+            }
+            // The follow-up pill always renders (the tab's
+            // furniture); it's inert until a conversation exists and
+            // no request is pending — a follow-up with no thread has
+            // nowhere to go.
+            let inert = conversation.is_pending() || conversation.is_empty();
+            let mut draft = std::mem::take(&mut conversation.draft);
+            let (edit_response, send_clicked) =
+                follow_up_row(ui, egui::Id::new("ai-follow-up"), &mut draft, inert);
+            let enter_pressed =
+                edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (send_clicked || enter_pressed) && !draft.trim().is_empty() && !inert {
+                conversation.outbox = Some(draft.trim().to_string());
+                draft.clear();
+            }
+            if !edit_response.has_focus() && enter_pressed {
+                edit_response.request_focus();
+            }
+            conversation.draft = draft;
+        });
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -246,7 +300,13 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
                         // The arrival hairline: only the card a
                         // response just landed into animates.
                         let fresh = fresh_arrival && i + 1 == turns.len();
-                        assistant_card(ui, md_cache, egui::Id::new(("ai-arrival", i)), text, fresh);
+                        assistant_card(
+                            ui,
+                            &mut conversation.md_cache,
+                            egui::Id::new(("ai-arrival", i)),
+                            text,
+                            fresh,
+                        );
                     }
                     AiTurn::Error { message } => {
                         error_card(ui, egui::Id::new(("ai-turn", i)), message);
@@ -262,24 +322,6 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
                 pending_row(ui);
             }
         });
-
-    ui.add_space(theme::SPACE_SCALE[1]);
-    // The follow-up pill always renders (the tab's furniture); it's
-    // inert until a conversation exists and no request is pending —
-    // a follow-up with no thread has nowhere to go.
-    let inert = conversation.is_pending() || conversation.is_empty();
-    let mut draft = std::mem::take(&mut conversation.draft);
-    let (edit_response, send_clicked) =
-        follow_up_row(ui, egui::Id::new("ai-follow-up"), &mut draft, inert);
-    let enter_pressed = edit_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-    if (send_clicked || enter_pressed) && !draft.trim().is_empty() && !inert {
-        conversation.outbox = Some(draft.trim().to_string());
-        draft.clear();
-    }
-    if !edit_response.has_focus() && enter_pressed {
-        edit_response.request_focus();
-    }
-    conversation.draft = draft;
 }
 
 /// The initiating shot as a small paper-shadowed thumbnail.
@@ -479,6 +521,64 @@ fn pending_row(ui: &mut egui::Ui) {
                 .color(theme::palette::INK_SOFT),
         );
     });
+}
+
+/// The Stop pill: the gold hero grammar (ghost fill, gold key
+/// border, gold-deep on hover) compressed to a compact right-aligned
+/// pill with a painted stop square — a vector, never a font
+/// codepoint (the tofu ban). Returns whether it fired.
+fn stop_pill(ui: &mut egui::Ui, id: egui::Id) -> bool {
+    use crate::theme::palette as p;
+    let font = egui::FontId::proportional(theme::TYPE_SM);
+    let galley = ui
+        .painter()
+        .layout_no_wrap("Stop".to_owned(), font, p::CREAM_TEXT);
+    let glyph = 10.0;
+    let pad = 10.0;
+    let size = egui::vec2(pad + glyph + 6.0 + galley.size().x + pad, theme::CONTROL_H);
+    let row = ui.available_rect_before_wrap();
+    let rect = egui::Rect::from_min_size(egui::pos2(row.right() - size.x, row.top()), size);
+    let _ = ui.allocate_rect(rect, egui::Sense::hover());
+    let resp = ui
+        .interact(rect, id, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let border = if resp.hovered() {
+        p::GOLD_DEEP
+    } else {
+        p::GOLD
+    };
+    let fill = if resp.hovered() {
+        p::with_alpha(p::CREAM_TEXT, 36)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(theme::POD_RADIUS),
+        fill,
+        egui::Stroke::new(1.5, border),
+        egui::StrokeKind::Inside,
+    );
+    let square = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + pad + glyph / 2.0, rect.center().y),
+        egui::vec2(glyph, glyph),
+    );
+    ui.painter().rect(
+        square,
+        CornerRadius::same(2),
+        p::GOLD,
+        egui::Stroke::NONE,
+        egui::StrokeKind::Middle,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            square.right() + 6.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        p::CREAM_TEXT,
+    );
+    resp.clicked()
 }
 
 /// The follow-up pill: single-line input + send glyph. Disabled
@@ -910,5 +1010,98 @@ mod tests {
         conversation.reset();
         assert!(!conversation.is_streaming());
         assert_eq!(conversation.streaming_text(), None);
+    }
+
+    fn screen_with_click(at: egui::Pos2) -> egui::RawInput {
+        egui::RawInput {
+            time: Some(0.016),
+            events: vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(236.0, 600.0),
+            )),
+            ..egui::RawInput::default()
+        }
+    }
+
+    #[test]
+    fn stop_pill_registers_only_while_streaming_and_fires_once() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut conversation = AiConversation::default();
+        conversation.push_user("ocr it");
+        conversation.begin_pending();
+
+        // Not streaming yet: no Stop pill registers.
+        let _ = render_once(&ctx, &mut conversation);
+        assert!(
+            ctx.read_response(egui::Id::new("ai-stop")).is_none(),
+            "no Stop pill before the first delta"
+        );
+
+        conversation.push_delta("text");
+        let out = render_once(&ctx, &mut conversation);
+        let pill = ctx
+            .read_response(egui::Id::new("ai-stop"))
+            .expect("the Stop pill registers while streaming")
+            .rect;
+        assert!(
+            frame_texts(&out).iter().any(|t| t.contains("Stop")),
+            "the pill paints its label"
+        );
+        assert!(
+            conversation.take_stop_request().is_none(),
+            "no stop before the click"
+        );
+
+        // Click the pill's center: the stop request fires exactly once.
+        let _ = ctx.run_ui(screen_with_click(pill.center()), |ui| {
+            egui::Panel::right("test_ai_panel_streaming")
+                .resizable(false)
+                .exact_size(236.0)
+                .show(ui, |ui| show(ui, &mut conversation));
+        });
+        assert_eq!(conversation.take_stop_request(), Some(true));
+        assert_eq!(conversation.take_stop_request(), None, "one-shot");
+    }
+
+    #[test]
+    fn stop_pill_disappears_after_terminal_events() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+
+        let mut done = AiConversation::default();
+        done.push_delta("half");
+        done.finish_stream("whole");
+        let _ = render_once(&ctx, &mut done);
+        assert!(
+            ctx.read_response(egui::Id::new("ai-stop")).is_none(),
+            "gone after Done"
+        );
+
+        let mut failed = AiConversation::default();
+        failed.push_delta("half");
+        failed.fail_stream("boom");
+        let _ = render_once(&ctx, &mut failed);
+        assert!(
+            ctx.read_response(egui::Id::new("ai-stop")).is_none(),
+            "gone after Failed"
+        );
     }
 }

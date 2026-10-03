@@ -211,6 +211,13 @@ pub trait EditorPageBridge {
     /// [`Self::poll_ai_test_result`]. Default no-op.
     fn ai_test_connection(&mut self, _provider: &str, _model: &str, _base_url: &str) {}
 
+    /// The AI tab's Stop pill fired: abort the live stream (the
+    /// host stops the worker; its partial finalizes as the response
+    /// card and Run re-arms). Default no-op (headless tests and
+    /// worker shells without a live worker): stopping without a
+    /// bridge is a no-op, never a dead render.
+    fn ai_stop(&mut self) {}
+
     /// Take an arrived test-connection result, copy-mapped
     /// (`Ok` = pass line, `Err` = the error's next-step copy).
     /// Default: always `None`.

@@ -2132,6 +2132,11 @@ impl EditorApp {
                 }
             }
         }
+        if self.ai.take_stop_request().is_some() {
+            if let Some(bridge) = self.page.clone() {
+                bridge.borrow_mut().ai_stop();
+            }
+        }
         if let Some(text) = self.ai.take_outbox() {
             self.handle_ai_follow_up(&text);
         }

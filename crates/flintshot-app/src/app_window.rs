@@ -2198,28 +2198,42 @@ impl EditorPageBridge for PageBridge {
     }
 
     fn poll_ai_event(&mut self) -> Option<flintshot_editor_egui::AiEvent> {
-        // Drain arrived worker results into the queue, then hand
-        // back the oldest event.
+        // Drain arrived worker events into the queue, then hand
+        // back the oldest. The protocol's single terminal clears
+        // the stored receiver + handle: the run is over, a new Run
+        // starts clean.
+        let mut terminal_seen = false;
         if let Some(rx) = self.ai.rx.as_ref() {
             while let Ok(result) = rx.try_recv() {
-                let event = match result {
-                    // Deltas hold no queue event yet — Task 006 wires
-                    // AiEvent::Delta so they stream into the panel.
-                    // The authoritative full text rides Done, so
-                    // dropping them here keeps today's behavior
-                    // exact.
-                    crate::ai::worker::ChatWorkerEvent::Delta(_) => continue,
+                match result {
+                    crate::ai::worker::ChatWorkerEvent::Delta(text) => {
+                        self.ai
+                            .queue
+                            .push_back(flintshot_editor_egui::AiEvent::Delta(text));
+                    }
                     crate::ai::worker::ChatWorkerEvent::Done(text) => {
-                        flintshot_editor_egui::AiEvent::Response(text)
+                        self.ai
+                            .queue
+                            .push_back(flintshot_editor_egui::AiEvent::Response(text));
+                        terminal_seen = true;
                     }
                     crate::ai::worker::ChatWorkerEvent::Failed(err) => {
-                        flintshot_editor_egui::AiEvent::Failed(crate::ai::worker::ai_error_copy(
-                            &err,
-                        ))
+                        self.ai
+                            .queue
+                            .push_back(flintshot_editor_egui::AiEvent::Failed(
+                                crate::ai::worker::ai_error_copy(&err),
+                            ));
+                        terminal_seen = true;
                     }
-                };
-                self.ai.queue.push_back(event);
+                }
+                if terminal_seen {
+                    break;
+                }
             }
+        }
+        if terminal_seen {
+            self.ai.rx = None;
+            self.ai.stop = None;
         }
         self.ai.queue.pop_front()
     }
@@ -4320,5 +4334,109 @@ mod tests {
         // compositor-side disappearance. If either constant moves,
         // re-derive the other.
         assert_eq!(HIDE_GRACE_MS, 250);
+    }
+
+    // --- Task 007: bridge mapping + cancel ---
+
+    /// A bridge with a synthetic live worker: `events` pre-seeded on
+    /// its channel, plus an observable stop handle.
+    fn bridge_with_worker_channel(
+        events: Vec<crate::ai::worker::ChatWorkerEvent>,
+    ) -> (PageBridge, crate::ai::worker::StopHandle) {
+        let (shared, _dir) = shared_with_session();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for event in events {
+            tx.send(event).expect("seed event");
+        }
+        drop(tx);
+        let stop = crate::ai::worker::StopHandle::new();
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::new(shared),
+            ai: AiHost {
+                rx: Some(rx),
+                stop: Some(stop.clone()),
+                ..AiHost::default()
+            },
+        };
+        let _ = &mut bridge;
+        (bridge, stop)
+    }
+
+    #[test]
+    fn poll_ai_event_maps_all_three_event_kinds_in_order() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (mut bridge, _observed) = bridge_with_worker_channel(vec![
+            crate::ai::worker::ChatWorkerEvent::Delta("Hel".into()),
+            crate::ai::worker::ChatWorkerEvent::Delta("lo".into()),
+            crate::ai::worker::ChatWorkerEvent::Done("Hello".into()),
+        ]);
+        assert_eq!(
+            bridge.poll_ai_event(),
+            Some(flintshot_editor_egui::AiEvent::Delta("Hel".into()))
+        );
+        assert_eq!(
+            bridge.poll_ai_event(),
+            Some(flintshot_editor_egui::AiEvent::Delta("lo".into()))
+        );
+        assert_eq!(
+            bridge.poll_ai_event(),
+            Some(flintshot_editor_egui::AiEvent::Response("Hello".into()))
+        );
+        assert!(bridge.poll_ai_event().is_none(), "the queue drained");
+    }
+
+    #[test]
+    fn terminal_event_clears_the_stored_handle() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (mut bridge, observed) =
+            bridge_with_worker_channel(vec![crate::ai::worker::ChatWorkerEvent::Failed(
+                flintshot_core::AiError::Auth("bad key".into()),
+            )]);
+        let event = bridge.poll_ai_event().expect("the failure maps");
+        match event {
+            flintshot_editor_egui::AiEvent::Failed(copy) => {
+                assert!(copy.contains("key"), "actionable copy: {copy}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(
+            bridge.ai.rx.is_none(),
+            "the terminal clears the stored receiver"
+        );
+        assert!(
+            bridge.ai.stop.is_none() && !observed.is_stopped(),
+            "the terminal clears the stored handle without signalling stop"
+        );
+    }
+
+    #[test]
+    fn new_run_stops_a_prior_live_worker_before_spawning() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (mut bridge, observed) =
+            bridge_with_worker_channel(vec![crate::ai::worker::ChatWorkerEvent::Delta(
+                "par".into(),
+            )]);
+        assert!(
+            !observed.is_stopped(),
+            "precondition: the prior worker is live"
+        );
+        // Default config is unconfigured: the new run fails
+        // immediately — but only after the cancel-then-spawn path
+        // stopped the prior worker and dropped its receiver.
+        bridge.ai_request(vec![flintshot_core::ChatMessage::User {
+            content: vec![flintshot_core::text_part("again")],
+        }]);
+        assert!(
+            observed.is_stopped(),
+            "a new Run signals stop on the prior worker"
+        );
+        let event = bridge.poll_ai_event().expect("the new run answers");
+        assert!(
+            matches!(event, flintshot_editor_egui::AiEvent::Failed(_)),
+            "unconfigured copy: {event:?}"
+        );
     }
 }
