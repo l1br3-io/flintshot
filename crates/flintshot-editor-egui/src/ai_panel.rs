@@ -159,6 +159,14 @@ impl AiConversation {
     }
 }
 
+/// The AI tab's empty-state copy. Pure (the `panel::tool_hint`
+/// pattern) so a test can pin it: the entry points it names must
+/// exist — the rail spark chip is retired, the topbar AI hero and
+/// `I` are the ways in.
+fn empty_hint() -> &'static str {
+    "Nothing asked yet — press AI in the topbar or hit I"
+}
+
 /// Render the AI tab body. Submitted follow-ups land in the
 /// conversation's outbox ([`AiConversation::take_outbox`]) for the
 /// page's send wiring (Task 007) — the request itself is not this
@@ -174,7 +182,7 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if empty {
-                crate::panel::hint(ui, "Nothing asked yet — press the spark in the rail");
+                crate::panel::hint(ui, empty_hint());
                 return;
             }
             if let Some(thumb) = thumb.as_ref() {
@@ -432,6 +440,22 @@ fn follow_up_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The empty-state copy must name entry points that exist: the
+    /// rail's spark chip is retired — the topbar AI hero and the
+    /// `I` shortcut are the ways in.
+    #[test]
+    fn empty_state_copy_names_live_entry_points() {
+        let copy = empty_hint();
+        assert!(
+            copy.contains("topbar") && copy.contains('I'),
+            "names the AI hero and the shortcut: {copy}"
+        );
+        assert!(
+            !copy.to_ascii_lowercase().contains("rail"),
+            "the retired rail chip must not be named: {copy}"
+        );
+    }
 
     #[test]
     fn conversation_starts_empty_and_not_pending() {
