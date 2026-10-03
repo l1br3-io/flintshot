@@ -132,7 +132,7 @@ msrv:
 # Build the opt-in COSMIC applet. Needs system deps; see AGENTS.md.
 # On Debian/Ubuntu: sudo apt-get install -y --no-install-recommends \
 #   cmake libxkbcommon-dev libfontconfig-dev libfreetype6-dev \
-#   libglib2.0-dev libgfxbuffer-dev pkg-config
+#   libglib2.0-dev pkg-config
 cosmic:
     cargo build -q -p flintshot-cosmic
 

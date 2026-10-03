@@ -119,7 +119,6 @@ jobs:
             libfontconfig-dev \
             libfreetype6-dev \
             libglib2.0-dev \
-            libgfxbuffer-dev \
             ${{ env.XCAP_LINUX_DEPS }}
       - name: Build the cosmic applet crate
         run: cargo build -p flintshot-cosmic
