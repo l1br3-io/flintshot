@@ -18,6 +18,45 @@ Categories used below:
 
 ## [Unreleased]
 
+### Fixed
+
+- **AI keys never reached the OS keyring** (and vanished on every
+  window close). The `keyring` dependency declared only
+  `crypto-rust` — a crypto backend, not a store — so keyring v3
+  silently fell back to an in-process mock store. Saving a key
+  appeared to work (the settings page showed "Key saved"), but
+  nothing persisted and nothing touched the secret service;
+  FlintShot closes its editor window per capture, so keys were
+  effectively never stored. Test connection then probed keyless
+  against key-requiring endpoints and surfaced "The provider
+  rejected the key". The workspace now enables real stores
+  (`sync-secret-service` on Linux with the pure-Rust crypto
+  backend, `apple-native`/`windows-native` elsewhere), guarded by
+  a regression test that fails if keyring falls back to its mock.
+- **AI settings never persisted.** The config save path merged
+  `[ui]`, `[capture]`, `[hotkeys]`, `[upload]`, and `[output]` but
+  dropped `[ai]` — provider, model, and base-URL were lost on every
+  save once a config file existed, so the AI page started blank on
+  each launch. The `[ai]` section now merges with the same
+  comment-preserving semantics as the other sections.
+- **A corrupted `config.toml` locked the app out of its own
+  settings.** Duplicate keys (e.g. from an older write) made the
+  strict loader reject the file on every launch (callers fell back
+  to defaults) while every save failed with only a log warn —
+  freezing the broken file in place. Saving now detects an
+  unloadable file, backs it up beside the config as
+  `config.toml.bak`, and rewrites a clean, loadable one.
+- **A failed keyring write no longer reports "Key saved."** The
+  key-status line optimistically claimed success before the write
+  ran; it now renders the bridge's actual result, with a dedicated
+  "Couldn't store the key" line when the secret store rejects the
+  write.
+- **Auth and rate-limit failures now carry the provider's own
+  message** after the actionable headline ("The provider rejected
+  the key — … Provider said: …"), so an invalid key, a missing
+  model grant, and a keyless probe are distinguishable from the AI
+  tab alone.
+
 ### Added
 
 - **Live-streamed Ask-the-shot responses** (effort `ai-streaming`).

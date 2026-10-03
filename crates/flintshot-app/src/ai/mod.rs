@@ -563,6 +563,39 @@ mod tests {
         );
     }
 
+    /// Full round-trip through the *real* OS secret store
+    /// (set → get → delete), proving the store backend works at
+    /// runtime — not just that a non-mock one is compiled in.
+    /// Ignored by default because it touches the user's keyring;
+    /// run explicitly on a desktop session:
+    /// `cargo test -p flintshot-app -- --ignored keyring_round_trips`
+    #[test]
+    #[ignore = "touches the real OS keyring; run on a desktop session"]
+    fn keyring_round_trips_through_the_real_store() {
+        let entry = super::ai_key_entry("round-trip-check").expect("entry constructs");
+        let _ = entry.delete_credential(); // clean slate, absent is fine
+
+        entry
+            .set_password("probe-value")
+            .expect("the real store accepted the write");
+        assert_eq!(
+            entry
+                .get_password()
+                .expect("the real store served the read")
+                .as_str(),
+            "probe-value",
+            "round-trip must return the stored value"
+        );
+
+        entry
+            .delete_credential()
+            .expect("cleanup deletes the entry");
+        assert!(
+            entry.get_password().is_err(),
+            "the entry must be gone after cleanup"
+        );
+    }
+
     #[tokio::test]
     async fn keyless_stream_sends_no_authorization_header() {
         let mut server = mockito::Server::new_async().await;
