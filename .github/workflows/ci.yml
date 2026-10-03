@@ -12,12 +12,14 @@ env:
   FLINTSHOT_MSRV: "1.95"
   # xcap (screen capture) needs these on Linux at build time — even for
   # `cargo check` or `cargo clippy`. `libgbm-dev` is not in xcap's own
-  # README but is required at link time. Mirrors the apt line in AGENTS.md
+  # README but is required at link time. `libxkbcommon-dev` serves
+  # smithay-client-toolkit's build script (the libcosmic tree, which the
+  # --workspace jobs compile). Mirrors the apt line in AGENTS.md
   # so the install step below stays a single env reference.
   XCAP_LINUX_DEPS: >-
     pkg-config libclang-dev libxcb1-dev libxrandr-dev
     libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev
-    libgbm-dev
+    libgbm-dev libxkbcommon-dev
 
 jobs:
   lint:
