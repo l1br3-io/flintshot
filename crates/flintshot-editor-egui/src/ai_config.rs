@@ -106,6 +106,9 @@ pub(crate) struct AiConfigApp {
     /// Whether the current provider has a stored key (bridge-served;
     /// tracks `key_saved_for` so a provider switch re-targets it).
     key_saved: bool,
+    /// Whether the last keyring write for the current provider
+    /// failed (bridge-served; shown instead of a phantom saved copy).
+    key_store_failed: bool,
     /// The provider id `key_saved` answers for.
     key_saved_for: String,
     /// The Test connection row's status.
@@ -132,6 +135,7 @@ impl AiConfigApp {
             dirty_since: None,
             key_draft: String::new(),
             key_saved: false,
+            key_store_failed: false,
             key_saved_for,
             test: None,
             actions: Vec::new(),
@@ -205,6 +209,15 @@ impl AiConfigApp {
     pub(crate) fn set_key_saved(&mut self, provider: &str, saved: bool) {
         self.key_saved_for = provider.to_string();
         self.key_saved = saved;
+        self.key_store_failed = false;
+    }
+
+    /// The bridge's keyring write for `provider` failed: surface the
+    /// failure instead of a phantom "saved" copy.
+    pub(crate) fn set_key_store_failed(&mut self, provider: &str) {
+        self.key_saved_for = provider.to_string();
+        self.key_saved = false;
+        self.key_store_failed = true;
     }
 
     /// The bridge answered the test connection.
@@ -227,6 +240,8 @@ impl AiConfigApp {
     pub(crate) fn key_status_text(&self) -> &'static str {
         if self.key_status_stale() {
             "Checking your secret store…"
+        } else if self.key_store_failed {
+            "Couldn't store the key — check your secret store is unlocked, then retry."
         } else if self.key_saved {
             "Key saved in your system's secret store."
         } else {
@@ -276,7 +291,10 @@ impl AiConfigApp {
     }
 
     /// Commit the Replace-key field: queue the keyring write and
-    /// clear the draft (a stored key never renders again).
+    /// clear the draft (a stored key never renders again). The
+    /// status copy waits for the bridge's answer — the router
+    /// services the write the same frame and reports success or
+    /// failure; the page never claims "saved" on its own.
     pub(crate) fn commit_key_draft(&mut self) {
         let key = self.key_draft.trim().to_string();
         if key.is_empty() {
@@ -287,11 +305,6 @@ impl AiConfigApp {
             key,
         });
         self.key_draft.clear();
-        // Optimistic: the write services on the next action drain;
-        // a failure status would need the bridge's error surface
-        // (logged app-side, the keyring is local-trusted).
-        self.key_saved = true;
-        self.key_saved_for = self.config.ai.provider.clone();
     }
 
     /// Fire Test connection (only meaningful when armed).
@@ -976,13 +989,48 @@ mod tests {
             "the keyring write queues with the current provider, trimmed"
         );
         assert!(page.key_draft.is_empty(), "the draft clears on commit");
+        // The commit alone claims nothing — the bridge's answer (same
+        // frame, router-side) decides the status. Regression: the
+        // page used to optimistically claim "Key saved" even when the
+        // keyring write failed, sending the user chasing a phantom
+        // bad key.
+        assert_eq!(
+            page.key_status_text(),
+            "No key stored yet — paste one below for this provider.",
+            "no optimistic saved copy before the bridge answers"
+        );
+        page.set_key_saved("openai", true);
         assert_eq!(
             page.key_status_text(),
             "Key saved in your system's secret store.",
-            "optimistic status after commit"
+            "the bridge's confirmation lands"
         );
         // The status copy surface never contains key material.
         assert!(!page.key_status_text().contains("sk-secret"));
+    }
+
+    #[test]
+    fn key_store_failure_surfaces_instead_of_a_phantom_saved_copy() {
+        let mut page = AiConfigApp::new(Config::default());
+        page.key_draft = "sk-secret-123".into();
+        page.commit_key_draft();
+        let _ = page.drain_action();
+
+        // The bridge answers: the store rejected the write.
+        page.set_key_store_failed("openai");
+        assert_eq!(
+            page.key_status_text(),
+            "Couldn't store the key — check your secret store is unlocked, then retry.",
+            "a failed write must be visible, never 'Key saved'"
+        );
+        assert!(!page.key_status_text().contains("sk-secret"));
+
+        // A later successful save clears the failure.
+        page.set_key_saved("openai", true);
+        assert_eq!(
+            page.key_status_text(),
+            "Key saved in your system's secret store."
+        );
     }
 
     #[test]

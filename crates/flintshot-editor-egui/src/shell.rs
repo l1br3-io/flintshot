@@ -202,8 +202,12 @@ pub trait EditorPageBridge {
 
     /// Store a provider's API key (the AI settings page's
     /// Replace-key commit — immediate, never on the config debounce).
-    /// Default no-op.
-    fn ai_save_key(&mut self, _provider: &str, _key: &str) {}
+    /// Returns whether the keyring accepted the write; the page
+    /// shows the failure instead of a phantom "saved" copy. Default
+    /// no-op (nothing stored).
+    fn ai_save_key(&mut self, _provider: &str, _key: &str) -> bool {
+        false
+    }
 
     /// Fire a test connection (a vision probe: tiny inline PNG +
     /// one-word prompt) against the AI settings page's working

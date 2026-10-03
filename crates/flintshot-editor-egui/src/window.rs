@@ -784,7 +784,13 @@ impl WindowApp {
                     for action in actions {
                         match action {
                             crate::ai_config::AiConfigAction::SaveKey { provider, key } => {
-                                self.page_bridge.borrow_mut().ai_save_key(&provider, &key);
+                                let stored =
+                                    self.page_bridge.borrow_mut().ai_save_key(&provider, &key);
+                                if stored {
+                                    page.set_key_saved(&provider, true);
+                                } else {
+                                    page.set_key_store_failed(&provider);
+                                }
                             }
                             crate::ai_config::AiConfigAction::ProviderChanged { provider } => {
                                 let saved = self.page_bridge.borrow_mut().ai_key_saved(&provider);
@@ -1372,10 +1378,16 @@ mod tests {
                 .unwrap_or(false)
         }
 
-        fn ai_save_key(&mut self, provider: &str, key: &str) {
+        fn ai_save_key(&mut self, provider: &str, key: &str) -> bool {
             self.saved_keys
                 .borrow_mut()
                 .push((provider.to_string(), key.to_string()));
+            // The stub "stores" into its map: answer the follow-up
+            // key-status query truthfully.
+            self.key_saved_answers
+                .borrow_mut()
+                .insert(provider.to_string(), true);
+            true
         }
 
         fn ai_test_connection(&mut self, provider: &str, model: &str, base_url: &str) {

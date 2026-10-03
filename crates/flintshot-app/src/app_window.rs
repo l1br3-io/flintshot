@@ -2255,11 +2255,17 @@ impl EditorPageBridge for PageBridge {
         crate::ai::ai_key_entry(provider).is_some_and(|entry| entry.get_password().is_ok())
     }
 
-    fn ai_save_key(&mut self, provider: &str, key: &str) {
+    fn ai_save_key(&mut self, provider: &str, key: &str) -> bool {
         // Immediate keyring write (never on the config debounce; the
-        // key never logs).
-        if let Err(e) = crate::ai::store_ai_key(provider, key) {
-            tracing::warn!("storing the {provider} API key: {e}");
+        // key never logs). The result drives the page's key-status
+        // copy — a failed write must be visible, never reported as
+        // saved.
+        match crate::ai::store_ai_key(provider, key) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("storing the {provider} API key: {e}");
+                false
+            }
         }
     }
 
