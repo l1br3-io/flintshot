@@ -377,6 +377,70 @@ impl ProviderPreset {
     }
 }
 
+/// The four built-in starter transforms — code, not data.
+///
+/// They live here (never in `ai-transforms.toml`) so a fresh profile
+/// has working one-press transforms, they can't be deleted by a
+/// store edit, and using one mutates nothing on disk: the MRU rides
+/// `[ai] recent-transforms` instead. Ids are `builtin-*` and are
+/// API-stable — the dialog preselect and the MRU key persist them.
+#[must_use]
+pub fn builtin_transforms() -> &'static [AiTransform] {
+    static BUILTINS: std::sync::OnceLock<Vec<AiTransform>> = std::sync::OnceLock::new();
+    BUILTINS.get_or_init(|| {
+        let starter = |id: &str, name: &str, prompt: &str| AiTransform {
+            id: id.to_string(),
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            builtin: true,
+        };
+        vec![
+            starter(
+                "builtin-extract-text",
+                "Extract text",
+                "Extract the text inside this image, preserving its layout.",
+            ),
+            starter(
+                "builtin-summarize",
+                "Summarize",
+                "Summarize this screenshot in a few bullet points.",
+            ),
+            starter(
+                "builtin-explain-error",
+                "Explain this error",
+                "Explain the error in this screenshot: what caused it and how to fix it.",
+            ),
+            starter(
+                "builtin-draft-reply",
+                "Draft a reply",
+                "Draft a short reply to the message conversation in this screenshot.",
+            ),
+        ]
+    })
+}
+
+/// Merge user transforms + built-ins MRU-first for the dialog list.
+///
+/// Order: ids from `recent_transforms` that still exist (recent
+/// order, stale ids filtered out), then the remaining user
+/// transforms (store order), then the remaining built-ins.
+#[must_use]
+pub fn merge_transforms_mru_first(user: &[AiTransform], recent_ids: &[String]) -> Vec<AiTransform> {
+    let mut remainder: Vec<AiTransform> = user
+        .iter()
+        .chain(builtin_transforms().iter())
+        .cloned()
+        .collect();
+    let mut ordered = Vec::with_capacity(remainder.len());
+    for id in recent_ids {
+        if let Some(position) = remainder.iter().position(|t| &t.id == id) {
+            ordered.push(remainder.remove(position));
+        }
+    }
+    ordered.append(&mut remainder);
+    ordered
+}
+
 /// Encode PNG bytes as a `data:image/png;base64,…` URL for the
 /// `image_url` content part.
 #[must_use]
@@ -658,6 +722,60 @@ mod tests {
     fn png_data_url_prefixes_and_encodes() {
         // base64 of b"hello" is aGVsbG8=
         assert_eq!(png_data_url(b"hello"), "data:image/png;base64,aGVsbG8=");
+    }
+
+    #[test]
+    fn builtin_transforms_are_four_with_stable_ids_and_flag() {
+        let builtins = builtin_transforms();
+        let ids: Vec<&str> = builtins.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "builtin-extract-text",
+                "builtin-summarize",
+                "builtin-explain-error",
+                "builtin-draft-reply",
+            ],
+            "ids are API surface — stable across releases"
+        );
+        assert!(
+            builtins.iter().all(|t| t.builtin),
+            "every starter carries the builtin flag"
+        );
+        assert!(builtins
+            .iter()
+            .all(|t| !t.name.is_empty() && !t.prompt.is_empty()));
+    }
+
+    #[test]
+    fn merge_orders_mru_first_then_user_then_builtins_and_filters_stale() {
+        let user = |id: &str, name: &str| AiTransform {
+            id: id.into(),
+            name: name.into(),
+            prompt: format!("prompt for {name}"),
+            builtin: false,
+        };
+        let merged = merge_transforms_mru_first(
+            &[user("u1", "One"), user("u2", "Two")],
+            &[
+                "u2".into(),
+                "builtin-extract-text".into(),
+                "gone-with-the-wind".into(),
+            ],
+        );
+        let ids: Vec<&str> = merged.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "u2",                   // MRU head, most recent
+                "builtin-extract-text", // MRU second
+                "u1",                   // remaining user (store order)
+                "builtin-summarize",    // remaining built-ins
+                "builtin-explain-error",
+                "builtin-draft-reply",
+            ],
+            "stale MRU id ('gone-with-the-wind') is filtered out"
+        );
     }
 
     #[test]

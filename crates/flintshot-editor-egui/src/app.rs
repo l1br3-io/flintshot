@@ -1490,8 +1490,7 @@ impl EditorApp {
         if ctx.input(|i| i.key_pressed(egui::Key::I))
             && !(modifiers.ctrl || modifiers.shift || modifiers.alt || modifiers.super_key)
         {
-            self.refresh_ai_transforms();
-            self.ai_dialog.open();
+            self.open_ai_dialog();
             return true;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.state.selected.is_empty() {
@@ -1879,8 +1878,7 @@ impl EditorApp {
             // the Ask-the-shot dialog — the same path the `I`
             // shortcut takes.
             TopbarAction::Ai => {
-                self.refresh_ai_transforms();
-                self.ai_dialog.open();
+                self.open_ai_dialog();
             }
             // The overflow's AI settings row never renders on worker
             // topbars (Enable::WORKER omits the bit), so this arm is
@@ -2112,6 +2110,19 @@ impl EditorApp {
         self.ai_transforms = bridge.borrow_mut().ai_transforms();
     }
 
+    /// Open the transform dialog: refresh the merged list, then
+    /// preselect the MRU head — but only when it still exists in the
+    /// list (a deleted transform's id must not arm a dead Run).
+    fn open_ai_dialog(&mut self) {
+        self.refresh_ai_transforms();
+        let preselect = self
+            .page
+            .clone()
+            .and_then(|bridge| bridge.borrow_mut().ai_last_transform_id())
+            .filter(|id| self.ai_transforms.iter().any(|t| &t.id == id));
+        self.ai_dialog.open(preselect.as_deref());
+    }
+
     /// Consume the Ask-the-shot surface's outbound actions: the
     /// dialog's typed action (Run fires; Configure routes in Task
     /// 009) and the follow-up outbox (submitted inside
@@ -2119,7 +2130,18 @@ impl EditorApp {
     fn handle_ai_actions(&mut self, ctx: &Context) {
         if let Some(action) = self.ai_pending_action.take() {
             match action {
-                crate::ai_dialog::AiDialogAction::Run { prompt } => {
+                crate::ai_dialog::AiDialogAction::Run {
+                    prompt,
+                    transform_id,
+                } => {
+                    // A saved/built-in run records the use (the MRU
+                    // the next open preselects); custom prompts
+                    // carry no id.
+                    if let Some(id) = transform_id.as_deref() {
+                        if let Some(bridge) = self.page.clone() {
+                            bridge.borrow_mut().ai_note_transform_used(id);
+                        }
+                    }
                     self.handle_ai_run(ctx, &prompt);
                 }
                 // The Configure link routes the window to the AI
@@ -4742,6 +4764,7 @@ mod tests {
                 id: "t9".into(),
                 name: "Nine".into(),
                 prompt: "p".into(),
+                builtin: false,
             }]
         }
     }

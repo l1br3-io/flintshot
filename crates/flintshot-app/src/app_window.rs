@@ -2082,7 +2082,7 @@ struct PageBridge {
     ai: AiHost,
 }
 
-/// The bridge's AI plumbing. One request at a time: a second request
+/// The bridge's AI plumbing. One stream at a time: a second request
 /// while one is pending replaces the receiver (the old worker's send
 /// fails into the void and its thread exits — the page only fires a
 /// second request after a turn landed, so this is defensive).
@@ -2215,6 +2215,16 @@ impl EditorPageBridge for PageBridge {
         }
     }
 
+    fn ai_stop(&mut self) {
+        // Drop-to-cancel (Task 002): releasing the receiver makes
+        // the worker's next send fail; it drops the stream and the
+        // connection tears down. Buffered events die here too — a
+        // stale token appending to a conversation the page already
+        // settled would corrupt the turn.
+        self.ai.rx = None;
+        self.ai.queue.clear();
+    }
+
     fn poll_ai_event(&mut self) -> Option<flintshot_editor_egui::AiEvent> {
         // Drain arrived worker events into the queue, then hand
         // back the oldest. The protocol's single terminal clears
@@ -2257,7 +2267,33 @@ impl EditorPageBridge for PageBridge {
     }
 
     fn ai_transforms(&mut self) -> Vec<flintshot_core::AiTransform> {
-        flintshot_core::TransformStore::load().all().to_vec()
+        // Built-ins + user store, MRU-first (the `[ai]
+        // recent-transforms` order; stale ids filtered by the merge).
+        let user = flintshot_core::TransformStore::load();
+        let recent = flintshot_core::Config::load()
+            .unwrap_or_default()
+            .ai
+            .recent_transforms;
+        flintshot_core::merge_transforms_mru_first(user.all(), &recent)
+    }
+
+    fn ai_last_transform_id(&mut self) -> Option<String> {
+        flintshot_core::Config::load()
+            .unwrap_or_default()
+            .ai
+            .recent_transforms
+            .into_iter()
+            .next()
+    }
+
+    fn ai_note_transform_used(&mut self, id: &str) {
+        // MRU persist: load → note → save (one Run, one write; a
+        // failure only costs the preselect, so it warns, not fails).
+        let mut config = flintshot_core::Config::load().unwrap_or_default();
+        config.ai.note_recent_transform(id);
+        if let Err(e) = config.save() {
+            tracing::warn!(error = %e, "could not persist recent-transforms");
+        }
     }
 
     fn ai_configured(&mut self) -> bool {
@@ -4235,6 +4271,34 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         assert!(bridge.poll_ai_event().is_none(), "exactly one event");
+    }
+
+    /// Stop drops the receiver (drop-to-cancel) and kills any events
+    /// still buffered behind it — stale deltas must not append to a
+    /// conversation the page already settled.
+    #[test]
+    fn ai_stop_drops_the_receiver_and_clears_buffered_events() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (shared, _dir) = shared_with_session();
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::new(shared),
+            ai: AiHost::default(),
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::ai::worker::ChatWorkerEvent::Delta("stale".into()))
+            .expect("send delta");
+        bridge.ai.rx = Some(rx);
+        bridge.ai_stop();
+        assert!(
+            bridge.ai.rx.is_none(),
+            "drop-to-cancel: the receiver is gone"
+        );
+        assert!(
+            bridge.poll_ai_event().is_none(),
+            "buffered events die with the stop"
+        );
     }
 
     /// Test connection rides the worker pipeline (a mock endpoint

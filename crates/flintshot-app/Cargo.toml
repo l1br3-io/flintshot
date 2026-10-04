@@ -94,6 +94,7 @@ egui = ["dep:flintshot-editor-egui"]
 tray = ["dep:tray-icon", "dep:gtk", "dep:zbus"]
 
 [dependencies]
+eventsource-stream = "0.2"
 flintshot-core = { workspace = true }
 flintshot-editor-egui = { workspace = true, optional = true }
 arboard = { workspace = true }

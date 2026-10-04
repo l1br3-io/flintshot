@@ -183,6 +183,17 @@ pub trait EditorPageBridge {
         Vec::new()
     }
 
+    /// The id of the most recently used transform (the `[ai]
+    /// recent-transforms` head — the dialog's preselect). Default:
+    /// `None` (no MRU yet).
+    fn ai_last_transform_id(&mut self) -> Option<String> {
+        None
+    }
+
+    /// Record a transform use: persist it at the MRU head (the
+    /// dialog's preselect + ordering). Default no-op.
+    fn ai_note_transform_used(&mut self, _id: &str) {}
+
     /// Whether a provider + model + key are configured (the dialog's
     /// Run vs Configure AI… gate). Default: unconfigured.
     fn ai_configured(&mut self) -> bool {
