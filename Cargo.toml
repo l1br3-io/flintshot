@@ -26,7 +26,7 @@ flintshot-editor-egui = { path = "crates/flintshot-editor-egui", version = "0.0.
 # XWayland's clipboard bridge, whose Wayland→X11 sync is
 # lazy/focus-gated, so clipboard access fails nondeterministically
 # (bit the portal `clipboard:///` read-back; see
-# docs/specs/portal-clipboard-uri/). The feature adds wl-clipboard-rs
+# git log --grep='portal-clipboard-uri'). The feature adds wl-clipboard-rs
 # (native zwlr_data_control_v1, pure Rust); X11 sessions still take
 # the x11rb path. `image-data` is declared here too: the app's
 # clipboard code uses `arboard::ImageData` unconditionally, so

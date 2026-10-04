@@ -1,8 +1,8 @@
 //! The app window (`flintshot app`): a single window routing between
 //! a three-button home page and the editor page (single-window spec,
-//! `docs/specs/single-window/`).
+//! `git log --grep='single-window'`).
 //!
-//! Process model (spec `docs/specs/app-window/`): the window is an
+//! Process model (spec `git log --grep='app-window'`): the window is an
 //! IPC **client** — same stance as the tray helper (ADR-0042). A
 //! background **pump thread** owns a current-thread tokio runtime,
 //! holds the daemon subscription, delegates capture requests, and

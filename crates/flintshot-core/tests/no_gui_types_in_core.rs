@@ -16,7 +16,7 @@
 //! must not spread beyond that module — everywhere else in core, `use
 //! zbus` fails exactly like the global bans. `ashpd` stays banned
 //! everywhere (the portal-heavy app crate owns it); see
-//! `docs/specs/native-capture-backends/`.
+//! `git log --grep='native-capture-backends'`.
 
 use std::path::{Path, PathBuf};
 

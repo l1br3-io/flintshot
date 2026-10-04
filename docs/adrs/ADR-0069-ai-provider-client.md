@@ -1,7 +1,7 @@
 # ADR-0069: AI provider client — one OpenAI-compatible wire format, trait in core, reqwest in app
 
 **Context.** The Ask-the-shot effort (spec
-`docs/specs/ai-transforms/`) needs to send the flattened canvas to
+`git log --grep='ai-transforms'`) needs to send the flattened canvas to
 a vision-capable chat model and render the markdown answer in the
 editor. The provider landscape at decision time: OpenAI and xAI
 speak OpenAI chat-completions natively; Gemini exposes an

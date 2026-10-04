@@ -69,5 +69,5 @@ Ubuntu 22.04 desktops are out of scope for prebuilt binaries.
 AppImage runtime relies on the host's pipewire. First release
 (`v0.1.0`) is the end-to-end acceptance run (spec checklist).
 
-See also: `docs/specs/release-pipeline/` (spec + tasks with the
+See also: `git log --grep='release-pipeline'` (spec + tasks with the
 verification evidence), `justfile` (`dist-*`, `release*` recipes).

@@ -547,7 +547,7 @@ Categories used below:
   row (elapsed-timestamped, clickable like every other edit).
   (Pinned by the `resize*` unit tests across `flintshot-core` and
   `flintshot-editor-egui`; effort spec:
-  `docs/specs/editor-resize-image/`.)
+  `git log --grep='editor-resize-image'`.)
 
 - **Text selection & highlight while editing** (effort
   `text-selection-highlight`). In-edit text now behaves like real
@@ -748,13 +748,13 @@ Categories used below:
 
 ### Added
 
-- **Adjustable Number-bubble size** (spec `docs/specs/number-tool/`):
+- **Adjustable Number-bubble size** (spec `git log --grep='number-tool'`):
   the properties panel's Number section gains a **Size** stepper
   (16–96 px, default 28) beside "Start at", bound to
   `EditorState::number_diameter` and clamped to core's new pub
   `NUMBER_MIN/MAX_DIAMETER`. Session tool state — the next placement
   picks it up, committed bubbles never change, no history entries.
-- **Five-zone UI + settings route** (spec `docs/specs/ux-redesign/`):
+- **Five-zone UI + settings route** (spec `git log --grep='ux-redesign'`):
   the single window re-laid out around the mockup's five zones —
   44 px topbar (flame brand, breadcrumb, Capture / Copy / Open hero
   buttons, `⋯` overflow with Save / Upload / Paste + Settings), a
@@ -818,7 +818,7 @@ Categories used below:
 ### Fixed
 
 - **Number tool's digit is centered in its bubble** (spec
-  `docs/specs/number-tool/`): the shared render path passed the
+  `git log --grep='number-tool'`): the shared render path passed the
   bubble's center to `draw_text`, whose contract anchors a text run
   top-left — the digit sat toward the bubble's bottom-right, in the
   live editor and the saved/copied PNG alike. The label is now
@@ -915,7 +915,7 @@ Categories used below:
   image-fit resize follows the live panel width, so a collapsed
   rail never keeps re-issuing the expanded size.
 - **Pop-up book UI — design-token system + editor/home redesign**
-  (spec `docs/specs/popup-book-ui/`): one centralized theme
+  (spec `git log --grep='popup-book-ui'`): one centralized theme
   (`theme/` — cream paper, white cutout cards with 8px borders,
   two-level painted shadows, forest accents, Plus Jakarta Sans
   embedded under OFL, spring easing, procedural paper grain,
@@ -942,8 +942,8 @@ Categories used below:
   hairlines, replacing the seven disjointed shadowed islands; the
   per-pod hover-lift microinteraction is gone with them.
 - **One window for everything — `flintshot app` routes instead of
-  spawning** (ADR-0053/0054, specs `docs/specs/single-window/`,
-  `docs/specs/editor-capture-ux/`): the app window is a page router
+  spawning** (ADR-0053/0054, specs `git log --grep='single-window'`,
+  `git log --grep='editor-capture-ux'`): the app window is a page router
   (three-button home ↔ fitted editor ↔ capture-progress loading),
   captures run in its own process (no worker spawn, no image relay),
   and external triggers — hotkeys, tray, `flintshot capture`,
@@ -996,7 +996,7 @@ Categories used below:
   loop-breaker rule capture argvs always had; humans can pass it as
   the debugging escape hatch.
 - **Breaking — one Capture action replaces `region` / `fullscreen`**
-  (ADR-0051, spec `docs/specs/native-capture-ux/`): `flintshot
+  (ADR-0051, spec `git log --grep='native-capture-ux'`): `flintshot
   capture` is the single Capture action on every surface — the OS's
   own selection UI where the selected backend supports it (portal
   *interactive* on Wayland; Enter returns exactly the selection,
@@ -1065,7 +1065,7 @@ Categories used below:
   config > auto-detect by session kind, with `xcap` as the
   never-failing fallback; the chosen backend id is logged on every
   grab. Selection groundwork for the native Wayland portal backend
-  (spec `docs/specs/native-capture-backends/`).
+  (spec `git log --grep='native-capture-backends'`).
 - **Portal interactive selection** (Linux): `Capturer` gained a
   selection capability (`supports_selection` / `capture_selection`);
   the portal backend implements it with `interactive: true` — the
@@ -1094,7 +1094,7 @@ Categories used below:
   it can never be in the new shot — and the same worker process
   re-captures and reopens (region re-enters selection-first), so
   an app window hiding for the chain restores only when the whole
-  chain ends (ADR-0046, spec `docs/specs/editor-new-capture/`).
+  chain ends (ADR-0046, spec `git log --grep='editor-new-capture'`).
 
 - `flintshot app` — a Win11-Snipping-Tool-style app window: *Capture
   region* / *Capture fullscreen* controls (plus a monitor picker and
@@ -1104,7 +1104,7 @@ Categories used below:
   crashed workers (`SessionEnded` is sourced from the daemon's
   worker reaper). A second `flintshot app` (or the tray's new *Open
   app window* item) focuses the existing window instead of stacking
-  another (ADR-0045, spec `docs/specs/app-window/`).
+  another (ADR-0045, spec `git log --grep='app-window'`).
 - IPC: `Request::OpenApp`, `Event::SessionEnded`, `Event::AppFocus`
   (appended enum variants; postcard wire bytes unchanged for
   existing variants).
@@ -1120,7 +1120,7 @@ Categories used below:
   Copy hero pinned below, pinned by a regression test at multiple
   window heights.
 - **Confirming the OS screenshot UI with Copy no longer kills the
-  capture** (spec `docs/specs/portal-clipboard-uri/`): COSMIC's
+  capture** (spec `git log --grep='portal-clipboard-uri'`): COSMIC's
   portal answers a Copy-confirmed grab with `clipboard:///` — the
   image is on the system clipboard, no file exists — which
   flintshot rejected as a non-file-uri error, ending the capture
@@ -1145,7 +1145,7 @@ Categories used below:
   restores at pixel-time now — the pre-grab guard no longer spans
   the clipboard wait.
 - **App-window capture races** (ADR-0052, spec
-  `docs/specs/fix-app-window-capture-races/`) — the "window in the
+  `git log --grep='fix-app-window-capture-races'`) — the "window in the
   shot" guarantee now holds for every trigger and every app-window
   lifecycle: (1) the pre-grab handshake learns about
   **directly-launched** app windows (`flintshot app` auto-starts the
@@ -1195,7 +1195,7 @@ Categories used below:
 ### Changed
 
 - **Both toolbars are organized into grouped pods** (spec
-  `docs/specs/toolbar-groups/`): the editor rail's flat chip row and
+  `git log --grep='toolbar-groups'`): the editor rail's flat chip row and
   the overlay's floating toolbar become semantic islands — capture
   `+` (editor only) · selection (Move, Select) · shapes (Rect,
   Ellipse, Line, Arrow) · freehand (Pencil, Marker) · labels (Text,
@@ -1263,7 +1263,7 @@ Categories used below:
   Save / Copy / Pin / Upload output. Deleting during a text draft
   is impossible (the modal text mode owns `Backspace`), and the
   selection-first phase leaves `Del` inert. See
-  `docs/specs/annotation-delete/`.
+  `git log --grep='annotation-delete'`.
 - **The selection phase now locks the annotation tools until the
   region is committed** (select-first-tool-lock effort, ADR-0043,
   revising ADR-0035): in the editor window's selection-first
@@ -1303,7 +1303,7 @@ Categories used below:
   shows neither; hovers are read-only queries that never touch the
   dispatcher or history. The editor window gains hover cursors at
   all (the Move grab cursor is its first). See
-  `docs/specs/prominent-move-tool/`.
+  `git log --grep='prominent-move-tool'`.
 - **Move tool** (`V`, a dedicated toolbar chip in both the editor
   window and the fullscreen overlay): pressing on a committed
   annotation grabs it and dragging repositions it, for every
@@ -1319,7 +1319,7 @@ Categories used below:
   overlay, a Move press always reaches the dispatcher so
   annotation grabs work anywhere, while region handles and
   interior drags remain Select-owned (spec:
-  `docs/specs/annotation-move/`).
+  `git log --grep='annotation-move'`).
 
 ### Changed
 
@@ -2372,16 +2372,17 @@ Categories used below:
   async pattern; `Send + Sync + 'static` shape preserved.
 
 - Planning docs reorganized to the canonical OpenCode harness v0.5.0+
-  layout. Root `SPEC.md`, `tasks/plan.md`, `tasks/todo.md`, and
-  `tasks/archive/` are eliminated; in their place, each effort lives at
-  `docs/specs/<effort-slug>/` with `spec.md` (frontmatter
-  `status: draft|active|shipped`), thin `plan.md`, flat `todo.md`, and
-  per-task `tasks/00N-*.md` files. Shipped Phase 0 →
-  `docs/specs/phase-0-scaffolding/` (status: shipped); in-flight Phase 1
-  → `docs/specs/phase-1-capture-editor/` (status: active). `docs/adr/`
+  layout. The previous root-level planning files (master index, plan,
+  todo, archive) are eliminated; in their place, each effort gets a
+  per-effort spec directory (frontmattered spec, thin plan, flat
+  todo, and per-task files), with shipped Phase 0 and in-flight
+  Phase 1 migrated to that layout. `docs/adr/`
   renamed to `docs/adrs/`. `docs/ROADMAP.md` "How we plan" now describes
   the status-flip lifecycle (no archive step). Links in `README.md`,
   `CONTRIBUTING.md`, and `AGENTS.md` updated to the new paths.
+  (Superseded 2026-10-04: the per-effort spec directories were
+  themselves folded into enriched git commit messages — the spec trail
+  is now `git log --grep='<effort>'`; no planning files remain.)
 - `EditorState::undo` / `redo` fields changed from
   `Vec<Vec<Annotation>>` to `Vec<Snapshot>` (Phase 1 Task 14). The new
   `Snapshot` type captures both `anns` and an optional `image`, so
@@ -2528,7 +2529,7 @@ Categories used below:
 
 - **Phase 5 (Live overlay) shipped 2026-08-17.** All nine tasks
   complete; exit criteria in
-  `docs/specs/phase-5-live-overlay/spec.md` met (per-task entries
+  `git log --grep='phase-5-live-overlay'` met (per-task entries
   above landed with their code). ADR-0028 records the
   capture-then-overlay decision and the Wayland editor-window
   fallback that follows from it; `docs/TEST_MATRIX.md` gains the
@@ -2546,7 +2547,7 @@ Categories used below:
   clients.
 - **Phase 1 (Capture + Editor Window) shipped 2026-07-28.** All
   checkpoints A–F complete; exit criteria in
-  `docs/specs/phase-1-capture-editor/spec.md` met. Spec status flipped
+  `git log --grep='phase-1-capture-editor'` met. Spec status flipped
   to `shipped`; `docs/ROADMAP.md` moves Phase 2 to **In flight**. No
   version tag cut — `0.x.y` remains in effect until Phase 4 (upload)
   per the versioning policy.
@@ -2602,7 +2603,7 @@ Categories used below:
 ### Removed
 
 - **Pin-to-desktop, removed entirely** (ADR-0049, spec
-  `docs/specs/remove-pin-to-desktop/`): the `flintshot pin`
+  `git log --grep='remove-pin-to-desktop'`): the `flintshot pin`
   subcommand, the editor/overlay Pin button, the tray/applet *Pin
   last* action, the pin window machinery
   (`flintshot-editor-egui`'s `pin` module, `EditorShell::run_pin`,

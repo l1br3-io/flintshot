@@ -102,22 +102,23 @@ VISION   "What problem are we solving?"   docs/VISION.md
   │
 ROADMAP  "What directions / milestones?"  docs/ROADMAP.md  (this)
   │
-SPEC     "Current effort requirements"    docs/specs/<effort-slug>/spec.md
+SPEC     "Current effort requirements"    git log (enriched commit messages)
 ```
 
 ### Each effort ships through the harness lifecycle
 
 ```text
-DEFINE → /spec       spec-driven-development             → docs/specs/<slug>/spec.md (status: draft)
-PLAN   → /planning   planning-and-task-breakdown         → docs/specs/<slug>/{plan.md, todo.md, tasks/00N-*.md}
-BUILD  → /build      incremental-implementation + TDD    → source + tests (flips spec status: draft → active)
-VERIFY → /test       debugging-and-error-recovery        → pnpm verify green
+DEFINE → /spec       spec-driven-development             → approved spec (presented in session, no files)
+PLAN   → /planning   planning-and-task-breakdown         → task list with acceptance + verification
+BUILD  → /build      incremental-implementation + TDD    → source + tests (one commit per task)
+VERIFY → /test       debugging-and-error-recovery        → just ci green
 REVIEW → /review     code-review-and-quality             → sign-off
-SHIP   → /ship       shipping-and-launch                 → merge PR; spec status flips to shipped (dir stays in place)
+SHIP   → /ship       shipping-and-launch                 → merge PR
 ```
 
-When an effort ships, its spec.md frontmatter flips to `status: shipped`
-with the merge date. The directory stays at `docs/specs/<slug>/` forever
-— no archive step, no move. Git is the full history; the filesystem is
-the browsable index. The next effort starts on a fresh branch with a
-fresh `docs/specs/<new-slug>/` directory.
+When an effort ships, its knowledge lives in git: the completion commit
+carries a Context / Decisions / Deviations / Outcome block (see AGENTS.md
+"Git as docs"), and every commit carries a scope-prefixed subject, so the
+full spec trail of any effort is `git log --grep='<effort-slug>'`. Git is
+the full history; the log is the browsable index. The next effort starts
+on a fresh branch.

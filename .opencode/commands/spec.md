@@ -14,4 +14,4 @@ Then generate a structured spec covering all six core areas: objective, commands
 
 If the request bundles several independently testable capabilities, first propose a capability map (module ids, dependency direction, build order) per the skill's Phase 0 and get it approved, then spec each module in dependency order.
 
-Save the master index (capability map + status) as SPEC.md in the project root and per-module specs as SPEC-<module-id>.md, named by the module id from the approved map. All are local working artifacts (gitignored). When a module's spec is approved, record it with the date in SPEC.md's status table — `/build auto` gates on that marker. Confirm with the user before proceeding.
+No spec files are written. Present the spec (and the capability map, if any) in the session for approval; it is recorded when the work lands — the effort's completion commit carries the Context / Decisions / Deviations / Outcome block defined in AGENTS.md "Git as docs", and the trail is looked up with `git log --grep='<effort>'`. Confirm with the user before proceeding to `/plan`.

@@ -32,7 +32,7 @@ use flintshot_core::capture::{CaptureOptions, Capturer, PortalScreenshotCapturer
 ///     portal_interactive
 /// ```
 ///
-/// Spike C caveats (`docs/specs/native-capture-ux/tasks/001-spike-interactive.md`):
+/// Spike C caveats (`git log --grep='native-capture-ux'`):
 /// on `xdg-desktop-portal-cosmic 0.1.0pop1~abf258b` Escape is
 /// unreliable (spurious code-0 captures, and one observed no-Response
 /// hang) — this test soft-skips on those outcomes with a diagnostic so

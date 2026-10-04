@@ -2,7 +2,7 @@
 //! over D-Bus (Linux only).
 //!
 //! Spike B measured this path live on a Wayland/COSMIC session
-//! (`docs/specs/native-capture-backends/tasks/002-spike-portal.md`):
+//! (`git log --grep='native-capture-backends'`):
 //! prompt-free, ~75–120 ms end-to-end — it earns the `auto` slot on
 //! Wayland (ahead of `xcap`, which drives a `ScreenCast` session
 //! there).
@@ -46,7 +46,7 @@
 //!   cannot be honored here; a permanent, documented gap.
 //! - **Interactive mode** ([`Capturer::capture_selection`]): the
 //!   compositor's own selection UI does the region picking. Spike C
-//!   (`docs/specs/native-capture-ux/tasks/001-spike-interactive.md`)
+//!   (`git log --grep='native-capture-ux'`)
 //!   verified on COSMIC that the Response returns **exactly the
 //!   selection** (passthrough — no composite crop), that files land
 //!   in `~/Pictures/Screenshots` (read-then-delete), and that

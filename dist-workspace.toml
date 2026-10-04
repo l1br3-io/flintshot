@@ -20,7 +20,7 @@ targets = [
 installers = ["shell", "powershell", "msi", "homebrew"]
 # Homebrew channel: formula is pushed to this tap on each release.
 # Requires repo secret HOMEBREW_TAP_TOKEN (PAT, repo scope) — see
-# docs/specs/release-pipeline/tasks/004-homebrew-tap.md.
+# git log --grep='release-pipeline'
 tap = "l1br3-io/homebrew-tap"
 # Formula name is what users type: `brew install flintshot` (the
 # binary name), not the cargo package name flintshot-app.

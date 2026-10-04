@@ -4,7 +4,7 @@ description: Break work into small verifiable tasks with acceptance criteria and
 
 Load the `planning-and-task-breakdown` skill with the `skill` tool.
 
-Read the existing spec (SPEC.md or equivalent) and the relevant codebase sections. Then:
+Read the approved spec from the session (or the PR body it was recorded in) and the relevant codebase sections. Then:
 
 1. Enter plan mode — read only, no code changes
 2. Identify the dependency graph between components
@@ -13,6 +13,4 @@ Read the existing spec (SPEC.md or equivalent) and the relevant codebase section
 5. Add checkpoints between phases
 6. Present the plan for human review
 
-Save the plan to tasks/plan.md, the task list to tasks/todo.md, and per-module task chunks to tasks/<module-id>.md (one per module in the capability map). Each chunk opens with links to its SPEC-<module-id>.md and the files it touches, followed by its tasks with acceptance, verify, and files. Chunk file = the unit /build consumes; plan/todo are aggregates of the chunks.
-
-If tasks/plan.md or tasks/todo.md already exists with unchecked tasks for different work, stop and ask before writing — never silently overwrite an incomplete plan.
+No plan files are written. The plan and its task list are presented in the session and recorded as the work lands: one commit per task with a scope-prefixed subject, and the effort's completion commit carries the Context / Decisions / Deviations / Outcome block defined in AGENTS.md "Git as docs". Look up any effort's trail with `git log --grep='<effort>'`.

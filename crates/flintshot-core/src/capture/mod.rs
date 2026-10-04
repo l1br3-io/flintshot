@@ -38,7 +38,7 @@
 //! permission dialog on first capture per session. The portal backend
 //! (`--backend portal`, auto-selected on Wayland where available)
 //! avoids the `ScreenCast` session dance entirely — see
-//! `docs/specs/native-capture-backends/` for the spike findings.
+//! `git log --grep='native-capture-backends'` for the spike findings.
 
 use image::RgbaImage;
 

@@ -4,9 +4,7 @@ Cross-platform screenshot capture and annotation tool, written in pure Rust.
 Inspired by [Flameshot](https://flameshot.org), designed to be fast, modular,
 and friendly to the [COSMIC desktop](https://system76.com/cosmic).
 
-> **Status:** Phase 1 (capture + editor window) in progress. Basic capture works;
-> annotation tools and save/copy coming soon. See the
-> [Phase 1 spec](docs/specs/phase-1-capture-editor/spec.md), or
+> **Status:** capturing, annotating, and sharing all work. See
 > [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone index.
 
 ## At a glance
@@ -117,7 +115,9 @@ Product & design:
 
 - [`docs/VISION.md`](docs/VISION.md) — product vision, scope, non-goals
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone index (thin)
-- [`docs/specs/`](docs/specs/) — per-effort spec, plan, and task checklists (one dir per effort)
+- Git history — the spec trail: each effort's goal, decisions, deviations, and
+  outcome live in enriched commit messages. Look up any effort with
+  `git log --grep='<effort>'` (e.g. `git log --grep=phase-1-capture-editor`)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — workspace, crates, dependencies, data model
 - [`docs/adrs/`](docs/adrs/) — technical decision records (ADRs)
 - [`docs/REFERENCES.md`](docs/REFERENCES.md) — open-source reference projects (comparables, agents, chat/streaming UI, Rust AI infra)

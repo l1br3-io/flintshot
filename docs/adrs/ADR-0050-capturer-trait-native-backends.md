@@ -4,7 +4,7 @@
 cross-platform story, flagging its Wayland path (the `ScreenCast`
 portal, per-session prompts) for re-evaluation. Two spikes measured
 the alternatives on a live session (findings:
-`docs/specs/native-capture-backends/tasks/001-spike-gnome-shell.md`,
+`git log --grep='native-capture-backends'`,
 `002-spike-portal.md`):
 
 - `org.gnome.Shell.Screenshot` is allowlist-restricted for

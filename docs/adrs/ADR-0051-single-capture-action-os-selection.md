@@ -7,11 +7,11 @@ two hotkey chords, three tray capture items (region, fullscreen,
 per-monitor submenu), two home-window buttons plus a monitor picker,
 and two COSMIC-applet buttons plus per-monitor entries. Meanwhile
 ADR-0050 shipped the `Capturer` trait with the XDG Screenshot Portal
-native on Wayland, and Spike B (`docs/specs/native-capture-backends/
+native on Wayland, and Spike B (`git log --grep='native-capture-backends'
 tasks/002-spike-portal.md`) had measured the portal's
 `interactive: true` mode — COSMIC's own full-screen select-and-confirm
 UI — dismissing it with "not usable … we have our own editor". Spike C
-(`docs/specs/native-capture-ux/tasks/001-spike-interactive.md`)
+(`git log --grep='native-capture-ux'`)
 re-measured it as the *user-facing* selection mechanism: it returns
 exactly the selected region (dims track the drag, no composite crop
 needed), Enter captures, Escape maps to the existing `"cancelled"`
@@ -89,7 +89,7 @@ actual value-add — stays as the default post-grab destination.
 - The editor remains the default post-grab destination everywhere;
   `after_grab = "clipboard"` is the window-less flow (notification
   as the only feedback). Superseded (2026-09-14,
-  `docs/specs/clipboard-opens-editor/`): `clipboard` now copies and
+  `git log --grep='clipboard-opens-editor'`): `clipboard` now copies and
   opens the editor too — only `upload` stays window-less.
 - Spike B's "we have our own editor" note is superseded *as a UX
   stance* (the OS UI is the better selector); its protocol findings

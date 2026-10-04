@@ -44,19 +44,34 @@ This project uses the [addyosmani/agent-skills](https://github.com/addyosmani/ag
 
 - Run `cargo clippy` and `cargo fmt --check` before a change counts as done; `cargo test` is the verification gate.
 - Screen capture and editor behavior are only partially testable headless; unit tests cover what can be tested and the rest follows the manual checklist in the README.
-## Spec & task artifacts (local working docs)
 
-- `SPEC.md` is the master index: the capability map (module ids, dependency
-  direction, build order) and per-module status. Per-module specs live at
-  `SPEC-<module-id>.md`; per-module task chunks at `tasks/<module-id>.md`.
-  Global aggregates: `tasks/plan.md` and `tasks/todo.md`.
-- All of the above are local working artifacts, gitignored via `SPEC*.md`
-  and `/tasks`. Never commit them.
-- Module ids come from the capability map in `SPEC.md`, are chosen once, and
-  are never renamed mid-initiative.
-- Before implementing: read `SPEC.md` for orientation, then load the
-  module's `SPEC-<id>.md` and `tasks/<id>.md` chunk. Never implement a
-  module whose spec is not approved or whose chunk is not written.
-- `/build` consumes the chunk files; see `.opencode/commands/build.md`.
-- PRs must copy the module's success criteria into the PR body, since
-  reviewers cannot see the local spec files.
+## Git as docs (the spec trail)
+
+There are no spec, plan, or task files — git history is the documentation.
+Every effort's context, decisions, and outcome live in enriched commit
+messages; every commit carries a scope-prefixed subject
+(`feat(<scope>)`, `fix(<scope>)`), so any effort's full trail is:
+
+    git log --grep='<effort>'        # e.g. git log --grep=fix-tray-sni
+
+The completion commit of each effort carries a context block in this
+shape (this is THE place context/decisions/deviations get recorded):
+
+    ---
+    Context: why this work existed (1-3 lines)
+    Decisions:
+    - key choices and their reasons
+    Deviations:
+    - where implementation diverged from plan (omit if none)
+    Outcome: what shipped and how it was verified
+
+Rules:
+
+- Plan in the session (`/spec`, `/plan`); do not write planning files.
+  PRs carry the effort's success criteria in the PR body.
+- One commit per task; interim commits get normal scope-prefixed
+  subjects, the completion commit gets the context block above.
+- Debugging root causes go in the Deviations lines of the fixing
+  effort's block — they are the project's war stories.
+- `.gitignore` still blocks `SPEC*.md` and `/tasks` defensively; never
+  commit planning artifacts.

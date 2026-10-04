@@ -1279,7 +1279,7 @@ box, paste each command's output next to its step, and fill the
 matrix cells the steps name (Phase 2 rows 2 and 6–10, L5 column).
 Launcher rows 4/6/7 are **not** re-run here — they re-run on the
 `launcher-desktop-entry` effort's task 007
-(`docs/specs/launcher-desktop-entry/tasks/007-manual-pass-closeout.md`)
+(`git log --grep='launcher-desktop-entry'`)
 once this effort lands.
 
 Build the tray binary and keep a log tail open (plain cargo keeps
@@ -2287,7 +2287,7 @@ crops only when *not* editing.
 
 ## App window — `flintshot app` capture home (Win11-Snipping-Tool-style)
 
-Spec: `docs/specs/app-window/`; design: ADR-0045. Run on a session
+Spec: `git log --grep='app-window'`; design: ADR-0045. Run on a session
 with a display (X11 and Wayland each).
 
 ### Test setup
@@ -2363,7 +2363,7 @@ the tray half of row 6 needs a real tray — both await L5.
 
 ## Editor new-capture — the `+` chip / Ctrl+N (Win11-style)
 
-Spec: `docs/specs/editor-new-capture/`; design: ADR-0046. Extends
+Spec: `git log --grep='editor-new-capture'`; design: ADR-0046. Extends
 the app-window rows (run both sections' setups).
 
 ### Test script
@@ -2409,7 +2409,7 @@ compile-checked); awaits L5.
 
 ## Smart window hiding — capture self-exclusion + single-session replace
 
-Spec: `docs/specs/smart-window-hiding/`; design: ADR-0048. Runs on
+Spec: `git log --grep='smart-window-hiding'`; design: ADR-0048. Runs on
 top of the app-window and recapture setups (daemon + tray running;
 `RUST_LOG=flintshot=debug` shows the supersede/prepare lines).
 
@@ -2465,7 +2465,7 @@ scripted old daemon in `ipc_client.rs` (ignored, real socket).
 
 ## Capture backends — registry, portal on Wayland, `flintshot backends`
 
-Spec: `docs/specs/native-capture-backends/`; design: ADR-0050. The
+Spec: `git log --grep='native-capture-backends'`; design: ADR-0050. The
 portal path is live-verified on L5 (COSMIC); GNOME/KDE/wlr rows are
 the unmeasured frontier — Spike B flagged they may prompt. The
 `#[ignore]`'d live test backs these rows:
@@ -2518,7 +2518,7 @@ portal_smoke_grabs_primary`.
 
 ## Native capture UX — one Capture action, the OS's selection UI
 
-Spec: `docs/specs/native-capture-ux/`; design: ADR-0051. The single
+Spec: `git log --grep='native-capture-ux'`; design: ADR-0051. The single
 Capture action on every surface (CLI, tray, applet, app window,
 hotkey): the selected backend's OS selection UI where it supports
 one (portal interactive on Wayland — capability-based, so a pinned
@@ -2585,14 +2585,14 @@ byte-identical. Live smoke (incl. interactive):
   Escape (sometimes a spurious code-0 capture of a stale rect,
   sometimes no Response): the native path carries a long Response
   budget with a quiet hard timeout (Spike C,
-  `docs/specs/native-capture-ux/tasks/001-spike-interactive.md`).
+  `git log --grep='native-capture-ux'`).
 - Portal grabs remain cursor-less (ADR-0050); the OS selection UI's
   chrome never lands in the grab (it composites before the file is
   written — verified in Spike C).
 
 ## App-window capture races — presence, truthful acks, self-healing close
 
-Spec: `docs/specs/fix-app-window-capture-races/`; design: ADR-0052.
+Spec: `git log --grep='fix-app-window-capture-races'`; design: ADR-0052.
 The "no flintshot surface in the shot" guarantee for **every**
 trigger while an app window exists, plus the phase-transition
 hygiene around it. Run on a live session with a display (Wayland

@@ -2,7 +2,7 @@
 
 ## Context
 
-The ux-redesign effort (spec `docs/specs/ux-redesign/`) replaced the
+The ux-redesign effort (spec `git log --grep='ux-redesign'`) replaced the
 popup-book arrangement — quiet header bar, right panel with a tools
 card + export island + `+` popup, collapse-to-rail mode — with the
 mockup's five zones: topbar, left tool rail, canvas, properties

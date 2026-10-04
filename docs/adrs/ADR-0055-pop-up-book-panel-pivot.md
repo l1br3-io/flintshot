@@ -2,7 +2,7 @@
 
 ## Context
 
-The pop-up book effort (spec `docs/specs/popup-book-ui/`) replaces
+The pop-up book effort (spec `git log --grep='popup-book-ui'`) replaces
 the editor's top toolbar with a docked right side panel and a
 floating on-canvas quick cluster. Input gating historically
 reasoned about the toolbar as a *top* strip: comments (and one
