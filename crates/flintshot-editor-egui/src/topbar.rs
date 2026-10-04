@@ -596,8 +596,14 @@ fn overflow(
         egui::StrokeKind::Inside,
     );
     more_dots(ui.painter(), rect, theme::palette::CREAM_TEXT);
+    // A menu, not an editing popover: every row is a discrete
+    // action, so any click — inside or out — dismisses. egui's
+    // `CloseOnClickOutside` kept the menu open after a row fired
+    // (each row's action landed, the menu never went away); the
+    // stay-open popovers are the editing kind — the resize
+    // popover's width field, the picker bays' live swatches.
     egui::Popup::from_toggle_button_response(&resp)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
         .show(|ui| {
             ui.set_min_width(212.0);
             if enable.has(Enable::EDITOR_ITEMS) {
@@ -1844,6 +1850,74 @@ mod tests {
             fired.set(show(ui, Surface::Editor, None, Enable::ALL, false, false));
         });
         assert!(fired.get().is_none(), "a dead entry never fires");
+    }
+
+    /// The texts a frame painted — menu rows are painted labels, so
+    /// their presence proves the popup body ran and their absence
+    /// proves it dismissed (egui's popup open-state is `pub(crate)`,
+    /// and `read_response` lags a pass, so shapes are the honest
+    /// signal).
+    fn painted_texts(out: &egui::FullOutput) -> Vec<String> {
+        out.shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The overflow menu is a menu, not an editing popover: a row
+    /// click fires its action *and* dismisses the popup. The bug:
+    /// `PopupCloseBehavior::CloseOnClickOutside` left the menu open
+    /// after every item — Settings included. Opened here on the
+    /// Editor surface; the row-label grammar is identical on every
+    /// surface (one `overflow` draws them all).
+    #[test]
+    fn overflow_menu_closes_after_a_row_fires() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let draw = |time: f64, events: Vec<egui::Event>| {
+            ctx.run_ui(screen(time, events), |ui| {
+                show(ui, Surface::Editor, None, Enable::ALL, false, true);
+            })
+        };
+        let _ = draw(0.0, vec![]);
+        let ovf = ctx
+            .read_response(egui::Id::new("topbar-overflow"))
+            .expect("overflow")
+            .rect;
+        let _ = draw(0.016, click_events(ovf.center()));
+        let _ = draw(0.024, vec![]);
+        let open = draw(0.028, vec![]);
+        let open_labels = painted_texts(&open);
+        for label in ["Settings", "AI settings", "Save"] {
+            assert!(
+                open_labels.iter().any(|t| t == label),
+                "the menu is open — {label} paints ({open_labels:?})"
+            );
+        }
+        let row = ctx
+            .read_response(egui::Id::new("topbar-settings"))
+            .expect("settings row")
+            .rect;
+        let fired = std::cell::Cell::new(None);
+        let _ = ctx.run_ui(screen(0.032, click_events(row.center())), |ui| {
+            fired.set(show(ui, Surface::Editor, None, Enable::ALL, false, true));
+        });
+        assert_eq!(
+            fired.get(),
+            Some(TopbarAction::Settings),
+            "the row still fires as it dismisses"
+        );
+        let closed = draw(0.040, vec![]);
+        let closed_labels = painted_texts(&closed);
+        for label in ["Settings", "AI settings", "Save", "Upload", "Paste"] {
+            assert!(
+                !closed_labels.iter().any(|t| t == label),
+                "the menu must dismiss after a row fires — {label} still paints ({closed_labels:?})"
+            );
+        }
     }
 
     /// The open popover offers the three preset chips plus the custom

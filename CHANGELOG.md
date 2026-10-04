@@ -20,6 +20,16 @@ Categories used below:
 
 ### Fixed
 
+- **The topbar "More" menu never closed on its own items.** The
+  overflow popup used egui's `CloseOnClickOutside`, which only
+  dismisses on clicks outside the popup body — so clicking Save /
+  Upload / Paste / Resize / AI settings / Settings fired the action
+  but left the menu hanging open over the window. The menu now uses
+  `CloseOnClick` (egui's own menu/combobox behavior): any row click
+  fires its action and dismisses in the same gesture. The
+  stay-open popovers are untouched by design — the resize popover's
+  width field and the color/text picker bays must survive inside
+  clicks while editing.
 - **AI keys never reached the OS keyring** (and vanished on every
   window close). The `keyring` dependency declared only
   `crypto-rust` — a crypto backend, not a store — so keyring v3
