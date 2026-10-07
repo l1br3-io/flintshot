@@ -812,9 +812,15 @@ impl WindowApp {
                             }
                         }
                     }
-                    // The test result poll (copy-mapped app-side).
-                    if let Some(result) = self.page_bridge.borrow_mut().poll_ai_test_result() {
-                        page.set_test_result(result);
+                    // The vision-probe arrival: the banner's
+                    // persisted verdict (+ triple), and — when a
+                    // manual Test armed this probe — its result
+                    // line.
+                    if let Some(arrival) = self.page_bridge.borrow_mut().poll_vision_probe() {
+                        page.note_probe_outcome(&arrival.outcome);
+                        if let Some(result) = arrival.manual_test {
+                            page.set_test_result(result);
+                        }
                     }
                     if escape {
                         // Esc / breadcrumb: the parked editor returns

@@ -2093,15 +2093,12 @@ struct AiHost {
     /// new run replaces it (its partial finalizes into the void).
     stop: Option<crate::ai::worker::StopHandle>,
     queue: std::collections::VecDeque<flintshot_editor_egui::AiEvent>,
-    /// A test-connection worker's channel (the AI settings page's
-    /// Test connection row — deliberately separate from the
-    /// conversation pipeline; the probe stays one-shot
-    /// non-streaming).
-    test_rx: Option<std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>>,
-    /// The model the live test-connection probe is running against —
-    /// kept so the result's error copy can name it (the settings
-    /// page's working model, not necessarily the saved one).
-    test_model: Option<String>,
+    /// A manual Test connection's armed triple — `(model, base_url)`
+    /// — so the completing probe's arrival attaches the test row's
+    /// mapped result. Cleared whenever a new probe arms (a pending
+    /// manual row superseded by a save-change probe simply stops
+    /// answering).
+    manual_probe_for: Option<(String, String)>,
     /// Test seam: when set, AI requests resolve against this
     /// snapshot instead of the platform config file. Hermetic
     /// tests — a dev machine's real `config.toml` may be (and on an
@@ -2206,12 +2203,41 @@ impl PageBridge {
             model: model.clone(),
             api_key,
         };
+        self.ai.manual_probe_for = None; // a superseded manual row stops answering
         self.ai.vision_probe = Some(VisionProbeFlight {
             rx: crate::ai::worker::spawn_probe_worker(resolved, challenge.messages),
             expected: challenge.expected,
             model,
             base_url,
         });
+    }
+
+    /// Classify one completed flight and persist its verdict +
+    /// triple + date through the config save path (load-modify-save
+    /// so edits that landed mid-flight survive; the `toml_edit`
+    /// merge keeps comments). A persist failure costs the banner
+    /// only — never blocks or corrupts anything.
+    fn settle_flight(
+        &mut self,
+        flight: &VisionProbeFlight,
+        result: &Result<String, flintshot_core::AiError>,
+    ) -> flintshot_core::ProbeVerdict {
+        let verdict = flintshot_core::classify_probe(result, flight.expected);
+        let mut config = self.ai_config();
+        config.ai.probe_model = Some(flight.model.clone());
+        config.ai.probe_base_url = Some(flight.base_url.clone());
+        config.ai.probe_verdict = Some(verdict.as_str().to_string());
+        config.ai.probe_date = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| {
+                    i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+                }),
+        );
+        if !self.persist_config(&config) {
+            tracing::warn!("vision-probe verdict not persisted");
+        }
+        verdict
     }
 }
 
@@ -2433,42 +2459,29 @@ impl EditorPageBridge for PageBridge {
     }
 
     fn ai_test_connection(&mut self, provider: &str, model: &str, base_url: &str) {
-        // A minimal vision round-trip on the Task 007 worker — the
-        // probe's inline PNG rides the exact `image_url` content
-        // part the transform path uses, so a pass proves the model
-        // accepts image input. Keyless custom endpoints test exactly
-        // as they run.
+        // Manual Test = probe v1 against the page's working settings
+        // (a randomized color challenge; a pass means the model
+        // described the image, not merely that the wire shape was
+        // accepted). The verdict settles through the same
+        // classify-and-persist loop as the save-change probe;
+        // keyless custom endpoints test exactly as they run.
         let api_key = crate::ai::load_ai_key(provider).unwrap_or_default();
         let resolved = crate::ai::worker::ResolvedAi {
             base_url: base_url.to_string(),
             model: model.to_string(),
             api_key,
         };
-        // Probe v1 (content-checking): a random palette color per
-        // run, so a blind "ready"-style answer cannot pass.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
         let challenge = flintshot_core::probe_challenge(flintshot_core::probe_color_for(nanos));
-        self.ai.test_rx = Some(crate::ai::worker::spawn_probe_worker(
-            resolved,
-            challenge.messages,
-        ));
-        self.ai.test_model = Some(model.to_string());
-    }
-
-    fn poll_ai_test_result(&mut self) -> Option<Result<String, String>> {
-        if let Some(rx) = self.ai.test_rx.as_ref() {
-            if let Ok(result) = rx.try_recv() {
-                self.ai.test_rx = None;
-                let model = self.ai.test_model.take().unwrap_or_default();
-                return Some(match result {
-                    Ok(_) => Ok("Connection works".into()),
-                    Err(err) => Err(crate::ai::worker::ai_error_copy(&err, &model)),
-                });
-            }
-        }
-        None
+        self.ai.vision_probe = Some(VisionProbeFlight {
+            rx: crate::ai::worker::spawn_probe_worker(resolved, challenge.messages),
+            expected: challenge.expected,
+            model: model.to_string(),
+            base_url: base_url.to_string(),
+        });
+        self.ai.manual_probe_for = Some((model.to_string(), base_url.to_string()));
     }
 
     /// The AI settings page's debounced save drain (the same
@@ -2484,33 +2497,46 @@ impl EditorPageBridge for PageBridge {
         }
     }
 
-    fn poll_vision_probe(&mut self) -> Option<flintshot_core::ProbeOutcome> {
+    fn poll_vision_probe(&mut self) -> Option<flintshot_editor_egui::VisionProbeArrival> {
         // Non-blocking: no ready result leaves the flight running.
         let result = self.ai.vision_probe.as_ref()?.rx.try_recv().ok()?;
         let flight = self.ai.vision_probe.take().expect("checked above");
-        let verdict = flintshot_core::classify_probe(&result, flight.expected);
-        // Persist through the config save path (load-modify-save so
-        // edits that landed mid-flight survive; the toml_edit merge
-        // keeps comments). A persist failure costs the banner only —
-        // it never blocks or corrupts anything.
-        let mut config = self.ai_config();
-        config.ai.probe_model = Some(flight.model.clone());
-        config.ai.probe_base_url = Some(flight.base_url.clone());
-        config.ai.probe_verdict = Some(verdict.as_str().to_string());
-        config.ai.probe_date = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |elapsed| {
-                    i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
-                }),
-        );
-        if !self.persist_config(&config) {
-            tracing::warn!("vision-probe verdict not persisted");
-        }
-        Some(flintshot_core::ProbeOutcome {
+        let verdict = self.settle_flight(&flight, &result);
+        let outcome = flintshot_core::ProbeOutcome {
             verdict,
-            model: flight.model,
-            base_url: flight.base_url,
+            model: flight.model.clone(),
+            base_url: flight.base_url.clone(),
+        };
+        // A manual test gets its result line attached when the
+        // settled flight is the triple it armed.
+        let manual_test = if self
+            .ai
+            .manual_probe_for
+            .take()
+            .is_some_and(|(model, base)| model == flight.model && base == flight.base_url)
+        {
+            Some(match verdict {
+                flintshot_core::ProbeVerdict::VisionOk => {
+                    Ok("Connection works — the model described the image".into())
+                }
+                flintshot_core::ProbeVerdict::VisionUnsupported => Err(format!(
+                    "Model `{}` answered without seeing the image — it may not accept image \
+                     input. Pick a vision-capable model.",
+                    flight.model
+                )),
+                // Unknown ⇒ the raw error's copy (transport/auth/
+                // rate-limit next steps), not a vision claim.
+                flintshot_core::ProbeVerdict::VisionUnknown => Err(match result.as_ref() {
+                    Err(err) => crate::ai::worker::ai_error_copy(err, &flight.model),
+                    Ok(text) => format!("Unexpected probe answer: {text}"),
+                }),
+            })
+        } else {
+            None
+        };
+        Some(flintshot_editor_egui::VisionProbeArrival {
+            outcome,
+            manual_test,
         })
     }
 }
@@ -4531,7 +4557,7 @@ mod tests {
             verdict = bridge.poll_vision_probe();
         }
         assert_eq!(
-            verdict,
+            verdict.map(|arrival| arrival.outcome),
             Some(flintshot_core::ProbeOutcome {
                 verdict: flintshot_core::ProbeVerdict::VisionUnsupported,
                 model: "llama3".into(),
@@ -4592,7 +4618,7 @@ mod tests {
             verdict = bridge.poll_vision_probe();
         }
         assert_eq!(
-            verdict.map(|outcome| outcome.verdict),
+            verdict.map(|arrival| arrival.outcome.verdict),
             Some(flintshot_core::ProbeVerdict::VisionUnsupported)
         );
 
@@ -4665,7 +4691,7 @@ mod tests {
             verdict = bridge.poll_vision_probe();
         }
         assert_eq!(
-            verdict.map(|outcome| outcome.verdict),
+            verdict.map(|arrival| arrival.outcome.verdict),
             Some(flintshot_core::ProbeVerdict::VisionUnknown),
             "a 500 says nothing about vision — unknown, no banner claim"
         );
@@ -4705,15 +4731,52 @@ mod tests {
         );
     }
 
-    /// Test connection rides the worker pipeline (a mock endpoint
-    /// answering the vision probe) and returns copy-mapped results —
-    /// pass on 2xx with the probe image on the wire, actionable copy
-    /// on auth failure.
+    /// Manual Test connection rides probe v1 (vision-validate T5):
+    /// the answer is judged against the challenge color, the verdict
+    /// settles + persists through the same path as the save-change
+    /// probe, and the test row's copy stays distinct per outcome.
+    /// Shared harness: a bridge over a temp config path, a mock
+    /// endpoint, and a bounded arrival wait.
+    fn manual_test_harness() -> (PageBridge, mockito::ServerGuard, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = flintshot_core::Config::default();
+        config.ai.provider = "custom".into();
+        config.ai.model = "m".into();
+        config
+            .save_to(&path)
+            .expect("the page's settings are saved ground truth");
+        let (shared, _session) = shared_with_session();
+        let bridge = PageBridge {
+            shared: std::sync::Arc::new(shared),
+            ai: AiHost {
+                config_path: Some(path),
+                ..AiHost::default()
+            },
+        };
+        (bridge, mockito::Server::new(), dir)
+    }
+
+    fn wait_arrival(bridge: &mut PageBridge) -> flintshot_editor_egui::VisionProbeArrival {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(arrival) = bridge.poll_vision_probe() {
+                return arrival;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the manual probe never answered"
+            );
+        }
+    }
+
+    /// The pass means the model described the image (answering with
+    /// every palette word passes any randomized challenge).
     #[test]
-    fn test_connection_round_trips_mapped_results() {
+    fn manual_test_pass_means_the_model_described_the_image() {
         use flintshot_editor_egui::EditorPageBridge as _;
 
-        let mut server = mockito::Server::new();
+        let (mut bridge, mut server, _dir) = manual_test_harness();
         server
             .mock("POST", "/chat/completions")
             // The probe must exercise image input, not just text —
@@ -4721,31 +4784,67 @@ mod tests {
             .match_body(mockito::Matcher::Regex(r#""type":"image_url""#.into()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ready"},"finish_reason":"stop"}]}"#)
+            .with_body(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"red orange yellow green blue purple pink brown black white"},"finish_reason":"stop"}]}"#)
             .create();
-
-        let (shared, _dir) = shared_with_session();
-        let shared = std::sync::Arc::new(shared);
-        let mut bridge = PageBridge {
-            shared: std::sync::Arc::clone(&shared),
-            ai: AiHost::default(),
-        };
-
         bridge.ai_test_connection("custom", "m", &server.url());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut result = None;
-        while result.is_none() && std::time::Instant::now() < deadline {
-            result = bridge.poll_ai_test_result();
-        }
+        let arrival = wait_arrival(&mut bridge);
         assert_eq!(
-            result,
-            Some(Ok("Connection works".to_string())),
-            "a 2xx round-trip passes"
+            arrival.outcome,
+            flintshot_core::ProbeOutcome {
+                verdict: flintshot_core::ProbeVerdict::VisionOk,
+                model: "m".into(),
+                base_url: server.url(),
+            }
         );
-        assert!(bridge.poll_ai_test_result().is_none(), "drains once");
+        assert_eq!(
+            arrival.manual_test,
+            Some(Ok("Connection works — the model described the image".into())),
+            "a pass means the model described the image"
+        );
+    }
 
-        // An auth failure maps to the key-rejected copy.
-        server.reset();
+    /// A blind answer (no color word) ⇒ the not-seen outcome, with
+    /// copy distinct from any failure mapping.
+    #[test]
+    fn manual_test_blind_answer_reports_not_seen_with_distinct_copy() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (mut bridge, mut server, _dir) = manual_test_harness();
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"The image shows a receipt"},"finish_reason":"stop"}]}"#)
+            .create();
+        bridge.ai_test_connection("custom", "m", &server.url());
+        let arrival = wait_arrival(&mut bridge);
+        assert_eq!(
+            arrival.outcome.verdict,
+            flintshot_core::ProbeVerdict::VisionUnsupported
+        );
+        match arrival.manual_test {
+            Some(Err(copy)) => {
+                assert!(
+                    copy.contains("without seeing the image"),
+                    "the not-seen copy: {copy}"
+                );
+                assert!(
+                    !copy.contains("provider error"),
+                    "distinct from the generic failure copy: {copy}"
+                );
+            }
+            other => panic!("expected the not-seen failure, got {other:?}"),
+        }
+    }
+
+    /// An auth failure ⇒ unknown verdict (no banner claim) + the
+    /// key-rejected copy — and the verdict still settles + persists,
+    /// keyed to the tested triple.
+    #[test]
+    fn manual_test_auth_failure_is_unknown_and_persists() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (mut bridge, mut server, dir) = manual_test_harness();
         server
             .mock("POST", "/chat/completions")
             .with_status(401)
@@ -4753,15 +4852,22 @@ mod tests {
             .with_body(r#"{"error": {"message": "bad key"}}"#)
             .create();
         bridge.ai_test_connection("custom", "m", &server.url());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut result = None;
-        while result.is_none() && std::time::Instant::now() < deadline {
-            result = bridge.poll_ai_test_result();
-        }
-        match result {
+        let arrival = wait_arrival(&mut bridge);
+        assert_eq!(
+            arrival.outcome.verdict,
+            flintshot_core::ProbeVerdict::VisionUnknown
+        );
+        match arrival.manual_test {
             Some(Err(copy)) => assert!(copy.contains("key"), "copy was: {copy}"),
             other => panic!("expected a mapped failure, got {other:?}"),
         }
+        let reloaded = flintshot_core::Config::load_from(&dir.path().join("config.toml")).unwrap();
+        assert_eq!(reloaded.ai.probe_model.as_deref(), Some("m"));
+        assert_eq!(
+            reloaded.ai.probe_base_url.as_deref(),
+            Some(server.url().as_str())
+        );
+        assert_eq!(reloaded.ai.probe_verdict.as_deref(), Some("vision-unknown"));
     }
 
     /// Uploads, copies, and cancels deliberately keep the entry

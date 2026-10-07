@@ -111,6 +111,11 @@ pub(crate) struct AiConfigApp {
     key_store_failed: bool,
     /// The provider id `key_saved` answers for.
     key_saved_for: String,
+    /// The last known vision-probe verdict + the triple it was
+    /// measured on (seeded from the persisted `[ai]` fields on open,
+    /// updated live by the probe-arrival poll). Renders the banner
+    /// while the triple matches the working settings.
+    probe: Option<flintshot_core::ProbeOutcome>,
     /// The Test connection row's status.
     test: Option<TestStatus>,
     /// Clicked actions awaiting the router's drain.
@@ -130,6 +135,20 @@ impl AiConfigApp {
     pub(crate) fn new(config: Config) -> Self {
         let key_saved_for = config.ai.provider.clone();
         let (transforms, transforms_path) = default_transform_store();
+        // The persisted verdict rehydrates the banner on open (zero
+        // network — the save-change probe only fires on a save).
+        let probe = match (
+            config.ai.probe_model.as_deref(),
+            config.ai.probe_base_url.as_deref(),
+            config.ai.probe_verdict.as_deref(),
+        ) {
+            (Some(model), Some(base_url), Some(verdict)) => Some(flintshot_core::ProbeOutcome {
+                verdict: flintshot_core::ProbeVerdict::parse(verdict),
+                model: model.to_string(),
+                base_url: base_url.to_string(),
+            }),
+            _ => None,
+        };
         Self {
             config,
             dirty_since: None,
@@ -137,6 +156,7 @@ impl AiConfigApp {
             key_saved: false,
             key_store_failed: false,
             key_saved_for,
+            probe,
             test: None,
             actions: Vec::new(),
             transforms,
@@ -226,6 +246,12 @@ impl AiConfigApp {
             Ok(_) => TestStatus::Passed,
             Err(copy) => TestStatus::Failed(copy),
         });
+    }
+
+    /// The bridge settled a vision probe: adopt the verdict + triple
+    /// (the banner's live update path).
+    pub(crate) fn note_probe_outcome(&mut self, outcome: &flintshot_core::ProbeOutcome) {
+        self.probe = Some(outcome.clone());
     }
 
     /// Whether the current provider's key-status row is stale (a
@@ -523,6 +549,7 @@ fn model_section(ui: &mut egui::Ui, page: &mut AiConfigApp, now: f64) {
                 page.mark_dirty(now);
             }
         });
+        probe_banner(ui, page);
         set_row(ui, "Base URL", |ui| {
             let preset = page.config.ai.preset();
             let response = ui.add(
@@ -576,6 +603,75 @@ fn model_hint(page: &AiConfigApp) -> &str {
     }
 }
 
+/// The vision-probe verdict banner under the model field. Shows the
+/// persisted verdict only while it was measured on exactly the
+/// working `(model, base-url)` — a stale verdict never badges a
+/// different model. Strictly advisory: ok renders a muted
+/// sees-images line, unsupported a berry not-seen line with a
+/// **Check again** re-test affordance; unknown stays silent (it
+/// says nothing about vision).
+fn probe_banner(ui: &mut egui::Ui, page: &mut AiConfigApp) {
+    let Some(outcome) = page.probe.as_ref() else {
+        return;
+    };
+    if page.config.ai.model.trim() != outcome.model || page.effective_base_url() != outcome.base_url
+    {
+        return;
+    }
+    match outcome.verdict {
+        flintshot_core::ProbeVerdict::VisionOk => {
+            // The check is a painted vector, not a font codepoint —
+            // the tofu ban (icons are painted glyphs in this crate).
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Model sees images")
+                        .size(theme::TYPE_SM)
+                        .color(theme::palette::INK_SOFT),
+                );
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                let center = rect.center();
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(center.x - 4.0, center.y + 0.5),
+                        egui::pos2(center.x - 1.0, center.y + 3.5),
+                    ],
+                    egui::Stroke::new(1.5, theme::palette::FOREST_MID),
+                );
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(center.x - 1.0, center.y + 3.5),
+                        egui::pos2(center.x + 4.5, center.y - 3.5),
+                    ],
+                    egui::Stroke::new(1.5, theme::palette::FOREST_MID),
+                );
+            });
+            ui.add_space(theme::SPACE_SCALE[1]);
+        }
+        flintshot_core::ProbeVerdict::VisionUnsupported => {
+            // Hoist the copy before the pill closure's mutable page
+            // borrow (the key row's idiom).
+            let line = format!(
+                "Model `{}` may not accept image input — answers arrived without seeing \
+                 the PNG",
+                outcome.model
+            );
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(line)
+                        .size(theme::TYPE_SM)
+                        .color(theme::palette::BERRY_RED),
+                );
+                if ghost_pill(ui, egui::Id::new("ai-probe-retest"), "Check again", true) {
+                    page.test_connection();
+                }
+            });
+            ui.add_space(theme::SPACE_SCALE[1]);
+        }
+        flintshot_core::ProbeVerdict::VisionUnknown => {}
+    }
+}
+
 /// The key affordance: a masked field plus a **Save key** pill to
 /// its right — the visible commit path, dim + inert until the draft
 /// holds content, with Enter kept as the keyboard shortcut. The
@@ -624,7 +720,9 @@ fn test_row(ui: &mut egui::Ui, page: &mut AiConfigApp) {
     match page.test.as_ref() {
         None => {}
         Some(TestStatus::Pending) => status_line(ui, "Testing…"),
-        Some(TestStatus::Passed) => status_line(ui, "Connection works — image input verified"),
+        Some(TestStatus::Passed) => {
+            status_line(ui, "Connection works — the model described the image");
+        }
         Some(TestStatus::Failed(copy)) => status_line(ui, copy),
     }
 }
@@ -1553,6 +1651,193 @@ mod tests {
             page.editing.as_ref().expect("draft open").prompt,
             "ocr",
             "every typed char lands, not just the first"
+        );
+    }
+
+    // --- the vision-probe verdict banner (vision-validate T5) ---
+
+    /// A config carrying a persisted probe verdict for exactly its
+    /// working `(model, base-url)`.
+    fn config_with_probe(verdict: &str, probed_model: &str, probed_base: &str) -> Config {
+        let mut config = Config::default();
+        config.ai.provider = "custom".into();
+        config.ai.model = "llama3".into();
+        config.ai.base_url = "http://x/v1".into();
+        config.ai.probe_model = Some(probed_model.into());
+        config.ai.probe_base_url = Some(probed_base.into());
+        config.ai.probe_verdict = Some(verdict.into());
+        config.ai.probe_date = Some(1);
+        config
+    }
+
+    /// One rendered page's painted texts (the banner-visibility
+    /// assertion seam).
+    fn page_texts(ctx: &egui::Context, page: &mut AiConfigApp) -> Vec<String> {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 768.0),
+            )),
+            ..egui::RawInput::default()
+        };
+        ctx.run_ui(raw, |ui| {
+            let _ = AiConfigPage::show(ui, page, ui.input(|i| i.time));
+        })
+        .shapes
+        .iter()
+        .filter_map(|cs| match &cs.shape {
+            egui::Shape::Text(t) => Some(t.galley.job.text.clone()),
+            _ => None,
+        })
+        .collect()
+    }
+
+    /// The banner shows the three verdict states with the spec's
+    /// copy — and only while the persisted triple matches the
+    /// working settings.
+    #[test]
+    fn banner_renders_verdict_states_only_on_triple_match() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+
+        // Unsupported + match: berry copy names the model.
+        let mut page = AiConfigApp::new(config_with_probe(
+            "vision-unsupported",
+            "llama3",
+            "http://x/v1",
+        ));
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("may not accept image input")),
+            "the unsupported copy paints: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("llama3")),
+            "the banner names the model: {texts:?}"
+        );
+
+        // Ok + match: the muted sees-images line.
+        let mut page = AiConfigApp::new(config_with_probe("vision-ok", "llama3", "http://x/v1"));
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            texts.iter().any(|t| t.contains("Model sees images")),
+            "the ok copy paints: {texts:?}"
+        );
+
+        // Unknown: no banner claim either way.
+        let mut page =
+            AiConfigApp::new(config_with_probe("vision-unknown", "llama3", "http://x/v1"));
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains("may not accept") || t.contains("sees images")),
+            "unknown stays silent: {texts:?}"
+        );
+
+        // Triple mismatch (model differs): hidden.
+        let mut page = AiConfigApp::new(config_with_probe(
+            "vision-unsupported",
+            "other-model",
+            "http://x/v1",
+        ));
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            !texts.iter().any(|t| t.contains("may not accept")),
+            "a stale verdict never badges a different model: {texts:?}"
+        );
+
+        // Triple mismatch (base differs): hidden.
+        let mut page = AiConfigApp::new(config_with_probe(
+            "vision-unsupported",
+            "llama3",
+            "http://y/v1",
+        ));
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            !texts.iter().any(|t| t.contains("may not accept")),
+            "a stale verdict never badges a different endpoint: {texts:?}"
+        );
+    }
+
+    /// An arriving verdict updates the banner live (the page-poll
+    /// handoff), even when the page opened before any probe existed.
+    #[test]
+    fn banner_updates_from_a_live_arrival() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut page = AiConfigApp::new(Config::default());
+        page.config.ai.provider = "custom".into();
+        page.config.ai.model = "llama3".into();
+        page.config.ai.base_url = "http://x/v1".into();
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            !texts.iter().any(|t| t.contains("may not accept")),
+            "no verdict yet, no banner"
+        );
+        page.note_probe_outcome(&flintshot_core::ProbeOutcome {
+            verdict: flintshot_core::ProbeVerdict::VisionUnsupported,
+            model: "llama3".into(),
+            base_url: "http://x/v1".into(),
+        });
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("may not accept image input")),
+            "the arrival paints the banner: {texts:?}"
+        );
+    }
+
+    /// The banner's re-test affordance re-fires the manual probe
+    /// (the same Test connection path).
+    #[test]
+    fn banner_re_test_refires_the_probe() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut page = AiConfigApp::new(config_with_probe(
+            "vision-unsupported",
+            "llama3",
+            "http://x/v1",
+        ));
+        let _ = page_texts(&ctx, &mut page);
+        let retest = ctx
+            .read_response(egui::Id::new("ai-probe-retest"))
+            .expect("the Check again pill registers under the banner")
+            .rect;
+        let _ = page_texts(&ctx, &mut page); // warm the id
+        let _ = page_texts(&ctx, &mut page);
+        let _ = page_frame(&ctx, &mut page, click_events(retest.center()));
+        assert_eq!(
+            page.drain_action(),
+            Some(AiConfigAction::TestConnection {
+                provider: "custom".into(),
+                model: "llama3".into(),
+                base_url: "http://x/v1".into(),
+            }),
+            "re-test queues the same action as Test connection"
+        );
+        assert_eq!(page.test, Some(TestStatus::Pending));
+    }
+
+    /// `TestStatus::Passed` means the model described the image
+    /// (probe v1), not merely that the wire shape was accepted.
+    #[test]
+    fn passed_copy_pins_the_described_image_meaning() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut page = AiConfigApp::new(Config::default());
+        page.set_test_result(Ok(String::new()));
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            texts.iter().any(|t| t.contains("described the image")),
+            "the pass line says what passed: {texts:?}"
         );
     }
 }

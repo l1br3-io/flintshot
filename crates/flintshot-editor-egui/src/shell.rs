@@ -220,10 +220,11 @@ pub trait EditorPageBridge {
         false
     }
 
-    /// Fire a test connection (a vision probe: tiny inline PNG +
-    /// one-word prompt) against the AI settings page's working
-    /// provider settings; the result arrives on
-    /// [`Self::poll_ai_test_result`]. Default no-op.
+    /// Fire a test connection (a vision probe: a randomized
+    /// solid-color PNG + "name the color" prompt) against the AI
+    /// settings page's working provider settings; the verdict
+    /// arrives on [`Self::poll_vision_probe`] with the test row's
+    /// mapped result attached. Default no-op.
     fn ai_test_connection(&mut self, _provider: &str, _model: &str, _base_url: &str) {}
 
     /// The AI tab's Stop pill fired: abort the live stream (the
@@ -233,26 +234,35 @@ pub trait EditorPageBridge {
     /// bridge is a no-op, never a dead render.
     fn ai_stop(&mut self) {}
 
-    /// Take an arrived test-connection result, copy-mapped
-    /// (`Ok` = pass line, `Err` = the error's next-step copy).
-    /// Default: always `None`.
-    fn poll_ai_test_result(&mut self) -> Option<Result<String, String>> {
-        None
-    }
-
     /// The AI settings page's debounced save: persist the working
     /// config (the settings-route contract — debounce coalesces
     /// rapid edits, final write wins) and arm the save-change vision
     /// probe. Default no-op (headless tests).
     fn save_config(&mut self, _config: &flintshot_core::Config) {}
 
-    /// Take an arrived auto-fired vision-probe verdict (the
-    /// save-change loop's result, already persisted to
-    /// `config.toml`): the verdict plus the `(model, base-url)`
-    /// triple it was measured on. Default: always `None`.
-    fn poll_vision_probe(&mut self) -> Option<flintshot_core::ProbeOutcome> {
+    /// Take an arrived vision-probe result (already classified and
+    /// persisted to `config.toml`): the verdict + triple for the
+    /// banner, and — when a manual Test connection armed this probe
+    /// — the test row's copy-mapped result. Default: always `None`.
+    fn poll_vision_probe(&mut self) -> Option<VisionProbeArrival> {
         None
     }
+}
+
+/// One arrived vision-probe result: the persisted verdict + triple
+/// (the banner's state), plus the manual Test row's copy-mapped
+/// result when a manual test armed this probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisionProbeArrival {
+    /// The persisted outcome — verdict plus the `(model, base-url)`
+    /// triple it was measured on.
+    pub outcome: flintshot_core::ProbeOutcome,
+    /// The manual Test row's result: `Ok` = the model described the
+    /// image; `Err` = next-step copy (the not-seen line for blind
+    /// answers, the raw error's copy for transport/auth failures).
+    /// `None` when this probe was the save-change loop, not a
+    /// manual test.
+    pub manual_test: Option<Result<String, String>>,
 }
 
 /// An Ask-the-shot event, host → page. Mirrors
