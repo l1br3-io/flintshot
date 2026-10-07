@@ -257,6 +257,11 @@ pub enum AiEvent {
     /// Text already streamed stays rendered; this appends the error
     /// card.
     Failed(String),
+    /// The request failed because the model rejected the image
+    /// (text-only): the message is actionable copy naming the model,
+    /// and the error card carries a Configure AI… deep-link — the fix
+    /// is a model change, not a retry.
+    VisionUnsupported(String),
 }
 
 /// Shared handle to the boxed [`EditorPageBridge`]: the shell keeps

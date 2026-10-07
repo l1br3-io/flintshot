@@ -257,6 +257,18 @@ pub enum AiError {
         message: String,
     },
 
+    /// The provider rejected an image content part — the configured
+    /// model is text-only. Surfaced with a Configure deep-link,
+    /// never retried blindly: the fix is a model change, not a
+    /// resend.
+    #[error("model rejected the image (text-only?): {message}")]
+    VisionUnsupported {
+        /// HTTP status the provider returned.
+        status: u16,
+        /// Provider-surfaced message, kept for the error card.
+        message: String,
+    },
+
     /// A 2xx response with no usable text (`choices` empty or
     /// `content` null).
     #[error("empty response: {0}")]
@@ -288,9 +300,42 @@ impl AiError {
         match status {
             401 | 403 => Self::Auth(message),
             429 => Self::RateLimited(message),
+            // The vision check runs only in the generic arm: a 401
+            // or 429 mentioning images keeps its more-specific
+            // variant.
+            _ if is_vision_rejection(&message) => Self::VisionUnsupported { status, message },
             _ => Self::Provider { status, message },
         }
     }
+}
+
+/// Terms marking a provider message as being about image/vision
+/// input.
+const VISION_TERMS: [&str; 4] = ["image", "vision", "modality", "multimodal"];
+
+/// Phrases marking such a message as *rejecting* that input — a
+/// bare image mention must not match ("image too large" is a payload
+/// problem, not a capability statement).
+const REJECTION_PHRASES: [&str; 5] = [
+    "not supported",
+    "only supported",
+    "does not support",
+    "invalid content type",
+    "does not accept image",
+];
+
+/// Whether a provider error message says the model rejects
+/// image/vision input. Lowercased-substring heuristic anchored on
+/// the verified `OpenAI` wording ("Invalid content type. `image_url` is
+/// only supported by certain models." — research §3.3) and tolerant
+/// of rewordings; heuristic rot is safe — a miss degrades to today's
+/// [`AiError::Provider`] card, never worse.
+fn is_vision_rejection(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    VISION_TERMS.iter().any(|term| lower.contains(term))
+        && REJECTION_PHRASES
+            .iter()
+            .any(|phrase| lower.contains(phrase))
 }
 
 /// Trait implemented by AI provider clients (the upload-backend
@@ -685,6 +730,79 @@ mod tests {
                 assert_eq!(message, "<html>Bad Gateway</html>");
             }
             other => panic!("expected Provider, got {other:?}"),
+        }
+    }
+
+    // --- vision-rejection classification (vision-validate T1) ---
+
+    /// The verified `OpenAI` rejection body (research §3.3, seen on
+    /// `gpt-4o-search-preview`): an `image_url` part reached a
+    /// text-only model.
+    #[test]
+    fn openai_vision_rejection_400_classifies_to_vision_unsupported() {
+        let err = AiError::from_status_and_body(
+            400,
+            r#"{"error": {"message": "Invalid content type. image_url is only supported by certain models."}}"#,
+        );
+        match err {
+            AiError::VisionUnsupported { status, message } => {
+                assert_eq!(status, 400);
+                assert!(message.contains("image_url"), "kept: {message}");
+            }
+            other => panic!("expected VisionUnsupported, got {other:?}"),
+        }
+    }
+
+    /// Benign image mentions stay `Provider`: "image too large" is a
+    /// payload problem, not a capability statement; a generic 5xx
+    /// matches nothing.
+    #[test]
+    fn benign_image_mentions_and_generic_errors_stay_provider() {
+        for (status, message) in [
+            (400u16, "image too large: the file exceeds the 20 MiB limit"),
+            (500u16, "internal server error"),
+        ] {
+            match AiError::from_status_and_message(status, message.into()) {
+                AiError::Provider {
+                    status: s,
+                    message: m,
+                } => {
+                    assert_eq!(s, status);
+                    assert_eq!(m, message);
+                }
+                other => panic!("expected Provider for {message:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Auth/rate-limit keep priority: a 401 mentioning image models
+    /// is a key problem, not a capability verdict.
+    #[test]
+    fn vision_classification_never_steals_auth_or_rate_limited() {
+        assert!(matches!(
+            AiError::from_status_and_message(401, "invalid key for image models".into()),
+            AiError::Auth(_)
+        ));
+        assert!(matches!(
+            AiError::from_status_and_message(429, "image requests rate limited".into()),
+            AiError::RateLimited(_)
+        ));
+    }
+
+    /// Heuristic tolerance: rewordings providers may ship instead of
+    /// the anchored `OpenAI` wording still classify — a miss only
+    /// degrades to today's `Provider` card.
+    #[test]
+    fn reworded_rejection_phrases_classify_as_vision_unsupported() {
+        for message in [
+            "This model does not support image input",
+            "vision input is not supported on this model",
+            "multimodal content is only supported by certain models",
+        ] {
+            match AiError::from_status_and_message(400, message.into()) {
+                AiError::VisionUnsupported { .. } => {}
+                other => panic!("expected VisionUnsupported for {message:?}, got {other:?}"),
+            }
         }
     }
 

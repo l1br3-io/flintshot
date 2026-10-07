@@ -2098,6 +2098,10 @@ struct AiHost {
     /// conversation pipeline; the probe stays one-shot
     /// non-streaming).
     test_rx: Option<std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>>,
+    /// The model the live test-connection probe is running against —
+    /// kept so the result's error copy can name it (the settings
+    /// page's working model, not necessarily the saved one).
+    test_model: Option<String>,
     /// Test seam: when set, AI requests resolve against this
     /// snapshot instead of the platform config file. Hermetic
     /// tests — a dev machine's real `config.toml` may be (and on an
@@ -2246,11 +2250,23 @@ impl EditorPageBridge for PageBridge {
                         terminal_seen = true;
                     }
                     crate::ai::worker::ChatWorkerEvent::Failed(err) => {
-                        self.ai
-                            .queue
-                            .push_back(flintshot_editor_egui::AiEvent::Failed(
-                                crate::ai::worker::ai_error_copy(&err),
-                            ));
+                        // Vision rejections get their own event: the
+                        // panel's card carries the Configure
+                        // deep-link off it. The copy names the
+                        // configured model — that's the thing to
+                        // change.
+                        let model = self.ai_config().ai.model;
+                        let event =
+                            if matches!(err, flintshot_core::AiError::VisionUnsupported { .. }) {
+                                flintshot_editor_egui::AiEvent::VisionUnsupported(
+                                    crate::ai::worker::ai_error_copy(&err, &model),
+                                )
+                            } else {
+                                flintshot_editor_egui::AiEvent::Failed(
+                                    crate::ai::worker::ai_error_copy(&err, &model),
+                                )
+                            };
+                        self.ai.queue.push_back(event);
                         terminal_seen = true;
                     }
                 }
@@ -2339,15 +2355,17 @@ impl EditorPageBridge for PageBridge {
             resolved,
             flintshot_core::vision_probe_messages(),
         ));
+        self.ai.test_model = Some(model.to_string());
     }
 
     fn poll_ai_test_result(&mut self) -> Option<Result<String, String>> {
         if let Some(rx) = self.ai.test_rx.as_ref() {
             if let Ok(result) = rx.try_recv() {
                 self.ai.test_rx = None;
+                let model = self.ai.test_model.take().unwrap_or_default();
                 return Some(match result {
                     Ok(_) => Ok("Connection works".into()),
-                    Err(err) => Err(crate::ai::worker::ai_error_copy(&err)),
+                    Err(err) => Err(crate::ai::worker::ai_error_copy(&err, &model)),
                 });
             }
         }
@@ -4269,6 +4287,48 @@ mod tests {
                 assert!(message.contains("AI settings"), "copy was: {message}");
             }
             other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(bridge.poll_ai_event().is_none(), "exactly one event");
+    }
+
+    /// A worker failure carrying the vision-rejection variant
+    /// surfaces as `AiEvent::VisionUnsupported` with model-naming
+    /// copy — the panel renders its Configure deep-link off that
+    /// event (vision-validate T1).
+    #[test]
+    fn vision_unsupported_failure_maps_to_the_configure_event() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let (shared, _dir) = shared_with_session();
+        let shared = std::sync::Arc::new(shared);
+        let mut config = flintshot_core::Config::default();
+        config.ai.model = "m".into();
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::clone(&shared),
+            ai: AiHost {
+                config_override: Some(config),
+                ..AiHost::default()
+            },
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::ai::worker::ChatWorkerEvent::Failed(
+            flintshot_core::AiError::VisionUnsupported {
+                status: 400,
+                message: "Invalid content type. image_url is only supported by certain models."
+                    .into(),
+            },
+        ))
+        .expect("send failure");
+        bridge.ai.rx = Some(rx);
+
+        let event = bridge.poll_ai_event().expect("the failure surfaces");
+        match event {
+            flintshot_editor_egui::AiEvent::VisionUnsupported(message) => {
+                assert!(message.contains("`m`"), "names the model: {message}");
+                assert!(message.contains("text-only"), "says why: {message}");
+            }
+            other => panic!("expected VisionUnsupported, got {other:?}"),
         }
         assert!(bridge.poll_ai_event().is_none(), "exactly one event");
     }

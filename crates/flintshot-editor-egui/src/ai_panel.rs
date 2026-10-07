@@ -50,6 +50,10 @@ pub(crate) enum AiTurn {
     Error {
         /// The surfaced error message.
         message: String,
+        /// Whether the card offers the Configure AI… deep-link
+        /// (vision-unsupported rejections — the fix is a model
+        /// change, not a retry).
+        configure: bool,
     },
 }
 
@@ -58,7 +62,10 @@ pub(crate) enum AiTurn {
 /// In-memory only — conversation history never persists to disk
 /// (spec boundary). The thumbnail handle uploads when a transform
 /// run starts (Task 007); `None` before the first run.
+// The bools are one-shot render/handoff flags, not domain states —
+// a state machine here would obscure the page-poll choreography.
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct AiConversation {
     /// The conversation so far, oldest first.
     turns: Vec<AiTurn>,
@@ -83,6 +90,9 @@ pub(crate) struct AiConversation {
     /// The Stop pill's one-shot click flag (consumed by the page
     /// right after the render, like the outbox).
     stop_requested: bool,
+    /// The error card's Configure AI… link fired (the page's one-shot
+    /// handoff to the bridge's config route, like the stop request).
+    configure_requested: bool,
     /// Whether an assistant response just landed (the arrival
     /// hairline's one-shot trigger; the first render of the fresh
     /// card consumes it).
@@ -154,12 +164,27 @@ impl AiConversation {
     /// finished assistant card and the error card appends after it.
     /// With no partial, only the error card lands (today's shape).
     pub(crate) fn fail_stream(&mut self, message: impl Into<String>) {
+        self.fail_with(message.into(), false);
+    }
+
+    /// A vision-unsupported failure lands identically to
+    /// [`Self::fail_stream`] but the error card carries the
+    /// Configure AI… deep-link — the fix is a model change, so the
+    /// card routes to settings instead of suggesting a retry.
+    pub(crate) fn fail_vision_unsupported(&mut self, message: impl Into<String>) {
+        self.fail_with(message.into(), true);
+    }
+
+    /// The shared failure path: keep any streamed partial as a
+    /// finished card, append the error card, end the wait.
+    fn fail_with(&mut self, message: String, configure: bool) {
         if let Some(partial) = self.streaming.take() {
             if !partial.is_empty() {
                 self.turns.push(AiTurn::Assistant { text: partial });
             }
         }
-        self.push_error(message);
+        self.turns.push(AiTurn::Error { message, configure });
+        self.pending = false;
     }
 
     /// Record the Stop pill's click: the page consumes it right
@@ -177,13 +202,20 @@ impl AiConversation {
         })
     }
 
-    /// Append an error card and clear the pending flag — a surfaced
-    /// failure also ends the wait.
-    pub(crate) fn push_error(&mut self, message: impl Into<String>) {
-        self.turns.push(AiTurn::Error {
-            message: message.into(),
-        });
-        self.pending = false;
+    /// Record the error card's Configure AI… link click: the page
+    /// consumes it right after the panel render and fires the
+    /// bridge's config route.
+    pub(crate) fn request_configure(&mut self) {
+        self.configure_requested = true;
+    }
+
+    /// Take the pending configure request, if any (one-shot handoff
+    /// to the bridge's `request_ai_config_route`).
+    pub(crate) fn take_configure_request(&mut self) -> Option<bool> {
+        self.configure_requested.then(|| {
+            self.configure_requested = false;
+            true
+        })
     }
 
     /// Mark a request in flight (the spinner row shows).
@@ -208,6 +240,7 @@ impl AiConversation {
         self.thumb = None;
         self.outbox = None;
         self.stop_requested = false;
+        self.configure_requested = false;
         self.fresh_arrival = false;
     }
 
@@ -308,8 +341,12 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
                             fresh,
                         );
                     }
-                    AiTurn::Error { message } => {
-                        error_card(ui, egui::Id::new(("ai-turn", i)), message);
+                    AiTurn::Error { message, configure } => {
+                        let link_fired =
+                            error_card(ui, egui::Id::new(("ai-turn", i)), message, *configure);
+                        if *configure && link_fired {
+                            conversation.request_configure();
+                        }
                     }
                 }
             }
@@ -433,8 +470,12 @@ fn assistant_card(
 }
 
 /// One failed request: a berry-tinted card with the surfaced
-/// message.
-fn error_card(ui: &mut egui::Ui, id: egui::Id, message: &str) {
+/// message. Vision-unsupported rejections additionally offer the
+/// **Configure AI…** deep-link (the 09-26 error-card pattern the
+/// dialog's Run row uses). Returns whether the link fired (always
+/// `false` when `configure` is unset).
+fn error_card(ui: &mut egui::Ui, id: egui::Id, message: &str, configure: bool) -> bool {
+    let mut link_fired = false;
     egui::Frame::new()
         .fill(theme::palette::PAPER_DIM)
         .corner_radius(CornerRadius::same(theme::POD_RADIUS))
@@ -445,14 +486,46 @@ fn error_card(ui: &mut egui::Ui, id: egui::Id, message: &str) {
         ))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let _ = id;
             ui.label(
                 RichText::new(message)
                     .size(theme::TYPE_SM)
                     .color(theme::palette::INK),
             );
+            if configure && configure_link(ui, id.with("configure")) {
+                link_fired = true;
+            }
         });
     ui.add_space(theme::SPACE_SCALE[1]);
+    link_fired
+}
+
+/// The error card's **Configure AI…** deep-link: a forest-mid text
+/// chip, underlined on hover (the dialog's `configure_link` grammar;
+/// per-turn id, since a thread can hold several flagged cards).
+fn configure_link(ui: &mut egui::Ui, id: egui::Id) -> bool {
+    let label = "Configure AI…";
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(theme::TYPE_SM),
+        theme::palette::FOREST_MID,
+    );
+    let w = 4.0 + galley.size().x + 4.0;
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(w, galley.size().y + 6.0), egui::Sense::hover());
+    let resp = ui.interact(rect, id, egui::Sense::click());
+    let pos = egui::pos2(rect.left() + 4.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter()
+        .galley(pos, galley.clone(), theme::palette::FOREST_MID);
+    if resp.hovered() {
+        ui.painter().line_segment(
+            [
+                egui::pos2(pos.x, pos.y + galley.size().y + 1.0),
+                egui::pos2(pos.x + galley.size().x, pos.y + galley.size().y + 1.0),
+            ],
+            egui::Stroke::new(1.0, theme::palette::FOREST_MID),
+        );
+    }
+    resp.clicked()
 }
 
 /// The in-flight stream's growing card: plain wrapped text (the
@@ -676,7 +749,7 @@ mod tests {
         assert!(conversation.is_pending());
         conversation.push_assistant("## Extracted");
         assert!(!conversation.is_pending(), "arrival ends the wait");
-        conversation.push_error("boom");
+        conversation.fail_stream("boom");
         assert!(!conversation.is_pending(), "an error also ends the wait");
         assert_eq!(
             conversation.turns(),
@@ -688,7 +761,8 @@ mod tests {
                     text: "## Extracted".into()
                 },
                 AiTurn::Error {
-                    message: "boom".into()
+                    message: "boom".into(),
+                    configure: false,
                 },
             ]
         );
@@ -955,7 +1029,8 @@ mod tests {
                     text: "partial answer".into()
                 },
                 AiTurn::Error {
-                    message: "The provider rejected the key — replace it in AI settings.".into()
+                    message: "The provider rejected the key — replace it in AI settings.".into(),
+                    configure: false,
                 },
             ],
             "the partial stays rendered and the error card appends"
@@ -1102,6 +1177,89 @@ mod tests {
         assert!(
             ctx.read_response(egui::Id::new("ai-stop")).is_none(),
             "gone after Failed"
+        );
+    }
+
+    // --- vision-unsupported error cards (vision-validate T1) ---
+
+    /// A vision-unsupported failure keeps any streamed partial and
+    /// lands an error card carrying the Configure AI… deep-link: the
+    /// fix is a model change, so the card routes to settings instead
+    /// of suggesting a retry.
+    #[test]
+    fn vision_unsupported_card_offers_the_configure_deep_link() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut conversation = AiConversation::default();
+        conversation.begin_pending();
+        conversation.push_delta("partial");
+        conversation.fail_vision_unsupported(
+            "Model `gpt-3.5-turbo` rejected the image — it looks text-only.",
+        );
+        assert!(
+            matches!(
+                conversation.turns().last(),
+                Some(AiTurn::Error {
+                    configure: true,
+                    ..
+                })
+            ),
+            "the error turn carries the deep-link flag"
+        );
+
+        let out = render_once(&ctx, &mut conversation);
+        assert!(
+            frame_texts(&out).iter().any(|t| t.contains("text-only")),
+            "the copy paints"
+        );
+        assert!(
+            frame_texts(&out).iter().any(|t| t.contains("Configure AI")),
+            "the deep-link paints"
+        );
+        let link = ctx
+            .read_response(egui::Id::new(("ai-turn", 1)).with("configure"))
+            .expect("the link registers under its per-turn id");
+        assert!(
+            conversation.take_configure_request().is_none(),
+            "no request before the click"
+        );
+
+        let _ = ctx.run_ui(screen_with_click(link.rect.center()), |ui| {
+            egui::Panel::right("test_ai_panel_streaming")
+                .resizable(false)
+                .exact_size(236.0)
+                .show(ui, |ui| show(ui, &mut conversation));
+        });
+        assert_eq!(
+            conversation.take_configure_request(),
+            Some(true),
+            "the click arms the configure handoff"
+        );
+        assert_eq!(conversation.take_configure_request(), None, "one-shot");
+    }
+
+    /// Plain errors carry no deep-link — only vision rejections
+    /// route to settings.
+    #[test]
+    fn plain_error_card_has_no_configure_link() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut conversation = AiConversation::default();
+        conversation.fail_stream("boom");
+        assert!(matches!(
+            conversation.turns().last(),
+            Some(AiTurn::Error {
+                configure: false,
+                ..
+            })
+        ));
+        let _ = render_once(&ctx, &mut conversation);
+        assert!(
+            ctx.read_response(egui::Id::new(("ai-turn", 0)).with("configure"))
+                .is_none(),
+            "no link response for a plain error"
         );
     }
 }

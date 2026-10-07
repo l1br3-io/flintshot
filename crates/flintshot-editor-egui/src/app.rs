@@ -2049,6 +2049,9 @@ impl EditorApp {
                 crate::shell::AiEvent::Delta(text) => self.ai.push_delta(text),
                 crate::shell::AiEvent::Response(text) => self.ai.finish_stream(text),
                 crate::shell::AiEvent::Failed(message) => self.ai.fail_stream(message),
+                crate::shell::AiEvent::VisionUnsupported(message) => {
+                    self.ai.fail_vision_unsupported(message);
+                }
             }
             self.panel.focus_ai();
         }
@@ -2157,6 +2160,14 @@ impl EditorApp {
         if self.ai.take_stop_request().is_some() {
             if let Some(bridge) = self.page.clone() {
                 bridge.borrow_mut().ai_stop();
+            }
+        }
+        // The error card's Configure AI… deep-link routes exactly
+        // like the dialog's: the router parks this editor and
+        // restores it on Esc.
+        if self.ai.take_configure_request().is_some() {
+            if let Some(bridge) = self.page.clone() {
+                bridge.borrow_mut().request_ai_config_route();
             }
         }
         if let Some(text) = self.ai.take_outbox() {
@@ -3396,6 +3407,7 @@ mod tests {
             },
             AiTurn::Error {
                 message: "boom".into(),
+                configure: false,
             },
         ];
         let messages = ai_follow_up_messages(&turns, "what color?");

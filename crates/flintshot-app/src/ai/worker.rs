@@ -393,8 +393,10 @@ pub fn ai_configured(config: &Config) -> bool {
 
 /// Map a provider error to one-line, next-step copy for the AI tab's
 /// error card. The raw error text rides along where it helps.
+/// `model` names the configured model in variant copy that needs it
+/// (vision rejections say which model is text-only).
 #[must_use]
-pub fn ai_error_copy(error: &AiError) -> String {
+pub fn ai_error_copy(error: &AiError, model: &str) -> String {
     match error {
         AiError::Transport(_) => {
             "Couldn't reach the provider — check the base URL and network, then retry.".into()
@@ -408,6 +410,10 @@ pub fn ai_error_copy(error: &AiError) -> String {
         AiError::EmptyResponse(_) => {
             "The model returned no text — retry, or pick another model in AI settings.".into()
         }
+        AiError::VisionUnsupported { message, .. } => format!(
+            "Model `{model}` rejected the image — it looks text-only. \
+             Change it in Configure AI…. Provider said: {message}"
+        ),
         // Provider bodies already carry status + message (and any
         // future variant falls through with its Display form).
         _ => format!("{error}"),
@@ -468,10 +474,10 @@ mod tests {
 
     #[test]
     fn error_copy_is_actionable_per_variant() {
-        assert!(ai_error_copy(&AiError::Transport("x".into())).contains("reach"));
-        assert!(ai_error_copy(&AiError::Auth("x".into())).contains("key"));
-        assert!(ai_error_copy(&AiError::RateLimited("x".into())).contains("Rate"));
-        assert!(ai_error_copy(&AiError::EmptyResponse("x".into())).contains("no text"));
+        assert!(ai_error_copy(&AiError::Transport("x".into()), "m").contains("reach"));
+        assert!(ai_error_copy(&AiError::Auth("x".into()), "m").contains("key"));
+        assert!(ai_error_copy(&AiError::RateLimited("x".into()), "m").contains("Rate"));
+        assert!(ai_error_copy(&AiError::EmptyResponse("x".into()), "m").contains("no text"));
     }
 
     /// Regression: the `Auth` and `RateLimited` copies discarded the
@@ -481,7 +487,7 @@ mod tests {
     /// after the actionable headline.
     #[test]
     fn auth_and_rate_limit_copy_carry_the_provider_detail() {
-        let copy = ai_error_copy(&AiError::Auth("Invalid API key provided".into()));
+        let copy = ai_error_copy(&AiError::Auth("Invalid API key provided".into()), "m");
         assert!(
             copy.contains("replace it in AI settings"),
             "headline stays: {copy}"
@@ -491,11 +497,43 @@ mod tests {
             "provider detail rides along: {copy}"
         );
 
-        let copy = ai_error_copy(&AiError::RateLimited("quota exhausted".into()));
+        let copy = ai_error_copy(&AiError::RateLimited("quota exhausted".into()), "m");
         assert!(copy.contains("wait a moment"), "headline stays: {copy}");
         assert!(
             copy.contains("quota exhausted"),
             "detail rides along: {copy}"
+        );
+    }
+
+    /// The vision-rejection variant earns copy distinct from the
+    /// generic `Provider` card, and it names the configured model —
+    /// that model is the thing to change.
+    #[test]
+    fn vision_unsupported_copy_names_the_model_and_differs_from_provider() {
+        let message = "Invalid content type. image_url is only supported by certain models.";
+        let vision = ai_error_copy(
+            &AiError::VisionUnsupported {
+                status: 400,
+                message: message.into(),
+            },
+            "gpt-3.5-turbo",
+        );
+        let provider = ai_error_copy(
+            &AiError::Provider {
+                status: 400,
+                message: message.into(),
+            },
+            "gpt-3.5-turbo",
+        );
+        assert_ne!(vision, provider, "the typed variant earns distinct copy");
+        assert!(
+            vision.contains("gpt-3.5-turbo"),
+            "names the model: {vision}"
+        );
+        assert!(vision.contains("text-only"), "says why: {vision}");
+        assert!(
+            vision.contains("Configure AI"),
+            "points at the fix: {vision}"
         );
     }
 
