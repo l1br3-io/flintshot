@@ -385,7 +385,9 @@ const XAI: ProviderPreset = ProviderPreset {
     id: "xai",
     name: "xAI (Grok)",
     base_url: "https://api.x.ai/v1",
-    model_hint: "grok-2-vision-1212",
+    // xAI's current image-understanding example (docs.x.ai, pinned
+    // 2026-10-07); a hint, never a lock.
+    model_hint: "grok-4.7",
 };
 
 const GEMINI: ProviderPreset = ProviderPreset {
@@ -1020,6 +1022,18 @@ mod tests {
     fn presets_cover_display_order() {
         let ids: Vec<&str> = ProviderPreset::all().iter().map(|p| p.id).collect();
         assert_eq!(ids, ["openai", "xai", "gemini", "custom"]);
+    }
+
+    /// Preset hints are pinned from provider docs at build time
+    /// (vision-validate T7, 2026-10-07): xAI's image-understanding
+    /// examples run `grok-4.7` (docs.x.ai) — the old
+    /// `grok-2-vision-1212` predates the current docs and misleads
+    /// exactly the users the probe protects.
+    #[test]
+    fn preset_model_hints_are_current_vision_examples() {
+        assert_eq!(XAI.model_hint, "grok-4.7");
+        assert_eq!(OPENAI.model_hint, "gpt-4o-mini");
+        assert_eq!(GEMINI.model_hint, "gemini-2.0-flash");
     }
 
     #[test]

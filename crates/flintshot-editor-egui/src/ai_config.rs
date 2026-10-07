@@ -1077,7 +1077,7 @@ mod tests {
         assert_eq!(page.config().ai.provider, "xai");
         assert_eq!(
             page.config().ai.model,
-            "grok-2-vision-1212",
+            "grok-4.7",
             "empty model takes the preset's hint"
         );
         assert_eq!(
@@ -1103,7 +1103,7 @@ mod tests {
         page.select_provider("xai", 3.0);
         assert_eq!(
             page.config().ai.model,
-            "grok-2-vision-1212",
+            "grok-4.7",
             "a stale preset hint follows the new preset"
         );
         page.select_provider("custom", 4.0);
