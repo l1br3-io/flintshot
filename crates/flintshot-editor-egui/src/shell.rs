@@ -234,6 +234,14 @@ pub trait EditorPageBridge {
     /// bridge is a no-op, never a dead render.
     fn ai_stop(&mut self) {}
 
+    /// Whether the live `(model, base-url)` carries a persisted
+    /// `vision-unsupported` verdict (the AI tab's advisory badge —
+    /// a config read, zero network; the verdict only ever changes on
+    /// a probe). Default: `false`.
+    fn ai_vision_unsupported(&mut self) -> bool {
+        false
+    }
+
     /// The AI settings page's debounced save: persist the working
     /// config (the settings-route contract — debounce coalesces
     /// rapid edits, final write wins) and arm the save-change vision

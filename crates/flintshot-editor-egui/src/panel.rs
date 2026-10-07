@@ -156,6 +156,12 @@ impl PanelState {
         self.collapsed
     }
 
+    /// Whether the AI tab is the active tab (the badge-refresh poll
+    /// gate — only that tab reads the verdict).
+    pub(crate) fn ai_focused(&self) -> bool {
+        matches!(self.tab, PanelTab::Ai)
+    }
+
     /// The live panel width, logical px. Raw — the caller owns the
     /// collapsed-means-zero policy (the worker fit path); the panel
     /// itself always restores this width.

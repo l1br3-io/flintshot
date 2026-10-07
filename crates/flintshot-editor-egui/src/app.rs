@@ -2055,6 +2055,16 @@ impl EditorApp {
             }
             self.panel.focus_ai();
         }
+        // The advisory vision badge: while the AI tab is visible,
+        // refresh the persisted verdict's applicability (a config
+        // read — zero network; the small file reads fine at the
+        // poll cadence).
+        if self.panel.ai_focused() {
+            if let Some(bridge) = self.page.clone() {
+                let unsupported = bridge.borrow_mut().ai_vision_unsupported();
+                self.ai.set_vision_unsupported(unsupported);
+            }
+        }
         // While a request is pending the response must arrive
         // without user input: a short repaint timer carries the poll.
         // No cross-thread `Context` clone — the worker signals only

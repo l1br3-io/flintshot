@@ -97,6 +97,11 @@ pub(crate) struct AiConversation {
     /// hairline's one-shot trigger; the first render of the fresh
     /// card consumes it).
     fresh_arrival: bool,
+    /// Whether the live `(model, base-url)` carries a persisted
+    /// `vision-unsupported` verdict (bridge-served while the AI tab
+    /// is visible; the advisory berry badge). Config-owned state —
+    /// a conversation reset never clears it.
+    vision_unsupported: bool,
 }
 
 impl AiConversation {
@@ -218,6 +223,12 @@ impl AiConversation {
         })
     }
 
+    /// Adopt the bridge's vision-verdict applicability flag (the
+    /// advisory badge; refreshed while the AI tab is visible).
+    pub(crate) fn set_vision_unsupported(&mut self, active: bool) {
+        self.vision_unsupported = active;
+    }
+
     /// Mark a request in flight (the spinner row shows).
     pub(crate) fn begin_pending(&mut self) {
         self.pending = true;
@@ -290,6 +301,7 @@ pub(crate) fn show(ui: &mut egui::Ui, conversation: &mut AiConversation) {
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
             ui.add_space(theme::SPACE_SCALE[1]);
+            vision_badge(ui, conversation.vision_unsupported);
             // While a stream is live the footer leads with the Stop
             // pill (spec default: footer row): the gold hero grammar
             // compressed, firing the page's stop wiring on click.
@@ -594,6 +606,37 @@ fn pending_row(ui: &mut egui::Ui) {
                 .color(theme::palette::INK_SOFT),
         );
     });
+}
+
+/// The advisory vision badge: a berry chip above the composer
+/// warning that the live `(model, base-url)` was measured not to
+/// see images (a persisted `vision-unsupported` verdict). Strictly
+/// advisory — never disables the follow-up pill or Run. The warning
+/// glyph is a painted vector, never a font codepoint (the tofu
+/// ban).
+fn vision_badge(ui: &mut egui::Ui, active: bool) {
+    if !active {
+        return;
+    }
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+        let berry = theme::palette::BERRY_RED;
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(rect.center().x, rect.top() + 1.0),
+                egui::pos2(rect.right() - 0.5, rect.bottom() - 2.0),
+                egui::pos2(rect.left() + 0.5, rect.bottom() - 2.0),
+            ],
+            berry,
+            egui::Stroke::NONE,
+        ));
+        ui.label(
+            RichText::new("may not see images")
+                .size(theme::TYPE_SM)
+                .color(berry),
+        );
+    });
+    ui.add_space(theme::SPACE_SCALE[0]);
 }
 
 /// The Stop pill: the gold hero grammar (ghost fill, gold key
@@ -1260,6 +1303,47 @@ mod tests {
             ctx.read_response(egui::Id::new(("ai-turn", 0)).with("configure"))
                 .is_none(),
             "no link response for a plain error"
+        );
+    }
+
+    // --- the advisory vision badge (vision-validate T6) ---
+
+    /// The badge renders only while flagged — and its presence
+    /// changes no interaction: the follow-up row stays armed.
+    #[test]
+    fn vision_badge_is_advisory_and_leaves_interactions_armed() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut conversation = AiConversation::default();
+        conversation.push_user("read it");
+        conversation.finish_stream("done");
+
+        // Absent by default.
+        let out = render_once(&ctx, &mut conversation);
+        assert!(
+            !frame_texts(&out)
+                .iter()
+                .any(|t| t.contains("may not see images")),
+            "no verdict flag, no badge"
+        );
+
+        // Present when the live pair was measured not to see images.
+        conversation.set_vision_unsupported(true);
+        let out = render_once(&ctx, &mut conversation);
+        assert!(
+            frame_texts(&out)
+                .iter()
+                .any(|t| t.contains("may not see images")),
+            "the berry chip paints"
+        );
+        // The follow-up send chip stays enabled under the badge.
+        let send = ctx
+            .read_response(egui::Id::new("ai-follow-up").with("send"))
+            .expect("the send chip still registers");
+        assert!(
+            send.enabled(),
+            "the badge never disables the follow-up pill"
         );
     }
 }

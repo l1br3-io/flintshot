@@ -2484,6 +2484,20 @@ impl EditorPageBridge for PageBridge {
         self.ai.manual_probe_for = Some((model.to_string(), base_url.to_string()));
     }
 
+    fn ai_vision_unsupported(&mut self) -> bool {
+        // Pure config read — zero network (verdicts only change on a
+        // probe, which only fires on user action).
+        let config = self.ai_config();
+        config
+            .ai
+            .probe_verdict
+            .as_deref()
+            .map(flintshot_core::ProbeVerdict::parse)
+            == Some(flintshot_core::ProbeVerdict::VisionUnsupported)
+            && config.ai.probe_model.as_deref() == Some(config.ai.model.trim())
+            && config.ai.probe_base_url.as_deref() == Some(config.ai.effective_base_url())
+    }
+
     /// The AI settings page's debounced save drain (the same
     /// GOTCHA contract as the settings route's: debounce coalesces
     /// rapid edits, final write wins). Persists, then arms the
@@ -4868,6 +4882,51 @@ mod tests {
             Some(server.url().as_str())
         );
         assert_eq!(reloaded.ai.probe_verdict.as_deref(), Some("vision-unknown"));
+    }
+
+    /// The AI tab's badge flag (vision-validate T6): true only for
+    /// an unsupported verdict measured on exactly the live
+    /// `(model, base-url)` — ok/unknown verdicts, triple mismatches,
+    /// and absent verdicts all stay silent.
+    #[test]
+    fn vision_unsupported_flag_requires_verdict_and_triple_match() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let (shared, _session) = shared_with_session();
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::new(shared),
+            ai: AiHost {
+                config_path: Some(path.clone()),
+                ..AiHost::default()
+            },
+        };
+
+        let mut config = flintshot_core::Config::default();
+        config.ai.provider = "custom".into();
+        config.ai.model = "llama3".into();
+        config.ai.base_url = "http://x/v1".into();
+        config.save_to(&path).unwrap();
+        assert!(!bridge.ai_vision_unsupported(), "no verdict yet, no badge");
+
+        for (verdict, probed_model, probed_base, expected) in [
+            ("vision-unsupported", "llama3", "http://x/v1", true),
+            ("vision-ok", "llama3", "http://x/v1", false),
+            ("vision-unknown", "llama3", "http://x/v1", false),
+            ("vision-unsupported", "other-model", "http://x/v1", false),
+            ("vision-unsupported", "llama3", "http://y/v1", false),
+        ] {
+            config.ai.probe_model = Some(probed_model.into());
+            config.ai.probe_base_url = Some(probed_base.into());
+            config.ai.probe_verdict = Some(verdict.into());
+            config.save_to(&path).unwrap();
+            assert_eq!(
+                bridge.ai_vision_unsupported(),
+                expected,
+                "verdict {verdict} probed ({probed_model}, {probed_base})"
+            );
+        }
     }
 
     /// Uploads, copies, and cancels deliberately keep the entry
