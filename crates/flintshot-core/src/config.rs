@@ -360,6 +360,24 @@ pub struct AiConfig {
     /// Capped at [`AiConfig::MAX_RECENT_TRANSFORMS`] on use.
     #[serde(default)]
     pub recent_transforms: Vec<String>,
+    /// The model id the last vision-probe verdict applies to, with
+    /// [`AiConfig::probe_base_url`] — the pair a verdict must match
+    /// before any UI shows it (a stale verdict never badges a
+    /// different model). `None` before the first probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_model: Option<String>,
+    /// The effective base URL the last probe ran against (the
+    /// triple's second member).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_base_url: Option<String>,
+    /// The last probe's verdict, string form: `vision-ok`,
+    /// `vision-unsupported`, or `vision-unknown`. Strictly advisory —
+    /// never gates Run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_verdict: Option<String>,
+    /// When the last probe ran (unix epoch seconds) — informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_date: Option<i64>,
 }
 
 impl Default for AiConfig {
@@ -369,6 +387,10 @@ impl Default for AiConfig {
             model: String::new(),
             base_url: String::new(),
             recent_transforms: Vec::new(),
+            probe_model: None,
+            probe_base_url: None,
+            probe_verdict: None,
+            probe_date: None,
         }
     }
 }
@@ -959,26 +981,49 @@ impl Config {
             );
         }
         if let Some(ai) = doc.get_mut("ai").and_then(|i| i.as_table_mut()) {
-            // GOTCHA: every new `[ai]` field must be added here or
-            // saves into an existing config silently drop it — the
-            // v1 bug (AI settings edits never persisted once
-            // config.toml existed), fenced by the regression test.
-            set_value(
-                ai,
-                "provider",
-                toml_edit::Value::from(self.ai.provider.as_str()),
-            );
-            set_value(ai, "model", toml_edit::Value::from(self.ai.model.as_str()));
-            set_value(
-                ai,
-                "base-url",
-                toml_edit::Value::from(self.ai.base_url.as_str()),
-            );
-            let recent: toml_edit::Array = self.ai.recent_transforms.iter().cloned().collect();
-            set_value(ai, "recent-transforms", toml_edit::Value::Array(recent));
+            self.merge_ai(ai);
         }
 
         Ok(doc.to_string())
+    }
+
+    /// Write every `[ai]` field into the existing `ai` table.
+    ///
+    /// GOTCHA: every new `[ai]` field must be added here or saves
+    /// into an existing config silently drop it — the v1 bug (AI
+    /// settings edits never persisted once `config.toml` existed),
+    /// fenced by the regression test.
+    fn merge_ai(&self, ai: &mut toml_edit::Table) {
+        set_value(
+            ai,
+            "provider",
+            toml_edit::Value::from(self.ai.provider.as_str()),
+        );
+        set_value(ai, "model", toml_edit::Value::from(self.ai.model.as_str()));
+        set_value(
+            ai,
+            "base-url",
+            toml_edit::Value::from(self.ai.base_url.as_str()),
+        );
+        let recent: toml_edit::Array = self.ai.recent_transforms.iter().cloned().collect();
+        set_value(ai, "recent-transforms", toml_edit::Value::Array(recent));
+        // Probe verdict fields: written only when a verdict exists
+        // (skip-when-none keeps unprobed configs clean). A `None`
+        // overwrite of a probed file leaves the old keys — harmless:
+        // consumers match the (model, base-url) triple before
+        // trusting a verdict.
+        if let Some(model) = self.ai.probe_model.as_deref() {
+            set_value(ai, "probe-model", toml_edit::Value::from(model));
+        }
+        if let Some(base_url) = self.ai.probe_base_url.as_deref() {
+            set_value(ai, "probe-base-url", toml_edit::Value::from(base_url));
+        }
+        if let Some(verdict) = self.ai.probe_verdict.as_deref() {
+            set_value(ai, "probe-verdict", toml_edit::Value::from(verdict));
+        }
+        if let Some(date) = self.ai.probe_date {
+            set_value(ai, "probe-date", toml_edit::Value::from(date));
+        }
     }
 
     /// Write every `[ui]` field into the existing `ui` table.
@@ -2097,6 +2142,66 @@ base-url = \"\"
         config.save_to(&path).unwrap();
         let reloaded = Config::load_from(&path).unwrap_or_default();
         assert_eq!(reloaded.ai.recent_transforms, ["x"]);
+    }
+
+    /// Vision-probe verdict fields (vision-validate T3): four
+    /// optional `[ai]` keys persisting the last probe's verdict and
+    /// the `(model, base-url)` triple it applies to — through the
+    /// note-preserving merge path (save over an existing file).
+    #[test]
+    fn probe_verdict_fields_round_trip_through_save_and_merge() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "# mine\n[ai]\nprovider = \"openai\"\n").unwrap();
+        let mut config = Config::load_from(&path).unwrap_or_default();
+        config.ai.probe_model = Some("gpt-4o-mini".into());
+        config.ai.probe_base_url = Some("https://api.openai.com/v1".into());
+        config.ai.probe_verdict = Some("vision-unsupported".into());
+        config.ai.probe_date = Some(1_760_000_000);
+        config.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# mine"), "decor lost:\n{written}");
+        let reloaded = Config::load_from(&path).unwrap();
+        assert_eq!(
+            reloaded.ai.probe_model.as_deref(),
+            Some("gpt-4o-mini"),
+            "verdict fields must persist:\n{written}"
+        );
+        assert_eq!(
+            reloaded.ai.probe_base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(
+            reloaded.ai.probe_verdict.as_deref(),
+            Some("vision-unsupported")
+        );
+        assert_eq!(reloaded.ai.probe_date, Some(1_760_000_000));
+    }
+
+    /// A `config.toml` from before this effort parses with all four
+    /// probe fields defaulted — no migration.
+    #[test]
+    fn pre_probe_config_files_load_with_the_verdict_fields_absent() {
+        let legacy: Config = toml::from_str(
+            "[ai]\nprovider = \"xai\"\nmodel = \"grok-2-vision-1212\"\nbase-url = \"\"\nrecent-transforms = [\"builtin-extract-text\"]\n",
+        )
+        .unwrap();
+        assert_eq!(legacy.ai.probe_model, None);
+        assert_eq!(legacy.ai.probe_base_url, None);
+        assert_eq!(legacy.ai.probe_verdict, None);
+        assert_eq!(legacy.ai.probe_date, None);
+    }
+
+    /// Clean diffs: a fresh config serializes without the probe
+    /// keys — they appear only after a first probe writes them.
+    #[test]
+    fn default_ai_config_serializes_without_the_probe_keys() {
+        let written = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(
+            !written.contains("probe-"),
+            "probe keys leaked into a fresh config:\n{written}"
+        );
     }
 
     #[test]
