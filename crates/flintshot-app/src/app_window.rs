@@ -2351,9 +2351,15 @@ impl EditorPageBridge for PageBridge {
             model: model.to_string(),
             api_key,
         };
+        // Probe v1 (content-checking): a random palette color per
+        // run, so a blind "ready"-style answer cannot pass.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let challenge = flintshot_core::probe_challenge(flintshot_core::probe_color_for(nanos));
         self.ai.test_rx = Some(crate::ai::worker::spawn_probe_worker(
             resolved,
-            flintshot_core::vision_probe_messages(),
+            challenge.messages,
         ));
         self.ai.test_model = Some(model.to_string());
     }

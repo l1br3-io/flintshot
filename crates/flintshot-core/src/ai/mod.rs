@@ -495,25 +495,136 @@ pub fn png_data_url(png_bytes: &[u8]) -> String {
     format!("data:image/png;base64,{encoded}")
 }
 
-/// A 1×1 opaque white PNG as a data URL — the smallest payload that
-/// still makes a provider exercise its image-input path. The
-/// `vision_probe` test decodes it, so a mangled constant fails CI
-/// rather than every connection test.
-const PROBE_IMAGE_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=";
+/// One palette entry for the content-checking probe: the color word
+/// the model must name and the RGB the challenge PNG is filled with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeColor {
+    /// Lowercase English color word — the expected answer.
+    pub name: &'static str,
+    /// Solid fill for the challenge PNG.
+    pub rgb: [u8; 3],
+}
 
-/// The connection-probe conversation: one user message pairing the
-/// one-word-answer prompt with an inline PNG — the exact
-/// `image_url` content-part shape the transform path sends. A
-/// passing round-trip therefore proves the configured model accepts
-/// image input, not merely text.
+/// The probe palette: unambiguous primary color words, one distinct
+/// RGB each. The challenge randomizes across it so a silent-ignore
+/// model cannot pass by always guessing one fixed color.
+pub const PROBE_PALETTE: [ProbeColor; 10] = [
+    ProbeColor {
+        name: "red",
+        rgb: [237, 28, 36],
+    },
+    ProbeColor {
+        name: "orange",
+        rgb: [255, 127, 39],
+    },
+    ProbeColor {
+        name: "yellow",
+        rgb: [255, 221, 0],
+    },
+    ProbeColor {
+        name: "green",
+        rgb: [34, 177, 76],
+    },
+    ProbeColor {
+        name: "blue",
+        rgb: [0, 102, 255],
+    },
+    ProbeColor {
+        name: "purple",
+        rgb: [128, 0, 255],
+    },
+    ProbeColor {
+        name: "pink",
+        rgb: [255, 105, 180],
+    },
+    ProbeColor {
+        name: "brown",
+        rgb: [139, 69, 19],
+    },
+    ProbeColor {
+        name: "black",
+        rgb: [0, 0, 0],
+    },
+    ProbeColor {
+        name: "white",
+        rgb: [255, 255, 255],
+    },
+];
+
+/// The probe prompt: one question, one-word answer shape, about the
+/// image's content — the half that makes the probe capability-
+/// checking rather than wire-shape-checking.
+const PROBE_PROMPT: &str =
+    "What is the dominant color of this image? Reply with only the color word.";
+
+/// The content-checking probe challenge (v1): a solid-color PNG
+/// paired with the color question, plus the expected answer a pass
+/// is judged against. Replaces the wire-shape-only probe of
+/// ask-the-shot v1 — a silent-ignore model (Ollama with a text-only
+/// model, research §3.3) answered "ready" about an image it never
+/// saw and passed; here it must name the color it was shown.
+#[derive(Debug, Clone)]
+pub struct ProbeChallenge {
+    /// The challenge conversation: exactly one user message, text
+    /// part first, inline PNG second (the transform path's shape).
+    pub messages: Vec<ChatMessage>,
+    /// Lowercase English color word the answer must contain.
+    pub expected: &'static str,
+}
+
+/// Build the [`ProbeChallenge`] for one palette color.
 #[must_use]
-pub fn vision_probe_messages() -> Vec<ChatMessage> {
-    vec![ChatMessage::User {
-        content: vec![
-            text_part("Reply with the single word: ready"),
-            image_part(PROBE_IMAGE_URL),
-        ],
-    }]
+pub fn probe_challenge(color: ProbeColor) -> ProbeChallenge {
+    ProbeChallenge {
+        messages: vec![ChatMessage::User {
+            content: vec![
+                text_part(PROBE_PROMPT),
+                image_part(png_data_url(&solid_color_png(color.rgb))),
+            ],
+        }],
+        expected: color.name,
+    }
+}
+
+/// The probe's pass predicate: the answer, lowercased and
+/// punctuation-stripped, must *contain* the expected color word —
+/// models answer "Red.", "The dominant color is red", "reddish". An
+/// answer that never names the color means the model did not look at
+/// the image (the silent-ignore failure this probe exists to catch).
+#[must_use]
+pub fn probe_answer_passes(answer: &str, expected: &str) -> bool {
+    let normalize = |text: &str| -> String {
+        text.to_ascii_lowercase()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect()
+    };
+    normalize(answer).contains(&normalize(expected))
+}
+
+/// The seed-injectable challenge color picker: nanoseconds modulo
+/// the palette. The bridge feeds `SystemTime` nanos; tests feed
+/// chosen seeds. Deliberately not an RNG crate — this is a challenge
+/// picker, not crypto, and the workspace takes no new deps for it.
+#[must_use]
+pub fn probe_color_for(nanos: u128) -> ProbeColor {
+    PROBE_PALETTE[(nanos % PROBE_PALETTE.len() as u128) as usize]
+}
+
+/// Encode a 64×64 solid-color PNG in memory — small, uniform, and
+/// unambiguous for a vision model; indistinguishable from noise for
+/// a text-only one.
+fn solid_color_png(rgb: [u8; 3]) -> Vec<u8> {
+    let [r, g, b] = rgb;
+    let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([r, g, b, u8::MAX]));
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        // No failure modes: the cursor writes to memory and the
+        // encoder input is well-formed RGBA8; the per-palette decode
+        // test catches any encoder regression at test time.
+        .expect("in-memory PNG encode cannot fail");
+    png
 }
 
 #[cfg(test)]
@@ -897,26 +1008,100 @@ mod tests {
     }
 
     #[test]
-    fn vision_probe_pairs_prompt_with_a_real_inline_png() {
+    fn vision_probe_replacement_is_content_checking() {
+        // Probe v1 pins: ≥8 unambiguous colors, distinct words.
+        assert!(
+            PROBE_PALETTE.len() >= 8,
+            "palette must randomize across ≥8 colors"
+        );
+        let mut names: Vec<_> = PROBE_PALETTE.iter().map(|c| c.name).collect();
+        names.sort_unstable();
+        let distinct = names
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert_eq!(distinct, PROBE_PALETTE.len(), "color words are distinct");
+    }
+
+    /// Every palette entry's challenge PNG decodes as an image of
+    /// exactly that color — a mangled generator fails CI here, not
+    /// as a provider-side bad-request on the user's machine.
+    #[test]
+    fn every_palette_challenge_png_decodes_to_its_color() {
         use base64::Engine as _;
-        let messages = vision_probe_messages();
-        let [ChatMessage::User { content }] = messages.as_slice() else {
-            panic!("the probe is exactly one user message");
+        for color in PROBE_PALETTE {
+            let challenge = probe_challenge(color);
+            assert_eq!(challenge.expected, color.name);
+            let [ChatMessage::User { content }] = challenge.messages.as_slice() else {
+                panic!("the probe is exactly one user message");
+            };
+            // Same order as the transform path: text first, image second.
+            assert!(matches!(content[0], ContentPart::Text { .. }));
+            let ContentPart::ImageUrl { image_url } = &content[1] else {
+                panic!("the second part carries the image");
+            };
+            let payload = image_url
+                .url
+                .strip_prefix("data:image/png;base64,")
+                .expect("data URL prefix");
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .expect("valid base64");
+            let decoded = image::load_from_memory(&bytes).expect("decodes as a PNG");
+            let [r, g, b] = color.rgb;
+            assert_eq!(
+                decoded.to_rgba8().get_pixel(0, 0),
+                &image::Rgba([r, g, b, u8::MAX]),
+                "{} challenge PNG is solid {}",
+                color.name,
+                color.name
+            );
+        }
+    }
+
+    /// The prompt must ask about the image's content — the pass
+    /// predicate is meaningless against a prompt the answer can
+    /// satisfy without looking.
+    #[test]
+    fn probe_prompt_asks_for_the_dominant_color() {
+        let challenge = probe_challenge(PROBE_PALETTE[0]);
+        let ChatMessage::User { content } = &challenge.messages[0] else {
+            panic!("user message");
         };
-        // Same order as the transform path: text first, image second.
-        assert!(matches!(content[0], ContentPart::Text { .. }));
-        let ContentPart::ImageUrl { image_url } = &content[1] else {
-            panic!("the second part carries the image");
+        let ContentPart::Text { text } = &content[0] else {
+            panic!("text part first");
         };
-        let payload = image_url
-            .url
-            .strip_prefix("data:image/png;base64,")
-            .expect("data URL prefix");
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(payload)
-            .expect("valid base64");
-        // A mangled constant would make every connection test a
-        // provider-side bad-request — hold it to a real decodable PNG.
-        image::load_from_memory(&bytes).expect("decodes as a PNG");
+        assert!(
+            text.to_ascii_lowercase().contains("dominant color"),
+            "prompt was: {text}"
+        );
+    }
+
+    /// The pass predicate: contains, case- and punctuation-tolerant;
+    /// a blind answer that never names the color fails.
+    #[test]
+    fn probe_answer_passes_on_color_word_in_any_shape() {
+        assert!(probe_answer_passes("Red.", "red"));
+        assert!(probe_answer_passes("The dominant color is RED", "red"));
+        assert!(probe_answer_passes("reddish", "red"));
+        assert!(!probe_answer_passes("The image shows a receipt", "red"));
+        assert!(!probe_answer_passes("blue", "red"));
+        assert!(!probe_answer_passes("", "red"));
+    }
+
+    /// The seed-injectable picker: deterministic per seed, and varied
+    /// across seeds (a one-color distribution would let a blind
+    /// model pass by always guessing the same word).
+    #[test]
+    fn probe_color_picker_is_deterministic_and_varies() {
+        assert_eq!(probe_color_for(0), PROBE_PALETTE[0]);
+        assert_eq!(probe_color_for(7), PROBE_PALETTE[7 % PROBE_PALETTE.len()]);
+        let distinct: std::collections::BTreeSet<&str> =
+            (0..1000u128).map(|n| probe_color_for(n).name).collect();
+        assert!(
+            distinct.len() > 1,
+            "N draws must hit more than one color, got {}",
+            distinct.len()
+        );
     }
 }
