@@ -239,6 +239,20 @@ pub trait EditorPageBridge {
     fn poll_ai_test_result(&mut self) -> Option<Result<String, String>> {
         None
     }
+
+    /// The AI settings page's debounced save: persist the working
+    /// config (the settings-route contract — debounce coalesces
+    /// rapid edits, final write wins) and arm the save-change vision
+    /// probe. Default no-op (headless tests).
+    fn save_config(&mut self, _config: &flintshot_core::Config) {}
+
+    /// Take an arrived auto-fired vision-probe verdict (the
+    /// save-change loop's result, already persisted to
+    /// `config.toml`): the verdict plus the `(model, base-url)`
+    /// triple it was measured on. Default: always `None`.
+    fn poll_vision_probe(&mut self) -> Option<flintshot_core::ProbeOutcome> {
+        None
+    }
 }
 
 /// An Ask-the-shot event, host → page. Mirrors

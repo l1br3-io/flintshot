@@ -772,7 +772,12 @@ impl WindowApp {
                         .show(ui, |ui| crate::ai_config::AiConfigPage::show(ui, page, now));
                     let escape = panel.inner;
                     if let Some(config) = page.drain_save(now) {
-                        self.home.save_config(&config);
+                        // The editor bridge owns the save (same
+                        // persist contract as the settings route)
+                        // and the save-change vision probe that arms
+                        // on it — the AI page's saves flow here, not
+                        // through the settings route.
+                        self.page_bridge.borrow_mut().save_config(&config);
                     }
                     // The page's actions: the bridge services keyring
                     // writes and test connections (the page stays pure

@@ -2108,6 +2108,31 @@ struct AiHost {
     /// active install, is) configured, which used to flip the
     /// "unconfigured" test premises.
     config_override: Option<flintshot_core::Config>,
+    /// Test seam: when set, config load/save go through this path
+    /// (`load_from`/`save_to`) instead of the platform file — the
+    /// vision-probe loop's persistence tests must never touch a real
+    /// `config.toml`.
+    config_path: Option<std::path::PathBuf>,
+    /// The in-flight auto-fired vision probe (the save-change loop):
+    /// judging context + the worker's channel. Armed by a debounced
+    /// save that changed the effective `(base_url, model)`; drained
+    /// by `poll_vision_probe`, which classifies and persists.
+    vision_probe: Option<VisionProbeFlight>,
+}
+
+/// One in-flight auto-fired vision probe: the judging context (the
+/// challenge's expected color + the triple a verdict keys to) and
+/// the probe worker's channel. A new changed save replaces it; the
+/// old worker's sends fail into the void.
+struct VisionProbeFlight {
+    rx: std::sync::mpsc::Receiver<Result<String, flintshot_core::AiError>>,
+    /// The challenge's expected color word (the pass predicate's
+    /// judge input).
+    expected: &'static str,
+    /// The model being probed — the verdict's key.
+    model: String,
+    /// The effective base URL being probed.
+    base_url: String,
 }
 
 impl PageBridge {
@@ -2115,10 +2140,78 @@ impl PageBridge {
     /// when set, else the platform file (defaulting on load
     /// failure, as ever).
     fn ai_config(&self) -> flintshot_core::Config {
+        if let Some(path) = &self.ai.config_path {
+            return flintshot_core::Config::load_from(path).unwrap_or_default();
+        }
         self.ai
             .config_override
             .clone()
             .unwrap_or_else(|| flintshot_core::Config::load().unwrap_or_default())
+    }
+
+    /// Persist a config through the right path: the test seam's
+    /// path when set, else the platform file. Returns whether the
+    /// write landed.
+    fn persist_config(&self, config: &flintshot_core::Config) -> bool {
+        let saved = match &self.ai.config_path {
+            Some(path) => config.save_to(path),
+            None => config.save(),
+        };
+        match saved {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not persist config");
+                false
+            }
+        }
+    }
+
+    /// Arm the auto-fired vision probe (the save-change loop,
+    /// vision-validate T4). The save *is* the user action, so
+    /// ADR-0069's user-initiated boundary holds — nothing fires on
+    /// startup or AI-tab open. One probe spawns when the effective
+    /// `(base_url, model)` differs from the persisted triple (and
+    /// from an already-in-flight probe of the same pair); anything
+    /// else fires nothing.
+    fn arm_vision_probe(&mut self, config: &flintshot_core::Config) {
+        let model = config.ai.model.trim().to_string();
+        let base_url = config.ai.effective_base_url().to_string();
+        if model.is_empty() || base_url.is_empty() {
+            self.ai.vision_probe = None; // nothing configured to probe
+            return;
+        }
+        let triple_matches = config.ai.probe_model.as_deref() == Some(model.as_str())
+            && config.ai.probe_base_url.as_deref() == Some(base_url.as_str());
+        if triple_matches {
+            return; // this pair was already measured
+        }
+        if let Some(flight) = self.ai.vision_probe.as_ref() {
+            if flight.model == model && flight.base_url == base_url {
+                return; // this pair is being measured right now
+            }
+        }
+        // Hosted presets need a stored key (the `resolve_ai`
+        // policy); custom endpoints run keyless.
+        let preset = config.ai.preset();
+        let api_key = crate::ai::load_ai_key(&config.ai.provider).unwrap_or_default();
+        if preset.id != "custom" && api_key.is_empty() {
+            return;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let challenge = flintshot_core::probe_challenge(flintshot_core::probe_color_for(nanos));
+        let resolved = crate::ai::worker::ResolvedAi {
+            base_url: base_url.clone(),
+            model: model.clone(),
+            api_key,
+        };
+        self.ai.vision_probe = Some(VisionProbeFlight {
+            rx: crate::ai::worker::spawn_probe_worker(resolved, challenge.messages),
+            expected: challenge.expected,
+            model,
+            base_url,
+        });
     }
 }
 
@@ -2376,6 +2469,49 @@ impl EditorPageBridge for PageBridge {
             }
         }
         None
+    }
+
+    /// The AI settings page's debounced save drain (the same
+    /// GOTCHA contract as the settings route's: debounce coalesces
+    /// rapid edits, final write wins). Persists, then arms the
+    /// save-change vision probe — the save *is* the user action, so
+    /// ADR-0069's user-initiated boundary holds.
+    fn save_config(&mut self, config: &flintshot_core::Config) {
+        if self.persist_config(config) {
+            // Arms only after the save landed: the verdict keys to a
+            // persisted config.
+            self.arm_vision_probe(config);
+        }
+    }
+
+    fn poll_vision_probe(&mut self) -> Option<flintshot_core::ProbeOutcome> {
+        // Non-blocking: no ready result leaves the flight running.
+        let result = self.ai.vision_probe.as_ref()?.rx.try_recv().ok()?;
+        let flight = self.ai.vision_probe.take().expect("checked above");
+        let verdict = flintshot_core::classify_probe(&result, flight.expected);
+        // Persist through the config save path (load-modify-save so
+        // edits that landed mid-flight survive; the toml_edit merge
+        // keeps comments). A persist failure costs the banner only —
+        // it never blocks or corrupts anything.
+        let mut config = self.ai_config();
+        config.ai.probe_model = Some(flight.model.clone());
+        config.ai.probe_base_url = Some(flight.base_url.clone());
+        config.ai.probe_verdict = Some(verdict.as_str().to_string());
+        config.ai.probe_date = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| {
+                    i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+                }),
+        );
+        if !self.persist_config(&config) {
+            tracing::warn!("vision-probe verdict not persisted");
+        }
+        Some(flintshot_core::ProbeOutcome {
+            verdict,
+            model: flight.model,
+            base_url: flight.base_url,
+        })
     }
 }
 
@@ -4337,6 +4473,208 @@ mod tests {
             other => panic!("expected VisionUnsupported, got {other:?}"),
         }
         assert!(bridge.poll_ai_event().is_none(), "exactly one event");
+    }
+
+    // ── The auto-fired vision probe (vision-validate T4) ────────
+
+    /// A debounced save that changes the effective `(base_url,
+    /// model)` fires exactly one probe — repeated saves of the same
+    /// changed pair don't re-fire — an unchanged save fires none,
+    /// and startup fires nothing.
+    #[test]
+    fn vision_probe_fires_once_per_changed_save_and_never_on_unchanged_or_startup() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"The image shows a receipt"},"finish_reason":"stop"}]}"#)
+            .expect(1)
+            .create();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = flintshot_core::Config::default();
+        config.ai.provider = "custom".into();
+        config.ai.model = "llama3".into();
+        config.ai.base_url = server.url();
+
+        let (shared, _session) = shared_with_session();
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::new(shared),
+            ai: AiHost {
+                config_path: Some(path),
+                ..AiHost::default()
+            },
+        };
+
+        // Startup fired nothing (no save yet ⇒ no flight).
+        assert!(bridge.ai.vision_probe.is_none(), "startup arms nothing");
+
+        // First save: the pair differs from the (absent) triple ⇒
+        // exactly one probe.
+        bridge.save_config(&config);
+        assert!(
+            bridge.ai.vision_probe.is_some(),
+            "the changed save armed a probe"
+        );
+
+        // A repeat save of the same pair while the probe is in
+        // flight: no second probe.
+        bridge.save_config(&config);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut verdict = None;
+        while verdict.is_none() && std::time::Instant::now() < deadline {
+            verdict = bridge.poll_vision_probe();
+        }
+        assert_eq!(
+            verdict,
+            Some(flintshot_core::ProbeOutcome {
+                verdict: flintshot_core::ProbeVerdict::VisionUnsupported,
+                model: "llama3".into(),
+                base_url: config.ai.base_url.clone(),
+            }),
+            "the blind answer classifies unsupported, keyed to the triple"
+        );
+        assert!(bridge.poll_vision_probe().is_none(), "one-shot");
+
+        // Unchanged save (the reloaded config now carries the
+        // triple): no new probe.
+        let settled = flintshot_core::Config::load_from(&dir.path().join("config.toml"))
+            .expect("the save landed");
+        bridge.save_config(&settled);
+        assert!(
+            bridge.ai.vision_probe.is_none(),
+            "unchanged save re-fires nothing"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        mock.assert(); // exactly one HTTP round-trip across all saves
+    }
+
+    /// The verdict + triple + date persist through the config save
+    /// path and rehydrate after a "restart" with zero network.
+    #[test]
+    fn vision_probe_verdict_persists_and_rehydrates_across_restart() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"The image shows a receipt"},"finish_reason":"stop"}]}"#)
+            .expect(1)
+            .create();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = flintshot_core::Config::default();
+        config.ai.provider = "custom".into();
+        config.ai.model = "llama3".into();
+        config.ai.base_url = server.url();
+
+        let (shared, _session) = shared_with_session();
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::new(shared),
+            ai: AiHost {
+                config_path: Some(path.clone()),
+                ..AiHost::default()
+            },
+        };
+        bridge.save_config(&config);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut verdict = None;
+        while verdict.is_none() && std::time::Instant::now() < deadline {
+            verdict = bridge.poll_vision_probe();
+        }
+        assert_eq!(
+            verdict.map(|outcome| outcome.verdict),
+            Some(flintshot_core::ProbeVerdict::VisionUnsupported)
+        );
+
+        // "Restart": a fresh bridge over the same config path
+        // rehydrates the triple + verdict — zero new network (the
+        // mock stays at one hit).
+        let (shared2, _session2) = shared_with_session();
+        let restarted = PageBridge {
+            shared: std::sync::Arc::new(shared2),
+            ai: AiHost {
+                config_path: Some(path),
+                ..AiHost::default()
+            },
+        };
+        let reloaded = flintshot_core::Config::load_from(&dir.path().join("config.toml"))
+            .expect("the verdict persisted");
+        assert_eq!(reloaded.ai.probe_model.as_deref(), Some("llama3"));
+        assert_eq!(
+            reloaded.ai.probe_base_url.as_deref(),
+            Some(config.ai.base_url.as_str())
+        );
+        assert_eq!(
+            reloaded.ai.probe_verdict.as_deref(),
+            Some("vision-unsupported")
+        );
+        assert!(reloaded.ai.probe_date.is_some(), "the date rode along");
+        assert!(
+            restarted.ai.vision_probe.is_none(),
+            "startup reads the verdict, probes nothing"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        mock.assert();
+    }
+
+    /// A probe that fails transport-side degrades to `vision-unknown`
+    /// — and never blocks or corrupts the save it rode on.
+    #[test]
+    fn vision_probe_failure_persists_unknown_and_never_blocks_the_save() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/chat/completions")
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "internal server error"}}"#)
+            .create();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = flintshot_core::Config::default();
+        config.ai.provider = "custom".into();
+        config.ai.model = "llama3".into();
+        config.ai.base_url = server.url();
+
+        let (shared, _session) = shared_with_session();
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::new(shared),
+            ai: AiHost {
+                config_path: Some(path.clone()),
+                ..AiHost::default()
+            },
+        };
+        bridge.save_config(&config);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut verdict = None;
+        while verdict.is_none() && std::time::Instant::now() < deadline {
+            verdict = bridge.poll_vision_probe();
+        }
+        assert_eq!(
+            verdict.map(|outcome| outcome.verdict),
+            Some(flintshot_core::ProbeVerdict::VisionUnknown),
+            "a 500 says nothing about vision — unknown, no banner claim"
+        );
+
+        // The save itself landed intact (the settings edit survives;
+        // only the verdict fields were added).
+        let reloaded = flintshot_core::Config::load_from(&path).unwrap();
+        assert_eq!(reloaded.ai.model, "llama3");
+        assert_eq!(reloaded.ai.probe_verdict.as_deref(), Some("vision-unknown"));
     }
 
     /// Stop drops the receiver (drop-to-cancel) and kills any events

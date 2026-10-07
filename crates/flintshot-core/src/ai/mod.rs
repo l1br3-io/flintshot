@@ -611,6 +611,81 @@ pub fn probe_color_for(nanos: u128) -> ProbeColor {
     PROBE_PALETTE[(nanos % PROBE_PALETTE.len() as u128) as usize]
 }
 
+/// The vision-probe verdict: what the config-page banner and the
+/// AI-tab badge render. Strictly advisory — never gates Run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeVerdict {
+    /// The model named the challenge color — it looked at the image.
+    VisionOk,
+    /// The provider rejected the image part, or the model answered
+    /// without naming the color (silent ignore) — treat as text-only.
+    VisionUnsupported,
+    /// Transport/auth/rate-limit failure: says nothing about vision,
+    /// so no banner claim either way.
+    VisionUnknown,
+}
+
+impl ProbeVerdict {
+    /// The persisted string form (the `[ai]` `probe-verdict` key).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::VisionOk => "vision-ok",
+            Self::VisionUnsupported => "vision-unsupported",
+            Self::VisionUnknown => "vision-unknown",
+        }
+    }
+
+    /// Parse the persisted form; unknown values (future files)
+    /// resolve to unknown — the string-tolerant policy every other
+    /// `[ai]` field follows.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "vision-ok" => Self::VisionOk,
+            "vision-unsupported" => Self::VisionUnsupported,
+            _ => Self::VisionUnknown,
+        }
+    }
+}
+
+/// One persisted probe verdict plus the `(model, base-url)` triple
+/// it was measured on — the banner/badge matching key. A verdict
+/// never displays against a pair it wasn't measured on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeOutcome {
+    /// The verdict.
+    pub verdict: ProbeVerdict,
+    /// The model id that was probed.
+    pub model: String,
+    /// The effective base URL that was probed.
+    pub base_url: String,
+}
+
+/// Classify one probe round-trip into a [`ProbeVerdict`] (pure; the
+/// bridge owns persistence). Color-match ⇒ ok; a typed
+/// [`AiError::VisionUnsupported`] or a rejection-shaped
+/// [`AiError::Provider`] (heuristic second chance) ⇒ unsupported; a
+/// blind answer ⇒ unsupported; every other error (transport/auth/
+/// rate-limit/unrelated 400) ⇒ unknown — those say nothing about
+/// vision and must not paint a banner.
+// The three unsupported arms stay separate on purpose: each names a
+// distinct failure mode (silent ignore / typed rejection / heuristic
+// catch), which the classification table test mirrors.
+#[must_use]
+#[allow(clippy::match_same_arms)]
+pub fn classify_probe(result: &Result<String, AiError>, expected: &str) -> ProbeVerdict {
+    match result {
+        Ok(answer) if probe_answer_passes(answer, expected) => ProbeVerdict::VisionOk,
+        Ok(_) => ProbeVerdict::VisionUnsupported,
+        Err(AiError::VisionUnsupported { .. }) => ProbeVerdict::VisionUnsupported,
+        Err(AiError::Provider { message, .. }) if is_vision_rejection(message) => {
+            ProbeVerdict::VisionUnsupported
+        }
+        Err(_) => ProbeVerdict::VisionUnknown,
+    }
+}
+
 /// Encode a 64×64 solid-color PNG in memory — small, uniform, and
 /// unambiguous for a vision model; indistinguishable from noise for
 /// a text-only one.
@@ -1103,5 +1178,94 @@ mod tests {
             "N draws must hit more than one color, got {}",
             distinct.len()
         );
+    }
+
+    // --- probe verdict classification (vision-validate T4) ---
+
+    /// The four outcomes: color named ⇒ ok; blind answer or
+    /// rejection ⇒ unsupported; anything transport-shaped ⇒ unknown
+    /// (says nothing about vision — must not paint a banner claim).
+    #[test]
+    fn classify_probe_names_the_four_outcomes() {
+        use ProbeVerdict::{VisionOk, VisionUnknown, VisionUnsupported};
+        // Color named, any shape ⇒ ok.
+        assert_eq!(classify_probe(&Ok("Red.".into()), "red"), VisionOk);
+        assert_eq!(
+            classify_probe(&Ok("the color is RED".into()), "red"),
+            VisionOk
+        );
+        // Blind answer ⇒ unsupported (the silent-ignore failure).
+        assert_eq!(
+            classify_probe(&Ok("The image shows a receipt".into()), "red"),
+            VisionUnsupported
+        );
+        // Typed rejection ⇒ unsupported.
+        assert_eq!(
+            classify_probe(
+                &Err(AiError::VisionUnsupported {
+                    status: 400,
+                    message: "Invalid content type. image_url is only supported by certain \
+                              models."
+                        .into()
+                }),
+                "red"
+            ),
+            VisionUnsupported
+        );
+        // Rejection-shaped `Provider` (heuristic second chance) ⇒
+        // unsupported.
+        assert_eq!(
+            classify_probe(
+                &Err(AiError::Provider {
+                    status: 400,
+                    message: "This model does not support image input".into()
+                }),
+                "red"
+            ),
+            VisionUnsupported
+        );
+        // Transport / auth / rate-limit ⇒ unknown.
+        assert_eq!(
+            classify_probe(&Err(AiError::Transport("refused".into())), "red"),
+            VisionUnknown
+        );
+        assert_eq!(
+            classify_probe(&Err(AiError::Auth("bad key".into())), "red"),
+            VisionUnknown
+        );
+        assert_eq!(
+            classify_probe(&Err(AiError::RateLimited("slow down".into())), "red"),
+            VisionUnknown
+        );
+        // An unrelated provider error (bad model id) is NOT a vision
+        // verdict — unknown, never unsupported.
+        assert_eq!(
+            classify_probe(
+                &Err(AiError::Provider {
+                    status: 400,
+                    message: "The model `m` does not exist".into()
+                }),
+                "red"
+            ),
+            VisionUnknown
+        );
+    }
+
+    /// The persisted string form round-trips; unknown values (future
+    /// files) degrade to unknown — string-tolerant policy.
+    #[test]
+    fn probe_verdict_string_form_round_trips_and_is_tolerant() {
+        for verdict in [
+            ProbeVerdict::VisionOk,
+            ProbeVerdict::VisionUnsupported,
+            ProbeVerdict::VisionUnknown,
+        ] {
+            assert_eq!(ProbeVerdict::parse(verdict.as_str()), verdict);
+        }
+        assert_eq!(
+            ProbeVerdict::parse("vision-spooky-future"),
+            ProbeVerdict::VisionUnknown
+        );
+        assert_eq!(ProbeVerdict::parse(""), ProbeVerdict::VisionUnknown);
     }
 }
