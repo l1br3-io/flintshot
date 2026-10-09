@@ -31,7 +31,7 @@
 
 pub mod worker;
 
-use flintshot_core::{AiClient, AiError, AiRequest, AiResponse};
+use flintshot_core::{AiClient, AiError, AiRequest, AiResponse, ModelListing, ModelsResponse};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -119,6 +119,43 @@ impl OpenAiCompatClient {
             Ok(ChatStreamStart::NotSse(response))
         }
     }
+
+    /// GET `{base}/models` and hand back the advertised model ids,
+    /// sorted and deduped with the vision flag folded from any
+    /// modalities metadata (the picker's rows — ai-config-ux).
+    ///
+    /// Same auth and error mapping as chat: bearer when keyed
+    /// (keyless local servers send no header), non-2xx through
+    /// [`AiError::from_status_and_body`].
+    ///
+    /// # Errors
+    /// [`AiError::Transport`] on connection failure or a body that
+    /// does not decode as a models envelope; the status mapping above
+    /// on non-2xx.
+    pub async fn list_models(&self) -> Result<Vec<ModelListing>, AiError> {
+        let mut outbound = self.http.get(models_url(&self.base_url));
+        if let Some(auth) = bearer_header(&self.api_key) {
+            outbound = outbound.header("Authorization", auth);
+        }
+        let response = outbound
+            .send()
+            .await
+            .map_err(|e| AiError::Transport(e.to_string()))?;
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| AiError::Transport(format!("reading models body: {e}")))?;
+        if !(200..300).contains(&status) {
+            return Err(AiError::from_status_and_body(status, &body));
+        }
+        let parsed: ModelsResponse = serde_json::from_str(&body)
+            .map_err(|e| AiError::Transport(format!("decoding models response: {e}")))?;
+        let mut listings = parsed.to_listings();
+        listings.sort_by(|a, b| a.id.cmp(&b.id));
+        listings.dedup_by(|a, b| a.id == b.id);
+        Ok(listings)
+    }
 }
 
 /// Full request URL: `{base}/chat/completions` (trailing base-URL
@@ -126,6 +163,13 @@ impl OpenAiCompatClient {
 #[must_use]
 pub fn chat_url(base_url: &str) -> String {
     format!("{}/chat/completions", base_url.trim_end_matches('/'))
+}
+
+/// Full models-list URL: `{base}/models` (trailing base-URL slashes
+/// tolerated) — the picker's fetch target.
+#[must_use]
+pub fn models_url(base_url: &str) -> String {
+    format!("{}/models", base_url.trim_end_matches('/'))
 }
 
 /// What [`OpenAiCompatClient::chat_stream`] hands back once the
@@ -612,5 +656,111 @@ mod tests {
         let start = client.chat_stream(&streaming_request()).await.expect("ok");
         drop(start); // release the connection before the mock asserts
         mock.assert_async().await;
+    }
+
+    // --- list_models (ai-config-ux T2) ---
+
+    #[test]
+    fn models_url_joins_base_and_path() {
+        assert_eq!(
+            models_url("https://api.x.ai/v1"),
+            "https://api.x.ai/v1/models"
+        );
+        assert_eq!(
+            models_url("http://localhost:11434/v1/"),
+            "http://localhost:11434/v1/models",
+            "trailing slash tolerated"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_models_parses_and_sorts_dedupes_the_envelope() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/models")
+            .match_header("authorization", "Bearer sk-test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data":[
+                    {"id":"llama3.2-vision","input_modalities":["text","image"]},
+                    {"id":"zephyr"},
+                    {"id":"llama3.2-vision"}
+                ]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "sk-test");
+        let listings = client.list_models().await.expect("2xx parses");
+        assert_eq!(
+            listings,
+            vec![
+                flintshot_core::ModelListing {
+                    id: "llama3.2-vision".into(),
+                    vision: Some(true)
+                },
+                flintshot_core::ModelListing {
+                    id: "zephyr".into(),
+                    vision: None
+                },
+            ],
+            "sorted, deduped, modalities folded"
+        );
+    }
+
+    #[tokio::test]
+    async fn keyless_list_models_sends_no_authorization_header() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/models")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"llama3"}]}"#)
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "");
+        client.list_models().await.expect("keyless ok");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn list_models_maps_errors_like_chat() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/models")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "Incorrect API key provided"}}"#)
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "sk-bad");
+        let err = client.list_models().await.expect_err("401 errors");
+        assert!(
+            matches!(err, AiError::Auth(ref m) if m == "Incorrect API key provided"),
+            "expected Auth, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_models_decodes_a_body_without_data_as_transport_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/models")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body("<html>not json</html>")
+            .create_async()
+            .await;
+
+        let client = OpenAiCompatClient::with_base_url_and_key(&server.url(), "k");
+        let err = client.list_models().await.expect_err("non-JSON errors");
+        assert!(
+            matches!(err, AiError::Transport(_)),
+            "expected Transport, got {err:?}"
+        );
     }
 }

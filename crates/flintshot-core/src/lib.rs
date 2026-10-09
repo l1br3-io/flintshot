@@ -41,8 +41,9 @@ pub use ai::{
     builtin_transforms, classify_probe, image_part, merge_transforms_mru_first, png_data_url,
     probe_answer_passes, probe_challenge, probe_color_for, text_part, transform_store_path,
     AiChoice, AiClient, AiError, AiRequest, AiResponse, AiResponseMessage, AiStreamChunk,
-    AiTransform, ChatMessage, ContentPart, ImageUrl, ProbeChallenge, ProbeColor, ProbeOutcome,
-    ProbeVerdict, ProviderPreset, SseDecoder, SseEvent, TransformStore, PROBE_PALETTE,
+    AiTransform, ChatMessage, ContentPart, ImageUrl, ModelListing, ModelsResponse, ProbeChallenge,
+    ProbeColor, ProbeOutcome, ProbeVerdict, ProviderPreset, SseDecoder, SseEvent, TransformStore,
+    PROBE_PALETTE,
 };
 #[cfg(target_os = "linux")]
 pub use capture::PortalScreenshotCapturer;
