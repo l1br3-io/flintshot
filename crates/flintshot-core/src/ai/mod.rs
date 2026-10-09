@@ -222,7 +222,7 @@ impl AiResponse {
 /// the vision flag where the provider's metadata carries it.
 ///
 /// The picker's row model: `vision` is `Some` only when the endpoint
-/// said so (OpenRouter's `input_modalities`); absence renders nothing
+/// said so (`OpenRouter`'s `input_modalities`); absence renders nothing
 /// — the probe verdict stays the only other badge (ai-config-ux).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ModelListing {
@@ -251,7 +251,7 @@ pub struct ModelEntry {
     #[serde(default)]
     pub id: String,
     /// Input modalities when the endpoint sends them
-    /// (e.g. `["text", "image"]` on OpenRouter).
+    /// (e.g. `["text", "image"]` on `OpenRouter`).
     #[serde(default)]
     pub input_modalities: Option<Vec<String>>,
 }

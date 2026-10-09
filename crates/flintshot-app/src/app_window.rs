@@ -2115,6 +2115,23 @@ struct AiHost {
     /// save that changed the effective `(base_url, model)`; drained
     /// by `poll_vision_probe`, which classifies and persists.
     vision_probe: Option<VisionProbeFlight>,
+    /// The in-flight models-list fetch (the picker's Browse
+    /// affordance). Drained by `poll_models`; a new fire replaces it
+    /// — the old worker's send dies with its channel.
+    models_flight: Option<ModelsFlight>,
+}
+
+/// One in-flight models-list fetch: the worker's channel plus the
+/// `(provider, base_url)` the arrival keys to (the page drops
+/// arrivals that no longer match its working settings).
+struct ModelsFlight {
+    rx: std::sync::mpsc::Receiver<
+        Result<Vec<flintshot_core::ModelListing>, flintshot_core::AiError>,
+    >,
+    /// The provider whose keyring entry authed the fetch.
+    provider: String,
+    /// The effective base URL the fetch hit.
+    base_url: String,
 }
 
 /// One in-flight auto-fired vision probe: the judging context (the
@@ -2551,6 +2568,35 @@ impl EditorPageBridge for PageBridge {
         Some(flintshot_editor_egui::VisionProbeArrival {
             outcome,
             manual_test,
+        })
+    }
+
+    fn ai_list_models(&mut self, provider: &str, base_url: &str) {
+        // The Browse click is the user action (ADR-0069): nothing
+        // fires on page open, provider switch, or save. Keyed with
+        // the provider's keyring entry exactly like a test
+        // connection — keyless custom endpoints fetch keyless.
+        let api_key = crate::ai::load_ai_key(provider).unwrap_or_default();
+        let resolved = crate::ai::worker::ResolvedAi {
+            base_url: base_url.to_string(),
+            model: String::new(),
+            api_key,
+        };
+        self.ai.models_flight = Some(ModelsFlight {
+            rx: crate::ai::worker::spawn_models_worker(resolved),
+            provider: provider.to_string(),
+            base_url: base_url.to_string(),
+        });
+    }
+
+    fn poll_models(&mut self) -> Option<flintshot_editor_egui::ModelsArrival> {
+        // Non-blocking: no ready result leaves the flight running.
+        let result = self.ai.models_flight.as_ref()?.rx.try_recv().ok()?;
+        let flight = self.ai.models_flight.take().expect("checked above");
+        Some(flintshot_editor_egui::ModelsArrival {
+            provider: flight.provider,
+            base_url: flight.base_url,
+            result: result.map_err(|err| crate::ai::worker::ai_error_copy(&err, "")),
         })
     }
 }
@@ -4715,6 +4761,125 @@ mod tests {
         let reloaded = flintshot_core::Config::load_from(&path).unwrap();
         assert_eq!(reloaded.ai.model, "llama3");
         assert_eq!(reloaded.ai.probe_verdict.as_deref(), Some("vision-unknown"));
+    }
+
+    // --- the models-list fetch flight (ai-config-ux T4) ---
+
+    fn models_bridge() -> (PageBridge, Vec<tempfile::TempDir>) {
+        // The session dir backs the bridge's SessionStore — keep it
+        // alive for the bridge's lifetime.
+        let (shared, session) = shared_with_session();
+        let mut bridge = PageBridge {
+            shared: std::sync::Arc::new(shared),
+            ai: AiHost::default(),
+        };
+        bridge.ai.config_override = Some(flintshot_core::Config::default());
+        (bridge, vec![session])
+    }
+
+    fn wait_for_models(bridge: &mut PageBridge) -> Option<flintshot_editor_egui::ModelsArrival> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(arrival) = bridge.poll_models() {
+                return Some(arrival);
+            }
+            if std::time::Instant::now() > deadline {
+                return None;
+            }
+        }
+    }
+
+    #[test]
+    fn models_fetch_lands_keyed_to_its_endpoint() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data":[
+                    {"id":"zephyr"},
+                    {"id":"llama3.2-vision","input_modalities":["text","image"]}
+                ]}"#,
+            )
+            .create();
+
+        let (mut bridge, _dirs) = models_bridge();
+        bridge.ai_list_models("custom", &server.url());
+        let arrival = wait_for_models(&mut bridge).expect("the fetch answers");
+        assert_eq!(arrival.provider, "custom");
+        assert_eq!(arrival.base_url, server.url());
+        assert_eq!(
+            arrival.result.expect("mock 2xx"),
+            vec![
+                flintshot_core::ModelListing {
+                    id: "llama3.2-vision".into(),
+                    vision: Some(true)
+                },
+                flintshot_core::ModelListing {
+                    id: "zephyr".into(),
+                    vision: None
+                },
+            ],
+            "sorted, deduped, flags folded"
+        );
+        assert!(bridge.poll_models().is_none(), "one-shot");
+    }
+
+    #[test]
+    fn models_fetch_failure_maps_to_actionable_copy() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/models")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "bad key"}}"#)
+            .create();
+
+        let (mut bridge, _dirs) = models_bridge();
+        bridge.ai_list_models("custom", &server.url());
+        let arrival = wait_for_models(&mut bridge).expect("the fetch answers");
+        let copy = arrival.result.expect_err("401 maps to copy");
+        assert!(
+            copy.contains("rejected the key"),
+            "the failure names the fix: {copy}"
+        );
+    }
+
+    /// A second fire for a different endpoint replaces the flight —
+    /// the first fetch's answer dies with its channel (a superseded
+    /// endpoint never answers).
+    #[test]
+    fn a_models_refire_for_another_endpoint_supersedes_the_first() {
+        use flintshot_editor_egui::EditorPageBridge as _;
+
+        let mut slow = mockito::Server::new();
+        slow.mock("GET", "/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"slow-model"}]}"#)
+            .create();
+        let mut fast = mockito::Server::new();
+        fast.mock("GET", "/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"fast-model"}]}"#)
+            .create();
+
+        let (mut bridge, _dirs) = models_bridge();
+        bridge.ai_list_models("custom", &slow.url());
+        bridge.ai_list_models("custom", &fast.url());
+        let arrival = wait_for_models(&mut bridge).expect("the live flight answers");
+        assert_eq!(
+            arrival.base_url,
+            fast.url(),
+            "only the latest flight exists to answer"
+        );
+        assert!(bridge.poll_models().is_none(), "no second answer");
     }
 
     /// Stop drops the receiver (drop-to-cancel) and kills any events

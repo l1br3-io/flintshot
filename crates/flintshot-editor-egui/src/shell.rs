@@ -255,6 +255,21 @@ pub trait EditorPageBridge {
     fn poll_vision_probe(&mut self) -> Option<VisionProbeArrival> {
         None
     }
+
+    /// Fire a models-list fetch (`GET {base}/models` — the Model
+    /// row's Browse affordance; the click is the user action, so the
+    /// fetch never rides page open, provider switch, or save). The
+    /// list arrives on [`Self::poll_models`]. Default no-op.
+    fn ai_list_models(&mut self, _provider: &str, _base_url: &str) {}
+
+    /// Take one arrived models-list result, keyed to the
+    /// `(provider, base_url)` it was fired for (the page drops
+    /// arrivals that no longer match its working settings — a
+    /// superseded fetch never populates the dropdown). Default:
+    /// always `None`.
+    fn poll_models(&mut self) -> Option<ModelsArrival> {
+        None
+    }
 }
 
 /// One arrived vision-probe result: the persisted verdict + triple
@@ -271,6 +286,22 @@ pub struct VisionProbeArrival {
     /// `None` when this probe was the save-change loop, not a
     /// manual test.
     pub manual_test: Option<Result<String, String>>,
+}
+
+/// One arrived models-list fetch: the listings (or the copy-mapped
+/// failure line) plus the `(provider, base_url)` it was fired for —
+/// the Model row's Browse affordance (ai-config-ux).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelsArrival {
+    /// The provider the fetch was keyed to (whose keyring entry
+    /// authed it).
+    pub provider: String,
+    /// The effective base URL the fetch hit.
+    pub base_url: String,
+    /// `Ok` = the endpoint's advertised models (sorted, deduped,
+    /// vision flags folded); `Err` = one-line actionable copy for
+    /// the status row.
+    pub result: Result<Vec<flintshot_core::ModelListing>, String>,
 }
 
 /// An Ask-the-shot event, host → page. Mirrors
