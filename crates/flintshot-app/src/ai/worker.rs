@@ -345,6 +345,38 @@ pub fn spawn_probe_worker(
     rx
 }
 
+/// Spawn the one-shot models-list worker (`ai_list_models`): same
+/// thread + runtime shape as the probe worker, but `GET {base}/models`
+/// and a whole [`Vec<ModelListing>`](flintshot_core::ModelListing) —
+/// the picker wants the complete list and a one-shot receiver
+/// (ai-config-ux).
+pub fn spawn_models_worker(
+    resolved: ResolvedAi,
+) -> mpsc::Receiver<Result<Vec<flintshot_core::ModelListing>, AiError>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("flintshot-ai-models".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(Err(AiError::Transport(format!(
+                        "building the models runtime: {e}"
+                    ))));
+                    return;
+                }
+            };
+            let client =
+                OpenAiCompatClient::with_base_url_and_key(&resolved.base_url, &resolved.api_key);
+            let _ = tx.send(rt.block_on(client.list_models()));
+        })
+        .expect("spawning the AI models worker thread");
+    rx
+}
+
 /// A resolved, ready-to-use provider configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAi {
@@ -584,6 +616,63 @@ mod tests {
                 content: vec![flintshot_core::text_part("hi")],
             }],
         );
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the worker answers");
+        assert!(matches!(result, Err(AiError::Auth(_))));
+    }
+
+    // --- models worker (ai-config-ux T3) ---
+
+    #[test]
+    fn models_worker_round_trips_against_a_mock_server() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"llama3.2-vision","input_modalities":["text","image"]},{"id":"zephyr"}]}"#)
+            .create();
+        let resolved = ResolvedAi {
+            base_url: server.url(),
+            model: String::new(),
+            api_key: String::new(),
+        };
+        let rx = spawn_models_worker(resolved);
+        let listings = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the worker answers")
+            .expect("mock 2xx");
+        assert_eq!(
+            listings,
+            vec![
+                flintshot_core::ModelListing {
+                    id: "llama3.2-vision".into(),
+                    vision: Some(true)
+                },
+                flintshot_core::ModelListing {
+                    id: "zephyr".into(),
+                    vision: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn models_worker_surfaces_provider_errors() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/models")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"message": "bad key"}}"#)
+            .create();
+        let resolved = ResolvedAi {
+            base_url: server.url(),
+            model: String::new(),
+            api_key: "k".into(),
+        };
+        let rx = spawn_models_worker(resolved);
         let result = rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the worker answers");
