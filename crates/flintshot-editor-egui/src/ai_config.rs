@@ -94,9 +94,6 @@ enum ModelsStatus {
     /// In flight (the loading line).
     Pending,
     /// The endpoint answered (the dropdown's rows).
-    // T6's painted dropdown reads these; until it lands only the
-    // test accessor does.
-    #[allow(dead_code, reason = "the T6 dropdown renderer is the reader")]
     Arrived(Vec<flintshot_core::ModelListing>),
     /// The mapped failure copy (typing stays the path).
     Failed(String),
@@ -314,25 +311,69 @@ impl AiConfigApp {
                 match state.status {
                     ModelsStatus::Pending => return, // one flight per pair
                     ModelsStatus::Arrived(_) => {
-                        // Arrived toggles the dropdown (T6 renders it).
-                        if let Some(state) = self.models.as_mut() {
-                            state.open = !state.open;
-                        }
+                        let Some(state) = self.models.as_mut() else {
+                            return;
+                        };
+                        state.open = !state.open;
                         return;
                     }
                     ModelsStatus::Failed(_) => {} // retry path re-fires
                 }
             }
         }
+        self.fetch_models();
+    }
+
+    /// Queue a fresh fetch for the working pair (the Browse pill's
+    /// first click and the dropdown's Refresh share this core). The
+    /// previous state — stale or failed — is replaced wholesale.
+    fn fetch_models(&mut self) {
+        let base_url = self.effective_base_url().to_string();
+        if base_url.is_empty() {
+            return;
+        }
+        let provider = self.config.ai.provider.clone();
         self.models = Some(ModelsState {
             provider: provider.clone(),
-            base_url: base_url.clone(),
+            base_url,
             status: ModelsStatus::Pending,
             filter: String::new(),
             open: false,
         });
-        self.actions
-            .push(AiConfigAction::ListModels { provider, base_url });
+        self.actions.push(AiConfigAction::ListModels {
+            provider,
+            base_url: self.effective_base_url().to_string(),
+        });
+    }
+
+    /// The dropdown's Refresh fired: a fresh fetch even though a list
+    /// already arrived (endpoints gain models; the list is never
+    /// stale forever). The dropdown closes while the fetch runs and
+    /// reopens on arrival.
+    pub(crate) fn refresh_models(&mut self) {
+        self.fetch_models();
+    }
+
+    /// A dropdown row was picked: the id lands in the model field as
+    /// if typed (the debounce persists it) and the dropdown closes.
+    pub(crate) fn select_model(&mut self, id: &str, now: f64) {
+        self.config.ai.model = id.to_string();
+        self.mark_dirty(now);
+        if let Some(state) = self.models.as_mut() {
+            state.open = false;
+        }
+    }
+
+    /// Whether the painted dropdown is engaged this frame (an arrived
+    /// list for the working pair, open). The page's Escape guard:
+    /// an Esc that closes the dropdown must not also leave the page.
+    pub(crate) fn dropdown_open(&self) -> bool {
+        self.models.as_ref().is_some_and(|state| {
+            state.open
+                && state.provider == self.config.ai.provider
+                && state.base_url == self.effective_base_url()
+                && matches!(state.status, ModelsStatus::Arrived(_))
+        })
     }
 
     /// The bridge answered a models fetch. Arrivals for anything but
@@ -653,6 +694,9 @@ impl AiConfigPage {
     /// Draw the AI settings body. `now` is the frame clock.
     pub(crate) fn show(ui: &mut egui::Ui, page: &mut AiConfigApp, now: f64) -> bool {
         let escape = AiConfigApp::escape_pressed(ui.ctx());
+        // An Esc that closes the models dropdown must not also leave
+        // the page — the dropdown swallows the first press.
+        let dropdown_open = page.dropdown_open();
         egui::ScrollArea::vertical()
             .auto_shrink([false, true])
             .show(ui, |ui| {
@@ -673,7 +717,7 @@ impl AiConfigPage {
                     });
                 });
             });
-        escape
+        escape && !dropdown_open
     }
 }
 
@@ -683,6 +727,9 @@ impl AiConfigPage {
 fn model_section(ui: &mut egui::Ui, page: &mut AiConfigApp, now: f64) {
     section_card(ui, "Model", |ui| {
         provider_row(ui, page, now);
+        // The dropdown anchors to the model field — capture its rect
+        // out of the row for the popup below.
+        let mut field_rect = None;
         set_row(ui, "Model", |ui| {
             // set_row lays the control right-to-left: reserve the
             // Browse pill first so it lands rightmost, then the field
@@ -698,10 +745,12 @@ fn model_section(ui: &mut egui::Ui, page: &mut AiConfigApp, now: f64) {
                     .hint_text(hint)
                     .desired_width(ui.available_width()),
             );
+            field_rect = Some(response.rect);
             if response.changed() {
                 page.mark_dirty(now);
             }
         });
+        models_dropdown(ui, page, field_rect, now);
         if let Some(line) = page.models_status_text() {
             status_line(ui, &line);
         }
@@ -769,6 +818,208 @@ fn host_of(base_url: &str) -> &str {
     after_scheme.trim_end_matches('/')
 }
 
+/// The painted check vector — a painted glyph, not a font codepoint
+/// (the tofu ban; icons are painted glyphs in this crate). Shared by
+/// the probe banner's sees-images line and the dropdown's
+/// accepts-images flag.
+fn check_glyph(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x - 4.0, center.y + 0.5),
+            egui::pos2(center.x - 1.0, center.y + 3.5),
+        ],
+        egui::Stroke::new(1.5, color),
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(center.x - 1.0, center.y + 3.5),
+            egui::pos2(center.x + 4.5, center.y - 3.5),
+        ],
+        egui::Stroke::new(1.5, color),
+    );
+}
+
+/// The arrived model list as a painted dropdown under the model
+/// field — the page's one memorable element (ai-config-ux). A filter
+/// field over `CONTROL_H` painted rows (the current model rides the
+/// forest-selected fill; `accepts images` flags ride the rows where
+/// the endpoint's metadata said so), a Refresh affordance in the
+/// footer. Selecting a row fills the field as if typed; the popup's
+/// own machinery closes on outside click and Escape.
+fn models_dropdown(
+    ui: &mut egui::Ui,
+    page: &mut AiConfigApp,
+    anchor: Option<egui::Rect>,
+    now: f64,
+) {
+    let Some(anchor) = anchor else {
+        return;
+    };
+    if !page.dropdown_open() {
+        return;
+    }
+    let mut open = true; // `dropdown_open` gated above; the popup writes back closes
+                         // Hoist what the closure borrows: the filter draft, the row
+                         // snapshot, the current model, and the frame's intents.
+    let (filter_draft, rows) = match page.models.as_ref() {
+        Some(state) => match &state.status {
+            ModelsStatus::Arrived(models) => (state.filter.clone(), models.clone()),
+            _ => return,
+        },
+        None => return,
+    };
+    let mut filter = filter_draft;
+    let current_model = page.config.ai.model.trim().to_string();
+    let mut selected: Option<String> = None;
+    let mut refresh = false;
+
+    let popup = egui::Popup::new(
+        egui::Id::new("ai-models-popover"),
+        ui.ctx().clone(),
+        anchor,
+        ui.layer_id(),
+    )
+    .open_bool(&mut open)
+    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+    .gap(4.0)
+    .width(anchor.width())
+    .frame(
+        egui::Frame::new()
+            .fill(theme::palette::PAPER_CREAM)
+            .corner_radius(egui::CornerRadius::same(theme::CUTOUT_RADIUS))
+            .inner_margin(egui::Margin::same(8))
+            .stroke(theme::HAIRLINE_STROKE)
+            .shadow(theme::SHADOW_POP),
+    );
+    let _ = popup.show(|ui| {
+        ui.set_width(ui.available_width());
+        ui.add(
+            egui::TextEdit::singleline(&mut filter)
+                .id(egui::Id::new("ai-models-filter"))
+                .hint_text("Filter models…")
+                .desired_width(ui.available_width()),
+        );
+        ui.add_space(theme::SPACE_SCALE[0]);
+        let needle = filter.trim().to_lowercase();
+        egui::ScrollArea::vertical()
+            .max_height(5.5 * theme::CONTROL_H)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let mut matched = 0;
+                for listing in &rows {
+                    if !needle.is_empty() && !listing.id.to_lowercase().contains(&needle) {
+                        continue;
+                    }
+                    matched += 1;
+                    if model_row(ui, listing, &current_model) {
+                        selected = Some(listing.id.clone());
+                    }
+                }
+                if matched == 0 {
+                    ui.label(
+                        egui::RichText::new(format!("No models match {}", filter.trim()))
+                            .size(theme::TYPE_SM)
+                            .color(theme::palette::INK_SOFT),
+                    );
+                }
+            });
+        ui.add_space(theme::SPACE_SCALE[0]);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ghost_pill(ui, egui::Id::new("ai-models-refresh"), "Refresh", true) {
+                refresh = true;
+            }
+        });
+    });
+
+    // Write the frame's outcomes back (the popup may have closed on
+    // outside click or Escape; a row may have been picked).
+    if let Some(state) = page.models.as_mut() {
+        state.filter = filter;
+        state.open = open;
+    }
+    if let Some(id) = selected {
+        page.select_model(&id, now);
+    }
+    if refresh {
+        page.refresh_models();
+    }
+}
+
+/// One painted dropdown row: the id at `TYPE_MD` left, the
+/// `accepts images` check + flag right where the endpoint's metadata
+/// said so (`Some(false)` and `None` stay silent — absence is never
+/// "no"). The current model rides the forest-selected fill. Returns
+/// whether the row was clicked.
+fn model_row(ui: &mut egui::Ui, listing: &flintshot_core::ModelListing, current: &str) -> bool {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, theme::CONTROL_H), egui::Sense::hover());
+    let resp = ui.interact(
+        rect,
+        egui::Id::new(("ai-model-row", listing.id.clone())),
+        egui::Sense::click(),
+    );
+    let is_current = listing.id == current;
+    if is_current {
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(theme::POD_RADIUS),
+            theme::palette::FOREST_MID,
+            egui::Stroke::NONE,
+            egui::StrokeKind::Middle,
+        );
+    } else if resp.hovered() {
+        ui.painter().rect(
+            rect,
+            egui::CornerRadius::same(theme::POD_RADIUS),
+            theme::palette::PAPER_DIM,
+            egui::Stroke::NONE,
+            egui::StrokeKind::Middle,
+        );
+    }
+    let pad = 10.0;
+    let id_galley = ui.painter().layout_no_wrap(
+        listing.id.clone(),
+        egui::FontId::proportional(theme::TYPE_MD),
+        if is_current {
+            theme::palette::CREAM_TEXT
+        } else {
+            theme::palette::INK
+        },
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.left() + pad,
+            rect.center().y - id_galley.size().y / 2.0,
+        ),
+        id_galley,
+        if is_current {
+            theme::palette::CREAM_TEXT
+        } else {
+            theme::palette::INK
+        },
+    );
+    if listing.vision == Some(true) {
+        let flag_galley = ui.painter().layout_no_wrap(
+            "accepts images".to_owned(),
+            egui::FontId::proportional(theme::TYPE_SM),
+            theme::palette::INK_SOFT,
+        );
+        let flag_x = rect.right() - pad - flag_galley.size().x - 14.0;
+        ui.painter().galley(
+            egui::pos2(flag_x, rect.center().y - flag_galley.size().y / 2.0),
+            flag_galley,
+            theme::palette::INK_SOFT,
+        );
+        check_glyph(
+            ui,
+            egui::pos2(rect.right() - pad - 6.0, rect.center().y),
+            theme::palette::FOREST_MID,
+        );
+    }
+    resp.clicked()
+}
+
 /// The vision-probe verdict banner under the model field. Shows the
 /// persisted verdict only while it was measured on exactly the
 /// working `(model, base-url)` — a stale verdict never badges a
@@ -786,8 +1037,6 @@ fn probe_banner(ui: &mut egui::Ui, page: &mut AiConfigApp) {
     }
     match outcome.verdict {
         flintshot_core::ProbeVerdict::VisionOk => {
-            // The check is a painted vector, not a font codepoint —
-            // the tofu ban (icons are painted glyphs in this crate).
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("Model sees images")
@@ -796,21 +1045,7 @@ fn probe_banner(ui: &mut egui::Ui, page: &mut AiConfigApp) {
                 );
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                let center = rect.center();
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(center.x - 4.0, center.y + 0.5),
-                        egui::pos2(center.x - 1.0, center.y + 3.5),
-                    ],
-                    egui::Stroke::new(1.5, theme::palette::FOREST_MID),
-                );
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(center.x - 1.0, center.y + 3.5),
-                        egui::pos2(center.x + 4.5, center.y - 3.5),
-                    ],
-                    egui::Stroke::new(1.5, theme::palette::FOREST_MID),
-                );
+                check_glyph(ui, rect.center(), theme::palette::FOREST_MID);
             });
             ui.add_space(theme::SPACE_SCALE[1]);
         }
@@ -2153,6 +2388,192 @@ mod tests {
         assert!(
             page.models_arrived().is_none(),
             "the switch drops the list (xai's base URL differs)"
+        );
+    }
+
+    // --- the painted dropdown (ai-config-ux T6) ---
+
+    fn arrived_page() -> AiConfigApp {
+        let mut page = custom_page("http://x/v1");
+        page.browse_models();
+        let _ = page.drain_action();
+        page.note_models_arrival(&arrival(
+            "http://x/v1",
+            vec![
+                flintshot_core::ModelListing {
+                    id: "llama3.2-vision".into(),
+                    vision: Some(true),
+                },
+                flintshot_core::ModelListing {
+                    id: "zephyr".into(),
+                    vision: None,
+                },
+                flintshot_core::ModelListing {
+                    id: "qwen2.5".into(),
+                    vision: Some(false),
+                },
+            ],
+        ));
+        page
+    }
+
+    /// The arrived dropdown paints its rows (ids at `TYPE_MD`, the
+    /// vision flag only where metadata said yes — Some(false) and
+    /// None stay silent), and selecting a row fills the model field,
+    /// marks the page dirty, and closes the dropdown.
+    #[test]
+    fn dropdown_paints_rows_and_selecting_fills_the_field() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut page = arrived_page();
+
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            texts.iter().any(|t| t.contains("llama3.2-vision")),
+            "the ids paint: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("accepts images")),
+            "the vision flag paints where metadata said yes: {texts:?}"
+        );
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|t| t.contains("accepts images"))
+                .count(),
+            1,
+            "Some(false) and None stay silent"
+        );
+
+        // The selected row's id at TYPE_MD (the token-system pin).
+        let row = ctx
+            .read_response(egui::Id::new(("ai-model-row", "llama3.2-vision")))
+            .expect("the row registers")
+            .rect;
+        assert!(
+            (row.height() - theme::CONTROL_H).abs() < 0.5,
+            "rows ride the control height: {}",
+            row.height()
+        );
+
+        // Click the row: the field fills, the page goes dirty, the
+        // dropdown closes.
+        let _ = page_frame(&ctx, &mut page, click_events(row.center()));
+        assert_eq!(page.config.ai.model, "llama3.2-vision");
+        page.mark_dirty(0.0);
+        let saved = page.drain_save(2.0).expect("a selection is an edit");
+        assert_eq!(saved.ai.model, "llama3.2-vision");
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            !texts.iter().any(|t| t.contains("zephyr")),
+            "the dropdown closed on select: {texts:?}"
+        );
+    }
+
+    /// The filter field narrows the rows (case-insensitive), and a
+    /// filter that matches nothing invites rather than blanks.
+    #[test]
+    fn dropdown_filter_narrows_rows_and_empty_matches_invite() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut page = arrived_page();
+        let _ = page_texts(&ctx, &mut page);
+        let filter = ctx
+            .read_response(egui::Id::new("ai-models-filter"))
+            .expect("the filter field registers")
+            .rect;
+        let _ = page_frame(&ctx, &mut page, click_events(filter.center()));
+        let _ = page_frame(&ctx, &mut page, vec![egui::Event::Text("LLAMA".into())]);
+
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            texts.iter().any(|t| t.contains("llama3.2-vision")),
+            "the case-insensitive match stays"
+        );
+        assert!(
+            !texts.iter().any(|t| t == "zephyr"),
+            "non-matches hide: {texts:?}"
+        );
+
+        let _ = page_frame(&ctx, &mut page, vec![egui::Event::Text("zzz".into())]);
+        let texts = page_texts(&ctx, &mut page);
+        assert!(
+            texts.iter().any(|t| t.contains("No models match")),
+            "the empty state invites: {texts:?}"
+        );
+    }
+
+    /// The dropdown's Refresh re-fires the fetch (the loading line
+    /// returns, the rows go) — the arrived list is never stale
+    /// forever.
+    #[test]
+    fn dropdown_refresh_refires_the_fetch() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut page = arrived_page();
+        let _ = page_texts(&ctx, &mut page);
+        let refresh = ctx
+            .read_response(egui::Id::new("ai-models-refresh"))
+            .expect("the Refresh pill registers")
+            .rect;
+        let _ = page_frame(&ctx, &mut page, click_events(refresh.center()));
+        assert_eq!(
+            page.drain_action(),
+            Some(AiConfigAction::ListModels {
+                provider: "custom".into(),
+                base_url: "http://x/v1".into()
+            }),
+            "refresh queues the same action as Browse"
+        );
+        assert!(
+            page.models_status_text()
+                .is_some_and(|t| t.contains("Loading models")),
+            "the loading line returns while refreshing"
+        );
+    }
+
+    /// Esc with the dropdown open closes the dropdown, not the page —
+    /// the second press leaves (the cascade a modal-over-page should
+    /// have).
+    #[test]
+    fn escape_with_the_dropdown_open_closes_only_the_dropdown() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        crate::widgets::set_animations(&ctx, false);
+        let mut page = arrived_page();
+        let escape_frame = |ctx: &egui::Context, page: &mut AiConfigApp| {
+            let raw = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 768.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let mut escaped = false;
+            let _ = ctx.run_ui(raw, |ui| {
+                escaped = AiConfigPage::show(ui, page, ui.input(|i| i.time));
+            });
+            escaped
+        };
+        let _ = page_texts(&ctx, &mut page); // the dropdown registers
+        assert!(
+            !escape_frame(&ctx, &mut page),
+            "the first Esc closes the dropdown, not the page"
+        );
+        assert!(!page.dropdown_open(), "the popup machinery closed it");
+        assert!(
+            escape_frame(&ctx, &mut page),
+            "the second Esc leaves the page"
         );
     }
 }
