@@ -218,6 +218,64 @@ impl AiResponse {
     }
 }
 
+/// One model id an endpoint advertised on `GET {base}/models`, with
+/// the vision flag where the provider's metadata carries it.
+///
+/// The picker's row model: `vision` is `Some` only when the endpoint
+/// said so (OpenRouter's `input_modalities`); absence renders nothing
+/// — the probe verdict stays the only other badge (ai-config-ux).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ModelListing {
+    /// The id a chat request's `model` field takes.
+    pub id: String,
+    /// `Some(true)` when the provider's modalities list image input;
+    /// `None` when the response says nothing about it.
+    pub vision: Option<bool>,
+}
+
+/// The `GET {base}/models` response envelope — the OpenAI-compat
+/// shape every surface in scope returns (research §2). Fetch
+/// direction only, hence Deserialize without Serialize.
+#[derive(Debug, Deserialize)]
+pub struct ModelsResponse {
+    /// The advertised models, in endpoint order.
+    #[serde(default)]
+    pub data: Vec<ModelEntry>,
+}
+
+/// One entry of a [`ModelsResponse`]. `input_modalities` is the
+/// `OpenRouter` extension (absent everywhere else).
+#[derive(Debug, Deserialize)]
+pub struct ModelEntry {
+    /// The id a chat request's `model` field takes.
+    #[serde(default)]
+    pub id: String,
+    /// Input modalities when the endpoint sends them
+    /// (e.g. `["text", "image"]` on OpenRouter).
+    #[serde(default)]
+    pub input_modalities: Option<Vec<String>>,
+}
+
+impl ModelsResponse {
+    /// Reduce the envelope to picker rows: id + the vision flag
+    /// folded from `input_modalities` (case-insensitive "image"
+    /// membership; absent metadata stays `None`).
+    #[must_use]
+    pub fn to_listings(&self) -> Vec<ModelListing> {
+        self.data
+            .iter()
+            .filter(|entry| !entry.id.is_empty())
+            .map(|entry| ModelListing {
+                id: entry.id.clone(),
+                vision: entry
+                    .input_modalities
+                    .as_ref()
+                    .map(|modalities| modalities.iter().any(|m| m.eq_ignore_ascii_case("image"))),
+            })
+            .collect()
+    }
+}
+
 /// Provider error envelope: `{"error": {"message": "...", ...}}`.
 ///
 /// All providers in scope (`OpenAI`, `xAI`, Gemini-compat) return this
@@ -1281,5 +1339,56 @@ mod tests {
             ProbeVerdict::VisionUnknown
         );
         assert_eq!(ProbeVerdict::parse(""), ProbeVerdict::VisionUnknown);
+    }
+
+    // --- /models wire types (ai-config-ux T1) ---
+
+    /// The shared OpenAI-compat `{"data":[{"id":...}]}` shape parses
+    /// into listings with `vision: None` — the shape `OpenAI`, `xAI`,
+    /// Gemini-compat, `Ollama`, and `LM Studio` all return (research
+    /// §2). Extra fields per entry are tolerated.
+    #[test]
+    fn models_listing_parses_the_shared_compat_shape() {
+        let body = r#"{"object":"list","data":[{"id":"gpt-4o-mini","object":"model","owned_by":"openai"},{"id":"gpt-4o","object":"model"}]}"#;
+        let listing: ModelsResponse = serde_json::from_str(body).expect("compat shape parses");
+        assert_eq!(
+            listing.to_listings(),
+            vec![
+                ModelListing {
+                    id: "gpt-4o-mini".into(),
+                    vision: None
+                },
+                ModelListing {
+                    id: "gpt-4o".into(),
+                    vision: None
+                },
+            ]
+        );
+    }
+
+    /// `OpenRouter`'s per-entry `input_modalities` reduces to the
+    /// vision flag: image listed ⇒ `Some(true)`; text-only ⇒
+    /// `Some(false)`; absent ⇒ `None` (absence is never "no" — the
+    /// probe verdict stays the only other badge).
+    #[test]
+    fn models_listing_reduces_openrouter_modalities_to_the_vision_flag() {
+        let body = r#"{"data":[
+            {"id":"anthropic/claude-3.5-sonnet","input_modalities":["text","image"]},
+            {"id":"openai/gpt-3.5-turbo","input_modalities":["text"]},
+            {"id":"qwen/qwen-2.5"}
+        ]}"#;
+        let listing: ModelsResponse = serde_json::from_str(body).expect("openrouter shape parses");
+        let listings = listing.to_listings();
+        assert_eq!(listings[0].vision, Some(true), "image modality");
+        assert_eq!(listings[1].vision, Some(false), "text-only modality");
+        assert_eq!(listings[2].vision, None, "no metadata says nothing");
+    }
+
+    /// An empty `data` array parses to an empty list — an endpoint
+    /// with nothing installed (bare `Ollama`) is not an error.
+    #[test]
+    fn models_listing_parses_an_empty_data_array_to_empty() {
+        let listing: ModelsResponse = serde_json::from_str(r#"{"data":[]}"#).expect("empty parses");
+        assert!(listing.to_listings().is_empty());
     }
 }
