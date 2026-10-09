@@ -780,38 +780,9 @@ impl WindowApp {
                         self.page_bridge.borrow_mut().save_config(&config);
                     }
                     // The page's actions: the bridge services keyring
-                    // writes and test connections (the page stays pure
-                    // data + queue).
-                    let mut actions = Vec::new();
-                    while let Some(action) = page.drain_action() {
-                        actions.push(action);
-                    }
-                    for action in actions {
-                        match action {
-                            crate::ai_config::AiConfigAction::SaveKey { provider, key } => {
-                                let stored =
-                                    self.page_bridge.borrow_mut().ai_save_key(&provider, &key);
-                                if stored {
-                                    page.set_key_saved(&provider, true);
-                                } else {
-                                    page.set_key_store_failed(&provider);
-                                }
-                            }
-                            crate::ai_config::AiConfigAction::ProviderChanged { provider } => {
-                                let saved = self.page_bridge.borrow_mut().ai_key_saved(&provider);
-                                page.set_key_saved(&provider, saved);
-                            }
-                            crate::ai_config::AiConfigAction::TestConnection {
-                                provider,
-                                model,
-                                base_url,
-                            } => {
-                                self.page_bridge
-                                    .borrow_mut()
-                                    .ai_test_connection(&provider, &model, &base_url);
-                            }
-                        }
-                    }
+                    // writes, test connections, and model fetches
+                    // (the page stays pure data + queue).
+                    Self::service_ai_config_actions(&self.page_bridge, page);
                     // The vision-probe arrival: the banner's
                     // persisted verdict (+ triple), and — when a
                     // manual Test armed this probe — its result
@@ -821,6 +792,12 @@ impl WindowApp {
                         if let Some(result) = arrival.manual_test {
                             page.set_test_result(result);
                         }
+                    }
+                    // The models fetch's arrival (the Browse
+                    // lifecycle): dropped page-side when it no longer
+                    // matches the working pair.
+                    if let Some(arrival) = self.page_bridge.borrow_mut().poll_models() {
+                        page.note_models_arrival(&arrival);
                     }
                     if escape {
                         // Esc / breadcrumb: the parked editor returns
@@ -835,6 +812,51 @@ impl WindowApp {
             }
         }
         route_after
+    }
+
+    /// Drain the AI settings page's action queue through the page
+    /// bridge (keyring writes, key-status queries, test connections,
+    /// model fetches — the page stays pure data + this loop). Takes
+    /// the bridge slot, not `self`: the page is borrowed out of
+    /// `self.ai_config` for the route body's whole draw.
+    fn service_ai_config_actions(
+        bridge: &PageBridgeSlot,
+        page: &mut crate::ai_config::AiConfigApp,
+    ) {
+        let mut actions = Vec::new();
+        while let Some(action) = page.drain_action() {
+            actions.push(action);
+        }
+        for action in actions {
+            match action {
+                crate::ai_config::AiConfigAction::SaveKey { provider, key } => {
+                    let stored = bridge.borrow_mut().ai_save_key(&provider, &key);
+                    if stored {
+                        page.set_key_saved(&provider, true);
+                    } else {
+                        page.set_key_store_failed(&provider);
+                    }
+                }
+                crate::ai_config::AiConfigAction::ProviderChanged { provider } => {
+                    let saved = bridge.borrow_mut().ai_key_saved(&provider);
+                    page.set_key_saved(&provider, saved);
+                }
+                crate::ai_config::AiConfigAction::TestConnection {
+                    provider,
+                    model,
+                    base_url,
+                } => {
+                    bridge
+                        .borrow_mut()
+                        .ai_test_connection(&provider, &model, &base_url);
+                }
+                crate::ai_config::AiConfigAction::ListModels { provider, base_url } => {
+                    // The Browse click is the user action — the only
+                    // path that fires the fetch.
+                    bridge.borrow_mut().ai_list_models(&provider, &base_url);
+                }
+            }
+        }
     }
 }
 
@@ -1348,6 +1370,8 @@ mod tests {
         key_saved_answers: Rc<RefCell<std::collections::HashMap<String, bool>>>,
         key_queries: Rc<RefCell<Vec<String>>>,
         tests: Rc<RefCell<Vec<(String, String, String)>>>,
+        models_fetches: Rc<RefCell<Vec<(String, String)>>>,
+        models_answer: Rc<RefCell<Option<crate::shell::ModelsArrival>>>,
     }
 
     impl StubPageBridge {
@@ -1405,6 +1429,16 @@ mod tests {
             self.tests
                 .borrow_mut()
                 .push((provider.into(), model.into(), base_url.into()));
+        }
+
+        fn ai_list_models(&mut self, provider: &str, base_url: &str) {
+            self.models_fetches
+                .borrow_mut()
+                .push((provider.into(), base_url.into()));
+        }
+
+        fn poll_models(&mut self) -> Option<crate::shell::ModelsArrival> {
+            self.models_answer.borrow_mut().take()
         }
     }
 
@@ -1737,6 +1771,82 @@ mod tests {
         };
         let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
         assert!(matches!(app.route, Route::Home));
+    }
+
+    /// The Browse pill's full window round-trip: the click routes the
+    /// fetch through the bridge (the only firing path), and the
+    /// bridge's arrival lands on the page keyed to the working pair
+    /// (ai-config-ux T5).
+    #[test]
+    fn aiconfig_browse_click_fires_the_bridge_and_the_arrival_adopts() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (mut app, bridge, _host) = window_app_start(
+            WindowStart::AiConfig,
+            StubPageBridge::default(),
+            RecordingHost::default(),
+        );
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0));
+        let frame = |ctx: &egui::Context, app: &mut WindowApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                events,
+                screen_rect: Some(screen),
+                ..egui::RawInput::default()
+            };
+            let _ = ctx.run_ui(raw, |ui| app.ui_impl(ui));
+        };
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
+        let browse = ctx
+            .read_response(egui::Id::new("ai-model-browse"))
+            .expect("the Browse pill registers")
+            .rect;
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(browse.center()),
+                egui::Event::PointerButton {
+                    pos: browse.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: browse.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(
+            bridge.models_fetches.borrow().as_slice(),
+            [(
+                "openai".to_string(),
+                "https://api.openai.com/v1".to_string()
+            )],
+            "the click is the only firing path"
+        );
+
+        // The bridge answers for the working pair: the page adopts.
+        *bridge.models_answer.borrow_mut() = Some(crate::shell::ModelsArrival {
+            provider: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            result: Ok(vec![flintshot_core::ModelListing {
+                id: "gpt-4o-mini".into(),
+                vision: None,
+            }]),
+        });
+        frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.ai_config
+                .as_ref()
+                .and_then(crate::ai_config::AiConfigApp::models_arrived)
+                .map(|models| models.len()),
+            Some(1),
+            "the arrival lands on the page"
+        );
     }
 
     /// The Configure-link route poll: an armed intent routes from a

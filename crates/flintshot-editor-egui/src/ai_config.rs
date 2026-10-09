@@ -61,6 +61,45 @@ pub(crate) enum AiConfigAction {
         /// The effective base URL (override or preset).
         base_url: String,
     },
+    /// The Model row's **Browse** pill fired: fetch the endpoint's
+    /// model list (`GET {base}/models`). The click is the user
+    /// action — nothing fires on open, switch, or save.
+    ListModels {
+        /// Provider id (whose keyring entry auths the fetch).
+        provider: String,
+        /// The effective base URL (override or preset).
+        base_url: String,
+    },
+}
+
+/// The Browse affordance's fetch lifecycle, keyed to the
+/// `(provider, effective base URL)` it belongs to — every consumer
+/// gates on that pair so a stale list never serves a different
+/// endpoint (the probe banner's triple-match idiom).
+struct ModelsState {
+    /// The provider the fetch was keyed to.
+    provider: String,
+    /// The effective base URL the fetch hit.
+    base_url: String,
+    /// Where the fetch stands.
+    status: ModelsStatus,
+    /// The dropdown's filter draft (T6's field).
+    filter: String,
+    /// Whether the painted dropdown is open.
+    open: bool,
+}
+
+/// One fetch's outcome state.
+enum ModelsStatus {
+    /// In flight (the loading line).
+    Pending,
+    /// The endpoint answered (the dropdown's rows).
+    // T6's painted dropdown reads these; until it lands only the
+    // test accessor does.
+    #[allow(dead_code, reason = "the T6 dropdown renderer is the reader")]
+    Arrived(Vec<flintshot_core::ModelListing>),
+    /// The mapped failure copy (typing stays the path).
+    Failed(String),
 }
 
 /// A test-connection attempt's lifecycle (the inline status row).
@@ -116,6 +155,10 @@ pub(crate) struct AiConfigApp {
     /// updated live by the probe-arrival poll). Renders the banner
     /// while the triple matches the working settings.
     probe: Option<flintshot_core::ProbeOutcome>,
+    /// The Browse affordance's fetch state (T5+T6): pending /
+    /// arrived / failed, keyed to the working pair. Dropped on any
+    /// provider switch; arrivals for a stale pair drop it too.
+    models: Option<ModelsState>,
     /// The Test connection row's status.
     test: Option<TestStatus>,
     /// Clicked actions awaiting the router's drain.
@@ -157,6 +200,7 @@ impl AiConfigApp {
             key_store_failed: false,
             key_saved_for,
             probe,
+            models: None,
             test: None,
             actions: Vec::new(),
             transforms,
@@ -254,6 +298,104 @@ impl AiConfigApp {
         self.probe = Some(outcome.clone());
     }
 
+    /// The Browse pill fired. Arms one fetch for the working pair —
+    /// a pending fetch for the same pair swallows the re-click (the
+    /// bridge's one-flight policy), an arrived list for it toggles
+    /// the dropdown, anything else (or nothing yet) queues a fresh
+    /// fetch. Only meaningful when an endpoint exists.
+    pub(crate) fn browse_models(&mut self) {
+        let base_url = self.effective_base_url().to_string();
+        if base_url.is_empty() {
+            return;
+        }
+        let provider = self.config.ai.provider.clone();
+        if let Some(state) = self.models.as_ref() {
+            if state.provider == provider && state.base_url == base_url {
+                match state.status {
+                    ModelsStatus::Pending => return, // one flight per pair
+                    ModelsStatus::Arrived(_) => {
+                        // Arrived toggles the dropdown (T6 renders it).
+                        if let Some(state) = self.models.as_mut() {
+                            state.open = !state.open;
+                        }
+                        return;
+                    }
+                    ModelsStatus::Failed(_) => {} // retry path re-fires
+                }
+            }
+        }
+        self.models = Some(ModelsState {
+            provider: provider.clone(),
+            base_url: base_url.clone(),
+            status: ModelsStatus::Pending,
+            filter: String::new(),
+            open: false,
+        });
+        self.actions
+            .push(AiConfigAction::ListModels { provider, base_url });
+    }
+
+    /// The bridge answered a models fetch. Arrivals for anything but
+    /// the working pair drop the state entirely (a superseded
+    /// endpoint never populates the dropdown); the working pair's
+    /// answer lands — arrived opens the dropdown, failed keeps one
+    /// actionable line.
+    pub(crate) fn note_models_arrival(&mut self, arrival: &crate::shell::ModelsArrival) {
+        let working = (self.config.ai.provider.as_str(), self.effective_base_url());
+        if (arrival.provider.as_str(), arrival.base_url.as_str()) != working {
+            self.models = None; // stale — drop, never serve
+            return;
+        }
+        let Some(state) = self.models.as_mut() else {
+            return; // an answer nobody asked for
+        };
+        match arrival.result.clone() {
+            Ok(models) => {
+                state.status = ModelsStatus::Arrived(models);
+                state.filter.clear();
+                state.open = true;
+            }
+            Err(copy) => {
+                state.status = ModelsStatus::Failed(copy);
+                state.open = false;
+            }
+        }
+    }
+
+    /// The Model row's status line under the field: the loading line
+    /// while pending, the failure copy after a refused fetch.
+    /// `None` when quiet (nothing asked, or the list arrived — the
+    /// dropdown speaks then) or when the state is stale.
+    pub(crate) fn models_status_text(&self) -> Option<String> {
+        let state = self.models.as_ref()?;
+        if state.provider != self.config.ai.provider || state.base_url != self.effective_base_url()
+        {
+            return None;
+        }
+        match &state.status {
+            ModelsStatus::Pending => {
+                Some(format!("Loading models from {}…", host_of(&state.base_url)))
+            }
+            ModelsStatus::Failed(copy) => Some(copy.clone()),
+            ModelsStatus::Arrived(_) => None,
+        }
+    }
+
+    /// Test seam: the arrived list for the working pair, if any
+    /// (assertion accessor).
+    #[cfg(test)]
+    pub(crate) fn models_arrived(&self) -> Option<Vec<flintshot_core::ModelListing>> {
+        let state = self.models.as_ref()?;
+        if state.provider != self.config.ai.provider || state.base_url != self.effective_base_url()
+        {
+            return None;
+        }
+        match &state.status {
+            ModelsStatus::Arrived(models) => Some(models.clone()),
+            _ => None,
+        }
+    }
+
     /// Whether the current provider's key-status row is stale (a
     /// switch happened without a bridge answer yet).
     #[must_use]
@@ -341,6 +483,9 @@ impl AiConfigApp {
         });
         // A pending test answer no longer describes this provider.
         self.test = None;
+        // Neither does a fetched model list — the dropdown must never
+        // offer another endpoint's models.
+        self.models = None;
     }
 
     /// Commit the Replace-key field: queue the keyring write and
@@ -532,12 +677,20 @@ impl AiConfigPage {
     }
 }
 
-/// The Model section: provider pills, model id, base-URL override,
-/// the key affordance, Test connection.
+/// The Model section: provider pills, model id (+ the Browse
+/// affordance over the endpoint's advertised list), base-URL
+/// override, the key affordance, Test connection.
 fn model_section(ui: &mut egui::Ui, page: &mut AiConfigApp, now: f64) {
     section_card(ui, "Model", |ui| {
         provider_row(ui, page, now);
         set_row(ui, "Model", |ui| {
+            // set_row lays the control right-to-left: reserve the
+            // Browse pill first so it lands rightmost, then the field
+            // fills the rest (the key row's idiom).
+            let armed = !page.effective_base_url().is_empty();
+            if ghost_pill(ui, egui::Id::new("ai-model-browse"), "Browse…", armed) {
+                page.browse_models();
+            }
             let hint = model_hint(page).to_owned();
             let response = ui.add(
                 egui::TextEdit::singleline(&mut page.config.ai.model)
@@ -549,6 +702,9 @@ fn model_section(ui: &mut egui::Ui, page: &mut AiConfigApp, now: f64) {
                 page.mark_dirty(now);
             }
         });
+        if let Some(line) = page.models_status_text() {
+            status_line(ui, &line);
+        }
         probe_banner(ui, page);
         set_row(ui, "Base URL", |ui| {
             let preset = page.config.ai.preset();
@@ -601,6 +757,16 @@ fn model_hint(page: &AiConfigApp) -> &str {
     } else {
         hint
     }
+}
+
+/// The endpoint's host + path, scheme stripped — the loading line's
+/// legible form (`https://api.openai.com/v1` reads
+/// `api.openai.com/v1`).
+fn host_of(base_url: &str) -> &str {
+    let after_scheme = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest);
+    after_scheme.trim_end_matches('/')
 }
 
 /// The vision-probe verdict banner under the model field. Shows the
@@ -1838,6 +2004,155 @@ mod tests {
         assert!(
             texts.iter().any(|t| t.contains("described the image")),
             "the pass line says what passed: {texts:?}"
+        );
+    }
+
+    // --- the Browse fetch lifecycle (ai-config-ux T5) ---
+
+    fn custom_page(base_url: &str) -> AiConfigApp {
+        let mut page = AiConfigApp::new(Config::default());
+        page.config.ai.provider = "custom".into();
+        page.config.ai.base_url = base_url.into();
+        page
+    }
+
+    fn arrival(
+        base_url: &str,
+        models: Vec<flintshot_core::ModelListing>,
+    ) -> crate::shell::ModelsArrival {
+        crate::shell::ModelsArrival {
+            provider: "custom".into(),
+            base_url: base_url.into(),
+            result: Ok(models),
+        }
+    }
+
+    /// The Browse click queues the fetch keyed to the working pair
+    /// and shows the loading line; a re-click while pending swallows
+    /// (one flight per pair — the bridge replaces, the page need not
+    /// spam it).
+    #[test]
+    fn browse_click_queues_the_fetch_and_shows_loading() {
+        let mut page = custom_page("http://x/v1");
+        assert!(
+            page.models_status_text().is_none(),
+            "no click, no status, no network"
+        );
+        page.browse_models();
+        assert_eq!(
+            page.drain_action(),
+            Some(AiConfigAction::ListModels {
+                provider: "custom".into(),
+                base_url: "http://x/v1".into()
+            })
+        );
+        assert!(
+            page.models_status_text()
+                .is_some_and(|t| t.contains("Loading models")),
+            "the loading line names the work: {:?}",
+            page.models_status_text()
+        );
+        page.browse_models();
+        assert!(
+            page.drain_action().is_none(),
+            "a pending fetch swallows re-clicks"
+        );
+    }
+
+    /// Without an endpoint there is nothing to browse — custom with
+    /// an empty base URL never queues a fetch (and presets always
+    /// carry one, so only this corner is inert).
+    #[test]
+    fn browse_without_an_endpoint_fires_nothing() {
+        let mut page = custom_page("");
+        page.browse_models();
+        assert!(page.drain_action().is_none(), "nothing fires unarmed");
+    }
+
+    /// An arriving list lands only for the pair it was fired on: an
+    /// answer for another endpoint drops the stale state entirely
+    /// (never populates anything), the working pair's answer arrives.
+    #[test]
+    fn an_arrival_opens_the_list_only_for_the_working_pair() {
+        let mut page = custom_page("http://x/v1");
+        page.browse_models();
+        let _ = page.drain_action();
+
+        page.note_models_arrival(&arrival(
+            "http://elsewhere/v1",
+            vec![flintshot_core::ModelListing {
+                id: "not-mine".into(),
+                vision: None,
+            }],
+        ));
+        assert!(
+            page.models_status_text().is_none(),
+            "a superseded answer drops the state — no phantom loading line"
+        );
+
+        page.browse_models(); // re-arm after the drop
+        let _ = page.drain_action();
+        page.note_models_arrival(&arrival(
+            "http://x/v1",
+            vec![flintshot_core::ModelListing {
+                id: "llama3.2-vision".into(),
+                vision: Some(true),
+            }],
+        ));
+        assert!(page.models_status_text().is_none(), "arrived is quiet");
+        assert_eq!(
+            page.models_arrived().map(|m| m.len()),
+            Some(1),
+            "the working pair's answer lands"
+        );
+    }
+
+    /// A failed fetch keeps one actionable line and never touches the
+    /// typed model — typing stays the first-class path.
+    #[test]
+    fn failed_arrival_keeps_the_copy_and_the_typed_model() {
+        let mut page = custom_page("http://x/v1");
+        page.config.ai.model = "my-typed-model".into();
+        page.browse_models();
+        let _ = page.drain_action();
+        page.note_models_arrival(&crate::shell::ModelsArrival {
+            provider: "custom".into(),
+            base_url: "http://x/v1".into(),
+            result: Err(
+                "Couldn't reach the provider — check the base URL and network, then retry.".into(),
+            ),
+        });
+        assert!(
+            page.models_status_text()
+                .is_some_and(|t| t.contains("Couldn't reach the provider")),
+            "the failure copy shows: {:?}",
+            page.models_status_text()
+        );
+        assert_eq!(
+            page.config.ai.model, "my-typed-model",
+            "a failed fetch never mutates the field"
+        );
+    }
+
+    /// A provider (or endpoint) switch drops any models state — the
+    /// dropdown must never offer another endpoint's models.
+    #[test]
+    fn provider_switch_drops_the_models_state() {
+        let mut page = custom_page("http://x/v1");
+        page.browse_models();
+        let _ = page.drain_action();
+        page.note_models_arrival(&arrival(
+            "http://x/v1",
+            vec![flintshot_core::ModelListing {
+                id: "llama3".into(),
+                vision: None,
+            }],
+        ));
+        assert_eq!(page.models_arrived().map(|m| m.len()), Some(1));
+        page.select_provider("xai", 2.0);
+        assert!(
+            page.models_arrived().is_none(),
+            "the switch drops the list (xai's base URL differs)"
         );
     }
 }
