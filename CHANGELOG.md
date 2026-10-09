@@ -18,6 +18,21 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- **The AI settings Model row can browse the endpoint's own model
+  list.** A **Browse…** pill beside the model field fetches
+  `GET {base}/models` (the click is the only thing that fires it —
+  nothing phones home on open or save) and opens a dropdown: a
+  filterable list of the models the provider actually offers, with an
+  "accepts images" mark on rows where the endpoint's metadata says
+  so (OpenRouter's input modalities). Picking a row fills the field
+  and saves on the usual debounce; typing a model id by hand works
+  exactly as before, and a refused fetch leaves one actionable line
+  instead of blocking anything. A **Refresh** pill in the dropdown
+  re-fetches, and switching provider or base URL drops the list so a
+  dropdown never offers another endpoint's models.
+
 ### Fixed
 
 - **The topbar "More" menu never closed on its own items.** The

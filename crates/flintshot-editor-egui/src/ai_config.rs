@@ -3,13 +3,23 @@
 //!
 //! The settings page's grammar: labelled cutout section cards in a
 //! centered 680 px column. Two sections — **Model** (provider preset,
-//! model id, base-URL override, the masked Replace-key affordance,
+//! model id + the **Browse…** pill over the endpoint's advertised
+//! model list, base-URL override, the masked Replace-key affordance,
 //! Test connection) and **Transforms** (the saved-transform CRUD,
 //! Task 011) — over the page's config snapshot + save-debounce
 //! lifecycle. The page stays pure data + an action queue: the
-//! router services keyring writes and test connections through the
-//! page bridge (keyring writes land immediately on commit, config
-//! fields persist on the debounce).
+//! router services keyring writes, test connections, and model-list
+//! fetches through the page bridge (keyring writes land immediately
+//! on commit, config fields persist on the debounce).
+//!
+//! The Browse lifecycle (ai-config-ux): the pill's click is the only
+//! thing that fires the `GET {base}/models` fetch — never page open,
+//! provider switch, or save. The fetched list keys to the working
+//! `(provider, base-url)` pair (the probe banner's triple-match
+//! idiom) so a dropdown never offers another endpoint's models; the
+//! painted dropdown (filter field, `CONTROL_H` rows, an
+//! "accepts images" mark where the endpoint's metadata said so,
+//! Refresh) fills the model field as if typed.
 //!
 //! The stored key is never read back into the UI: the key row shows
 //! status copy ("Key saved in your system's secret store") and a
