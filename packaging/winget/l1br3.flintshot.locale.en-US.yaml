@@ -1,0 +1,21 @@
+# winget-pkgs default-locale manifest for l1br3.flintshot.
+# Schema: manifest.defaultLocale.1.28.0. PackageVersion travels with
+# each release; everything else is stable — copy verbatim per release.
+PackageIdentifier: l1br3.flintshot
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: l1br3
+PackageName: flintshot
+# Dual Rust-style licensing, same string the crates carry.
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/l1br3-io/flintshot/blob/main/LICENSE-MIT
+ShortDescription: Screenshot capture with a live editor, daemon, tray, hotkeys, and upload backends
+Description: flintshot grabs the screen through native backends (Wayland portal, X11, macOS, Windows), opens the shot in an editor with annotation tools, uploads to backends like imgur, and can ask a vision-capable AI model about the shot. Capture is driven by a daemon with global hotkeys and a tray.
+PackageUrl: https://github.com/l1br3-io/flintshot
+Moniker: flintshot
+Tags:
+  - screenshot
+  - capture
+  - screenshot-tool
+ManifestType: defaultLocale
+ManifestVersion: 1.28.0

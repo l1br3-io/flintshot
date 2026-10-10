@@ -1,0 +1,31 @@
+# winget-pkgs installer manifest for l1br3.flintshot — submitted to
+# microsoft/winget-pkgs post-release (see packaging/RELEASE.md §winget).
+# Schema: manifest.installer.1.28.0 (microsoft/winget-cli
+# schemas/JSON/manifests/v1.28.0).
+#
+# TEMPLATE VALUES — fill after the GitHub Release exists:
+#   InstallerSha256  ← the release's flintshot-app-x86_64-pc-windows-msvc.msi.sha256
+#   InstallerUrl / PackageVersion  ← per release tag (URL filename is
+#     VERSIONLESS — cargo-dist names artifacts flintshot-app-<target>.msi
+#     under the versioned tag path; verified against `dist plan` +
+#     a local dist build).
+#
+# The MSI's UpgradeCode is the STABLE WiX upgrade-guid from
+# [package.metadata.wix] in crates/flintshot-app/Cargo.toml (that is
+# its purpose: upgrades replace in place across versions). ProductCode
+# is deliberately not asserted — cargo-dist's WiX build generates it,
+# and UpgradeCode is the stable anchor winget keys upgrades on.
+PackageIdentifier: l1br3.flintshot
+PackageVersion: 0.1.0
+ManifestType: installer
+ManifestVersion: 1.28.0
+Installers:
+  - Architecture: x64
+    InstallerType: wix
+    InstallerUrl: https://github.com/l1br3-io/flintshot/releases/download/v0.1.0/flintshot-app-x86_64-pc-windows-msvc.msi
+    InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    AppsAndFeaturesEntries:
+      - DisplayName: flintshot
+        Publisher: l1br3
+        DisplayVersion: 0.1.0
+        UpgradeCode: 6c55b274-9df3-4fc3-82c4-ffd9e35ab681
