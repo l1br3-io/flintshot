@@ -20,6 +20,22 @@ Categories used below:
 
 ### Added
 
+- **flintshot 0.1.0 — the first public release** (effort
+  `release-ring`). The whole Unreleased section below is the 0.1.0
+  payload: screen capture through native backends (Wayland's XDG
+  Screenshot Portal, X11, macOS, Windows) with the OS's own selection
+  UI; a full annotation editor (selection, crop, shapes, text,
+  numbering, blur/privacy, resize, history, undoable everything); a
+  daemon with global hotkeys, tray, and a single routed app window;
+  upload backends (imgur); ask-the-shot AI transforms against any
+  OpenAI-compatible vision model (streamed, keys in the OS keyring);
+  an optional COSMIC applet. Installable via GitHub Releases with
+  `curl | sh` / `irm | iex` installers, winget (`l1br3.flintshot`),
+  the Homebrew tap (`l1br3-io/tap/flintshot`), `cargo binstall
+  flintshot-app`, AUR (`flintshot-bin`), and deb/rpm/AppImage — the
+  ordered release runbook for the maintainer lives in
+  `packaging/RELEASE.md`.
+
 - **The AI settings Model row can browse the endpoint's own model
   list.** A **Browse…** pill beside the model field fetches
   `GET {base}/models` (the click is the only thing that fires it —
