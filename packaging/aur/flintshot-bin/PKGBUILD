@@ -1,0 +1,72 @@
+# flintshot-bin — AUR package over the GitHub-Release binary tarball.
+#
+# WHY -bin (binary, not source build): the capture stack compiles
+# against system headers at build time — xcap's pipewire-rs
+# bindgen-compiles against PipeWire/SPA headers, and the tray feature
+# pulls the GTK3 dev stack — so a source build costs a full Rust
+# toolchain plus the whole -dev set for a 1-binary app. The tarball is
+# built by cargo-dist on ubuntu-24.04 (glibc 2.39 floor; same
+# rationale as dist-workspace's pinned runner).
+#
+# Runtime set derived empirically (readelf -d on the release binary in
+# a clean archlinux container, sonames mapped with pkgfile):
+#   gtk3 gdk-pixbuf2 glib2 libxcb dbus mesa libgcc  — link-time NEEDED
+#   libayatana-appindicator libpipewire             — dlopen-only
+#     (tray backend; xcap's portal capture). NOT in NEEDED, but the
+#     app breaks at runtime without them — the deb Depends list
+#     carries both for the same reason.
+#   libxdo3 — AUR. Arch's xdotool ships libxdo.so.4; the binary NEEDS
+#     libxdo.so.3 (muda, tray menus, is a link-time dep — the binary
+#     exits 127 without it; verified in container). libxdo3 builds
+#     the .so.3 from the upstream xdotool source. AUR-on-AUR deps are
+#     resolved by every helper (yay/paru).
+#
+# TEMPLATE VALUES — fill after the GitHub Release exists (RELEASE.md
+# §AUR): `updpkgsums` regenerates all three sha256s (sources are
+# tag-pinned, so they fetch the exact release files).
+
+pkgname=flintshot-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='flintshot CLI: daemon, region capture, fullscreen, upload.'
+arch=(x86_64)
+url='https://github.com/l1br3-io/flintshot'
+license=('MIT' 'Apache-2.0')
+depends=(
+  gtk3
+  gdk-pixbuf2
+  glib2
+  libxcb
+  dbus
+  mesa
+  libgcc
+  libayatana-appindicator
+  libpipewire
+  libxdo3
+)
+provides=(flintshot="$pkgver")
+conflicts=(flintshot)
+# Tarball root dir is versionless (cargo-dist layout; verified against
+# a local dist build). The desktop entry + icon come from the tag,
+# same asset set the deb ships.
+source=(
+  "$url/releases/download/v$pkgver/flintshot-app-x86_64-unknown-linux-gnu.tar.gz"
+  "flintshot.desktop::$url/raw/v$pkgver/assets/applications/flintshot.desktop"
+  "flintshot.svg::$url/raw/v$pkgver/assets/icons/hicolor/scalable/apps/flintshot.svg"
+)
+# PLACEHOLDER sums — 64 zeros keep the shape valid; updpkgsums (in
+# pacman-contrib) overwrites them with the real values post-release.
+sha256sums=(
+  '0000000000000000000000000000000000000000000000000000000000000000'
+  '0000000000000000000000000000000000000000000000000000000000000000'
+  '0000000000000000000000000000000000000000000000000000000000000000'
+)
+
+package() {
+  cd "$srcdir/flintshot-app-x86_64-unknown-linux-gnu"
+  install -Dm755 flintshot "$pkgdir/usr/bin/flintshot"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+  install -Dm644 "$srcdir/flintshot.desktop" "$pkgdir/usr/share/applications/flintshot.desktop"
+  install -Dm644 "$srcdir/flintshot.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/flintshot.svg"
+}

@@ -1,0 +1,28 @@
+pkgbase = flintshot-bin
+	pkgdesc = flintshot CLI: daemon, region capture, fullscreen, upload.
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/l1br3-io/flintshot
+	arch = x86_64
+	license = MIT
+	license = Apache-2.0
+	depends = gtk3
+	depends = gdk-pixbuf2
+	depends = glib2
+	depends = libxcb
+	depends = dbus
+	depends = mesa
+	depends = libgcc
+	depends = libayatana-appindicator
+	depends = libpipewire
+	depends = libxdo3
+	provides = flintshot=0.1.0
+	conflicts = flintshot
+	source = https://github.com/l1br3-io/flintshot/releases/download/v0.1.0/flintshot-app-x86_64-unknown-linux-gnu.tar.gz
+	source = flintshot.desktop::https://github.com/l1br3-io/flintshot/raw/v0.1.0/assets/applications/flintshot.desktop
+	source = flintshot.svg::https://github.com/l1br3-io/flintshot/raw/v0.1.0/assets/icons/hicolor/scalable/apps/flintshot.svg
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+
+pkgname = flintshot-bin
