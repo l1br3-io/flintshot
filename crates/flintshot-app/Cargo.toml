@@ -22,6 +22,28 @@ path-guid = "932eac9d-b2ac-4efd-a40c-9afbfd94b760"
 license = false
 eula = false
 
+# cargo-binstall channel: `cargo binstall flintshot-app` installs the
+# `flintshot` binary from our GitHub Releases. The schema is
+# cargo-dist's own (binstall auto-detects it — cargo-dist book,
+# "Other Installation Methods"); pinned here explicitly instead of
+# left implicit: releases/download/v{version}/{name}-{target}.{ext} —
+# VERSIONLESS filenames, the release tag carries the version, {name}
+# is the PACKAGE (flintshot-app), not the bin. Tarballs root under a
+# versionless {name}-{target}/ dir; Windows ZIPs unpack flat
+# (cargo-dist book, archives.md). Verified against a local dist build
+# and the installer script it generated. Placeholder/override shapes:
+# cargo-binstall SUPPORT.md.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.zip"
+pkg-fmt = "zip"
+# cargo-dist zips carry the binary at the archive root, no wrapper dir.
+bin-dir = "{ bin }{ binary-ext }"
+
 # Scoped to the one released package: workspace-level replacements
 # would run once per crate against the same root file. Rewrites the
 # Keep-a-Changelog Unreleased header into the released version and
