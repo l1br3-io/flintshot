@@ -9,7 +9,7 @@ members = [
 default-members = ["crates/flintshot-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -21,8 +21,8 @@ authors = ["flintshot contributors"]
 # time each becomes the registry requirement for the crate, so a stale
 # req would not match the published version.
 [workspace.dependencies]
-flintshot-core = { path = "crates/flintshot-core", version = "0.1.0" }
-flintshot-editor-egui = { path = "crates/flintshot-editor-egui", version = "0.1.0" }
+flintshot-core = { path = "crates/flintshot-core", version = "0.1.1" }
+flintshot-editor-egui = { path = "crates/flintshot-editor-egui", version = "0.1.1" }
 
 # GOTCHA: without `wayland-data-control`, arboard is X11-only on
 # Linux (x11rb) — on a Wayland session every read/write rides

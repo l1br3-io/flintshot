@@ -18,6 +18,8 @@ Categories used below:
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-17
+
 ### Added
 
 - **flintshot 0.1.0 — the first public release** (effort

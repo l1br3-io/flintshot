@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "flintshot-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arboard",
  "ashpd 0.13.13",
@@ -2465,7 +2465,7 @@ dependencies = [
 
 [[package]]
 name = "flintshot-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "base64",
@@ -2489,7 +2489,7 @@ dependencies = [
 
 [[package]]
 name = "flintshot-cosmic"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "color-eyre",
  "flintshot-core",
@@ -2504,7 +2504,7 @@ dependencies = [
 
 [[package]]
 name = "flintshot-editor-egui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arboard",
  "eframe",
