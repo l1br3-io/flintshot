@@ -555,11 +555,22 @@ fn quiet_capture_exit(err: &flintshot_core::FlintshotError) -> bool {
 /// instead of failing. Matches only the canonical core marker — a
 /// bare "non-file uri" wording stays a real error.
 fn portal_grab_on_clipboard(err: &flintshot_core::FlintshotError) -> bool {
-    match err {
-        flintshot_core::FlintshotError::Capture { detail } => {
-            detail.contains(flintshot_core::capture::PORTAL_GRAB_ON_CLIPBOARD)
+    // The marker constant comes from core's portal backend, which is
+    // Linux-only — everywhere else no portal can deliver a grab to the
+    // clipboard, so the answer is simply false.
+    #[cfg(target_os = "linux")]
+    {
+        match err {
+            flintshot_core::FlintshotError::Capture { detail } => {
+                detail.contains(flintshot_core::capture::PORTAL_GRAB_ON_CLIPBOARD)
+            }
+            _ => false,
         }
-        _ => false,
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = err;
+        false
     }
 }
 
@@ -752,6 +763,7 @@ mod tests {
     /// `clipboard:///`) routes to the clipboard read-back. The old
     /// bare "non-file uri" wording must NOT match — it would mask
     /// genuinely unsupported URI forms behind a clipboard read.
+    #[cfg(target_os = "linux")]
     #[test]
     fn portal_grab_on_clipboard_classifies_marker_only() {
         use flintshot_core::FlintshotError;

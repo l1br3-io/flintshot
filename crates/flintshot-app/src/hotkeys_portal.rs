@@ -15,10 +15,19 @@
 
 use std::sync::{Arc, Mutex};
 
+// ashpd (and the session machinery below) is Linux-only: XDG portals
+// are a Linux facility, and ashpd 0.13 does not even compile on
+// Windows. The module's cross-platform surface — PortalHandle,
+// PortalCmd, BindFailure — stays compiled on every OS so the daemon
+// and IPC server bind against it everywhere; off Linux every handle
+// is the `unavailable()` one.
+#[cfg(target_os = "linux")]
 use ashpd::desktop::global_shortcuts::{
     BindShortcutsOptions, GlobalShortcuts, ListShortcutsOptions, NewShortcut, Shortcut,
 };
+#[cfg(target_os = "linux")]
 use ashpd::desktop::CreateSessionOptions;
+#[cfg(target_os = "linux")]
 use futures_util::StreamExt;
 use tokio::sync::Notify;
 
@@ -163,7 +172,11 @@ pub(crate) enum PortalStage {
 
 /// Why the portal path is unavailable, in order of how far startup got.
 /// Every variant is non-fatal: the daemon keeps serving tray + IPC.
+// Pure classification logic: compiled everywhere (tests exercise it on
+// every OS), but its only non-test consumers are the Linux-only
+// session-machinery fns — hence the off-Linux dead_code allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum FallbackKind {
     /// No D-Bus session bus reachable at all (headless box, or the
     /// compositor session is gone).
@@ -181,6 +194,7 @@ impl FallbackKind {
     /// The user-facing notice for this fallback. Every variant names
     /// the compositor-keybind workaround so the log line is actionable
     /// on its own.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn notice(self) -> &'static str {
         match self {
             Self::NoSessionBus => {
@@ -213,6 +227,7 @@ impl FallbackKind {
 /// structured causes live in zbus/ashpd error types we do not depend
 /// on, and the matched fragments are stable spec'd D-Bus / ashpd
 /// messages, not incidental formatting.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn classify_failure(stage: PortalStage, error: &str) -> FallbackKind {
     // ashpd::Error::PortalNotFound: frontend missing or interface not
     // implemented by the installed frontend.
@@ -266,27 +281,41 @@ pub(crate) fn start(
     bind_requested: Arc<Notify>,
     capture: crate::worker::CaptureDispatch,
 ) -> PortalHandle {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let unavailable = Arc::new(std::sync::Mutex::new(None));
-    let handle = PortalHandle {
-        tx,
-        unavailable: Arc::clone(&unavailable),
-    };
-    tokio::spawn(session_task(
-        bus,
-        state,
-        hotkeys,
-        bind_requested,
-        capture,
-        rx,
-        unavailable,
-    ));
-    handle
+    #[cfg(target_os = "linux")]
+    {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let unavailable = Arc::new(std::sync::Mutex::new(None));
+        let handle = PortalHandle {
+            tx,
+            unavailable: Arc::clone(&unavailable),
+        };
+        tokio::spawn(session_task(
+            bus,
+            state,
+            hotkeys,
+            bind_requested,
+            capture,
+            rx,
+            unavailable,
+        ));
+        handle
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Portals are Linux-only; the params exist to feed the session
+        // task. macOS/Windows take the plain-config hotkey registry.
+        let _ = (bus, state, hotkeys, bind_requested, capture);
+        PortalHandle::unavailable(
+            "portal global shortcuts are Linux/Wayland-only; on macOS/Windows configure \
+             [hotkeys] chords in config.toml instead",
+        )
+    }
 }
 
 /// The portal session task behind [`start`]: startup (silent attach)
 /// then a select loop over activations, `ShortcutsChanged`, bind
 /// commands, and the tray's bind trigger.
+#[cfg(target_os = "linux")]
 async fn session_task(
     bus: SubscriberBus,
     state: DispatchState,
@@ -383,6 +412,7 @@ async fn session_task(
 /// — the spec's stance is that every portal log line names the cause
 /// and the workaround — and leave a note on the handle so a later
 /// `bind()` fails fast with the fix instead of a vague `gone`.
+#[cfg(target_os = "linux")]
 fn session_ended(unavailable: &Arc<std::sync::Mutex<Option<BindFailure>>>, source: &str) {
     tracing::warn!(
         source = %source,
@@ -404,6 +434,7 @@ fn session_ended(unavailable: &Arc<std::sync::Mutex<Option<BindFailure>>>, sourc
 /// loop stays responsive through its bounded waits (the capture
 /// context serializes concurrent triggers; latest wins). Unknown ids
 /// drop at debug.
+#[cfg(target_os = "linux")]
 fn dispatch_activation(
     capture: &crate::worker::CaptureDispatch,
     bus: &SubscriberBus,
@@ -444,6 +475,7 @@ fn dispatch_activation(
 /// Startup failed: record the classified reason on the handle (later
 /// `bind()` calls short-circuit with it) and answer anything already
 /// waiting in the channel, then end the task.
+#[cfg(target_os = "linux")]
 fn abort(
     unavailable: &Arc<std::sync::Mutex<Option<BindFailure>>>,
     cmds: &mut tokio::sync::mpsc::UnboundedReceiver<PortalCmd>,
@@ -470,6 +502,7 @@ fn abort(
 /// closes the dialog; the caller then receives what the user actually
 /// chose (suggestions are not authority). A repeat bind on the same
 /// session replaces the bindings — the portal treats it as a re-bind.
+#[cfg(target_os = "linux")]
 async fn do_bind(
     shortcuts: &GlobalShortcuts,
     session: &ashpd::desktop::Session<GlobalShortcuts>,
@@ -513,6 +546,7 @@ async fn do_bind(
 
 /// Tray-initiated bind outcome: success and dismissal are both normal
 /// user endings (`info`); anything else is a real failure (`warn`).
+#[cfg(target_os = "linux")]
 fn log_tray_bind(result: Result<Vec<ShortcutBinding>, BindFailure>) {
     match result {
         Ok(bindings) => {
@@ -529,6 +563,7 @@ fn log_tray_bind(result: Result<Vec<ShortcutBinding>, BindFailure>) {
 
 /// One dialog row: id + description, with the config chord as the
 /// preferred trigger when it converts (warn + bare otherwise).
+#[cfg(target_os = "linux")]
 fn suggested_shortcut(id: &str, description: &str, chord: &str) -> NewShortcut {
     if let Some(accelerator) = convert_chord(chord) {
         NewShortcut::new(id, description).preferred_trigger(accelerator.as_str())
@@ -543,6 +578,7 @@ fn suggested_shortcut(id: &str, description: &str, chord: &str) -> NewShortcut {
 
 /// Stable `Event::Error` code for a bind failure display string:
 /// user-dismissed dialogs are distinct from real failures.
+#[cfg(target_os = "linux")]
 fn bind_failure_code_for_display(display: &str) -> &'static str {
     if display.contains("cancelled") {
         "bind-cancelled"
@@ -557,7 +593,10 @@ fn bind_failure_code_for_display(display: &str) -> &'static str {
 pub(crate) enum PortalCmd {
     /// Open the portal bind dialog; reply with the outcome.
     Bind {
-        /// Where the bind result (or failure) is sent.
+        /// Where the bind result (or failure) is sent. Only the Linux
+        /// session task reads it — off Linux the handle is always the
+        /// `unavailable()` one and no Bind is ever sent.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
         reply: tokio::sync::oneshot::Sender<Result<Vec<ShortcutBinding>, BindFailure>>,
     },
 }
@@ -651,6 +690,7 @@ impl PortalHandle {
 /// Our ids from a portal shortcut list, as `"id=trigger"` pairs.
 /// Only our ids matter; anything else bound in the session is left
 /// alone.
+#[cfg(target_os = "linux")]
 fn our_bound_set(shortcuts: &[Shortcut]) -> Vec<String> {
     shortcuts
         .iter()
@@ -660,6 +700,7 @@ fn our_bound_set(shortcuts: &[Shortcut]) -> Vec<String> {
 }
 
 /// Log the bound-shortcut set from the silent attach.
+#[cfg(target_os = "linux")]
 fn log_bound_shortcuts(shortcuts: &[Shortcut]) {
     let bound = our_bound_set(shortcuts);
     if bound.is_empty() {
@@ -676,6 +717,7 @@ fn log_bound_shortcuts(shortcuts: &[Shortcut]) {
 /// outside flintshot (typically the compositor's own settings UI).
 /// The id → request mapping stays valid by construction — ids are
 /// stable strings, so this is bookkeeping, not a re-subscribe.
+#[cfg(target_os = "linux")]
 fn log_shortcuts_changed(shortcuts: &[Shortcut]) {
     let bound = our_bound_set(shortcuts);
     if bound.is_empty() {
@@ -693,6 +735,7 @@ fn log_shortcuts_changed(shortcuts: &[Shortcut]) {
 
 /// Log a classified startup failure. `NoSessionBus` is `info` (it is the
 /// expected state on a headless box); everything else is `warn`.
+#[cfg(target_os = "linux")]
 fn log_fallback(stage: PortalStage, error: &ashpd::Error) {
     match classify_failure(stage, &error.to_string()) {
         FallbackKind::NoSessionBus => {
@@ -807,6 +850,7 @@ mod tests {
         assert!(err.message.contains("no portal for you"), "got: {err:?}");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn session_ended_leaves_an_actionable_note() {
         let unavailable = Arc::new(std::sync::Mutex::new(None));
@@ -862,6 +906,7 @@ mod tests {
         assert!(err.message.contains("gone"), "got: {err:?}");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn bind_failure_codes_are_stable_strings() {
         assert_eq!(

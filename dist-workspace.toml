@@ -55,7 +55,11 @@ libclang-dev = "*"
 libxcb1-dev = "*"
 libxrandr-dev = "*"
 libdbus-1-dev = "*"
-libpipewire-0.3-dev = "*"
+# Quoted: TOML bare keys cannot contain dots. Unquoted, this parsed as
+# a dotted key (nested table libpipewire-0 -> 3-dev) and the release
+# runner tried to `apt-get install libpipewire-0` (v0.1.1 tag's Linux
+# job: "Unable to locate package libpipewire-0").
+"libpipewire-0.3-dev" = "*"
 libwayland-dev = "*"
 libegl-dev = "*"
 libgbm-dev = "*"

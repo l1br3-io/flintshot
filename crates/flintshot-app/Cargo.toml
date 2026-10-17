@@ -120,7 +120,6 @@ eventsource-stream = "0.2"
 flintshot-core = { workspace = true }
 flintshot-editor-egui = { workspace = true, optional = true }
 arboard = { workspace = true }
-ashpd = { workspace = true }
 clap = { workspace = true }
 color-eyre = { workspace = true }
 futures-util = { workspace = true }
@@ -148,6 +147,11 @@ tray-icon = { workspace = true, optional = true }
 # the default build stays GTK-free. zbus backs the SNI watchdog's
 # D-Bus calls (same target-scoped + optional shape).
 [target.'cfg(target_os = "linux")'.dependencies]
+# ashpd is Linux-only with the portal session (hotkeys_portal): XDG
+# portals are a Linux facility and ashpd 0.13 does not compile on
+# Windows — as a universal dep it broke the release matrix's
+# windows-msvc job (v0.1.1 tag).
+ashpd = { workspace = true }
 gtk = { workspace = true, optional = true }
 zbus = { workspace = true, optional = true }
 
