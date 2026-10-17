@@ -1,142 +1,167 @@
 # flintshot
 
-Cross-platform screenshot capture and annotation tool, written in pure Rust.
-Inspired by [Flameshot](https://flameshot.org), designed to be fast, modular,
-and friendly to the [COSMIC desktop](https://system76.com/cosmic).
+<p align="center">
+  <img src="assets/icons/hicolor/scalable/apps/flintshot.svg" width="110" alt="flintshot logo" />
+</p>
 
-> **Status:** capturing, annotating, and sharing all work. See
-> [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone index.
+**Cross-platform screenshot capture and annotation, in pure Rust.**
+Inspired by [Flameshot](https://flameshot.org), native to
+[Wayland and the COSMIC desktop](https://system76.com/cosmic), at home
+on X11, macOS, and Windows too.
 
-## At a glance
+[![CI](https://github.com/l1br3-io/flintshot/actions/workflows/ci.yml/badge.svg)](https://github.com/l1br3-io/flintshot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/l1br3-io/flintshot)](https://github.com/l1br3-io/flintshot/releases/latest)
+[![License](https://img.shields.io/github/license/l1br3-io/flintshot)](#license)
+<!-- Add after the crates.io publish lands (packaging/RELEASE.md §4):
+     [![crates.io](https://img.shields.io/crates/v/flintshot-app)](https://crates.io/crates/flintshot-app)
+-->
 
-- **Pure-Rust stack**: eframe/egui for UI, xcap for capture, tokio for async
-- **Cross-platform**: Linux (X11 + Wayland), macOS, Windows
-- **Two interaction models**: editor-window (Satty-style, ships first) +
-  live overlay (Flameshot-style, Phase 5)
-- **COSMIC panel applet** as an alternate front-end (Phase 3)
-- **Pluggable upload backends**: Imgur ships first; `Backend` trait designed
-  for extension
+## Install
 
-## Getting started
+One-liners from the latest [GitHub Release](https://github.com/l1br3-io/flintshot/releases/latest)
+(**v0.1.1** is the first public release):
 
-### Prerequisites
-
-- **Rust 1.95+** (auto-selected via `rust-toolchain.toml`)
-- **Linux:** X11/Wayland dev libraries for screen capture:
-  ```bash
-  sudo apt-get install -y pkg-config libclang-dev libxcb1-dev libxrandr-dev \
-    libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev libgbm-dev
-  ```
-- **macOS / Windows:** No extra deps needed
-
-### Run the app
-
-```bash
-# Build
-cargo build
-
-# Capture fullscreen and open editor
-cargo run -- fullscreen
-
-# Capture with delay (useful for setting up the screen)
-cargo run -- region --delay-ms 2000
-
-# Capture and save directly (skip editor)
-cargo run -- region --out /tmp/screenshot.png
-
-# See all options
-cargo run -- --help
-cargo run -- region --help
-```
-
-### Daemon, tray & hotkeys (Phase 2)
-
-Run the resident daemon for the system tray, global hotkeys, and IPC
-(the tray needs `--features tray`, which pulls GTK on Linux):
+**Linux / macOS**
 
 ```sh
-cargo run -- daemon                 # tray* + hotkeys + IPC server
-cargo run -- daemon --replace       # take over from a running daemon
-cargo run --features tray -- daemon # with the system tray enabled
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/l1br3-io/flintshot/releases/download/v0.1.1/flintshot-app-installer.sh | sh
 ```
 
-`flintshot region` / `fullscreen` delegate to a running daemon when one
-is present (centralising the event stream) and fall back to standalone
-otherwise; `--standalone` forces the in-process path.
+**Windows** (PowerShell)
 
-> **Wayland hotkeys:** on a Wayland session the daemon binds global
-> hotkeys through the xdg-desktop-portal `GlobalShortcuts` interface
-> (requires xdg-desktop-portal ≥ 1.16 and a frontend that implements
-> it — KDE Plasma, and COSMIC where the packaged portal lists it).
-> Run `flintshot hotkeys bind` (or use the tray's *Bind shortcuts…*)
-> once to open the portal bind dialog; `[hotkeys]` chords are offered
-> as suggestions. On desktops without that interface (GNOME, sway),
-> the daemon logs a notice and the compositor-keybinding workaround
-> still applies: bind it to `flintshot region` / `flintshot
-> fullscreen`. See
-> [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §Cross-platform
-> concerns and
-> [`docs/adrs/ADR-0029`](docs/adrs/ADR-0029-ashpd-global-shortcuts.md).
-
-### Development
-
-For contributors. The `justfile` wraps the common loop; see
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for the full workflow.
-
-```bash
-just bootstrap     # install cargo-watch + cargo-nextest (one-time)
-just dev           # auto-rebuild + re-run on file changes
-just ci            # run the same checks CI runs, locally
-just test          # tests (prefers nextest when installed)
+```powershell
+irm https://github.com/l1br3-io/flintshot/releases/download/v0.1.1/flintshot-app-installer.ps1 | iex
 ```
 
-Dev shortcuts exist for capture subcommands too — e.g.
-`just fullscreen`, `just region --delay-ms 500`. See
-`just --list` for the full surface.
+Package managers — the same release artifacts, each channel's own
+entry point:
 
-### What works right now
+| Channel | Command |
+|---|---|
+| winget (Windows) | `winget install --id l1br3.flintshot --source winget` |
+| Homebrew | `brew install l1br3-io/tap/flintshot` |
+| cargo-binstall | `cargo binstall flintshot-app` *(installs the `flintshot` binary)* |
+| Arch Linux (AUR) | `yay -S flintshot-bin` |
+| deb / rpm / AppImage | download from the [release page](https://github.com/l1br3-io/flintshot/releases/latest) |
+| Flathub / COSMIC Store | *in progress* — see [`packaging/flatpak/`](packaging/flatpak/) |
 
-- Capture fullscreen/region (via xcap)
-- Editor window with annotation tools (rectangle, arrow, text, blur, ellipse, line, marker, pencil, number)
-- Save to file / copy to clipboard
-- Config file at `~/.config/flintshot/config.toml`
-- Daemon with tray, hotkeys, and IPC server
+## What you get
 
-### Coming next (Phase 3b / 4)
+- **Capture through the OS's own selection UI** where the platform
+  has one: the XDG Screenshot Portal on Wayland (COSMIC, KDE, GNOME)
+  with region select and confirmation, native grabs elsewhere
+  (X11, macOS, Windows). `flintshot capture` is the single action;
+  `flintshot backends` shows what `auto` picks on your machine.
+- **A real editor**, not a paste-and-pray dialog: select, crop,
+  shapes, arrows, freehand, text (with re-edit), numbered steps,
+  blur/redact, resize, an edit *history* timeline, undo/redo — every
+  gesture undoable. Unsaved captures survive navigation within a
+  session (the app window's "This session" row).
+- **A daemon when you want one**: system tray, global hotkeys (the
+  Wayland GlobalShortcuts portal where supported, X11 grabs
+  elsewhere), IPC for tray/applet front-ends — and everything works
+  standalone without it.
+- **An app window** in the Windows 11 Snipping Tool spirit: capture
+  controls, recent captures with thumbnails, settings, AI settings.
+- **Uploads**: imgur ships first (`flintshot auth imgur` stores the
+  credential in the OS keyring — never in a config file).
+- **Ask-the-shot AI**: send what you see to any OpenAI-compatible
+  vision model (OpenAI, xAI, Gemini, Ollama, LM Studio, OpenRouter),
+  read the streamed answer in-app, save reusable prompt transforms.
+  Your API key lives in the OS keyring.
+- **COSMIC panel applet** as an alternate front-end (opt-in build —
+  `just cosmic`).
 
-- COSMIC panel applet
-- Upload backends (Imgur, …)
+<!-- Screenshots: capture with flintshot itself, drop PNGs in
+     docs/screenshots/, then uncomment:
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the milestone index.
+## Screenshots
+
+| Region capture + editor | Ask-the-shot AI | The app window |
+|---|---|---|
+| ![](docs/screenshots/editor.png) | ![](docs/screenshots/ai.png) | ![](docs/screenshots/home.png) |
+-->
+
+## The CLI
+
+```
+flintshot capture            # the OS selection UI (or fallback grab), then the editor
+flintshot app                # the app window; auto-starts the daemon
+flintshot daemon             # tray + global hotkeys + IPC (build with --features tray)
+flintshot open IMG.png       # edit an existing image
+flintshot upload IMG.png     # upload via a configured backend, prints the URL
+flintshot auth imgur         # store/clear backend credentials (OS keyring)
+flintshot hotkeys bind       # bind the capture hotkey via the Wayland portal
+flintshot config             # print the resolved configuration
+flintshot backends           # capture-backend probe report
+```
+
+`flintshot <command> --help` for the full flag surface;
+`flintshot app --route settings` cold-starts on any page.
+
+## Building from source
+
+Rust **1.95+** is auto-selected by `rust-toolchain.toml`. A default
+build (editor + capture, no tray) needs no system libraries beyond a
+C toolchain. The **tray** feature pulls the GTK stack on Linux:
+
+```sh
+# minimal build
+cargo build --release
+
+# with the system tray (Linux)
+sudo apt-get install -y pkg-config libclang-dev libxcb1-dev libxrandr-dev \
+  libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev libgbm-dev \
+  libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+cargo build --release --features tray
+```
+
+[`just`](https://github.com/casey/just) drives everything:
+`just ci` (the full gate), `just daemon --refresh` (dev loop with
+tray), `just install-user` (deploy + restart the daemon). See the
+[justfile](justfile) for the full surface.
+
+## Platform notes
+
+- **Wayland**: capture rides the XDG Screenshot Portal (prompt-free
+  region select on COSMIC/KDE). Global hotkeys bind through the
+  GlobalShortcuts portal (`flintshot hotkeys bind`); on compositors
+  without it, bind a compositor keybinding to `flintshot capture`.
+- **X11**: global-hotkey grabs work out of the box.
+- **macOS / Windows**: native capture paths; editor and AI are
+  fully cross-platform.
+- **Flatpak**: packaging in progress — see
+  [`packaging/flatpak/`](packaging/flatpak/).
 
 ## Documentation
 
 Product & design:
 
 - [`docs/VISION.md`](docs/VISION.md) — product vision, scope, non-goals
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone index (thin)
-- Git history — the spec trail: each effort's goal, decisions, deviations, and
-  outcome live in enriched commit messages. Look up any effort with
-  `git log --grep='<effort>'` (e.g. `git log --grep=phase-1-capture-editor`)
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — workspace, crates, dependencies, data model
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone index
+- Git history — the spec trail: each effort's goal, decisions,
+  deviations, and outcome live in enriched commit messages
+  (`git log --grep='<effort>'`).
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — workspace, crates,
+  dependencies, data model
 - [`docs/adrs/`](docs/adrs/) — technical decision records (ADRs)
-- [`docs/REFERENCES.md`](docs/REFERENCES.md) — open-source reference projects (comparables, agents, chat/streaming UI, Rust AI infra)
-- [`docs/research/`](docs/research/) — dated, source-cited research notes backing roadmap decisions
-- [`docs/TEST_MATRIX.md`](docs/TEST_MATRIX.md) — cross-platform manual QA grid
+- [`docs/research/`](docs/research/) — dated, source-cited research
+  notes backing roadmap decisions
 
 Working in the repo:
 
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, workflow, code style
-- [`AGENTS.md`](AGENTS.md) — operational guide for AI agents (build/test/lint commands)
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup, workflow, style
+- [`AGENTS.md`](AGENTS.md) — operational guide for AI agents
 - [`CHANGELOG.md`](CHANGELOG.md) — release history
 
-## Project name vs directory
+## Status
 
-The project is **`flintshot`** (the binary you'll install and the crates you'll
-depend on). The local directory may still be named `capture` from initial
-scaffolding — that's incidental; cargo package names are independent of the
-directory.
+First public release **v0.1.1** is out.
+[`docs/ROADMAP.md`](docs/ROADMAP.md) tracks what's queued next
+(export formats, watermarking, crash-resume session restore, a
+scripting surface).
 
 ## License
 
-Dual-licensed under `MIT OR Apache-2.0`, at your option.
+Dual-licensed under [MIT](LICENSE-MIT) or
+[Apache-2.0](LICENSE-APACHE) — your choice.
