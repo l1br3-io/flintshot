@@ -125,6 +125,35 @@ header comment explains why it exists).
 brew install l1br3-io/tap/flintshot
 ```
 
+## 7b. Flathub — the COSMIC Store channel (manual submission)
+
+Artifacts live in-repo: `packaging/flatpak/io.l1br3.Flintshot.yaml`
++ `assets/metainfo/io.l1br3.Flintshot.metainfo.xml`. The v1
+sandbox scope is daemon-less/tray-less (see SPEC-flathub.md).
+
+1. **Screenshots first** — Flathub requires real ones, and the
+   metainfo's URLs point at tag-pinned raws: capture
+   `docs/screenshots/{editor,ai,home}.png` **with flintshot itself**,
+   commit them, and land them in a tagged release (the next `just
+   release`); retarget the metainfo URLs at that tag.
+2. Re-validate: `appstreamcli validate assets/metainfo/*.metainfo.xml`
+   — only the inherent `cid-rdns-contains-hyphen` warning (the
+   `l1br3-io` org name) may remain.
+3. Local proof (what the flathub effort ran):
+   `flatpak-builder --force-clean --user --install-deps-from=flathub --repo=/tmp/fsh-repo /tmp/fsh-build packaging/flatpak/io.l1br3.Flintshot.yaml`
+4. Submit via a [Flathub](https://flathub.org) account (new-app
+   submission, carrying the manifest + metainfo); their build + lint
+   runs the matrix — fix findings, wait for review.
+5. Post-acceptance: `flatpak install flathub io.l1br3.Flintshot`
+   works and the COSMIC Store lists it (it surfaces Flathub).
+6. Per release: bump the manifest's git `tag:` and add a
+   `<release>` row to the metainfo.
+
+Manual sandbox checklist (record in the submission PR): app window
+opens, portal capture round-trips (region select → editor), save lands
+in `~/Pictures/Flintshot`, clipboard Copy behaves per the spike
+verdict, AI + imgur reach the network, keyring reads work.
+
 ## 8. Smoke every channel
 
 ```bash

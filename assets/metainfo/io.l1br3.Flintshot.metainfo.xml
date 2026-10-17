@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metainfo for flintshot (Flathub / COSMIC Store /
+     GNOME Software). Structure per Flathub's MetaInfo guidelines:
+     both appstreamcli errors AND warnings are fatal on submission.
+     Screenshots point at tag-pinned raw URLs; the PNGs land with the
+     first post-screenshot release — capture instructions live in the
+     README's commented Screenshots section (dogfooding flintshot). -->
+<component type="desktop-application">
+  <id>io.l1br3.Flintshot</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>Flintshot</name>
+  <summary>Screenshot capture and annotation</summary>
+  <developer id="io.github.l1br3-io">
+    <name>l1br3</name>
+  </developer>
+  <description>
+    <p>Capture the screen through the OS's own selection UI — the XDG
+    Screenshot Portal on Wayland, native grabs on X11, macOS and
+    Windows — then annotate the shot in a full editor: shapes, arrows,
+    text, numbered steps, blur/redaction, resize, an edit-history
+    timeline, and undo for every gesture.</p>
+    <p>Flintshot runs standalone or as a daemon with global hotkeys
+    and a system tray, uploads to imgur with credentials kept in the
+    OS keyring, and can ask any OpenAI-compatible vision model about
+    the current shot with streamed answers shown in-app.</p>
+  </description>
+  <launchable type="desktop-id">io.l1br3.Flintshot.desktop</launchable>
+  <url type="homepage">https://github.com/l1br3-io/flintshot</url>
+  <url type="bugtracker">https://github.com/l1br3-io/flintshot/issues</url>
+  <url type="vcs-browser">https://github.com/l1br3-io/flintshot</url>
+  <releases>
+    <release version="0.1.1" date="2026-10-17">
+      <url type="details">https://github.com/l1br3-io/flintshot/releases/tag/v0.1.1</url>
+    </release>
+  </releases>
+  <!-- Forest greens from the editor palette (cosmetic, store theming). -->
+  <branding>
+    <color type="primary" scheme_preference="light">#2E5C46</color>
+    <color type="primary" scheme_preference="dark">#1C3A2C</color>
+  </branding>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+  <content_rating type="oars-1.1" />
+  <screenshots>
+    <screenshot type="default">
+      <image>https://github.com/l1br3-io/flintshot/raw/v0.1.1/docs/screenshots/editor.png</image>
+      <caption>Region capture in the editor with annotations</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://github.com/l1br3-io/flintshot/raw/v0.1.1/docs/screenshots/ai.png</image>
+      <caption>Ask-the-shot AI: streamed answers beside the capture</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://github.com/l1br3-io/flintshot/raw/v0.1.1/docs/screenshots/home.png</image>
+      <caption>The app window with recent captures</caption>
+    </screenshot>
+  </screenshots>
+</component>

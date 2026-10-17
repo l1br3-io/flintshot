@@ -1,0 +1,90 @@
+# Flatpak manifest for flintshot — the Flathub (and therefore COSMIC
+# Store) channel. See SPEC-flathub.md for the v1 sandbox scope:
+# daemon-less and tray-less (SNI does not traverse the sandbox; the
+# Background-portal daemon fight is post-v1), so the default feature
+# set builds — editor + portal capture + save + upload + AI.
+#
+# Runtime: org.freedesktop.Platform 26.08 (current major, August
+# release train, 2-year support window — verified against the flathub
+# remote, freedesktop-sdk-26.08.2). NOT gtk-free: the editor's file
+# dialogs (rfd) link GTK3 on Linux, so the platform's GTK3 is a
+# runtime requirement even without the tray feature.
+#
+# Sources: the CODE builds from the release tag (flathub builds from
+# source, never binaries); the desktop entry derives from the tag's
+# flintshot.desktop (Icon line rewritten to the app-id — single
+# source of truth). The metainfo ships as a manifest-carried file
+# until a tagged release carries assets/metainfo/ itself; the flathub
+# submission carries this file beside the manifest (RELEASE.md
+# §flathub).
+app-id: io.l1br3.Flintshot
+runtime: org.freedesktop.Platform
+runtime-version: "26.08"
+sdk: org.freedesktop.Sdk
+# Toolchains come from SDK extensions (the base SDK ships neither
+# cargo nor clang): rust-stable (the plain .rust name was retired;
+# rust-stable//26.08 tracks 1.98) and llvm22 — bindgen (xcap's
+# pipewire/SPA bindings) needs libclang.so, which the base SDK lacks.
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.llvm22
+command: flintshot
+
+# --share=network          AI providers + imgur uploads (the AI panel
+#                           and upload CLI speak HTTPS only)
+# --socket=wayland         editor window + XDG Screenshot Portal capture
+# --socket=fallback-x11    XWayland fallback surface (also the
+#                           clipboard spike's fallback path)
+# --device=dri             wgpu GPU for the editor canvas
+# --filesystem=xdg-pictures  the default save dir (~/Pictures/Flintshot)
+# --talk-name=org.freedesktop.secrets  OS keyring: AI keys + imgur
+#                           credentials (no secrets portal exists)
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=xdg-pictures
+  - --talk-name=org.freedesktop.secrets
+
+modules:
+  - name: flintshot
+    buildsystem: simple
+    build-options:
+      # The sdk dirs are named after the extension ids.
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
+      # bindgen's libclang hunt (pipewire/SPA headers via pkg-config
+      # resolve inside the SDK; the library does not).
+      env:
+        LIBCLANG_PATH: /usr/lib/sdk/llvm22/lib
+        # Cargo state inside the build dir: fetched deps are part of
+        # the build, not the builder's HOME.
+        CARGO_HOME: /run/build/flintshot/cargo
+      # cargo fetches crates at build time; the build sandbox is
+      # network-less by default (workspace resolution reads the
+      # registry index even for --package builds — flintshot-cosmic's
+      # deps resolve, never compile; same shape as the dist CI).
+      build-args:
+        - --share=network
+    build-commands:
+      # default-members limits the virtual-workspace build to
+      # flintshot-app (flintshot-cosmic needs libcosmic system deps
+      # the SDK does not ship) — same precise-builds rule as
+      # dist-workspace.toml.
+      - cargo build --release --package=flintshot-app
+      - install -Dm755 -t /app/bin target/release/flintshot
+      # Desktop entry: the tag's file with the icon line rewritten to
+      # the app-id (flatpak requires desktop-id == app-id).
+      - sed -e 's/^Icon=.*/Icon=io.l1br3.Flintshot/' assets/applications/flintshot.desktop > flintshot.flatpak.desktop
+      - install -Dm644 flintshot.flatpak.desktop /app/share/applications/io.l1br3.Flintshot.desktop
+      - install -Dm644 metainfo/io.l1br3.Flintshot.metainfo.xml /app/share/metainfo/io.l1br3.Flintshot.metainfo.xml
+      - install -Dm644 assets/icons/hicolor/scalable/apps/flintshot.svg /app/share/icons/hicolor/scalable/apps/io.l1br3.Flintshot.svg
+    sources:
+      - type: git
+        url: https://github.com/l1br3-io/flintshot.git
+        tag: v0.1.1
+      # Manifest-carried until a tagged release ships assets/metainfo
+      # (the v0.1.1 tree predates it).
+      - type: file
+        path: ../../assets/metainfo/io.l1br3.Flintshot.metainfo.xml
+        dest: metainfo
