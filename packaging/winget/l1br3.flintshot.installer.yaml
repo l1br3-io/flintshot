@@ -3,12 +3,12 @@
 # Schema: manifest.installer.1.28.0 (microsoft/winget-cli
 # schemas/JSON/manifests/v1.28.0).
 #
-# TEMPLATE VALUES — fill after the GitHub Release exists:
-#   InstallerSha256  ← the release's flintshot-app-x86_64-pc-windows-msvc.msi.sha256
-#   InstallerUrl / PackageVersion  ← per release tag (URL filename is
-#     VERSIONLESS — cargo-dist names artifacts flintshot-app-<target>.msi
-#     under the versioned tag path; verified against `dist plan` +
-#     a local dist build).
+# v0.1.1 values are FILLED from the live release. Per release: bump
+# PackageVersion/DisplayVersion, retarget InstallerUrl at the new tag,
+# and re-fill InstallerSha256 from the release's
+# flintshot-app-x86_64-pc-windows-msvc.msi.sha256. URL filenames are
+# VERSIONLESS — cargo-dist names artifacts flintshot-app-<target>.msi
+# under the versioned tag path.
 #
 # The MSI's UpgradeCode is the STABLE WiX upgrade-guid from
 # [package.metadata.wix] in crates/flintshot-app/Cargo.toml (that is
@@ -23,7 +23,7 @@ Installers:
   - Architecture: x64
     InstallerType: wix
     InstallerUrl: https://github.com/l1br3-io/flintshot/releases/download/v0.1.1/flintshot-app-x86_64-pc-windows-msvc.msi
-    InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    InstallerSha256: 3D3807FFF50ED40C2B8575DAED1C6F7DF5227245A16B2DF41CDF46EE78A62E45
     AppsAndFeaturesEntries:
       - DisplayName: flintshot
         Publisher: l1br3

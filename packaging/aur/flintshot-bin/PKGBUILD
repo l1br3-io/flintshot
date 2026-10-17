@@ -54,12 +54,13 @@ source=(
   "flintshot.desktop::$url/raw/v$pkgver/assets/applications/flintshot.desktop"
   "flintshot.svg::$url/raw/v$pkgver/assets/icons/hicolor/scalable/apps/flintshot.svg"
 )
-# PLACEHOLDER sums — 64 zeros keep the shape valid; updpkgsums (in
-# pacman-contrib) overwrites them with the real values post-release.
+# v0.1.1 sums are FILLED from the live release (tarball) and the
+# tag-pinned assets. Per release: bump pkgver, then `updpkgsums`
+# (pacman-contrib) regenerates all three from the new tag.
 sha256sums=(
-  '0000000000000000000000000000000000000000000000000000000000000000'
-  '0000000000000000000000000000000000000000000000000000000000000000'
-  '0000000000000000000000000000000000000000000000000000000000000000'
+  '45b4916e1d05aa206ba6ee7b7f59967cb80a0c8c06fd652dbbc6374621d48630'
+  '9add158d6157430dd9515aece65a1ad69a599990eb53274cd370d6d49bb42ddd'
+  '1fe2e1cb8f34082dfc7faa7cf7fb2d6a6faff975c2897e734e3e03351676ef83'
 )
 
 package() {
