@@ -139,6 +139,12 @@ flintshot --version            # everywhere: prints 0.1.0
 - Fill the real `sha256sums` in `packaging/aur/flintshot-bin/PKGBUILD`
   and the real `InstallerSha256` in the winget installer manifest, and
   commit — keeps the repo templates truthful for diffing.
+- Keep each release's changelog section concise: the GitHub Release
+  body IS the `## [x.y.z]` section, and it passes through an
+  argv-limited step — the first v0.1.1 run died with "Argument list
+  too long" (~180 KB of first-release history) until the detail moved
+  under the non-version `## Pre-release history` heading. Never let a
+  single section approach ~100 KB.
 - Next release: bump `PackageVersion` (winget ×3 files) and `pkgver`
   (AUR) alongside the version, re-templatize the URLs/sums, and walk
   this runbook again; §5–§6 are the same flow at the new version.

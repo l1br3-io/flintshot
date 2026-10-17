@@ -39,6 +39,12 @@ Categories used below:
   ordered release runbook for the maintainer lives in
   `packaging/RELEASE.md`.
 
+- The full development history — every feature, fix, and decision
+  that landed before this first release — is preserved verbatim in
+  the [pre-release history](#pre-release-history) below.
+
+## Pre-release history
+
 - **The AI settings Model row can browse the endpoint's own model
   list.** A **Browse…** pill beside the model field fetches
   `GET {base}/models` (the click is the only thing that fires it —
