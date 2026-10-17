@@ -22,9 +22,10 @@ Categories used below:
 
 ### Added
 
-- **flintshot 0.1.0 — the first public release** (effort
-  `release-ring`). The whole Unreleased section below is the 0.1.0
-  payload: screen capture through native backends (Wayland's XDG
+- **flintshot 0.1.1 — the first public release** (effort
+  `release-ring`; first release fired 2026-10-17 via `just release`
+  from the 0.1.0-staged tree, hence the version skip). The whole
+  section below is the release payload: screen capture through native backends (Wayland's XDG
   Screenshot Portal, X11, macOS, Windows) with the OS's own selection
   UI; a full annotation editor (selection, crop, shapes, text,
   numbering, blur/privacy, resize, history, undoable everything); a

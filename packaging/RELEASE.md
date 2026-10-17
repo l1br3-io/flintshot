@@ -1,10 +1,14 @@
 # Releasing flintshot — the fire-the-release runbook
 
 Everything here is **yours to fire** — the agent stages artifacts but
-never pushes tags, never publishes, never submits PRs. As of the
-`release-ring` effort, v0.1.0 is fully staged: workspace version
-bumped, this changelog drafted, winget/AUR/binstall artifacts
-templated (with placeholder checksums that only exist post-release).
+never pushes tags, never publishes, never submits PRs.
+
+**Status:** the first release went out as **v0.1.1** on 2026-10-17
+via `just release` (patch bump from the release-ring-staged 0.1.0
+tree, which was never tagged — hence the version skip). §4–§8 below
+activate the channels for v0.1.1. For every future release:
+`just release [patch|minor]` automates §1–§3 (bump, changelog flip,
+tag, push, matrix build) — then repeat §4–§6 at the new version.
 
 All commands run from the repo root on `main`.
 
@@ -31,25 +35,27 @@ git status --porcelain                    # clean tree, on main
   save-banner + real transform; the Ollama `llama3:8b`
   silent-ignore repro) — `tasks/archive/vision-validate.md`.
 
-## 1. Flip the changelog (Unreleased → 0.1.0)
+## 1. Flip the changelog (fallback — `just release` automates this)
 
 This is the rewrite `[package.metadata.release]` in
-`crates/flintshot-app/Cargo.toml` performs on cargo-release releases,
-done by hand for the manual path — anchored, exactly-once, and it
-leaves a fresh `## [Unreleased]` above the new release section:
+`crates/flintshot-app/Cargo.toml` performs on `just release`-driven
+releases; hand-run it only when tagging by hand. Anchored,
+exactly-once, and it leaves a fresh `## [Unreleased]` above the new
+release section:
 
 ```bash
-sed -i "s/^## \[Unreleased\]$/## [Unreleased]\n\n## [0.1.0] - $(date +%F)/" CHANGELOG.md
-grep -n '## \[0.1.0\]' CHANGELOG.md    # one new header, today's date
+VER=0.1.2
+sed -i "s/^## \[Unreleased\]$/## [Unreleased]\n\n## [$VER] - $(date +%F)/" CHANGELOG.md
+grep -n "## \[$VER\]" CHANGELOG.md         # one new header, today's date
 grep -c '^## \[Unreleased\]' CHANGELOG.md   # must print 1
-git add CHANGELOG.md && git commit -m "chore(release): flintshot 0.1.0"
+git add CHANGELOG.md && git commit -m "chore(release): flintshot $VER"
 ```
 
 ## 2. Tag + push (the signed tag triggers everything)
 
 ```bash
-git tag -s v0.1.0 -m "flintshot 0.1.0"     # signed, per the release cheat sheet
-git push origin main v0.1.0
+git tag -s "v$VER" -m "flintshot $VER"   # signed, per the release cheat sheet
+git push origin main "v$VER"
 ```
 
 ## 3. Watch release.yml build the matrix
@@ -89,8 +95,8 @@ and the crate is `publish = false`.)
    `flintshot-app-x86_64-pc-windows-msvc.msi.sha256`.
 2. Fork [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs),
    branch, and copy the triple to
-   `manifests/l/l1br3/flintshot/0.1.0/` (same three filenames).
-3. On Windows: `winget validate --manifest manifests/l/l1br3/flintshot/0.1.0`
+   `manifests/l/l1br3/flintshot/0.1.1/` (same three filenames).
+3. On Windows: `winget validate --manifest manifests/l/l1br3/flintshot/0.1.1`
    (the repo's PR pipeline validates too).
 4. Open the PR — title `New package: l1br3.flintshot version 0.1.0`;
    the submission guide is

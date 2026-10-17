@@ -2,7 +2,7 @@
 # that changes every release (plus the same PackageVersion in the
 # installer + locale files). Schema: manifest.version.1.28.0.
 PackageIdentifier: l1br3.flintshot
-PackageVersion: 0.1.0
+PackageVersion: 0.1.1
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: 1.28.0

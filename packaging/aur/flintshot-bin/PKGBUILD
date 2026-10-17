@@ -26,7 +26,7 @@
 # tag-pinned, so they fetch the exact release files).
 
 pkgname=flintshot-bin
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='flintshot CLI: daemon, region capture, fullscreen, upload.'
 arch=(x86_64)

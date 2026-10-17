@@ -2,7 +2,7 @@
 # Schema: manifest.defaultLocale.1.28.0. PackageVersion travels with
 # each release; everything else is stable — copy verbatim per release.
 PackageIdentifier: l1br3.flintshot
-PackageVersion: 0.1.0
+PackageVersion: 0.1.1
 PackageLocale: en-US
 Publisher: l1br3
 PackageName: flintshot

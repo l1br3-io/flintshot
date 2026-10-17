@@ -16,16 +16,16 @@
 # is deliberately not asserted — cargo-dist's WiX build generates it,
 # and UpgradeCode is the stable anchor winget keys upgrades on.
 PackageIdentifier: l1br3.flintshot
-PackageVersion: 0.1.0
+PackageVersion: 0.1.1
 ManifestType: installer
 ManifestVersion: 1.28.0
 Installers:
   - Architecture: x64
     InstallerType: wix
-    InstallerUrl: https://github.com/l1br3-io/flintshot/releases/download/v0.1.0/flintshot-app-x86_64-pc-windows-msvc.msi
+    InstallerUrl: https://github.com/l1br3-io/flintshot/releases/download/v0.1.1/flintshot-app-x86_64-pc-windows-msvc.msi
     InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
     AppsAndFeaturesEntries:
       - DisplayName: flintshot
         Publisher: l1br3
-        DisplayVersion: 0.1.0
+        DisplayVersion: 0.1.1
         UpgradeCode: 6c55b274-9df3-4fc3-82c4-ffd9e35ab681
