@@ -23,7 +23,9 @@ Requirements:
 - Rust **1.95** (pinned via `rust-toolchain.toml`; `rustup` picks it up
   automatically)
 - A C toolchain (for native deps like `xcap`'s platform bindings)
-- Linux: typical X11 / Wayland dev packages if you want to run captures
+- Linux: the capture dev packages are needed at *build* time (see the
+  apt line in the README's "Building from source"; on Debian/Ubuntu,
+  `just install-user` installs them for you)
 - macOS / Windows: the standard Rust toolchain is enough for Phase 1
 
 Clone and verify:

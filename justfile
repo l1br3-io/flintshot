@@ -23,6 +23,14 @@
 # interpolation are unaffected.
 set positional-arguments
 
+# Linux build prerequisites, in one place so `just install` can install
+# them per platform. Mirrors the apt lines in .github/workflows/ci.yml
+# and README "Building from source": xcap needs its set even for
+# `cargo check`; the tray feature adds the GTK stack (Linux-only —
+# macOS/Windows trays are native, no system packages there).
+xcap_deps := "pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev libgbm-dev libxkbcommon-dev"
+tray_deps := "libgtk-3-dev libayatana-appindicator3-dev libxdo-dev"
+
 # Default: list available recipes.
 default:
     @just --list
@@ -213,10 +221,14 @@ release level="patch":
 
 # --- Install / uninstall (desktop integration) ---
 
-# Install system-wide: release binary, launcher entry, and icon under
-# PREFIX (default /usr/local). Needs write access to PREFIX — elevate
-# externally, there is no sudo inside the recipe. Builds first with
-# the tray feature on (FEATURES= overrides; FEATURES='' for minimal).
+# Install per-platform build prerequisites, then build and deploy.
+# On Debian/Ubuntu the system packages (capture deps always, GTK tray
+# deps when the build uses tray) are installed via apt first — as root
+# directly, else through sudo. Idempotent: already-installed packages
+# are skipped, so re-runs cost one dpkg query, not an apt run. On
+# macOS/Windows a C toolchain is enough (no system packages). On other
+# Linux distros the needed package list is printed and the build is
+# left to try — its failure hint names the missing stack if any.
 #   sudo just install                      # -> /usr/local
 #   sudo env PREFIX=/opt just install      # custom prefix, elevated
 #   AUTOSTART=1 just install               # + per-user login autostart
@@ -241,14 +253,19 @@ install *args:
             exit 2
         fi
     done
+    just _prereqs
     just _build
     just _deploy "${PREFIX:-/usr/local}"
     if [[ "$refresh" == 1 ]]; then
         just _restart-daemon "${PREFIX:-/usr/local}/bin/flintshot"
     fi
 
-# Install per-user, no elevation: release binary, launcher entry, and
-# icon under ~/.local. Builds first with the tray feature on
+# Install per-user: release binary, launcher entry, and icon under
+# ~/.local. Installing the files needs no elevation, but on
+# Debian/Ubuntu the prerequisite install (`_prereqs`, shared with
+# `install`) will use sudo for missing system packages — with a
+# password prompt — or print the apt line and continue when sudo
+# isn't available. Builds first with the tray feature on
 # (FEATURES= overrides; FEATURES='' for minimal).
 #   just install-user                      # -> ~/.local
 #   AUTOSTART=1 just install-user          # + ~/.config/autostart entry
@@ -269,11 +286,71 @@ install-user *args:
             exit 2
         fi
     done
+    just _prereqs
     just _build
     just _deploy "${HOME}/.local"
     if [[ "$refresh" == 1 ]]; then
         just _restart-daemon "${HOME}/.local/bin/flintshot"
     fi
+
+# Install the per-platform build prerequisites (see xcap_deps /
+# tray_deps above). Linux + apt: installs what dpkg reports missing,
+# as root directly or via sudo; base capture deps always, tray deps
+# only when the effective feature set includes tray (FEATURES=
+# respected, same rule as _build). Linux without apt: prints the
+# package list and continues — the build's own failure hint names the
+# missing stack if any. macOS/Windows: nothing to install. Private
+# helper for install / install-user.
+[private]
+_prereqs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -s)" in
+        Linux)
+            pkgs=({{ xcap_deps }})
+            features="${FEATURES-tray}"
+            # Comma-boundary match so a feature like 'mytray' can't
+            # pull the GTK stack in.
+            if [[ ",${features}," == *",tray,"* ]]; then
+                pkgs+=({{ tray_deps }})
+            fi
+            if ! command -v apt-get >/dev/null 2>&1; then
+                echo "note: no apt-get; install these build deps (or your distro's equivalents) if missing:" >&2
+                echo "      ${pkgs[*]}" >&2
+                exit 0
+            fi
+            missing=()
+            for p in "${pkgs[@]}"; do
+                # grep without -q: -q exits at first match and can
+                # SIGPIPE dpkg-query under pipefail, marking installed
+                # packages missing.
+                dpkg-query -W -f='${Status}' "$p" 2>/dev/null \
+                    | grep 'install ok installed' >/dev/null || missing+=("$p")
+            done
+            if [[ ${#missing[@]} -eq 0 ]]; then
+                echo "ok: build prerequisites already installed"
+                exit 0
+            fi
+            if [[ "$(id -u)" == 0 ]]; then
+                elevate=()
+            elif command -v sudo >/dev/null 2>&1; then
+                elevate=(sudo)
+            else
+                echo "note: missing packages need root: ${missing[*]}" >&2
+                echo "      install them with apt, then re-run (the build error hint names the stack too)" >&2
+                exit 0
+            fi
+            "${elevate[@]}" apt-get update -qq
+            "${elevate[@]}" apt-get install -y --no-install-recommends "${missing[@]}"
+            echo "ok: installed build prerequisites: ${missing[*]}"
+            ;;
+        Darwin)
+            echo "ok: no system prerequisites on macOS (a C toolchain is enough; the tray is native)"
+            ;;
+        *)
+            echo "ok: assuming no system prerequisites on $(uname -s); the build will say if otherwise"
+            ;;
+    esac
 
 # Build the release binary for the install recipes. FEATURES selects
 # the feature set: unset -> tray (the launcher promise: daemon +

@@ -103,7 +103,11 @@ flintshot backends           # capture-backend probe report
 
 Rust **1.95+** is auto-selected by `rust-toolchain.toml`. A default
 build (editor + capture, no tray) needs no system libraries beyond a
-C toolchain. The **tray** feature pulls the GTK stack on Linux:
+C toolchain on macOS and Windows; on Linux, xcap needs its capture
+dev packages and the **tray** feature adds the GTK stack. On
+Debian/Ubuntu, `just install` and `just install-user` install these
+system prerequisites for you (idempotent — already-installed packages
+are skipped); elsewhere, install the equivalents manually:
 
 ```sh
 # minimal build
