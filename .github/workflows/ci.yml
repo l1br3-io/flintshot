@@ -21,6 +21,17 @@ env:
     libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev
     libgbm-dev libxkbcommon-dev
 
+  # The flintshot-record engine's GStreamer stack (mirrors the
+  # record_deps set in the justfile). The -dev pair satisfies the
+  # gstreamer-rs link on every --workspace job; the plugin packages
+  # are runtime capability so the integration tests find an H.264
+  # encoder (x264enc via -ugly, openh264enc via -bad) and the muxer
+  # (-good). pre-approved with the record-engine plan.
+  RECORD_LINUX_DEPS: >-
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+    gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+    gstreamer1.0-plugins-ugly gstreamer1.0-pipewire
+
 jobs:
   lint:
     name: fmt + clippy
@@ -30,7 +41,9 @@ jobs:
       - name: Install xcap Linux system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ env.XCAP_LINUX_DEPS }}
+          sudo apt-get install -y --no-install-recommends \
+            ${{ env.XCAP_LINUX_DEPS }} \
+            ${{ env.RECORD_LINUX_DEPS }}
       - name: Run cargo fmt --check
         run: cargo fmt --all --check
       - name: Run cargo clippy (workspace)
@@ -44,7 +57,9 @@ jobs:
       - name: Install xcap Linux system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ env.XCAP_LINUX_DEPS }}
+          sudo apt-get install -y --no-install-recommends \
+            ${{ env.XCAP_LINUX_DEPS }} \
+            ${{ env.RECORD_LINUX_DEPS }}
       - name: Run cargo test
         run: cargo test --workspace --all-targets
       - name: Run doc tests (lib crates only)
@@ -77,7 +92,9 @@ jobs:
       - name: Install xcap Linux system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ env.XCAP_LINUX_DEPS }}
+          sudo apt-get install -y --no-install-recommends \
+            ${{ env.XCAP_LINUX_DEPS }} \
+            ${{ env.RECORD_LINUX_DEPS }}
       - name: Install 1.95 toolchain
         run: |
           rustup toolchain install 1.95 --profile minimal --component rustfmt --component clippy
@@ -99,7 +116,8 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             libxdo-dev \
-            ${{ env.XCAP_LINUX_DEPS }}
+            ${{ env.XCAP_LINUX_DEPS }} \
+            ${{ env.RECORD_LINUX_DEPS }}
       - name: Run cargo clippy (tray feature)
         run: cargo clippy -p flintshot-app --features tray --all-targets -- -D warnings
 
