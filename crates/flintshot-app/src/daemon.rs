@@ -738,8 +738,11 @@ fn run_tokio_side(
         // the tray gate so worker handshakes reach the main loop, and
         // the capture dispatch context so every capture trigger runs
         // the same serialized supersede-then-spawn.
+        // The record dispatch shares the daemon bus so Recording*
+        // events reach every subscriber surface (tray, app, applet).
+        let record = crate::record_dispatch::RecordDispatch::new(bus.clone());
         let (serve_handle, shutdown) = match crate::ipc_server::IpcServer::bind_with_bus(
-            None, bus, state, portal, tray_gate, capture, prepare,
+            None, bus, state, portal, tray_gate, capture, prepare, record,
         ) {
             Ok(ipc) => {
                 let shutdown = ipc.shutdown_signal();

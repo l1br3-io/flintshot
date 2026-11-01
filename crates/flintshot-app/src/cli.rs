@@ -1708,6 +1708,28 @@ fn report_uploaded_to_daemon(url: &str, delete_handle: Option<&str>) {
     report_uploaded_to_daemon_at(None, url, delete_handle);
 }
 
+/// Tell a running daemon a standalone recording finalized, so the
+/// tray/app/applet learn it and the file lands in recents — the
+/// `ReportSaved` pattern for recordings. Best-effort: no daemon is a
+/// silent no-op. Daemon-spawned workers (--json-events) skip this:
+/// their stdout lines are the report path (double-report guard).
+fn report_recorded_to_daemon(path: &std::path::Path) {
+    match crate::ipc_client::delegate_to(
+        None,
+        &Request::ReportRecorded {
+            path: path.to_path_buf(),
+        },
+    ) {
+        Ok(crate::ipc_client::DelegateOutcome::Delegated) => {
+            tracing::debug!(path = %path.display(), "reported recording to daemon");
+        }
+        Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "could not report recording to the daemon; ignoring");
+        }
+    }
+}
+
 /// Tell a running daemon an annotation window is about to run, so it
 /// broadcasts `Event::EditorOpened` — the truthful window signal, one
 /// report per actual window (fresh capture, recapture reopen, `open`;
@@ -3699,6 +3721,7 @@ pub fn run_record(args: &RecordArgs) -> Result<()> {
                 );
             } else {
                 println!("{}", path.display());
+                report_recorded_to_daemon(&path);
             }
             Ok(())
         }

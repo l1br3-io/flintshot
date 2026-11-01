@@ -21,6 +21,7 @@ mod ipc_client;
 mod ipc_server;
 mod platform;
 mod prepare_gate;
+mod record_dispatch;
 mod sessions;
 mod single;
 #[cfg(all(feature = "tray", target_os = "linux"))]

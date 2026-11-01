@@ -245,6 +245,23 @@ pub fn record_into(index_path: &Path, path: &Path, limit: usize) {
     }
 }
 
+/// Record a finalized recording into the index at the platform
+/// location (the `ReportRecorded` tail).
+pub fn record_video(path: &Path, limit: usize) {
+    if let Some(index_path) = recents_path() {
+        record_video_into(&index_path, path, limit);
+    }
+}
+
+/// Record a finalized recording into the index at `index_path`.
+pub fn record_video_into(index_path: &Path, path: &Path, limit: usize) {
+    let mut recents = Recents::load_from(index_path);
+    recents.record_video(path, limit);
+    if let Err(e) = recents.save_to(index_path) {
+        tracing::warn!(error = %e, "updating the recents index; ignoring");
+    }
+}
+
 /// Record `path` into the index at the platform location.
 pub fn record(path: &Path, limit: usize) {
     if let Some(index_path) = recents_path() {

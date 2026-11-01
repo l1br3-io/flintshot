@@ -211,6 +211,7 @@ pub struct IpcServer {
     gate: Arc<crate::tray_gate::TrayGate>,
     capture: crate::worker::CaptureDispatch,
     prepare: Arc<crate::prepare_gate::PrepareGate>,
+    record: crate::record_dispatch::RecordDispatch,
     shutdown: Arc<Notify>,
 }
 
@@ -240,6 +241,7 @@ impl IpcServer {
             Arc::new(crate::tray_gate::TrayGate::new()),
             crate::worker::CaptureDispatch::new(),
             Arc::new(crate::prepare_gate::PrepareGate::new()),
+            crate::record_dispatch::RecordDispatch::default(),
         )
     }
 
@@ -254,6 +256,10 @@ impl IpcServer {
     /// handler and the daemon's main loop, which alone may touch the
     /// tray icon; the capture dispatch context serializes the
     /// supersede-before-spawn Replace policy across every entry point.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per daemon-owned dependency; a struct would obscure the wiring"
+    )]
     pub fn bind_with_bus(
         override_path: Option<&Path>,
         bus: SubscriberBus,
@@ -262,6 +268,7 @@ impl IpcServer {
         gate: Arc<crate::tray_gate::TrayGate>,
         capture: crate::worker::CaptureDispatch,
         prepare: Arc<crate::prepare_gate::PrepareGate>,
+        record: crate::record_dispatch::RecordDispatch,
     ) -> eyre::Result<Self> {
         let path = socket_path(override_path);
         let name = socket_name(&path)?;
@@ -279,6 +286,7 @@ impl IpcServer {
             gate,
             capture,
             prepare,
+            record,
             shutdown: Arc::new(Notify::new()),
         })
     }
@@ -329,6 +337,7 @@ impl IpcServer {
         let gate = Arc::clone(&self.gate);
         let capture = self.capture.clone();
         let prepare = Arc::clone(&self.prepare);
+        let record = self.record.clone();
         let listener = self.listener;
         loop {
             tokio::select! {
@@ -351,9 +360,10 @@ impl IpcServer {
                     let gate = Arc::clone(&gate);
                     let capture = capture.clone();
                     let prepare = Arc::clone(&prepare);
+                    let record = record.clone();
                     let shutdown = Arc::clone(&shutdown);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, bus, state, shutdown, portal, gate, capture, prepare).await {
+                        if let Err(e) = handle_connection(stream, bus, state, shutdown, portal, gate, capture, prepare, record).await {
                             tracing::debug!(error = %e, "IPC connection ended");
                         }
                     });
@@ -388,6 +398,7 @@ async fn handle_connection<S>(
     gate: Arc<crate::tray_gate::TrayGate>,
     capture: crate::worker::CaptureDispatch,
     prepare: Arc<crate::prepare_gate::PrepareGate>,
+    record: crate::record_dispatch::RecordDispatch,
 ) -> eyre::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -452,6 +463,37 @@ where
                 url: url.clone(),
                 delete_handle: delete_handle.clone(),
             });
+            continue;
+        }
+
+        // RecordStart/RecordStop (record-ui): the single-recording
+        // gate owns the record worker lifecycle. Failures broadcast
+        // RecordingFailed so subscribers (tray, app, applet) learn
+        // why; success stays silent until the worker's own
+        // started/stopped lines arrive via the reader thread.
+        if matches!(request, IpcRequest::RecordStart) {
+            if let Err(message) =
+                record.start(&crate::record_dispatch::RecordDispatch::worker_argv())
+            {
+                bus.broadcast(IpcEvent::RecordingFailed { code: 1, message });
+            }
+            continue;
+        }
+        if matches!(request, IpcRequest::RecordStop) {
+            if let Err(message) = record.stop() {
+                bus.broadcast(IpcEvent::RecordingFailed { code: 1, message });
+            }
+            continue;
+        }
+
+        // ReportRecorded: a standalone `flintshot record` run (no
+        // --json-events) reports its finalized file — recents row +
+        // RecordingStopped broadcast, the ReportSaved pattern for
+        // recordings.
+        if let IpcRequest::ReportRecorded { path } = &request {
+            tracing::info!(path = %path.display(), "worker reported recording");
+            bus.broadcast(IpcEvent::RecordingStopped { path: path.clone() });
+            flintshot_core::recents::record_video(path, crate::capture_flow::recents_limit());
             continue;
         }
 
@@ -727,6 +769,7 @@ pub(crate) fn wait_for_socket_to_free(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record_dispatch::RecordDispatch;
     use flintshot_core::ipc::{Event, Request};
     use tokio::io::{duplex, AsyncWriteExt};
 
@@ -1198,6 +1241,7 @@ mod tests {
                 Arc::new(crate::tray_gate::TrayGate::new()),
                 capture,
                 prepare,
+                crate::record_dispatch::RecordDispatch::default(),
             )
             .await;
         });
@@ -1243,8 +1287,18 @@ mod tests {
         let capture = capture.unwrap_or_default();
         let prepare = prepare.unwrap_or_else(|| Arc::new(crate::prepare_gate::PrepareGate::new()));
         let task = tokio::spawn(async move {
-            let _ = handle_connection(server, bus, state, shutdown, portal, gate, capture, prepare)
-                .await;
+            let _ = handle_connection(
+                server,
+                bus,
+                state,
+                shutdown,
+                portal,
+                gate,
+                capture,
+                prepare,
+                RecordDispatch::default(),
+            )
+            .await;
         });
         (client, task)
     }
