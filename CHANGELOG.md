@@ -18,6 +18,17 @@ Categories used below:
 
 ## [Unreleased]
 
+### Changed
+
+- **One-command install on a bare machine** (effort
+  `install-bare-machine`). `just install` / `just install-user` now
+  bootstrap a missing Rust toolchain via rustup (never as root) and
+  install the build prerequisites on dnf/pacman/zypper distros too,
+  not just Debian/Ubuntu; anywhere else the needed package list is
+  printed and the build is left to try. macOS without a C compiler
+  now says so and points at `xcode-select --install` instead of
+  letting the build fail later.
+
 ### Fixed
 
 - **Responsive windows** (effort `responsive-ui`). The capture home

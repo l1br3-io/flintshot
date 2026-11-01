@@ -101,13 +101,17 @@ flintshot backends           # capture-backend probe report
 
 ## Building from source
 
-Rust **1.95+** is auto-selected by `rust-toolchain.toml`. A default
+A missing Rust toolchain is bootstrapped by `just install` /
+`just install-user` via rustup (never as root); with a toolchain
+present, **1.95+** is auto-selected by `rust-toolchain.toml`. A default
 build (editor + capture, no tray) needs no system libraries beyond a
 C toolchain on macOS and Windows; on Linux, xcap needs its capture
-dev packages and the **tray** feature adds the GTK stack. On
-Debian/Ubuntu, `just install` and `just install-user` install these
-system prerequisites for you (idempotent — already-installed packages
-are skipped); elsewhere, install the equivalents manually:
+dev packages and the **tray** feature adds the GTK stack. `just
+install` and `just install-user` install these system prerequisites
+for you — via apt (check-first and idempotent: already-installed
+packages are skipped) or the mapped equivalents on dnf/pacman/zypper
+distros; anywhere else the needed list is printed and the build is
+left to try. By hand:
 
 ```sh
 # minimal build

@@ -23,6 +23,12 @@
 # interpolation are unaffected.
 set positional-arguments
 
+# A rustup bootstrapped by `_prereqs` must be usable by `_build` (and
+# every other cargo recipe) in the same `just install` run — recipes
+# each run their own shell, so CARGO_HOME/bin is prepended for every
+# recipe. A nonexistent PATH entry is harmless.
+export PATH := env('CARGO_HOME', home_directory() / '.cargo') / 'bin' + ':' + env('PATH', '')
+
 # Linux build prerequisites, in one place so `just install` can install
 # them per platform. Mirrors the apt lines in .github/workflows/ci.yml
 # and README "Building from source": xcap needs its set even for
@@ -222,13 +228,14 @@ release level="patch":
 # --- Install / uninstall (desktop integration) ---
 
 # Install per-platform build prerequisites, then build and deploy.
-# On Debian/Ubuntu the system packages (capture deps always, GTK tray
-# deps when the build uses tray) are installed via apt first — as root
-# directly, else through sudo. Idempotent: already-installed packages
-# are skipped, so re-runs cost one dpkg query, not an apt run. On
-# macOS/Windows a C toolchain is enough (no system packages). On other
-# Linux distros the needed package list is printed and the build is
-# left to try — its failure hint names the missing stack if any.
+# Prerequisites (see _prereqs): a missing Rust toolchain is
+# bootstrapped via rustup (never as root); the system packages
+# (capture deps always, GTK tray deps when the build uses tray) are
+# installed via apt — check-first, idempotent, so re-runs cost one dpkg
+# query, not an apt run — or through dnf/pacman/zypper with the mapped
+# equivalents on those distros. On macOS a C toolchain is enough (and
+# pointed at xcode-select when missing); on Windows MSVC is assumed
+# (a recipe cannot install Visual Studio).
 #   sudo just install                      # -> /usr/local
 #   sudo env PREFIX=/opt just install      # custom prefix, elevated
 #   AUTOSTART=1 just install               # + per-user login autostart
@@ -294,41 +301,103 @@ install-user *args:
     fi
 
 # Install the per-platform build prerequisites (see xcap_deps /
-# tray_deps above). Linux + apt: installs what dpkg reports missing,
-# as root directly or via sudo; base capture deps always, tray deps
-# only when the effective feature set includes tray (FEATURES=
-# respected, same rule as _build). Linux without apt: prints the
-# package list and continues — the build's own failure hint names the
-# missing stack if any. macOS/Windows: nothing to install. Private
-# helper for install / install-user.
+# tray_deps above). Rust first: cargo via rustup (stable, minimal
+# profile) when absent — never under elevation, so a root rustup can't
+# land root-owned in /root; the justfile-wide CARGO_HOME/bin PATH
+# prepend makes it visible to _build in this same invocation. Then the
+# system side. Linux: base capture deps always, tray deps only when
+# the effective feature set includes tray (FEATURES= respected, same
+# rule as _build) — apt installs what dpkg reports missing (check
+# first, so an up-to-date machine is a silent no-op); dnf/pacman/
+# zypper install the mapped equivalents (the managers' own
+# already-installed handling stands in for dpkg's check); anything
+# else prints the package list and continues — the build's own failure
+# hint names the missing stack if any. macOS: checks for the C
+# toolchain and points at xcode-select when absent. Windows: nothing a
+# recipe can install (MSVC comes from Visual Studio). Private helper
+# for install / install-user.
 [private]
 _prereqs:
     #!/usr/bin/env bash
     set -euo pipefail
+
+    # Rust side first — the Linux branch below exits early on some
+    # paths, so this must run before it. Never as root.
+    if [[ "$(id -u)" != 0 ]] && ! command -v cargo >/dev/null 2>&1; then
+        echo "installing: Rust toolchain (rustup, stable, minimal profile)"
+        if command -v rustup >/dev/null 2>&1; then
+            rustup toolchain install stable --profile minimal
+            rustup default stable
+        else
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain stable
+        fi
+    fi
+
+    # System side.
     case "$(uname -s)" in
         Linux)
-            pkgs=({{ xcap_deps }})
             features="${FEATURES-tray}"
             # Comma-boundary match so a feature like 'mytray' can't
             # pull the GTK stack in.
-            if [[ ",${features}," == *",tray,"* ]]; then
-                pkgs+=({{ tray_deps }})
-            fi
-            if ! command -v apt-get >/dev/null 2>&1; then
-                echo "note: no apt-get; install these build deps (or your distro's equivalents) if missing:" >&2
-                echo "      ${pkgs[*]}" >&2
+            if [[ ",${features}," == *",tray,"* ]]; then tray=1; else tray=0; fi
+
+            if command -v apt-get >/dev/null 2>&1; then
+                pkgs=({{ xcap_deps }})
+                if [[ "$tray" == 1 ]]; then pkgs+=({{ tray_deps }}); fi
+                missing=()
+                for p in "${pkgs[@]}"; do
+                    # grep without -q: -q exits at first match and can
+                    # SIGPIPE dpkg-query under pipefail, marking installed
+                    # packages missing.
+                    dpkg-query -W -f='${Status}' "$p" 2>/dev/null \
+                        | grep 'install ok installed' >/dev/null || missing+=("$p")
+                done
+                if [[ ${#missing[@]} -eq 0 ]]; then
+                    echo "ok: build prerequisites already installed"
+                    exit 0
+                fi
+                if [[ "$(id -u)" == 0 ]]; then
+                    elevate=()
+                elif command -v sudo >/dev/null 2>&1; then
+                    elevate=(sudo)
+                else
+                    echo "note: missing packages need root: ${missing[*]}" >&2
+                    echo "      install them with apt, then re-run (the build error hint names the stack too)" >&2
+                    exit 0
+                fi
+                "${elevate[@]}" apt-get update -qq
+                "${elevate[@]}" apt-get install -y --no-install-recommends "${missing[@]}"
+                echo "ok: installed build prerequisites: ${missing[*]}"
                 exit 0
             fi
-            missing=()
-            for p in "${pkgs[@]}"; do
-                # grep without -q: -q exits at first match and can
-                # SIGPIPE dpkg-query under pipefail, marking installed
-                # packages missing.
-                dpkg-query -W -f='${Status}' "$p" 2>/dev/null \
-                    | grep 'install ok installed' >/dev/null || missing+=("$p")
-            done
-            if [[ ${#missing[@]} -eq 0 ]]; then
-                echo "ok: build prerequisites already installed"
+
+            # Non-apt distros: per-manager lists mapping the same set
+            # (xcap capture stack, GTK tray when enabled). Best-effort
+            # names — a wrong guess fails loudly at the manager's own
+            # resolution, never silently.
+            if command -v dnf >/dev/null 2>&1; then
+                pkgs=(pkgconf-pkg-config clang-devel libxcb-devel libXrandr-devel
+                    dbus-devel pipewire-devel wayland-devel mesa-libEGL-devel
+                    mesa-libGbm-devel libxkbcommon-devel)
+                if [[ "$tray" == 1 ]]; then pkgs+=(gtk3-devel libayatana-appindicator-gtk3-devel libxdo-devel); fi
+                mgr=(dnf install -y)
+            elif command -v pacman >/dev/null 2>&1; then
+                pkgs=(pkgconf clang libxcb libxrandr dbus pipewire wayland
+                    mesa libxkbcommon)
+                if [[ "$tray" == 1 ]]; then pkgs+=(gtk3 libayatana-appindicator xdotool); fi
+                mgr=(pacman -S --needed --noconfirm)
+            elif command -v zypper >/dev/null 2>&1; then
+                pkgs=(pkg-config clang-devel libxcb-devel libXrandr-devel
+                    dbus-1-devel pipewire-devel wayland-devel Mesa-libEGL-devel
+                    Mesa-libGbm-devel libxkbcommon-devel)
+                if [[ "$tray" == 1 ]]; then pkgs+=(gtk3-devel libayatana-appindicator3-devel xdotool-devel); fi
+                mgr=(zypper --non-interactive install)
+            else
+                echo "note: no supported package manager (apt-get, dnf, pacman, zypper); install these build deps (or your distro's equivalents) if missing:" >&2
+                pkgs=({{ xcap_deps }})
+                if [[ "$tray" == 1 ]]; then pkgs+=({{ tray_deps }}); fi
+                echo "      ${pkgs[*]}" >&2
                 exit 0
             fi
             if [[ "$(id -u)" == 0 ]]; then
@@ -336,19 +405,25 @@ _prereqs:
             elif command -v sudo >/dev/null 2>&1; then
                 elevate=(sudo)
             else
-                echo "note: missing packages need root: ${missing[*]}" >&2
-                echo "      install them with apt, then re-run (the build error hint names the stack too)" >&2
+                echo "note: packages need root: ${pkgs[*]}" >&2
+                echo "      install them with your package manager, then re-run" >&2
                 exit 0
             fi
-            "${elevate[@]}" apt-get update -qq
-            "${elevate[@]}" apt-get install -y --no-install-recommends "${missing[@]}"
-            echo "ok: installed build prerequisites: ${missing[*]}"
+            "${elevate[@]}" "${mgr[@]}" "${pkgs[@]}"
+            echo "ok: installed build prerequisites via ${mgr[0]}: ${pkgs[*]}"
             ;;
         Darwin)
-            echo "ok: no system prerequisites on macOS (a C toolchain is enough; the tray is native)"
+            if command -v cc >/dev/null 2>&1; then
+                echo "ok: no system prerequisites on macOS (a C toolchain is enough; the tray is native)"
+            else
+                echo "note: no C compiler on PATH — install the Command Line Tools:" >&2
+                echo "      xcode-select --install" >&2
+                exit 1
+            fi
             ;;
         *)
             echo "ok: assuming no system prerequisites on $(uname -s); the build will say if otherwise"
+            echo "     (a Windows build needs Visual Studio's MSVC + Windows SDK, which a recipe cannot install)"
             ;;
     esac
 
