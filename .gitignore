@@ -9,3 +9,7 @@ Cargo.lock.bak
 *.swp
 SPEC*.md
 /tasks
+# ZCode agent harness mirrors .opencode/ commands and drops session
+# plan artifacts here — derived, never source; ignored so its presence
+# doesn't trip the clean-baseline check /build auto runs.
+.zcode/
