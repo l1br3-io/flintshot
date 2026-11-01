@@ -64,6 +64,8 @@ mod home;
 mod magnifier;
 mod overlay;
 mod panel;
+mod pick;
+pub use pick::run_rect_pick_blocking;
 mod popover;
 mod rail;
 mod settings;

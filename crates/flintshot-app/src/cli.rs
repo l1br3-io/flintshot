@@ -68,6 +68,12 @@ pub enum Command {
     /// 3 missing `GStreamer` element (install hint printed) ·
     /// 4 no display
     Record(RecordArgs),
+    /// Internal: the record region picker — frozen frame, drag a
+    /// rect, print it as JSON, exit. Spawned by `flintshot record`
+    /// on X11 when no `--geometry`/`--monitor` is given; not for
+    /// direct use.
+    #[command(hide = true)]
+    RecordPick(RecordPickArgs),
     /// Set or clear credentials for an upload backend. [Phase 4]
     Auth(AuthArgs),
     /// Manage global hotkeys (bind via the Wayland portal). [Phase 6]
@@ -390,6 +396,59 @@ pub struct RecordArgs {
     /// Capture source override. Hidden: `testsrc` exists for tests.
     #[arg(long, hide = true, value_enum)]
     pub source: Option<RecordSourceFlag>,
+}
+
+/// Arguments for the hidden `flintshot record-pick`.
+#[derive(Debug, Args)]
+pub struct RecordPickArgs {
+    /// Which monitor's frozen frame to pick on (default: primary).
+    #[arg(long, value_name = "N")]
+    pub monitor: Option<u32>,
+}
+
+/// The picker handshake line: the picked rect in image pixels.
+fn pick_rect_json(rect: &flintshot_core::geom::Rect) -> String {
+    serde_json::json!({
+        "x": rect.min.x,
+        "y": rect.min.y,
+        "width": rect.max.x - rect.min.x,
+        "height": rect.max.y - rect.min.y,
+    })
+    .to_string()
+}
+
+/// Parse the picker handshake line back into a rect (`None` for
+/// malformed lines or non-positive extents).
+fn parse_pick_json(line: &str) -> Option<flintshot_core::geom::Rect> {
+    use flintshot_core::geom::{Point, Rect};
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let (x, y) = (value.get("x")?.as_f64()?, value.get("y")?.as_f64()?);
+    let (w, h) = (
+        value.get("width")?.as_f64()?,
+        value.get("height")?.as_f64()?,
+    );
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "screen coordinates fit f32's mantissa exactly"
+    )]
+    let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
+    Some(Rect::new(Point::new(x, y), Point::new(x + w, y + h)))
+}
+
+/// Shift a rect picked in monitor-image pixels into virtual-desktop
+/// coordinates (`ximagesrc` grabs are virtual): add the monitor's
+/// origin.
+fn offset_to_virtual(
+    rect: flintshot_core::geom::Rect,
+    origin: flintshot_core::geom::Point,
+) -> flintshot_core::geom::Rect {
+    flintshot_core::geom::Rect::new(
+        flintshot_core::geom::Point::new(rect.min.x + origin.x, rect.min.y + origin.y),
+        flintshot_core::geom::Point::new(rect.max.x + origin.x, rect.max.y + origin.y),
+    )
 }
 
 /// Clap `value_parser` for `--geometry`: `x,y,width,height` in
@@ -3105,6 +3164,94 @@ mod tests {
 
 // ── record: flag parsing + source resolution + exit codes ──────
 
+/// Interactively pick a region (hidden `record-pick` subprocess) and
+/// return it in **virtual-desktop** pixels for the X11 grab.
+#[cfg(feature = "egui")]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "monitor origins fit f32's mantissa exactly"
+)]
+fn pick_region_interactively(
+    monitor: Option<u32>,
+) -> std::result::Result<flintshot_core::geom::Rect, RecordError> {
+    use flintshot_core::geom::Point;
+
+    let mut command = std::process::Command::new(std::env::current_exe().map_err(|err| {
+        RecordError::PipelineFailed {
+            element: "record-pick".into(),
+            message: format!("resolving the flintshot binary: {err}"),
+        }
+    })?);
+    command.arg("record-pick");
+    if let Some(index) = monitor {
+        command.arg("--monitor").arg(index.to_string());
+    }
+    let output = command
+        .output()
+        .map_err(|err| RecordError::PipelineFailed {
+            element: "record-pick".into(),
+            message: format!("spawning the region picker: {err}"),
+        })?;
+    if !output.status.success() {
+        return Err(RecordError::PipelineFailed {
+            element: "record-pick".into(),
+            message: "region selection cancelled".into(),
+        });
+    }
+    let line = String::from_utf8_lossy(&output.stdout).into_owned();
+    let picked = parse_pick_json(&line).ok_or_else(|| RecordError::PipelineFailed {
+        element: "record-pick".into(),
+        message: format!("unparseable picker output: {line:?}"),
+    })?;
+    // The picker captures one monitor's image; ximagesrc works in
+    // virtual-desktop coordinates — offset by that monitor's origin.
+    let (origin_x, origin_y) = flintshot_core::capture::monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|m| monitor.is_some_and(|index| m.index == index))
+        .or_else(|| {
+            flintshot_core::capture::monitors()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|m| m.is_primary)
+        })
+        .map_or((0.0, 0.0), |m| (m.x as f32, m.y as f32));
+    Ok(offset_to_virtual(picked, Point::new(origin_x, origin_y)))
+}
+
+#[cfg(not(feature = "egui"))]
+fn pick_region_interactively(
+    _monitor: Option<u32>,
+) -> std::result::Result<flintshot_core::geom::Rect, RecordError> {
+    Err(RecordError::PipelineFailed {
+        element: "record-pick".into(),
+        message: "interactive region pick needs the editor build; pass --geometry or --monitor"
+            .into(),
+    })
+}
+
+/// `flintshot record-pick` — capture the frozen frame, run the pick
+/// window, print the rect as JSON.
+#[cfg(feature = "egui")]
+pub fn run_record_pick(args: &RecordPickArgs) -> Result<()> {
+    let image = flintshot_core::capture_fullscreen(args.monitor)
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?;
+    match flintshot_editor_egui::run_rect_pick_blocking(image)
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))?
+    {
+        Some(rect) => {
+            println!("{}", pick_rect_json(&rect));
+            Ok(())
+        }
+        None => std::process::exit(1),
+    }
+}
+
+#[cfg(not(feature = "egui"))]
+pub fn run_record_pick(_args: &RecordPickArgs) -> Result<()> {
+    color_eyre::eyre::bail!("record-pick needs the editor feature (the picker is a window)")
+}
+
 #[cfg(test)]
 mod record_cli_tests {
     use crate::cli::{Cli, Command, RecordArgs, RecordPlan, RecordSourceFlag};
@@ -3268,6 +3415,27 @@ mod record_cli_tests {
         .expect("sigint stop finalizes");
         let file = std::fs::read(&flow.0).expect("finalized file");
         assert!(flintshot_record::mp4::has_box(&file, b"moov"));
+    }
+
+    #[test]
+    fn pick_json_round_trips() {
+        use crate::cli::{offset_to_virtual, parse_pick_json, pick_rect_json};
+        use flintshot_core::geom::{Point, Rect};
+        let rect = Rect::new(Point::new(10.0, 20.0), Point::new(310.0, 470.0));
+        assert_eq!(parse_pick_json(&pick_rect_json(&rect)), Some(rect));
+        assert_eq!(parse_pick_json("{}"), None);
+        assert_eq!(
+            parse_pick_json(r#"{"x":0,"y":0,"width":0,"height":10}"#),
+            None,
+            "zero extent is not a rect"
+        );
+        // A rect picked on a monitor at virtual (1920, 0) shifts by
+        // that origin — ximagesrc works in virtual-desktop pixels.
+        let shifted = offset_to_virtual(rect, Point::new(1920.0, 0.0));
+        assert_eq!(
+            shifted,
+            Rect::new(Point::new(1930.0, 20.0), Point::new(2230.0, 470.0))
+        );
     }
 
     #[test]
@@ -3439,6 +3607,13 @@ async fn run_record_flow(args: &RecordArgs) -> std::result::Result<(PathBuf, u64
     let plan = resolve_record_source(args.source, SessionKind::detect())?;
     let cfg = Config::load().unwrap_or_default();
 
+    // Bare X11 record run: pick the region interactively before the
+    // countdown starts. Explicit --geometry/--monitor skip the pick.
+    let mut picked_region = None;
+    if plan == RecordPlan::X11 && args.geometry.is_none() && args.monitor.is_none() {
+        picked_region = Some(pick_region_interactively(None)?);
+    }
+
     for remaining in (1..=args.countdown).rev() {
         if args.json_events {
             println!("{}", RecordEvent::Countdown { remaining }.to_json_line());
@@ -3452,7 +3627,7 @@ async fn run_record_flow(args: &RecordArgs) -> std::result::Result<(PathBuf, u64
     let mut record_cfg = flintshot_record::RecordConfig::new(&out);
     record_cfg.fps = args.fps.unwrap_or(30);
     record_cfg.max_duration = args.duration_secs.map(Duration::from_secs_f64);
-    record_cfg.region = args.geometry;
+    record_cfg.region = args.geometry.or(picked_region);
     record_cfg.monitor = args.monitor;
     record_cfg.source = match plan {
         RecordPlan::TestSrc => flintshot_record::RecordSource::TestSrc,
