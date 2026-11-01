@@ -56,6 +56,13 @@ use crate::widgets;
 /// contract at this width is byte-identical to the pre-resize era.
 pub(crate) const PANEL_WIDTH: f32 = 236.0;
 
+/// The narrowest usable canvas, logical px — the responsive yield's
+/// threshold term. When the window cannot pay the rail plus the
+/// panel's live width plus this floor, the panel folds itself away
+/// (see [`PanelState::apply_window_yield`]) rather than starving
+/// the canvas to a sliver.
+pub(crate) const CANVAS_MIN_WIDTH: f32 = 240.0;
+
 /// Grain seed — any fixed value; determinism is the contract.
 const GRAIN_SEED: u64 = 0x5EED_C0DE;
 
@@ -108,6 +115,9 @@ pub(crate) struct PanelState {
     /// floating expand chip at the canvas's top-right corner
     /// (`crate::floating`), or [`Self::toggle_collapse`].
     collapsed: bool,
+    /// Who owns the current collapsed state — the responsive
+    /// yield's bookkeeping (see [`PanelState::apply_window_yield`]).
+    yield_state: PanelYield,
     /// The live panel width, logical px — the seed for the panel's
     /// `default_width` and the read-back the app's fit path and
     /// persistence consume. Updated from the rendered rect every
@@ -122,6 +132,24 @@ pub(crate) struct PanelState {
     color_pop_live: bool,
     /// Same bracketing flag for the text-style popover.
     text_pop_live: bool,
+}
+
+/// Who owns the panel's collapsed state right now — the responsive
+/// yield's episode bookkeeping. The invariant: what the **user** did
+/// with the panel always outranks what the window did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PanelYield {
+    /// No auto intervention: the panel sits where the user left it.
+    #[default]
+    Free,
+    /// The window (too narrow to afford a usable canvas beside the
+    /// panel) closed the panel itself; the next affordable frame
+    /// reopens it.
+    WindowHeld,
+    /// The user re-opened the panel while the window still cannot
+    /// afford it — their call stands; the yield re-arms only after
+    /// an affordable frame resets the episode.
+    UserHeld,
 }
 
 impl PanelState {
@@ -146,14 +174,60 @@ impl PanelState {
     }
 
     /// Toggle the collapsed flag (the chevron click and `Ctrl+B`
-    /// path). Width and active tab ride through unchanged.
+    /// path). Width and active tab ride through unchanged. The
+    /// user's toggle always outranks the window's hold: their close
+    /// is final (no auto-restore), and their reopen while the
+    /// window is still too narrow stands for the episode.
     pub(crate) fn toggle_collapse(&mut self) {
         self.collapsed = !self.collapsed;
+        self.yield_state = if matches!(self.yield_state, PanelYield::WindowHeld) && !self.collapsed
+        {
+            PanelYield::UserHeld
+        } else {
+            PanelYield::Free
+        };
+    }
+
+    /// The responsive yield (responsive-ui): when the window cannot
+    /// afford the panel beside a usable canvas (`afford` false —
+    /// rail + live width + [`CANVAS_MIN_WIDTH`] vs the window's
+    /// width, computed by the caller), the panel folds away on its
+    /// own and remembers the window did it; when the window can
+    /// afford it again, the panel returns. User collapses and
+    /// reopens are never overridden (see [`Self::toggle_collapse`]).
+    pub(crate) fn apply_window_yield(&mut self, afford: bool) {
+        match self.yield_state {
+            PanelYield::Free => {
+                if !afford && !self.collapsed {
+                    self.collapsed = true;
+                    self.yield_state = PanelYield::WindowHeld;
+                }
+            }
+            PanelYield::WindowHeld => {
+                if afford {
+                    self.collapsed = false;
+                    self.yield_state = PanelYield::Free;
+                }
+            }
+            PanelYield::UserHeld => {
+                if afford {
+                    self.yield_state = PanelYield::Free;
+                }
+            }
+        }
     }
 
     /// Whether the panel is collapsed (skipped from the frame).
     pub(crate) fn is_collapsed(&self) -> bool {
         self.collapsed
+    }
+
+    /// The collapse **config** should remember: the user's word, not
+    /// the window's. A window-held collapse persists as open, so a
+    /// fresh window on a wide display starts with the panel the user
+    /// chose — not the sliver a narrow tiled window forced.
+    pub(crate) fn user_collapsed(&self) -> bool {
+        self.collapsed && !matches!(self.yield_state, PanelYield::WindowHeld)
     }
 
     /// Whether the AI tab is the active tab (the badge-refresh poll
@@ -184,6 +258,7 @@ impl Default for PanelState {
         Self {
             tab: PanelTab::default(),
             collapsed: false,
+            yield_state: PanelYield::default(),
             width: PANEL_WIDTH,
             grain: None,
             color_pop_live: false,
@@ -3129,5 +3204,69 @@ mod tests {
             (right - (SCREEN_W - 280.0)).abs() < 1.0,
             "seeded 280 reserved on expand, central right {right}"
         );
+    }
+
+    // --- Responsive yield (responsive-ui) -----------------------------
+    //
+    // The window folds the panel away when it cannot afford it
+    // beside a usable canvas, and lets it back when it can. What
+    // the *user* did with the panel always outranks the window.
+
+    #[test]
+    fn the_window_holds_and_releases_the_panel() {
+        let mut panel = PanelState::default();
+        panel.apply_window_yield(false);
+        assert!(panel.is_collapsed(), "a too-narrow window folds the panel");
+        panel.apply_window_yield(true);
+        assert!(!panel.is_collapsed(), "a widened window restores it");
+    }
+
+    #[test]
+    fn a_window_held_collapse_does_not_persist() {
+        let mut panel = PanelState::default();
+        panel.apply_window_yield(false);
+        assert!(panel.is_collapsed());
+        assert!(
+            !panel.user_collapsed(),
+            "config must remember the user's word, not the window's"
+        );
+    }
+
+    #[test]
+    fn a_user_reopen_while_held_is_final_for_the_episode() {
+        let mut panel = PanelState::default();
+        panel.apply_window_yield(false); // the window closes it
+        panel.toggle_collapse(); // the user reopens (still narrow)
+        assert!(!panel.is_collapsed());
+        panel.apply_window_yield(false); // still narrow
+        assert!(
+            !panel.is_collapsed(),
+            "the user's reopen stands — no flapping"
+        );
+        panel.apply_window_yield(true); // afford again: the yield re-arms
+        panel.apply_window_yield(false); // narrow once more
+        assert!(
+            panel.is_collapsed(),
+            "the yield re-armed after a wide frame"
+        );
+    }
+
+    #[test]
+    fn a_user_collapse_never_auto_restores() {
+        let mut panel = PanelState::default();
+        panel.toggle_collapse(); // the user closes
+        panel.apply_window_yield(false); // narrow: already closed
+        panel.apply_window_yield(true); // widen
+        assert!(panel.is_collapsed(), "the user's close is final");
+    }
+
+    /// The afford threshold composes the real strips: rail + the
+    /// panel's live width + the canvas floor.
+    #[test]
+    fn window_affords_the_panel_composes_the_strips() {
+        let panel = PanelState::default(); // 236 px live width
+        let afford = |w: f32| w >= crate::rail::RAIL_WIDTH + panel.live_width() + CANVAS_MIN_WIDTH;
+        assert!(!afford(520.0), "520 cannot afford the default panel");
+        assert!(afford(560.0), "560 can");
     }
 }

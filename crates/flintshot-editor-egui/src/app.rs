@@ -1682,6 +1682,14 @@ impl EditorApp {
         // the `I` shortcut.
         let gate = self.rail_gate();
         rail::show(ui, &mut self.state, gate, &mut self.rail);
+        // The responsive yield: the panel folds itself away when the
+        // window cannot afford it beside a usable canvas (rail +
+        // live width + the canvas floor), and returns when it can.
+        // Applied before the panel draws so this frame already
+        // reflects the decision.
+        let afford = ui.input(egui::InputState::content_rect).width()
+            >= rail::RAIL_WIDTH + self.panel.live_width() + panel::CANVAS_MIN_WIDTH;
+        self.panel.apply_window_yield(afford);
         // Properties panel. Must come before CentralPanel so egui
         // reserves the right-hand strip. The plain call (no closure)
         // keeps the borrow of `&mut self.state` disjoint from the
@@ -2764,9 +2772,12 @@ fn fit_panel_width(collapsed: bool, width: f32) -> f32 {
 
 /// Write the panel's live state into a loaded config's `[ui]` — the
 /// mapping behind `persist_ui_config`'s panel fields. Pure seam.
+/// The collapsed field persists the **user's** word: a window-held
+/// collapse (the responsive yield on a narrow window) persists as
+/// open, so the next session starts where the user left it.
 fn persist_panel(cfg: &mut Config, panel: &panel::PanelState) {
     cfg.ui.panel_width = panel.live_width();
-    cfg.ui.panel_collapsed = panel.is_collapsed();
+    cfg.ui.panel_collapsed = panel.user_collapsed();
 }
 
 /// The worker window's image-sized target (the `clamp_default_size`
@@ -7082,5 +7093,171 @@ mod tests {
             "the chip press must not start a canvas gesture"
         );
         assert_eq!(app.state.tool, Tool::Rect, "the tool is untouched");
+    }
+
+    // --- Responsive yield (responsive-ui) -----------------------------
+    //
+    // Headless frames at explicit window sizes: the sidebar must
+    // fold itself away before it starves the canvas, and return
+    // when the window can afford it again.
+
+    /// One editor frame at an explicit window size. `modifiers`
+    /// seeds the frame's modifier state (the chord events carry
+    /// their own, but the shortcut checks read the frame's).
+    fn yield_frame(
+        ctx: &egui::Context,
+        app: &mut EditorApp,
+        screen: egui::Vec2,
+        modifiers: egui::Modifiers,
+        events: Vec<egui::Event>,
+    ) {
+        let raw = egui::RawInput {
+            events,
+            modifiers,
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), screen)),
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+    }
+
+    #[test]
+    fn the_sidebar_yields_on_a_narrow_window_and_returns_on_widen() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(340.0, 300.0),
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(340.0, 300.0),
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        assert!(
+            app.panel.is_collapsed(),
+            "a 340 px window cannot afford the panel"
+        );
+        let canvas = app.canvas_rect.expect("canvas cached");
+        assert!(
+            canvas.width() >= panel::CANVAS_MIN_WIDTH - 2.0,
+            "the canvas reclaimed the panel strip (width {})",
+            canvas.width()
+        );
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(800.0, 600.0),
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(800.0, 600.0),
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        assert!(
+            !app.panel.is_collapsed(),
+            "an 800 px window restores the panel"
+        );
+    }
+
+    /// The user's Ctrl+B is final: a collapse they made survives
+    /// both the narrow window and the widen back.
+    #[test]
+    fn a_user_collapse_survives_the_widen() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(800.0, 600.0),
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        assert!(!app.panel.is_collapsed(), "fixture: open on a wide window");
+        ctrl_b_frame(&ctx, &mut app);
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(340.0, 300.0),
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(900.0, 600.0),
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        assert!(
+            app.panel.is_collapsed(),
+            "the user's collapse outlives narrow and wide frames"
+        );
+    }
+
+    /// A Ctrl+B reopen while the window still cannot afford the
+    /// panel stands for the episode — no flapping re-collapse.
+    #[test]
+    fn a_narrow_ctrl_b_reopen_survives_the_next_narrow_frame() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(340.0, 300.0),
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        assert!(app.panel.is_collapsed(), "fixture: the window held it");
+        // Ctrl+B at the same narrow size.
+        let mods = ctrl_as_winit_reports_it();
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(340.0, 300.0),
+            mods,
+            vec![ctrl_b(mods)],
+        );
+        assert!(!app.panel.is_collapsed(), "the user reopened it");
+        yield_frame(
+            &ctx,
+            &mut app,
+            egui::vec2(340.0, 300.0),
+            egui::Modifiers::NONE,
+            vec![],
+        );
+        assert!(
+            !app.panel.is_collapsed(),
+            "the reopen stands — the window does not flap it shut"
+        );
     }
 }
