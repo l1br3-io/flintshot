@@ -211,6 +211,9 @@ struct Shared {
 struct SharedInner {
     directives: std::collections::VecDeque<HomeDirective>,
     status: String,
+    /// The recording banner's start instant, mirrored from the
+    /// pump's `HomeCore.record_ui` (the bridge reads it lock-cheap).
+    recording_since: Option<std::time::Instant>,
     pending_capture: Option<PumpCommand>,
     /// The Open control decoded an image (or a grab delivered one):
     /// the next epoch is the editor page over it.
@@ -550,6 +553,11 @@ impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, SharedInner> {
         self.inner.lock().expect("shared mutex poisoned")
     }
+
+    /// Mirror the recording banner state for the bridge.
+    fn set_recording(&self, since: Option<std::time::Instant>) {
+        self.lock().recording_since = since;
+    }
 }
 
 /// Pure close/reopen state machine driven by the subscription
@@ -570,9 +578,56 @@ struct HomeCore {
     /// into the new capture's grab — the flicker the Replace policy
     /// must not cause).
     supersede_pending: bool,
+    /// The recording banner's state (U5), event-driven.
+    record_ui: RecordUiState,
+}
+
+/// The recording banner's state machine (U5): event-driven, pure —
+/// the transitions are unit-tested without any process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum RecordUiState {
+    /// No recording activity.
+    #[default]
+    Idle,
+    /// A recording is live; `started_at` feeds the elapsed readout.
+    Recording {
+        /// When `RecordingStarted` arrived.
+        started_at: std::time::Instant,
+    },
+}
+
+/// Pure transition: the recording half of the event stream.
+/// `RecordingStarted` arms the banner (a second start re-arms — the
+/// daemon's gate should prevent it, the UI tolerates it);
+/// `RecordingStopped`/`RecordingFailed` always clear; everything
+/// else is a no-op.
+fn record_ui_transition(
+    state: RecordUiState,
+    event: &IpcEvent,
+    now: std::time::Instant,
+) -> RecordUiState {
+    #[allow(
+        clippy::wildcard_enum_match_arm,
+        reason = "IpcEvent is #[non_exhaustive]; only the recording variants matter here"
+    )]
+    match event {
+        IpcEvent::RecordingStarted => RecordUiState::Recording { started_at: now },
+        IpcEvent::RecordingStopped { .. } | IpcEvent::RecordingFailed { .. } => RecordUiState::Idle,
+        _ => state,
+    }
 }
 
 impl HomeCore {
+    /// Apply one subscription event's recording half; the banner
+    /// state lives on the window bridge so the pump can render it.
+    #[allow(
+        clippy::wildcard_enum_match_arm,
+        reason = "IpcEvent is #[non_exhaustive]; only the recording variants matter here"
+    )]
+    fn record_event(&mut self, event: &IpcEvent) {
+        self.record_ui = record_ui_transition(self.record_ui, event, std::time::Instant::now());
+    }
+
     /// The pump accepted a capture command: the window is (or is
     /// about to be) hidden.
     fn capture_requested(&mut self) {
@@ -586,6 +641,7 @@ impl HomeCore {
         reason = "IpcEvent is #[non_exhaustive]; only the capture-lifecycle variants matter here"
     )]
     fn on_event(&mut self, event: &IpcEvent) -> Option<HomeDirective> {
+        self.record_event(event);
         match event {
             IpcEvent::CaptureStarted => {
                 self.in_flight += 1;
@@ -1459,6 +1515,33 @@ async fn ensure_subscribed(
 /// `tracing` output goes to stdout, and an auto-started daemon's
 /// logs must survive for diagnostics (the harness caught this: a
 /// nulled stdout silently swallowed them).
+/// Daemon-less record path: spawn `flintshot record --json-events`
+/// detached (its events reach any later-subscribed surface through
+/// the daemon the NEXT time one runs — the standalone recording
+/// still reports via `ReportRecorded`). stdout is consumed by a
+/// drain thread so the pipe never fills.
+fn spawn_record_worker_detached() -> eyre::Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| eyre::eyre!("resolving current_exe for the record worker: {e}"))?;
+    let mut child = std::process::Command::new(exe)
+        .args(["record", "--json-events"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| eyre::eyre!("spawning the record worker: {e}"))?;
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let _ = std::io::BufReader::new(stdout).lines().count();
+        });
+    }
+    // Reap-on-exit thread so the child never lingers as a zombie.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 fn spawn_daemon() -> eyre::Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| eyre::eyre!("resolving current_exe to start the daemon: {e}"))?;
@@ -1546,6 +1629,10 @@ async fn connected_loop(
                     // destination — wherever the window currently sits
                     // (the settings ping's mirror).
                     let app_focus = matches!(event, IpcEvent::AppFocus);
+                    shared.set_recording(match core.record_ui {
+                        RecordUiState::Idle => None,
+                        RecordUiState::Recording { started_at } => Some(started_at),
+                    });
                     if let Some(directive) = core.on_event(&event) {
                         // Armed only when the ping actually surfaced
                         // the window (idle): a mid-capture ping stays
@@ -1837,6 +1924,41 @@ impl HomeBridge for Bridge {
             ));
             false
         }
+    }
+
+    fn request_record(&mut self) {
+        // Daemon-first: one gate, tray/app/applet agree. No daemon —
+        // spawn the worker ourselves; its json lines surface through
+        // the subscription-less fallback below.
+        match crate::ipc_client::try_delegate(&flintshot_core::ipc::Request::RecordStart) {
+            Ok(crate::ipc_client::DelegateOutcome::Delegated) => {
+                tracing::info!("recording started via the daemon");
+            }
+            Ok(crate::ipc_client::DelegateOutcome::NoDaemon) => {
+                match spawn_record_worker_detached() {
+                    Ok(()) => tracing::info!("no daemon; record worker spawned directly"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "spawning the record worker");
+                        self.shared.push_directive(HomeDirective::SetStatus(format!(
+                            "could not start recording: {e}"
+                        )));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "asking the daemon to record");
+                self.shared.push_directive(HomeDirective::SetStatus(format!(
+                    "could not start recording: {e}"
+                )));
+            }
+        }
+    }
+
+    fn recording_banner(&mut self) -> Option<String> {
+        let started_at = self.shared.lock().recording_since?;
+        let elapsed = started_at.elapsed().as_secs();
+        let (m, s) = (elapsed / 60, elapsed % 60);
+        Some(format!("Recording {m}:{s:02} — tray → Stop recording"))
     }
 
     fn poll_directive(&mut self) -> Option<HomeDirective> {
@@ -5266,5 +5388,47 @@ mod tests {
             matches!(event, flintshot_editor_egui::AiEvent::Failed(_)),
             "unconfigured copy: {event:?}"
         );
+    }
+
+    #[test]
+    fn record_ui_state_truth_table() {
+        let now = std::time::Instant::now();
+        let idle = RecordUiState::Idle;
+
+        // Started arms (from either state), with the event instant.
+        assert_eq!(
+            record_ui_transition(idle, &IpcEvent::RecordingStarted, now),
+            RecordUiState::Recording { started_at: now }
+        );
+        let live = RecordUiState::Recording { started_at: now };
+        assert_eq!(
+            record_ui_transition(live, &IpcEvent::RecordingStarted, now),
+            RecordUiState::Recording { started_at: now },
+            "a second start re-arms; the daemon's gate should prevent it"
+        );
+
+        // Stopped and Failed always clear.
+        let done = IpcEvent::RecordingStopped {
+            path: std::path::PathBuf::from("/tmp/x.mp4"),
+        };
+        assert_eq!(record_ui_transition(live, &done, now), RecordUiState::Idle);
+        let failed = IpcEvent::RecordingFailed {
+            code: 3,
+            message: "missing".into(),
+        };
+        assert_eq!(
+            record_ui_transition(live, &failed, now),
+            RecordUiState::Idle
+        );
+
+        // Everything else is a no-op in both states.
+        for event in [
+            IpcEvent::CaptureStarted,
+            IpcEvent::SessionEnded,
+            IpcEvent::AppFocus,
+        ] {
+            assert_eq!(record_ui_transition(idle, &event, now), idle);
+            assert_eq!(record_ui_transition(live, &event, now), live);
+        }
     }
 }

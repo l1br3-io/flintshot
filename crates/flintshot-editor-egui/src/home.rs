@@ -135,6 +135,17 @@ pub trait HomeBridge {
         false
     }
 
+    /// Start (or stop) a screen recording. The window stays open;
+    /// the banner shows progress from `recording_banner`. Default:
+    /// no-op — test doubles and minimal bridges.
+    fn request_record(&mut self) {}
+
+    /// The recording banner's text, `None` when idle: elapsed while
+    /// recording. Default: `None` — idle.
+    fn recording_banner(&mut self) -> Option<String> {
+        None
+    }
+
     /// Session cards for the "This session" section, newest first.
     /// Default: none — test doubles and minimal bridges.
     fn session_captures(&mut self) -> Vec<SessionCard> {
@@ -552,8 +563,13 @@ impl HomeApp {
     }
 
     /// The status line's current text (the header's overflow menu
-    /// surfaces it on the Home route).
-    pub(crate) fn status_line(&self) -> String {
+    /// surfaces it on the Home route). While a recording is live the
+    /// bridge's banner text leads (elapsed + stop hint) — recording
+    /// outranks connection chatter for the seconds it matters.
+    pub(crate) fn status_line(&mut self) -> String {
+        if let Some(banner) = self.bridge.recording_banner() {
+            return banner;
+        }
         self.ui.status.clone()
     }
 
@@ -977,10 +993,11 @@ impl HomeApp {
     fn secondary_cards(&mut self, ui: &mut egui::Ui) {
         use crate::theme::palette as p;
         let gap = crate::theme::SPACE_SCALE[1];
-        let specs: [(&'static str, &str, &str, &str); 3] = [
+        let specs: [(&'static str, &str, &str, &str); 4] = [
             ("home-capture", "✚", "New capture", " · C"),
             ("home-open", "🗀", "Open image", " · O"),
             ("home-paste", "📋", "Paste", " · P"),
+            ("home-record", "●", "Record", ""),
         ];
         // Measure first (chrome width is galley-driven), then flow
         // the measured cards into rows.
@@ -1048,10 +1065,10 @@ impl HomeApp {
                     );
                     ui.painter().galley(pos, galley.clone(), p::INK);
                     if resp.clicked() {
-                        let ctx = ui.ctx().clone();
                         match id {
-                            "home-capture" => self.start_capture(&ctx),
-                            "home-open" => self.handle_open(&ctx),
+                            "home-record" => self.bridge.request_record(),
+                            "home-capture" => self.start_capture(&ui.ctx().clone()),
+                            "home-open" => self.handle_open(&ui.ctx().clone()),
                             _ => {
                                 let _ = self.bridge.request_paste();
                             }
