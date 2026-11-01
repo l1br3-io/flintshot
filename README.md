@@ -104,9 +104,11 @@ flintshot backends           # capture-backend probe report
 A missing Rust toolchain is bootstrapped by `just install` /
 `just install-user` via rustup (never as root); with a toolchain
 present, **1.95+** is auto-selected by `rust-toolchain.toml`. A default
-build (editor + capture, no tray) needs no system libraries beyond a
-C toolchain on macOS and Windows; on Linux, xcap needs its capture
-dev packages and the **tray** feature adds the GTK stack. `just
+build (editor + capture, no tray) needs no system libraries beyond a C
+toolchain on macOS and Windows; on Linux, xcap needs its capture
+dev packages, the screen-recording engine needs the GStreamer dev
+packages plus an H.264 plugin set, and the **tray** feature adds the
+GTK stack. `just
 install` and `just install-user` install these system prerequisites
 for you — via apt (check-first and idempotent: already-installed
 packages are skipped) or the mapped equivalents on dnf/pacman/zypper
@@ -116,6 +118,13 @@ left to try. By hand:
 ```sh
 # minimal build
 cargo build --release
+
+# the recording engine's GStreamer stack (Linux; every --workspace
+# build links it — gstreamer1.0-plugins-good/bad/ugly carry the
+# encoders and muxer, gstreamer1.0-pipewire the Wayland source)
+sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly gstreamer1.0-pipewire
 
 # with the system tray (Linux)
 sudo apt-get install -y pkg-config libclang-dev libxcb1-dev libxrandr-dev \

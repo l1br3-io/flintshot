@@ -36,6 +36,14 @@ export PATH := env('CARGO_HOME', home_directory() / '.cargo') / 'bin' + ':' + en
 # macOS/Windows trays are native, no system packages there).
 xcap_deps := "pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev libgbm-dev libxkbcommon-dev"
 tray_deps := "libgtk-3-dev libayatana-appindicator3-dev libxdo-dev"
+# flintshot-record's GStreamer stack. Always installed, never
+# feature-gated like tray_deps: every `--workspace` build/test links
+# the record crate (`just ci` does), and the record verb makes it a
+# hard app dependency. The -dev pair is the build-time link; the
+# plugin packages are runtime capability (H.264 encoders, mp4 muxer,
+# PipeWire source). Mirrors the by-hand list in README "Building
+# from source" and the CI apt set in .github/workflows/ci.yml.
+record_deps := "libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-pipewire"
 
 # Default: list available recipes.
 default:
@@ -301,14 +309,15 @@ install-user *args:
     fi
 
 # Install the per-platform build prerequisites (see xcap_deps /
-# tray_deps above). Rust first: cargo via rustup (stable, minimal
-# profile) when absent — never under elevation, so a root rustup can't
-# land root-owned in /root; the justfile-wide CARGO_HOME/bin PATH
-# prepend makes it visible to _build in this same invocation. Then the
-# system side. Linux: base capture deps always, tray deps only when
-# the effective feature set includes tray (FEATURES= respected, same
-# rule as _build) — apt installs what dpkg reports missing (check
-# first, so an up-to-date machine is a silent no-op); dnf/pacman/
+# tray_deps / record_deps above). Rust first: cargo via rustup
+# (stable, minimal profile) when absent — never under elevation, so a
+# root rustup can't land root-owned in /root; the justfile-wide
+# CARGO_HOME/bin PATH prepend makes it visible to _build in this same
+# invocation. Then the system side. Linux: base capture deps and the
+# GStreamer record stack always, tray deps only when the effective
+# feature set includes tray (FEATURES= respected, same rule as
+# _build) — apt installs what dpkg reports missing (check first, so
+# an up-to-date machine is a silent no-op); dnf/pacman/
 # zypper install the mapped equivalents (the managers' own
 # already-installed handling stands in for dpkg's check); anything
 # else prints the package list and continues — the build's own failure
@@ -343,7 +352,7 @@ _prereqs:
             if [[ ",${features}," == *",tray,"* ]]; then tray=1; else tray=0; fi
 
             if command -v apt-get >/dev/null 2>&1; then
-                pkgs=({{ xcap_deps }})
+                pkgs=({{ xcap_deps }} {{ record_deps }})
                 if [[ "$tray" == 1 ]]; then pkgs+=({{ tray_deps }}); fi
                 missing=()
                 for p in "${pkgs[@]}"; do
@@ -379,23 +388,31 @@ _prereqs:
             if command -v dnf >/dev/null 2>&1; then
                 pkgs=(pkgconf-pkg-config clang-devel libxcb-devel libXrandr-devel
                     dbus-devel pipewire-devel wayland-devel mesa-libEGL-devel
-                    mesa-libGbm-devel libxkbcommon-devel)
+                    mesa-libGbm-devel libxkbcommon-devel
+                    gstreamer1-devel gstreamer1-plugins-base-devel
+                    gstreamer1-plugins-good gstreamer1-plugins-bad-free
+                    gstreamer1-plugins-ugly-free pipewire-gstreamer)
                 if [[ "$tray" == 1 ]]; then pkgs+=(gtk3-devel libayatana-appindicator-gtk3-devel libxdo-devel); fi
                 mgr=(dnf install -y)
             elif command -v pacman >/dev/null 2>&1; then
                 pkgs=(pkgconf clang libxcb libxrandr dbus pipewire wayland
-                    mesa libxkbcommon)
+                    mesa libxkbcommon
+                    gstreamer gst-plugins-base gst-plugins-good
+                    gst-plugins-bad gst-plugins-ugly gst-plugin-pipewire)
                 if [[ "$tray" == 1 ]]; then pkgs+=(gtk3 libayatana-appindicator xdotool); fi
                 mgr=(pacman -S --needed --noconfirm)
             elif command -v zypper >/dev/null 2>&1; then
                 pkgs=(pkg-config clang-devel libxcb-devel libXrandr-devel
                     dbus-1-devel pipewire-devel wayland-devel Mesa-libEGL-devel
-                    Mesa-libGbm-devel libxkbcommon-devel)
+                    Mesa-libGbm-devel libxkbcommon-devel
+                    gstreamer-devel gstreamer-plugins-base-devel
+                    gstreamer-plugins-good gstreamer-plugins-bad
+                    gstreamer-plugins-ugly gstreamer-plugin-pipewire)
                 if [[ "$tray" == 1 ]]; then pkgs+=(gtk3-devel libayatana-appindicator3-devel xdotool-devel); fi
                 mgr=(zypper --non-interactive install)
             else
                 echo "note: no supported package manager (apt-get, dnf, pacman, zypper); install these build deps (or your distro's equivalents) if missing:" >&2
-                pkgs=({{ xcap_deps }})
+                pkgs=({{ xcap_deps }} {{ record_deps }})
                 if [[ "$tray" == 1 ]]; then pkgs+=({{ tray_deps }}); fi
                 echo "      ${pkgs[*]}" >&2
                 exit 0
