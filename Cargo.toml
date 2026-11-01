@@ -39,9 +39,12 @@ flintshot-editor-egui = { path = "crates/flintshot-editor-egui", version = "0.1.
 arboard = { version = "3", default-features = false, features = ["image-data", "wayland-data-control"] }
 # default-features = false + tokio: ashpd's defaults pull the async-io
 # zbus backend, which would clash with the daemon's tokio runtime.
-# global_shortcuts is the Phase 6 portal interface. zbus is pure Rust,
-# so this adds no system deps (CI stays green unchanged).
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+# global_shortcuts is the Phase 6 portal interface; screencast is the
+# record engine's Wayland source (xdg ScreenCast; spec'd ask-first,
+# enabled per the E6 task — pure D-Bus, serde_repr was already in
+# the lock, so no new crates). zbus is pure Rust, so this adds no
+# system deps (CI stays green unchanged).
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts", "screencast"] }
 # Data-URL payload for AI vision message parts (flintshot-core); tiny,
 # no transitive deps beyond itself.
 base64 = "0.22"

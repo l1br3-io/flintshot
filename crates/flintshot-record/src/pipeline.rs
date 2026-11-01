@@ -15,6 +15,7 @@
 //! first performs the EOS/finalize inside a `OnceLock`; the other
 //! observes the same outcome.
 
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -63,6 +64,10 @@ fn package_hint(element: &str) -> &'static str {
 pub struct Recorder {
     config: RecordConfig,
     pipeline: gst::Pipeline,
+    /// The portal session's `PipeWire` remote — the fd `pipewiresrc`
+    /// records from must outlive the pipeline, so it lives here.
+    _portal_fd: Option<std::os::fd::OwnedFd>,
+    restore_token: Option<String>,
 }
 
 impl Recorder {
@@ -73,24 +78,32 @@ impl Recorder {
         crate::probe_capabilities(&GstElementRegistry)
     }
 
+    /// The fresh portal restore token, when the `Wayland` session
+    /// granted one — persist it (caller-owned storage) and feed it
+    /// back via [`RecordConfig::portal_restore_token`] to skip the
+    /// next consent prompt.
+    #[must_use]
+    pub fn restore_token(&self) -> Option<&str> {
+        self.restore_token.as_deref()
+    }
+
     /// Build (but do not start) the pipeline for `cfg`.
     ///
     /// `async` by contract — the `Wayland` portal session the
-    /// `Session` source drives is an async dance (see the portal
-    /// task); the headless [`RecordSource::TestSrc`] path resolves
-    /// immediately.
+    /// `Session` source drives is an async dance; the headless
+    /// [`RecordSource::TestSrc`] path resolves immediately.
     ///
     /// # Errors
     /// [`RecordError::ElementMissing`] for every absent factory,
     /// [`RecordError::PipelineFailed`] for link/negotiation
-    /// failures.
-    #[allow(clippy::unused_async)] // portal task awaits inside
+    /// failures, [`RecordError::PortalDenied`] when the portal
+    /// consent is refused.
     pub async fn prepare(cfg: RecordConfig) -> Result<Self, RecordError> {
         let config = cfg.sanitized();
         let encoder_kind = select_encoder(&GstElementRegistry)?;
 
-        let (source, fixed_geometry) = build_source(&config)?;
-        let capsfilter = build_caps_filter(&config, fixed_geometry)?;
+        let source = build_source(&config).await?;
+        let capsfilter = build_caps_filter(&config, source.fixed_geometry)?;
         let convert = make_element("videoconvert")?;
         let encoder = build_encoder(encoder_kind)?;
         // mp4mux only accepts avc/avc3 stream-format, while encoders
@@ -106,7 +119,7 @@ impl Recorder {
 
         let pipeline = gst::Pipeline::new();
         for element in [
-            &source,
+            &source.element,
             &capsfilter,
             &convert,
             &encoder,
@@ -120,7 +133,7 @@ impl Recorder {
                 .map_err(|err| pipeline_error("pipeline", err))?;
         }
         gst::Element::link_many([
-            &source,
+            &source.element,
             &capsfilter,
             &convert,
             &encoder,
@@ -131,7 +144,12 @@ impl Recorder {
         ])
         .map_err(|err| pipeline_error("pipeline", err))?;
 
-        Ok(Self { config, pipeline })
+        Ok(Self {
+            config,
+            pipeline,
+            _portal_fd: source.portal_fd,
+            restore_token: source.restore_token,
+        })
     }
 
     /// Move the pipeline to `PLAYING`, confirmed before returning.
@@ -269,14 +287,23 @@ fn finalize_recording(
     }
 }
 
-/// Build the source element the config selects. The second return
-/// says whether the caps filter should pin a fixed geometry (the
-/// test spine) or pass the source's own through (real grabs).
+/// Everything building a source produced: the element, whether the
+/// caps filter should pin fixed geometry (the test spine), and the
+/// portal session's fd / restore token for the [`Recorder`] to keep
+/// alive.
+struct SourceBuild {
+    element: gst::Element,
+    fixed_geometry: bool,
+    portal_fd: Option<std::os::fd::OwnedFd>,
+    restore_token: Option<String>,
+}
+
+/// Build the source element the config selects.
 ///
 /// [`RecordSource::Session`] resolves per session kind: X11 grabs
-/// directly, `Wayland` gets the portal (its task), anything else
+/// directly, `Wayland` runs the portal dance (async), anything else
 /// has no display to record.
-fn build_source(config: &RecordConfig) -> Result<(gst::Element, bool), RecordError> {
+async fn build_source(config: &RecordConfig) -> Result<SourceBuild, RecordError> {
     match config.source {
         RecordSource::TestSrc => {
             // Deliberately NOT is-live: a live source stays silent in
@@ -284,7 +311,12 @@ fn build_source(config: &RecordConfig) -> Result<(gst::Element, bool), RecordErr
             // stalls below PLAYING. Non-live videotestsrc prerolls
             // immediately and stamps frames at the negotiated rate,
             // which is all the headless spine needs.
-            Ok((make_element("videotestsrc")?, true))
+            Ok(SourceBuild {
+                element: make_element("videotestsrc")?,
+                fixed_geometry: true,
+                portal_fd: None,
+                restore_token: None,
+            })
         }
         RecordSource::Session => match SessionKind::detect() {
             SessionKind::X11 => {
@@ -302,14 +334,36 @@ fn build_source(config: &RecordConfig) -> Result<(gst::Element, bool), RecordErr
                 element.set_property("starty", grab.starty);
                 element.set_property("endx", grab.endx);
                 element.set_property("endy", grab.endy);
-                Ok((element, false))
+                Ok(SourceBuild {
+                    element,
+                    fixed_geometry: false,
+                    portal_fd: None,
+                    restore_token: None,
+                })
             }
-            SessionKind::Wayland => Err(RecordError::PipelineFailed {
-                element: "source".into(),
-                message: "the Wayland portal source lands in the portal task".into(),
-            }),
-            // Other (headless/tty) and any future session kind: no
-            // display to record from.
+            #[cfg(target_os = "linux")]
+            SessionKind::Wayland => {
+                let stream =
+                    crate::portal::open_stream(config.portal_restore_token.as_deref()).await?;
+                let element = make_element("pipewiresrc")?;
+                // The fd property takes the raw descriptor; the
+                // OwnedFd itself moves into the Recorder so the
+                // remote stays open for the whole recording.
+                let fd = stream.fd.as_raw_fd();
+                element.set_property("fd", fd);
+                element.set_property("target-object", stream.node_id.to_string());
+                Ok(SourceBuild {
+                    element,
+                    fixed_geometry: false,
+                    portal_fd: Some(stream.fd),
+                    restore_token: stream.restore_token,
+                })
+            }
+            // Wayland off-Linux cannot happen (SessionKind reads
+            // XDG_SESSION_TYPE), but the arm must exist to compile;
+            // Other (headless/tty) and future kinds: no display.
+            #[cfg(not(target_os = "linux"))]
+            SessionKind::Wayland => Err(RecordError::NoDisplay),
             _ => Err(RecordError::NoDisplay),
         },
     }

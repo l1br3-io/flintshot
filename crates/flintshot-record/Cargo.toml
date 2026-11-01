@@ -20,6 +20,11 @@ gstreamer = "0.23"
 flintshot-core = { workspace = true }
 thiserror = { workspace = true }
 
+# The ScreenCast portal client is Linux-only, matching core's zbus
+# gating; macOS/Windows compile no portal code.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { workspace = true }
+
 [dev-dependencies]
 # Integration tests finalize real pipelines into temp dirs and drive
 # the async prepare contract.

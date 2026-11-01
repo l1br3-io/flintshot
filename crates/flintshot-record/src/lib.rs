@@ -27,6 +27,8 @@
 pub mod encoder;
 pub mod mp4;
 pub mod pipeline;
+#[cfg(target_os = "linux")]
+pub mod portal;
 pub mod probe;
 
 use std::path::PathBuf;
@@ -88,6 +90,12 @@ pub struct RecordConfig {
     /// Where the frames come from. Defaults to the real session;
     /// [`RecordSource::TestSrc`] is the CI spine.
     pub source: RecordSource,
+    /// Portal restore token from a previous `Wayland` recording —
+    /// skips the consent prompt where the portal honors tokens.
+    /// Read the fresh token off the prepared [`Recorder`] after
+    /// [`Recorder::prepare`] and persist it; the engine never
+    /// stores it itself.
+    pub portal_restore_token: Option<String>,
 }
 
 impl RecordConfig {
@@ -102,6 +110,7 @@ impl RecordConfig {
             region: None,
             monitor: None,
             source: RecordSource::default(),
+            portal_restore_token: None,
         }
     }
 
@@ -173,6 +182,7 @@ mod tests {
         assert_eq!(cfg.region, None);
         assert_eq!(cfg.monitor, None);
         assert_eq!(cfg.source, RecordSource::Session);
+        assert_eq!(cfg.portal_restore_token, None);
     }
 
     #[test]
