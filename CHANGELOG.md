@@ -18,6 +18,23 @@ Categories used below:
 
 ## [Unreleased]
 
+### Added
+
+- **The screen-recording engine** (effort `record-engine`, module 1
+  of the recording initiative; ADR-0070). A new workspace crate,
+  `flintshot-record`, owns everything between "record" and a
+  finalized MP4: the XDG ScreenCast portal + PipeWire on Wayland
+  (restore token in/out on the contract, so repeat recordings skip
+  the consent prompt), an X11 region grab, an H.264 encoder fallback
+  chain probed at runtime (VA-API → V4L2 → x264 → OpenH264 —
+  whatever this machine has), and a finalize-on-stop lifecycle that
+  verifies the MP4 before handing back the path. No user surface
+  yet — the `flintshot record` verb and the window/tray controls
+  are the next modules. Every failure names what to install
+  (`ElementMissing` carries the plugin package), and building the
+  workspace now needs the GStreamer dev stack (`just install`
+  handles it).
+
 ### Changed
 
 - **One-command install on a bare machine** (effort
