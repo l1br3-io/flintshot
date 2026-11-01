@@ -2440,6 +2440,7 @@ dependencies = [
  "eventsource-stream",
  "flintshot-core",
  "flintshot-editor-egui",
+ "flintshot-record",
  "futures-util",
  "global-hotkey",
  "gtk",

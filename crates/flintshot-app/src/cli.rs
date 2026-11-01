@@ -17,6 +17,7 @@ use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
 use flintshot_core::ipc::Request;
 use flintshot_core::{BackendReport, Config, ImageMime, SessionKind, UploadContext, UploadOutcome};
+use flintshot_record::RecordError;
 use image::ImageFormat;
 
 use crate::capture_flow::{
@@ -59,6 +60,14 @@ pub enum Command {
     Open(OpenArgs),
     /// Upload an image to a backend and print the resulting URL. [Phase 4]
     Upload(UploadArgs),
+    /// Record the screen to an MP4 file (video-only, H.264):
+    /// the whole `--monitor` or a `--geometry` rectangle, stopped
+    /// with Ctrl-C or `--duration`.
+    ///
+    /// Exit codes: 0 success · 1 failure · 2 portal denied ·
+    /// 3 missing `GStreamer` element (install hint printed) ·
+    /// 4 no display
+    Record(RecordArgs),
     /// Set or clear credentials for an upload backend. [Phase 4]
     Auth(AuthArgs),
     /// Manage global hotkeys (bind via the Wayland portal). [Phase 6]
@@ -331,6 +340,134 @@ fn validate_after_action(value: &str) -> std::result::Result<String, String> {
             "unknown after action `{value}` (valid: {})",
             VALID.join(", ")
         ))
+    }
+}
+
+// ── record ─────────────────────────────────────────────────────
+
+/// The `--source` override for `flintshot record`.
+///
+/// `testsrc` is the hidden testability spine (`GStreamer`
+/// `videotestsrc`) — it lets engine/CLI tests run headless in CI and
+/// is not advertised in `--help`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RecordSourceFlag {
+    /// The real graphical session (portal on Wayland, `ximagesrc` on
+    /// X11). The default.
+    Session,
+    /// Hidden CI spine: `GStreamer` `videotestsrc`, no display needed.
+    TestSrc,
+}
+
+/// Arguments for `flintshot record`.
+#[derive(Debug, Args)]
+pub struct RecordArgs {
+    /// Monitor index to record. Ignored when `--geometry` is given.
+    #[arg(long, value_name = "N")]
+    pub monitor: Option<u32>,
+    /// Record a rectangle instead of a whole monitor:
+    /// `x,y,width,height` in pixels.
+    #[arg(long, value_name = "X,Y,W,H", value_parser = parse_geometry)]
+    pub geometry: Option<flintshot_core::geom::Rect>,
+    /// Frames per second. Defaults to `[record] fps` (config) or 30.
+    #[arg(long, value_name = "FPS")]
+    pub fps: Option<u32>,
+    /// Stop automatically after this many seconds.
+    #[arg(long = "duration", value_name = "SECS")]
+    pub duration_secs: Option<f64>,
+    /// Write the recording to `PATH` (an `.mp4`). Defaults to a
+    /// timestamped name in the save location.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+    /// Count down this many seconds before recording starts.
+    #[arg(long, value_name = "SECS", default_value_t = 0)]
+    pub countdown: u32,
+    /// Emit machine-readable progress events (one JSON object per
+    /// line) instead of human output — the daemon consumes this for
+    /// the tray/window recording state.
+    #[arg(long)]
+    pub json_events: bool,
+    /// Capture source override. Hidden: `testsrc` exists for tests.
+    #[arg(long, hide = true, value_enum)]
+    pub source: Option<RecordSourceFlag>,
+}
+
+/// Clap `value_parser` for `--geometry`: `x,y,width,height` in
+/// whole pixels into a [`flintshot_core::geom::Rect`] (`max` is the
+/// exclusive bottom-right corner, core's convention).
+fn parse_geometry(value: &str) -> std::result::Result<flintshot_core::geom::Rect, String> {
+    /// Screen coordinates stay whole and fit `f32`'s mantissa
+    /// exactly — the cast cannot lose anything real.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "screen coordinates fit f32's mantissa exactly"
+    )]
+    fn whole_to_f32(v: i32) -> f32 {
+        v as f32
+    }
+
+    let parts: Vec<&str> = value.split(',').collect();
+    let bad = || format!("invalid geometry `{value}` — expected x,y,width,height in pixels");
+    if parts.len() != 4 {
+        return Err(bad());
+    }
+    let coords: Vec<f32> = parts
+        .iter()
+        .map(|p| p.trim().parse::<i32>().map(whole_to_f32).map_err(|_| bad()))
+        .collect::<std::result::Result<_, _>>()?;
+    let [x, y, width, height] = [coords[0], coords[1], coords[2], coords[3]];
+    if width <= 0.0 || height <= 0.0 {
+        return Err(format!(
+            "invalid geometry `{value}` — size must be positive"
+        ));
+    }
+    Ok(flintshot_core::geom::Rect::new(
+        flintshot_core::geom::Point::new(x, y),
+        flintshot_core::geom::Point::new(x + width, y + height),
+    ))
+}
+
+/// Which capture source a recording will use — the resolved form of
+/// [`RecordSourceFlag`] plus the session kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordPlan {
+    /// The hidden CI spine.
+    TestSrc,
+    /// The XDG `ScreenCast` portal (Wayland sessions).
+    Portal,
+    /// A direct `ximagesrc` grab (X11 sessions).
+    X11,
+}
+
+/// Pure source resolution: an explicit `testsrc` wins everywhere
+/// (the CI spine must work headless); otherwise the session kind
+/// decides — portal on Wayland, a direct grab on X11, no display on
+/// anything else.
+pub fn resolve_record_source(
+    flag: Option<RecordSourceFlag>,
+    session: SessionKind,
+) -> std::result::Result<RecordPlan, RecordError> {
+    match flag {
+        Some(RecordSourceFlag::TestSrc) => Ok(RecordPlan::TestSrc),
+        Some(RecordSourceFlag::Session) | None => match session {
+            SessionKind::Wayland => Ok(RecordPlan::Portal),
+            SessionKind::X11 => Ok(RecordPlan::X11),
+            _ => Err(RecordError::NoDisplay),
+        },
+    }
+}
+
+/// Process exit code for a failed `flintshot record`, documented in
+/// the subcommand's help:
+///
+/// `0` success · `1` general failure · `2` portal denied ·
+/// `3` missing `GStreamer` element · `4` no display
+pub fn record_exit_code(err: &RecordError) -> i32 {
+    match err {
+        RecordError::PortalDenied => 2,
+        RecordError::ElementMissing { .. } => 3,
+        RecordError::NoDisplay => 4,
+        _ => 1,
     }
 }
 
@@ -2964,4 +3101,150 @@ mod tests {
         let state = state_from_config(img(), &cfg);
         assert!(state.flip_to_select, "true config must reach the state");
     }
+}
+
+// ── record: flag parsing + source resolution + exit codes ──────
+
+#[cfg(test)]
+mod record_cli_tests {
+    use crate::cli::{Cli, Command, RecordArgs, RecordPlan, RecordSourceFlag};
+    use clap::Parser;
+    use flintshot_core::capture::SessionKind;
+    use flintshot_core::geom::{Point, Rect};
+    use flintshot_record::RecordError;
+
+    fn parse_record(args: &[&str]) -> RecordArgs {
+        let Cli { command } =
+            Cli::try_parse_from(std::iter::once("flintshot").chain(args.iter().copied()))
+                .expect("flags must parse");
+        match command {
+            Some(Command::Record(args)) => args,
+            other => panic!("expected record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_flags_parse_every_field() {
+        let args = parse_record(&[
+            "record",
+            "--monitor",
+            "1",
+            "--geometry",
+            "10,20,800,600",
+            "--fps",
+            "15",
+            "--duration",
+            "1.5",
+            "--out",
+            "/tmp/clip.mp4",
+            "--countdown",
+            "2",
+            "--json-events",
+        ]);
+        assert_eq!(args.monitor, Some(1));
+        assert_eq!(
+            args.geometry,
+            Some(Rect::new(Point::new(10.0, 20.0), Point::new(810.0, 620.0)))
+        );
+        assert_eq!(args.fps, Some(15));
+        assert_eq!(args.duration_secs, Some(1.5));
+        assert_eq!(args.out, Some(std::path::PathBuf::from("/tmp/clip.mp4")));
+        assert_eq!(args.countdown, 2);
+        assert!(args.json_events);
+        assert_eq!(args.source, None);
+    }
+
+    #[test]
+    fn record_geometry_rejects_malformed_input() {
+        let err = Cli::try_parse_from(["flintshot", "record", "--geometry", "10,20,800"])
+            .expect_err("three fields must not parse");
+        assert!(err.to_string().contains("x,y,width,height"));
+    }
+
+    #[test]
+    fn record_help_documents_exit_codes() {
+        use clap::CommandFactory;
+        let mut root = Cli::command();
+        let help = root
+            .find_subcommand_mut("record")
+            .expect("record subcommand exists")
+            .render_long_help()
+            .to_string();
+        for code_line in [
+            "0 success",
+            "1 failure",
+            "2 portal",
+            "3 missing",
+            "4 no display",
+        ] {
+            assert!(help.contains(code_line), "help must mention `{code_line}`");
+        }
+    }
+
+    #[test]
+    fn record_source_resolution_truth_table() {
+        use crate::cli::resolve_record_source;
+        // Explicit testsrc wins everywhere — the CI spine works
+        // headless by design.
+        for session in [SessionKind::Wayland, SessionKind::X11, SessionKind::Other] {
+            assert_eq!(
+                resolve_record_source(Some(RecordSourceFlag::TestSrc), session),
+                Ok(RecordPlan::TestSrc)
+            );
+        }
+        assert_eq!(
+            resolve_record_source(None, SessionKind::Wayland),
+            Ok(RecordPlan::Portal)
+        );
+        assert_eq!(
+            resolve_record_source(None, SessionKind::X11),
+            Ok(RecordPlan::X11)
+        );
+        assert_eq!(
+            resolve_record_source(None, SessionKind::Other),
+            Err(RecordError::NoDisplay)
+        );
+        // Explicit session flag behaves like the default.
+        assert_eq!(
+            resolve_record_source(Some(RecordSourceFlag::Session), SessionKind::X11),
+            Ok(RecordPlan::X11)
+        );
+    }
+
+    #[test]
+    fn record_exit_codes_distinguish_failure_kinds() {
+        use crate::cli::record_exit_code;
+        assert_eq!(record_exit_code(&RecordError::PortalDenied), 2);
+        assert_eq!(
+            record_exit_code(&RecordError::ElementMissing {
+                plugin: "x264enc".into(),
+                package: "gstreamer1.0-plugins-ugly".into()
+            }),
+            3
+        );
+        assert_eq!(record_exit_code(&RecordError::NoDisplay), 4);
+        assert_eq!(
+            record_exit_code(&RecordError::PipelineFailed {
+                element: "pipeline".into(),
+                message: "boom".into()
+            }),
+            1
+        );
+        assert_eq!(record_exit_code(&RecordError::FinalizeTimeout), 1);
+    }
+}
+
+/// `flintshot record` — the standalone recording path.
+///
+/// C1 wires the verb; the runner (signal handling, countdown,
+/// engine dispatch, json-events) is the next task and replaces this
+/// interim error.
+pub fn run_record(args: &RecordArgs) -> Result<()> {
+    let plan = resolve_record_source(args.source, SessionKind::detect()).unwrap_or_else(|err| {
+        eprintln!("flintshot record: {err}");
+        std::process::exit(record_exit_code(&err));
+    });
+    color_eyre::eyre::bail!(
+        "recording via {plan:?} is not wired yet (the runner lands with the next task)"
+    )
 }

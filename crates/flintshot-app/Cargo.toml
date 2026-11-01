@@ -119,6 +119,7 @@ tray = ["dep:tray-icon", "dep:gtk", "dep:zbus"]
 eventsource-stream = "0.2"
 flintshot-core = { workspace = true }
 flintshot-editor-egui = { workspace = true, optional = true }
+flintshot-record = { workspace = true }
 arboard = { workspace = true }
 clap = { workspace = true }
 color-eyre = { workspace = true }
