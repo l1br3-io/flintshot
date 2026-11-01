@@ -1795,7 +1795,39 @@ pub fn run_backends() -> Result<()> {
         "{}",
         format_backend_report(&flintshot_core::backend_report())
     );
+    print!(
+        "{}",
+        format_record_capability(&flintshot_record::Recorder::probe())
+    );
     Ok(())
+}
+
+/// The record column of `flintshot backends`: best source, every
+/// present encoder in fallback order, and the what-to-install hint
+/// when recording is not possible here (pure; unit-tested).
+fn format_record_capability(capability: &flintshot_record::RecordCapability) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("record: ");
+    let source = match capability.source {
+        Some(flintshot_record::RecordSourceKind::PipeWire) => "pipewire (portal)",
+        Some(flintshot_record::RecordSourceKind::X11) => "x11 (ximagesrc)",
+        None => "none",
+    };
+    let _ = write!(out, "{source}, encoders:");
+    if capability.encoders.is_empty() {
+        let _ = write!(out, " none");
+    } else {
+        for kind in &capability.encoders {
+            let _ = write!(out, " {}", kind.factory_name());
+        }
+    }
+    if let Some(selected) = capability.selected_encoder() {
+        let _ = write!(out, " (selects {})", selected.factory_name());
+    } else if !capability.missing_packages().is_empty() {
+        let _ = write!(out, " — {}", capability.install_hint());
+    }
+    out.push('\n');
+    out
 }
 
 /// Rendered `flintshot backends` output (pure; unit-tested).
@@ -3455,6 +3487,39 @@ mod record_cli_tests {
             shifted,
             Rect::new(Point::new(1930.0, 20.0), Point::new(2230.0, 470.0))
         );
+    }
+
+    #[test]
+    fn record_capability_renders_source_encoders_and_hint() {
+        use crate::cli::format_record_capability;
+        use flintshot_record::EncoderKind;
+        use flintshot_record::{RecordCapability, RecordSourceKind};
+
+        let full = RecordCapability {
+            source: Some(RecordSourceKind::PipeWire),
+            encoders: vec![EncoderKind::X264, EncoderKind::OpenH264],
+        };
+        assert_eq!(
+            format_record_capability(&full),
+            "record: pipewire (portal), encoders: x264enc openh264enc (selects x264enc)\n"
+        );
+
+        let encoderless = RecordCapability {
+            source: Some(RecordSourceKind::X11),
+            encoders: vec![],
+        };
+        assert_eq!(
+            format_record_capability(&encoderless),
+            "record: x11 (ximagesrc), encoders: none — install: gstreamer1.0-vaapi\n"
+        );
+
+        let bare = RecordCapability {
+            source: None,
+            encoders: vec![],
+        };
+        let rendered = format_record_capability(&bare);
+        assert!(rendered.starts_with("record: none, encoders: none"));
+        assert!(rendered.contains("gstreamer1.0-pipewire"));
     }
 
     #[test]
