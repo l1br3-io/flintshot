@@ -185,6 +185,17 @@ pub fn status_for_event(event: &IpcEvent) -> String {
         }
         IpcEvent::Uploaded { url, .. } => format!("Uploaded {url}"),
         IpcEvent::Error { message, .. } => format!("Error: {message}"),
+        IpcEvent::RecordingStarted => "Recording…".to_string(),
+        IpcEvent::RecordingStopped { path } => {
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            format!("Recorded {name}")
+        }
+        IpcEvent::RecordingFailed { code, message } => {
+            format!("Recording failed ({code}): {message}")
+        }
         // Future variants (non_exhaustive): render the debug form so
         // the popup never blanks on an unknown event.
         other => format!("{other:?}"),
@@ -688,5 +699,23 @@ mod tests {
         })
         .await
         .map_err(|_| "timed out waiting for daemon state")
+    }
+
+    #[test]
+    fn recording_events_render_status_lines() {
+        assert_eq!(status_for_event(&IpcEvent::RecordingStarted), "Recording…");
+        assert_eq!(
+            status_for_event(&IpcEvent::RecordingStopped {
+                path: std::path::PathBuf::from("/tmp/clip.mp4")
+            }),
+            "Recorded clip.mp4"
+        );
+        assert_eq!(
+            status_for_event(&IpcEvent::RecordingFailed {
+                code: 3,
+                message: "missing element".into()
+            }),
+            "Recording failed (3): missing element"
+        );
     }
 }

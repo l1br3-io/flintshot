@@ -25,6 +25,11 @@ pub enum MenuMessage {
     /// *Capture* — the single Capture action: the OS's own selection
     /// UI where the backend supports it, else the editor flow.
     Capture,
+    /// *Record / Stop recording* — start or stop a screen recording
+    /// through the daemon's single gate. The label is the live one
+    /// (`app.rs` swaps it from the event stream); the action is the
+    /// same either way — the daemon resolves Stop vs start.
+    Record,
     /// *Open last* — re-open the most recently saved capture.
     OpenLast,
     /// *Settings* — open (or focus) the app window on its settings
@@ -53,6 +58,7 @@ pub enum Action {
 pub fn action_for(message: MenuMessage) -> Action {
     let request = match message {
         MenuMessage::Capture => Request::Capture { delay_ms: 0 },
+        MenuMessage::Record => Request::RecordStart,
         MenuMessage::OpenLast => Request::OpenLast,
         MenuMessage::Settings => Request::OpenSettings,
         MenuMessage::Quit => Request::Quit,
@@ -78,6 +84,23 @@ mod tests {
     use super::*;
 
     // ── action_for: the menu-item → Action mapping ──────────────────
+
+    #[test]
+    fn record_maps_to_record_start() {
+        assert!(matches!(
+            action_for(MenuMessage::Record),
+            Action::Request(Request::RecordStart)
+        ));
+    }
+
+    #[test]
+    fn record_requests_do_not_freeze_the_screen() {
+        // Unlike Capture, a Record click keeps the popup up: the
+        // recording is portal-driven, no frozen frame happens, and
+        // the status line shows Recording… instead.
+        assert!(!request_spawns_capture(&Request::RecordStart));
+        assert!(!request_spawns_capture(&Request::RecordStop));
+    }
 
     #[test]
     fn capture_maps_to_capture_request() {

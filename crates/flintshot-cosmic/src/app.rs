@@ -65,6 +65,9 @@ const POPUP_CLOSE_SETTLE: std::time::Duration = std::time::Duration::from_millis
 pub struct App {
     core: Core,
     popup: Option<Id>,
+    /// Whether a recording is live (drives the Record item's label
+    /// and the Recording… status; U7).
+    recording: bool,
     /// Current status line text (e.g. *"Idle"*, *"Capturing…"*). Set
     /// from the event stream; rendered at the top of the popup.
     status: String,
@@ -91,6 +94,12 @@ pub enum Message {
     /// A new status line from the event stream (e.g. *"Capturing…"*,
     /// *"Saved shot.png"*, *"Error: no display"*).
     Status(String),
+    /// A recording started (the event stream): the Record item
+    /// swaps to *Stop recording* and the status shows Recording…
+    /// (U7).
+    RecordingStarted,
+    /// A recording stopped or failed: the item returns to *Record*.
+    RecordingEnded,
     /// The daemon was lost (probe failed or the stream dropped). The
     /// popup switches to the daemon-absent display.
     DaemonLost,
@@ -124,6 +133,7 @@ impl cosmic::Application for App {
                 popup: None,
                 status: "Idle".to_string(),
                 daemon_up: false,
+                recording: false,
             },
             Task::none(),
         )
@@ -182,6 +192,8 @@ impl cosmic::Application for App {
                 )));
             }
             Message::Sent => {}
+            Message::RecordingStarted => self.recording = true,
+            Message::RecordingEnded => self.recording = false,
             Message::Status(s) => {
                 self.status = s;
             }
@@ -252,6 +264,16 @@ impl cosmic::Application for App {
 }
 
 impl App {
+    /// The Record item's live label (U7): the daemon's gate
+    /// resolves Stop vs start, so one item suffices.
+    fn record_label(&self) -> &'static str {
+        if self.recording {
+            "Stop recording"
+        } else {
+            "Record"
+        }
+    }
+
     /// Build the popup body: a status line at the top, then a column of
     /// menu buttons with dividers between the capture / system groups.
     /// Mirrors the tray's menu structure item-for-item (the
@@ -270,6 +292,7 @@ impl App {
             .push(status_line(&self.status, up))
             .push(divider::horizontal::default())
             .push(action_btn("Capture", MenuMessage::Capture, up))
+            .push(action_btn(self.record_label(), MenuMessage::Record, up))
             .push(divider::horizontal::default())
             .push(action_btn("Open last", MenuMessage::OpenLast, up))
             .push(action_btn("Settings", MenuMessage::Settings, up))
@@ -409,8 +432,19 @@ async fn ipc_event_loop(mut sender: cosmic::iced::futures::channel::mpsc::Sender
         loop {
             match stream.next_event().await {
                 Ok(Some(event)) => {
+                    let recording = matches!(event, flintshot_core::ipc::Event::RecordingStarted);
+                    let ended = matches!(
+                        event,
+                        flintshot_core::ipc::Event::RecordingStopped { .. }
+                            | flintshot_core::ipc::Event::RecordingFailed { .. }
+                    );
                     let status = status_for_event(&event);
                     tracing::debug!(status = %status, "event stream");
+                    if recording {
+                        ignore_send(&mut sender, Message::RecordingStarted).await;
+                    } else if ended {
+                        ignore_send(&mut sender, Message::RecordingEnded).await;
+                    }
                     ignore_send(&mut sender, Message::Status(status)).await;
                 }
                 Ok(None) => {
@@ -455,6 +489,7 @@ mod tests {
             popup,
             status: "Idle".to_string(),
             daemon_up: true,
+            recording: false,
         }
     }
 
