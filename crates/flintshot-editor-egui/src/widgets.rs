@@ -391,6 +391,18 @@ pub(crate) fn section(
     SectionResponse { open, body_height }
 }
 
+/// A kbd chip's horizontal chrome padding (see [`kbd_chip`]) —
+/// shared by the chip's own allocation and the statusbar's
+/// measure-first fit path ([`kbd_chip_width`]).
+const KBD_PAD_X: f32 = 8.0;
+
+/// A kbd chip's outer width for a `galley_width`-wide label — the
+/// exact width [`kbd_chip`] allocates, so fit decisions can measure
+/// without allocating.
+pub(crate) fn kbd_chip_width(galley_width: f32) -> f32 {
+    galley_width + KBD_PAD_X * 2.0
+}
+
 /// A keyboard-hint chip: the keys in the xs ramp on a cream chip
 /// with a hairline border.
 pub(crate) fn kbd_chip(ui: &mut egui::Ui, keys: &str) {
@@ -400,8 +412,7 @@ pub(crate) fn kbd_chip(ui: &mut egui::Ui, keys: &str) {
         egui::FontId::proportional(theme::TYPE_XS),
         p::INK_SOFT,
     );
-    let pad_x = 8.0;
-    let size = egui::vec2(galley.size().x + pad_x * 2.0, galley.size().y + 4.0);
+    let size = egui::vec2(kbd_chip_width(galley.size().x), galley.size().y + 4.0);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().rect(
         rect,
@@ -411,7 +422,10 @@ pub(crate) fn kbd_chip(ui: &mut egui::Ui, keys: &str) {
         egui::StrokeKind::Middle,
     );
     ui.painter().galley(
-        egui::pos2(rect.left() + pad_x, rect.center().y - galley.size().y / 2.0),
+        egui::pos2(
+            rect.left() + KBD_PAD_X,
+            rect.center().y - galley.size().y / 2.0,
+        ),
         galley,
         p::INK_SOFT,
     );

@@ -45,7 +45,31 @@ pub(crate) fn dims_label(dims: (u32, u32), size_bytes: u64) -> String {
 /// The statusbar's kbd chips, in the binding table's order: undo,
 /// redo, save, delete, and the panel toggle (the keyboard reopen
 /// path while collapsed — the floating « chip is the pointer one).
+/// The order doubles as the responsive discard order: when the row
+/// cannot fit, the tail yields first (see [`fitting_chips_prefix`]).
 const KEYS: [&str; 5] = ["Ctrl+Z", "Ctrl+Y", "Ctrl+S", "Del", "Ctrl+B"];
+
+/// How many of `widths`' leading chips fit `available` px at `gap`
+/// spacing — the statusbar's progressive discard. The tail yields
+/// first (the head is the binding table's importance order); a row
+/// that cannot fit even the first chip keeps zero, never a
+/// squeezed chip. Pure; unit-tested.
+fn fitting_chips_prefix(widths: &[f32], available: f32, gap: f32) -> usize {
+    let mut used = 0.0_f32;
+    for (i, &w) in widths.iter().enumerate() {
+        let next = if i == 0 { w } else { used + gap + w };
+        if next > available + 0.5 {
+            return i;
+        }
+        used = next;
+    }
+    widths.len()
+}
+
+/// Air the hint needs inside its span before it counts as fitting —
+/// a galley butted against the chips reads as collision, not a
+/// centre.
+const HINT_SPAN_MARGIN: f32 = 16.0;
 
 /// Draw the statusbar across the bottom of `ui`. Call it before the
 /// side panels and the central panel (draw order: top → bottom →
@@ -80,27 +104,64 @@ pub(crate) fn show(ui: &mut egui::Ui, dims: (u32, u32), tool: Tool, size_bytes: 
                     p::with_alpha(p::CREAM_TEXT, 115),
                 );
                 ui.add_space(12.0);
-                // The per-tool hint, gold and centered in the
-                // leftover span between the dims and the keys.
-                let hint = crate::panel::tool_hint(tool);
-                let keys_width: f32 = 330.0;
+                // The chips' real footprint, measured before any of
+                // them allocate (the fit path below decides how many
+                // survive; the painted chips hit the cache).
+                let gap = ui.spacing().item_spacing.x;
+                let chip_galleys: Vec<_> = KEYS
+                    .iter()
+                    .map(|key| {
+                        ui.painter().layout_no_wrap(
+                            (*key).to_owned(),
+                            egui::FontId::proportional(theme::TYPE_XS),
+                            p::INK_SOFT,
+                        )
+                    })
+                    .collect();
+                let chip_widths: Vec<f32> = chip_galleys
+                    .iter()
+                    .map(|g| widgets::kbd_chip_width(g.size().x))
+                    .collect();
+                // The row's whole-chip footprint: chip widths plus
+                // the gaps between them (the same accumulation
+                // [`fitting_chips_prefix`] performs).
+                let keys_width: f32 = chip_widths.iter().enumerate().fold(0.0, |acc, (i, w)| {
+                    if i == 0 {
+                        *w
+                    } else {
+                        acc + gap + w
+                    }
+                });
+                // The per-tool hint, gold and centred in the leftover
+                // span between the dims and the keys — but only when
+                // the span can actually hold it: the galley is
+                // no-wrap by design (one gold line), so painting it
+                // into a smaller span would run it off the bar's
+                // right edge (responsive-ui).
                 let hint_galley = ui.painter().layout_no_wrap(
-                    hint.to_owned(),
+                    crate::panel::tool_hint(tool).to_owned(),
                     egui::FontId::proportional(theme::TYPE_SM),
                     p::GOLD,
                 );
-                let span = (ui.available_width() - keys_width).max(0.0);
+                // One boundary gap rides between the span and the
+                // chip row (the layout transition consumes it), so
+                // the chips' region lands at exactly `keys_width`.
+                let span = (ui.available_width() - keys_width - gap).max(0.0);
                 let (rect, _) = ui.allocate_exact_size(
                     egui::vec2(span, STATUSBAR_HEIGHT - 4.0),
                     egui::Sense::hover(),
                 );
-                let x = rect.center().x - hint_galley.size().x / 2.0;
-                let y = rect.center().y - hint_galley.size().y / 2.0;
-                ui.painter()
-                    .galley(egui::pos2(x.max(rect.min.x), y), hint_galley, p::GOLD);
-                // The real binding chips, right-aligned.
+                if hint_galley.size().x + HINT_SPAN_MARGIN <= span {
+                    let x = rect.center().x - hint_galley.size().x / 2.0;
+                    let y = rect.center().y - hint_galley.size().y / 2.0;
+                    ui.painter().galley(egui::pos2(x, y), hint_galley, p::GOLD);
+                }
+                // The real binding chips, right-aligned — the
+                // fitting prefix only (the tail yields first when
+                // the row cannot afford all five).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    for key in KEYS {
+                    let keep = fitting_chips_prefix(&chip_widths, ui.available_width(), gap);
+                    for key in KEYS.iter().take(keep) {
                         widgets::kbd_chip(ui, key);
                     }
                 });
@@ -242,7 +303,7 @@ mod tests {
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(640.0, 480.0),
+                    egui::vec2(1032.0, 648.0),
                 )),
                 ..egui::RawInput::default()
             };
@@ -272,7 +333,7 @@ mod tests {
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(640.0, 480.0),
+                egui::vec2(1032.0, 648.0),
             )),
             ..egui::RawInput::default()
         };
@@ -299,7 +360,7 @@ mod tests {
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(640.0, 480.0),
+                egui::vec2(1032.0, 648.0),
             )),
             ..egui::RawInput::default()
         };
@@ -311,5 +372,96 @@ mod tests {
             .iter()
             .any(|cs| matches!(&cs.shape, egui::Shape::Text(t) if t.galley.job.text == "Ctrl+B"));
         assert!(painted, "the Ctrl+B chip paints on the statusbar");
+    }
+
+    // --- Responsive fit (responsive-ui) -------------------------------
+    //
+    // The bar's centre hint and right chip row yield before they
+    // collide with the dims readout or run off the window: the hint
+    // is skipped when its span cannot hold it, and the chips drop
+    // from the tail (the binding table's order is importance order)
+    // when they cannot fit.
+
+    fn bar_frame(screen: egui::Vec2, tool: Tool) -> egui::FullOutput {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), screen)),
+            ..egui::RawInput::default()
+        };
+        ctx.run_ui(raw, |ui| show(ui, (1920, 1080), tool, 1920 * 1080 * 4))
+    }
+
+    fn paints_text(out: &egui::FullOutput, needle: &str) -> bool {
+        out.shapes.iter().any(|cs| match &cs.shape {
+            egui::Shape::Text(t) => t.galley.job.text.contains(needle),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn the_hint_is_skipped_when_the_span_cannot_hold_it() {
+        let wide = bar_frame(egui::vec2(1032.0, 648.0), Tool::Pencil);
+        assert!(
+            paints_text(&wide, crate::panel::tool_hint(Tool::Pencil)),
+            "a wide bar centres the hint"
+        );
+        let narrow = bar_frame(egui::vec2(420.0, 300.0), Tool::Pencil);
+        assert!(
+            !paints_text(&narrow, crate::panel::tool_hint(Tool::Pencil)),
+            "a narrow bar skips the hint rather than truncating it"
+        );
+        assert!(
+            paints_text(&narrow, "Image:"),
+            "the dims readout stays on a narrow bar"
+        );
+    }
+
+    #[test]
+    fn the_chips_drop_the_tail_before_colliding_at_narrow_widths() {
+        let narrow = bar_frame(egui::vec2(340.0, 300.0), Tool::Pencil);
+        let escape = crate::test_layout::worst_text_clip_escape(&narrow);
+        assert!(
+            escape <= 0.5,
+            "no statusbar text may truncate (worst escape {escape:.1} px)"
+        );
+        assert!(paints_text(&narrow, "Image:"), "the dims readout stays");
+        let chip_count = narrow
+            .shapes
+            .iter()
+            .filter(|cs| {
+                matches!(&cs.shape, egui::Shape::Text(t) if KEYS.contains(&t.galley.job.text.as_str()))
+            })
+            .count();
+        assert!(
+            chip_count >= 1 && chip_count < KEYS.len(),
+            "a 340 px bar keeps some but not all chips (kept {chip_count})"
+        );
+    }
+
+    #[test]
+    fn the_wide_bar_keeps_the_whole_chip_row() {
+        let wide = bar_frame(egui::vec2(1032.0, 648.0), Tool::Pencil);
+        let chip_count = wide
+            .shapes
+            .iter()
+            .filter(|cs| {
+                matches!(&cs.shape, egui::Shape::Text(t) if KEYS.contains(&t.galley.job.text.as_str()))
+            })
+            .count();
+        assert_eq!(chip_count, KEYS.len(), "every chip paints on a wide bar");
+    }
+
+    /// The progressive discard's pure seam: how many leading chips
+    /// fit `available` px at `gap` spacing — the tail yields first.
+    #[test]
+    fn fitting_chips_prefix_counts_the_fitting_head() {
+        // 50 + 6 + 50 = 106 ≤ 140; a third chip would need 162.
+        assert_eq!(fitting_chips_prefix(&[50.0, 50.0, 50.0], 140.0, 6.0), 2);
+        // Everything fits.
+        assert_eq!(fitting_chips_prefix(&[50.0, 50.0], 200.0, 6.0), 2);
+        // Nothing fits: the readout keeps its row (never negative,
+        // never a squeezed chip).
+        assert_eq!(fitting_chips_prefix(&[50.0, 50.0], 10.0, 6.0), 0);
     }
 }
