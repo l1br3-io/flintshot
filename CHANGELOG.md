@@ -20,6 +20,20 @@ Categories used below:
 
 ### Added
 
+- **`flintshot record` — screen recording from the CLI** (effort
+  `record-cli`, module 2 of the recording initiative; ADR-0070).
+  `flintshot record` captures MP4/H.264: the whole `--monitor`, a
+  `--geometry x,y,w,h` rectangle, or — bare run on X11 — an
+  interactive drag pick over a frozen frame; `--countdown`,
+  `--duration` (or Ctrl-C) stop and finalize, `--fps` tunes the
+  rate, and `--json-events` emits machine-readable progress for the
+  daemon (module 3). Failures are typed exit codes (2 portal
+  denied, 3 missing GStreamer element with the exact package to
+  install, 4 no display). A new `[record]` config section carries
+  fps/countdown/max-duration and the Wayland portal restore token,
+  so repeat recordings skip the consent prompt; `flintshot backends`
+  grew the record capability column (source, encoder chain, what a
+  recording would select).
 - **The screen-recording engine** (effort `record-engine`, module 1
   of the recording initiative; ADR-0070). A new workspace crate,
   `flintshot-record`, owns everything between "record" and a

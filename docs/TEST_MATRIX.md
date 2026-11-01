@@ -2663,6 +2663,77 @@ RUST_LOG=flintshot=debug ./target/release/flintshot app   # window opens, daemon
   makes the wedge visible and retries, and the armed intent still
   fires on the eventual manual close.
 
+## Screen recording — `flintshot record`, engine + CLI
+
+Spec: `git log --grep='record-engine'` and `git log --grep='record-cli'`;
+design: ADR-0070. Linux-only in v1 (Wayland portal first-class, X11
+fallback). The headless engine/CLI tests run in CI off
+`videotestsrc`; **this phase is everything that needs a real session**
+— the portal consent dialog, real encoders, real grabs. The
+`#[ignore]`d engine tests cover the same ground in test form:
+`cargo test -p flintshot-record --test portal_session -- --ignored`.
+
+### Test setup
+
+```sh
+cargo build --release
+flintshot backends    # the record row must show a source and ≥1 encoder
+```
+
+### Test script
+
+1. **Wayland portal round-trip** (L2–L5): `flintshot record
+   --duration 3 --out /tmp/r1.mp4` → consent dialog appears →
+   approve → countdown → recording → stop → path printed; the file
+   plays in a stock player and `/tmp/r1.mp4` > 100 KB.
+2. **Restore token skips the prompt** (L2–L5): record again with the
+   same command → **no second consent dialog** (check
+   `portal-restore-token` in `flintshot config` output); if the
+   portal implementation ignores tokens, this row is PARTIAL — note
+   the compositor.
+3. **Deny path exits 2** (L2–L5): `flintshot record --duration 1`;
+   dismiss the consent dialog → exit code 2
+   (`echo $?`), message "portal request refused".
+4. **X11 grab** (L1, XV1): `flintshot record --monitor 0 --duration 2
+   --out /tmp/r2.mp4` → finalized file contains the monitor's
+   content; `--geometry 100,100,640,360` records exactly that
+   rectangle.
+5. **X11 interactive pick** (L1, XV1 with a pointer): bare
+   `flintshot record` → frozen frame → drag a rect → recording covers
+   exactly the dragged pixels; Escape during the pick exits 1 with
+   "region selection cancelled".
+6. **Missing element exits 3** (any, with plugins removed):
+   uninstall `gstreamer1.0-plugins-ugly`/`-bad` on a box with no
+   VA-API → `flintshot record --duration 1` fails with the install
+   hint naming the package, exit code 3.
+7. **json-events**: `flintshot record --source testsrc --duration 1
+   --out /tmp/r3.mp4 --json-events` (headless-safe) → lines
+   `{"type":"started",…}` then `{"type":"stopped",…,"bytes":N}` on
+   stdout, nothing human.
+8. **Duration cap + Ctrl-C**: `--countdown 1 --duration 2` auto-stops
+   at ~2 s; a bare record stops cleanly on Ctrl-C with the path
+   printed and `moov` present (both verified by row 1's player
+   check).
+
+| Behavior                                              | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Portal round-trip: consent → playable MP4 (rows 1)    | N/A | | | | | N/A | N/A | N/A | N/A | N/A |
+| Restore token skips the second prompt (row 2)         | N/A | | | | | N/A | N/A | N/A | N/A | N/A |
+| Deny path: exit 2 + refused message (row 3)           | N/A | | | | | N/A | N/A | N/A | N/A | N/A |
+| X11 monitor + geometry grabs (row 4)                 | | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | |
+| Interactive pick: drag = recorded rect; Esc exits 1   | | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | |
+| Missing element: install hint, exit 3 (row 6)         | | | | | | N/A | N/A | N/A | N/A | |
+| json-events schema on stdout (row 7)                  | | | | | | | | | | |
+| Duration cap + Ctrl-C finalize (row 8)                | | | | | | N/A | N/A | N/A | N/A | |
+
+### Known caveats
+
+- Ubuntu 24.04's `plugins-good` ships no V4L2 M2M encoders — the
+  chain's V4L2 slot is expected to be absent there (falls through to
+  x264/OpenH264); see ADR-0070.
+- macOS/Windows recording is deliberately unbuilt (future modules);
+  their columns are N/A by design, not omission.
+
 ## How to verify a cell
 
 1. Note the commit you're testing (`git rev-parse --short HEAD`).

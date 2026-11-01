@@ -63,10 +63,17 @@ entry point:
   standalone without it.
 - **An app window** in the Windows 11 Snipping Tool spirit: capture
   controls, recent captures with thumbnails, settings, AI settings.
+- **Screen recording** (Linux): `flintshot record` captures MP4/H.264
+  from the Wayland portal or an X11 grab — whole monitor, a
+  `--geometry` rectangle, or (on X11, bare run) an interactive drag
+  pick; Ctrl-C or `--duration` stops and finalizes. Encoder picked
+  per machine (VA-API → V4L2 → x264 → OpenH264), repeat Wayland
+  recordings skip the consent prompt via a stored restore token,
+  and `flintshot backends` shows exactly what your machine can do.
 - **Uploads**: imgur ships first (`flintshot auth imgur` stores the
   credential in the OS keyring — never in a config file).
 - **Ask-the-shot AI**: send what you see to any OpenAI-compatible
-  vision model (OpenAI, xAI, Gemini, Ollama, LM Studio, OpenRouter),
+  vision model (OpenAI, xxAI, Gemini, Ollama, LM Studio, OpenRouter),
   read the streamed answer in-app, save reusable prompt transforms.
   Your API key lives in the OS keyring.
 - **COSMIC panel applet** as an alternate front-end (opt-in build —
@@ -86,6 +93,8 @@ entry point:
 
 ```
 flintshot capture            # the OS selection UI (or fallback grab), then the editor
+flintshot record             # record the screen to MP4 — Ctrl-C or --duration stops
+flintshot record --geometry 100,100,800,600 --fps 30 --duration 10
 flintshot app                # the app window; auto-starts the daemon
 flintshot daemon             # tray + global hotkeys + IPC (build with --features tray)
 flintshot open IMG.png       # edit an existing image
@@ -93,7 +102,7 @@ flintshot upload IMG.png     # upload via a configured backend, prints the URL
 flintshot auth imgur         # store/clear backend credentials (OS keyring)
 flintshot hotkeys bind       # bind the capture hotkey via the Wayland portal
 flintshot config             # print the resolved configuration
-flintshot backends           # capture-backend probe report
+flintshot backends           # capture-backend + recording-capability probe report
 ```
 
 `flintshot <command> --help` for the full flag surface;
