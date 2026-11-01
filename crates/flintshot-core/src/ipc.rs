@@ -181,6 +181,26 @@ pub enum Request {
     /// and spawn nothing — the window resolves it from its own
     /// surface state.
     ToggleWindow,
+    // record-ui effort — appended (postcard variant-index rule):
+    /// Ask the daemon to start a screen recording. The daemon spawns
+    /// a `flintshot record` worker (single recording at a time; a
+    /// second request while recording is refused with
+    /// [`Event::RecordingFailed`]) and broadcasts
+    /// [`Event::RecordingStarted`] when the worker reports success.
+    RecordStart,
+    /// Ask the daemon to stop the running recording (graceful: the
+    /// worker finalizes and reports
+    /// [`Request::ReportRecorded`]). No-op — with a
+    /// [`Event::RecordingFailed`] reply — when nothing is recording.
+    RecordStop,
+    /// Record-worker → daemon: the recording finalized at `path`.
+    /// Intercepted by the connection layer (like
+    /// [`Request::ReportSaved`]) and re-broadcast as
+    /// [`Event::RecordingStopped`] to subscribers.
+    ReportRecorded {
+        /// Filesystem path of the finalized MP4.
+        path: PathBuf,
+    },
 }
 
 /// A daemon → client event. Subscribers (see [`Request::Subscribe`])
@@ -312,6 +332,28 @@ pub enum Event {
     /// visible → graceful exit (X-close semantics), capture-hidden →
     /// reopen.
     AppToggle,
+    // record-ui effort — appended (postcard variant-index rule):
+    /// A recording actually started (the worker confirmed
+    /// `PLAYING`). Subscribers swap their UI into the recording
+    /// state.
+    RecordingStarted,
+    /// A recording finalized: the MP4 at `path` is complete and
+    /// playable.
+    RecordingStopped {
+        /// Filesystem path of the finalized MP4.
+        path: PathBuf,
+    },
+    /// A recording failed to start or finalize. `code` is the
+    /// record CLI's exit code (2 portal denied, 3 missing element,
+    /// 4 no display, 1 general) so subscribers can surface the
+    /// actionable message verbatim.
+    RecordingFailed {
+        /// The record CLI's exit code for this failure.
+        code: i32,
+        /// Human-readable failure detail (already carries the
+        /// install hint for missing elements).
+        message: String,
+    },
 }
 
 /// One entry of an [`Event::ShortcutsBound`] reply: a bound shortcut's
@@ -425,6 +467,12 @@ mod tests {
             Request::OpenSettings,
             // tray-show-hide-toggle — appended (postcard variant-index rule)
             Request::ToggleWindow,
+            // record-ui — appended (postcard variant-index rule)
+            Request::RecordStart,
+            Request::RecordStop,
+            Request::ReportRecorded {
+                path: PathBuf::from("/tmp/recorded.mp4"),
+            },
         ];
         for original in cases {
             let bytes = postcard::to_allocvec(&original).expect("encode request");
@@ -468,6 +516,15 @@ mod tests {
             Event::CaptureSuperseded,
             Event::CaptureReady,
             Event::HideForCapture,
+            // record-ui — appended (postcard variant-index rule)
+            Event::RecordingStarted,
+            Event::RecordingStopped {
+                path: PathBuf::from("/tmp/recorded.mp4"),
+            },
+            Event::RecordingFailed {
+                code: 3,
+                message: "missing element".into(),
+            },
             // single-window — appended (postcard variant-index rule)
             Event::CaptureTriggered { delay_ms: 2_500 },
             Event::OpenRequested {

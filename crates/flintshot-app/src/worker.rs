@@ -481,6 +481,9 @@ fn variant_name(request: &Request) -> &'static str {
         Request::OpenApp => "open-app",
         Request::OpenSettings => "open-settings",
         Request::ToggleWindow => "toggle-window",
+        Request::RecordStart => "record-start",
+        Request::RecordStop => "record-stop",
+        Request::ReportRecorded { .. } => "report-recorded",
         Request::PrepareCapture => "prepare-capture",
         Request::ReportAppHidden => "report-app-hidden",
         Request::ReportEditorWindowOpened => "report-editor-window-opened",
@@ -1679,6 +1682,14 @@ mod tests {
             (Request::OpenSettings, "open-settings"),
             // tray-show-hide-toggle — appended
             (Request::ToggleWindow, "toggle-window"),
+            (Request::RecordStart, "record-start"),
+            (Request::RecordStop, "record-stop"),
+            (
+                Request::ReportRecorded {
+                    path: std::path::PathBuf::from("/tmp/r.mp4"),
+                },
+                "report-recorded",
+            ),
             (Request::PrepareCapture, "prepare-capture"),
             (Request::ReportAppHidden, "report-app-hidden"),
             (
