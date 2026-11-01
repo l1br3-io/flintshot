@@ -2714,6 +2714,17 @@ flintshot backends    # the record row must show a source and ≥1 encoder
    at ~2 s; a bare record stops cleanly on Ctrl-C with the path
    printed and `moov` present (both verified by row 1's player
    check).
+9. **Tray round-trip** (any Linux with the tray feature): daemon
+   running → tray **Record** → consent (Wayland) → the item swaps
+   to **Stop recording** → click it → the recording finalizes and
+   the item returns to **Record**; the app window (if open) shows
+   then clears its banner in step.
+10. **App card + stop from another surface** (L2–L5): app window →
+    **Record** card → banner counts up → stop from the TRAY → the
+    app's banner clears and the file appears in recents as a video
+    row; the ▶ card opens the system player.
+11. **COSMIC applet line** (L5): applet popup → Record → status
+    shows *Recording…* → stop → *Recorded <name>*.
 
 | Behavior                                              | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
 | ----------------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
@@ -2725,6 +2736,9 @@ flintshot backends    # the record row must show a source and ≥1 encoder
 | Missing element: install hint, exit 3 (row 6)         | | | | | | N/A | N/A | N/A | N/A | |
 | json-events schema on stdout (row 7)                  | | | | | | | | | | |
 | Duration cap + Ctrl-C finalize (row 8)                | | | | | | N/A | N/A | N/A | N/A | |
+| Tray Record→Stop label swap; finalize (row 9)          | | | | | | N/A | N/A | N/A | N/A | N/A |
+| App banner + stop-from-tray + recents ▶ (row 10)      | | | | | | N/A | N/A | N/A | N/A | N/A |
+| COSMIC applet recording status line (row 11)           | N/A | N/A | N/A | N/A | | N/A | N/A | N/A | N/A | N/A |
 
 ### Known caveats
 

@@ -20,6 +20,18 @@ Categories used below:
 
 ### Added
 
+- **Recording from every surface** (effort `record-ui`, module 3 of
+  the recording initiative). The tray grows a **Record / Stop
+  recording** item whose label tracks the live state; the app
+  window gains a **Record** card on the capture home with a
+  recording banner (elapsed time, stop hint) driven by the daemon's
+  event stream, and finished recordings land in recents as video
+  rows (▶ card → your video player, no thumbnail decode); the
+  COSMIC applet's popup tracks Recording… / Recorded / failed
+  states. One recording at a time, enforced by the daemon's gate;
+  a crashed record worker is isolated (the daemon broadcasts the
+  failure and stays alive).
+
 - **`flintshot record` — screen recording from the CLI** (effort
   `record-cli`, module 2 of the recording initiative; ADR-0070).
   `flintshot record` captures MP4/H.264: the whole `--monitor`, a

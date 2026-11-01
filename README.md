@@ -70,6 +70,11 @@ entry point:
   per machine (VA-API → V4L2 → x264 → OpenH264), repeat Wayland
   recordings skip the consent prompt via a stored restore token,
   and `flintshot backends` shows exactly what your machine can do.
+  Every surface can drive it: the tray grows a Record/Stop item
+  that swaps with the live state, the app window's Record card
+  shows a recording banner with elapsed time (recordings land in
+  your recents with a ▶ card that opens your video player), and
+  the COSMIC applet tracks it in its status line.
 - **Uploads**: imgur ships first (`flintshot auth imgur` stores the
   credential in the OS keyring — never in a config file).
 - **Ask-the-shot AI**: send what you see to any OpenAI-compatible

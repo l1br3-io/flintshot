@@ -3791,13 +3791,11 @@ async fn run_record_flow(args: &RecordArgs) -> std::result::Result<(PathBuf, u64
             }
         }
     }
-    let handle = std::sync::Arc::new(recorder.start()?);
-    if args.json_events {
-        println!("{}", RecordEvent::Started { path: &out }.to_json_line());
-    } else {
-        eprintln!("recording to {} — Ctrl-C to stop", out.display());
-    }
-
+    // Signal handling arms BEFORE the pipeline starts: the output
+    // file's existence is observable from start() onward, and a
+    // SIGINT that lands between file creation and handler
+    // registration would take the default disposition — killing the
+    // process instead of finalizing (the race the CI run caught).
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .map_err(|err| RecordError::PipelineFailed {
             element: "signal".into(),
@@ -3808,6 +3806,13 @@ async fn run_record_flow(args: &RecordArgs) -> std::result::Result<(PathBuf, u64
             element: "signal".into(),
             message: err.to_string(),
         })?;
+
+    let handle = std::sync::Arc::new(recorder.start()?);
+    if args.json_events {
+        println!("{}", RecordEvent::Started { path: &out }.to_json_line());
+    } else {
+        eprintln!("recording to {} — Ctrl-C to stop", out.display());
+    }
 
     let cap = async {
         match args.duration_secs {
