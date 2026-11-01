@@ -2519,6 +2519,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "flintshot-record"
+version = "0.1.1"
+dependencies = [
+ "flintshot-core",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

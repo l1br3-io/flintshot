@@ -5,6 +5,7 @@ members = [
     "crates/flintshot-core",
     "crates/flintshot-cosmic",
     "crates/flintshot-editor-egui",
+    "crates/flintshot-record",
 ]
 default-members = ["crates/flintshot-app"]
 
