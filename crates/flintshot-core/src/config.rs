@@ -47,6 +47,55 @@ pub struct Config {
     /// no secret material — the API key lives in the OS keyring.
     #[serde(default)]
     pub ai: AiConfig,
+    /// Screen-recording defaults (see [`RecordingConfig`]) — the
+    /// `[record]` section. Same additive policy as ADR-0057: older
+    /// files without the section load with defaults.
+    #[serde(default)]
+    pub record: RecordingConfig,
+}
+
+/// Screen-recording defaults (the `[record]` section; the recording
+/// initiative). Every field is additive with a default — an old
+/// config lacking the whole section loads unchanged, unknown keys
+/// inside it are ignored, and the portal restore token is not a
+/// credential: it lives here, not in the keyring (ADR-0070).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordingConfig {
+    /// Capture rate in frames per second, clamped into `1..=60` by
+    /// the engine.
+    #[serde(default = "default_record_fps")]
+    pub fps: u32,
+    /// Seconds to count down before a recording starts.
+    #[serde(default = "default_record_countdown")]
+    pub countdown: u32,
+    /// Auto-stop cap in seconds; `None` records until stopped.
+    #[serde(default)]
+    pub max_duration_secs: Option<f64>,
+    /// The XDG portal's restore token from the last Wayland
+    /// recording — replayed so repeat recordings skip the consent
+    /// prompt where the portal honors tokens. Best-effort by
+    /// design: a stale or revoked token just re-prompts.
+    #[serde(default)]
+    pub portal_restore_token: Option<String>,
+}
+
+fn default_record_fps() -> u32 {
+    30
+}
+
+fn default_record_countdown() -> u32 {
+    3
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            fps: default_record_fps(),
+            countdown: default_record_countdown(),
+            max_duration_secs: None,
+            portal_restore_token: None,
+        }
+    }
 }
 
 /// Editor defaults: persist the user's last-used color, stroke width,
@@ -1342,6 +1391,38 @@ mod tests {
     }
 
     #[test]
+    fn record_section_merges_tolerantly() {
+        // No [record] section at all: defaults (the ADR-0057 additive
+        // promise for pre-recording configs).
+        let old = toml::from_str::<Config>("[ui]\n").unwrap();
+        assert_eq!(old.record, RecordingConfig::default());
+
+        // Partial section + unknown key: known fields load, unknown
+        // ones are ignored, missing ones default.
+        let partial =
+            toml::from_str::<Config>("[record]\nfps = 24\nfuture-key = \"whatever\"\n").unwrap();
+        assert_eq!(partial.record.fps, 24);
+        assert_eq!(partial.record.countdown, 3);
+        assert_eq!(partial.record.max_duration_secs, None);
+        assert_eq!(partial.record.portal_restore_token, None);
+
+        // Full section round-trips through save/load.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.record.fps = 15;
+        cfg.record.countdown = 0;
+        cfg.record.max_duration_secs = Some(90.0);
+        cfg.record.portal_restore_token = Some("token-1".into());
+        cfg.save_to(&path).unwrap();
+        let back = Config::load_from(&path).unwrap();
+        assert_eq!(back.record.fps, 15);
+        assert_eq!(back.record.countdown, 0);
+        assert_eq!(back.record.max_duration_secs, Some(90.0));
+        assert_eq!(back.record.portal_restore_token, Some("token-1".into()));
+    }
+
+    #[test]
     fn save_to_then_load_from_roundtrips_values() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -1995,6 +2076,17 @@ backend = \"portal\"
         assert_eq!(from_asset.capture.backend, d.capture.backend);
         assert_eq!(from_asset.capture.after_grab, d.capture.after_grab);
         assert_eq!(from_asset.capture.default_mode, d.capture.default_mode);
+
+        assert_eq!(from_asset.record.fps, d.record.fps);
+        assert_eq!(from_asset.record.countdown, d.record.countdown);
+        assert_eq!(
+            from_asset.record.max_duration_secs,
+            d.record.max_duration_secs
+        );
+        assert_eq!(
+            from_asset.record.portal_restore_token,
+            d.record.portal_restore_token
+        );
 
         assert_eq!(from_asset.hotkeys.capture, d.hotkeys.capture);
         assert_eq!(from_asset.upload.default_backend, d.upload.default_backend);

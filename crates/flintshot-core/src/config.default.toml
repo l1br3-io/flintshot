@@ -144,3 +144,19 @@ save-clipboard-copies = true
 # model = ""
 # base-url = ""
 # recent-transforms = []
+
+# Screen recording (`flintshot record`; the recording initiative).
+#
+# fps: capture rate, clamped to 1..=60 by the engine.
+# countdown: seconds before a recording starts (0 = start at once).
+# max-duration: auto-stop after this many seconds; omit (or leave
+#   empty) to record until stopped.
+# portal-restore-token: managed by flintshot — replayed so repeat
+#   Wayland recordings skip the portal consent prompt. Not a secret;
+#   a stale token simply re-prompts.
+#
+# [record]
+# fps = 30
+# countdown = 3
+# max-duration = 300
+# portal-restore-token = ""

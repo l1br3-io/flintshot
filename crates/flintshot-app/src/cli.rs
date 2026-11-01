@@ -386,8 +386,9 @@ pub struct RecordArgs {
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
     /// Count down this many seconds before recording starts.
-    #[arg(long, value_name = "SECS", default_value_t = 0)]
-    pub countdown: u32,
+    /// Defaults to `[record] countdown` (config; 3).
+    #[arg(long, value_name = "SECS")]
+    pub countdown: Option<u32>,
     /// Emit machine-readable progress events (one JSON object per
     /// line) instead of human output — the daemon consumes this for
     /// the tray/window recording state.
@@ -3252,6 +3253,24 @@ pub fn run_record_pick(_args: &RecordPickArgs) -> Result<()> {
     color_eyre::eyre::bail!("record-pick needs the editor feature (the picker is a window)")
 }
 
+/// The effective recording settings after flag/config merge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RecordSettings {
+    fps: u32,
+    countdown: u32,
+    max_duration_secs: Option<f64>,
+}
+
+/// Flag-over-config settings resolution: an explicit CLI flag wins,
+/// else the `[record]` section, else the code default.
+fn resolve_record_settings(args: &RecordArgs, cfg: &Config) -> RecordSettings {
+    RecordSettings {
+        fps: args.fps.unwrap_or(cfg.record.fps),
+        countdown: args.countdown.unwrap_or(cfg.record.countdown),
+        max_duration_secs: args.duration_secs.or(cfg.record.max_duration_secs),
+    }
+}
+
 #[cfg(test)]
 mod record_cli_tests {
     use crate::cli::{Cli, Command, RecordArgs, RecordPlan, RecordSourceFlag};
@@ -3296,7 +3315,7 @@ mod record_cli_tests {
         assert_eq!(args.fps, Some(15));
         assert_eq!(args.duration_secs, Some(1.5));
         assert_eq!(args.out, Some(std::path::PathBuf::from("/tmp/clip.mp4")));
-        assert_eq!(args.countdown, 2);
+        assert_eq!(args.countdown, Some(2));
         assert!(args.json_events);
         assert_eq!(args.source, None);
     }
@@ -3365,7 +3384,7 @@ mod record_cli_tests {
             fps: Some(10),
             duration_secs: duration,
             out: Some(out.to_path_buf()),
-            countdown: 0,
+            countdown: Some(0),
             json_events: false,
             source: Some(RecordSourceFlag::TestSrc),
         }
@@ -3436,6 +3455,42 @@ mod record_cli_tests {
             shifted,
             Rect::new(Point::new(1930.0, 20.0), Point::new(2230.0, 470.0))
         );
+    }
+
+    #[test]
+    fn record_settings_flags_override_config_over_defaults() {
+        use crate::cli::resolve_record_settings;
+        use flintshot_core::Config;
+        let mut cfg = Config::default();
+        cfg.record.fps = 24;
+        cfg.record.countdown = 5;
+        cfg.record.max_duration_secs = Some(120.0);
+
+        let mut bare = test_record_args(std::path::Path::new("/tmp/x.mp4"), None);
+        bare.fps = None;
+        bare.countdown = None;
+        let s = resolve_record_settings(&bare, &cfg);
+        assert_eq!(s.fps, 24);
+        assert_eq!(s.countdown, 5);
+        assert_eq!(s.max_duration_secs, Some(120.0));
+
+        bare.fps = Some(15);
+        bare.countdown = Some(0);
+        bare.duration_secs = Some(1.5);
+        let s = resolve_record_settings(&bare, &cfg);
+        assert_eq!(s.fps, 15);
+        assert_eq!(s.countdown, 0);
+        assert_eq!(s.max_duration_secs, Some(1.5));
+
+        // Bare args against a default config: code defaults.
+        let s = resolve_record_settings(&bare, &Config::default());
+        assert_eq!(s.fps, 15, "flag still wins over defaults");
+        bare.fps = None;
+        bare.countdown = None;
+        bare.duration_secs = None;
+        let s = resolve_record_settings(&bare, &Config::default());
+        assert_eq!((s.fps, s.countdown), (30, 3));
+        assert_eq!(s.max_duration_secs, None);
     }
 
     #[test]
@@ -3614,7 +3669,8 @@ async fn run_record_flow(args: &RecordArgs) -> std::result::Result<(PathBuf, u64
         picked_region = Some(pick_region_interactively(None)?);
     }
 
-    for remaining in (1..=args.countdown).rev() {
+    let settings = resolve_record_settings(args, &cfg);
+    for remaining in (1..=settings.countdown).rev() {
         if args.json_events {
             println!("{}", RecordEvent::Countdown { remaining }.to_json_line());
         } else {
@@ -3625,24 +3681,27 @@ async fn run_record_flow(args: &RecordArgs) -> std::result::Result<(PathBuf, u64
 
     let out = args.out.clone().unwrap_or_else(|| default_record_out(&cfg));
     let mut record_cfg = flintshot_record::RecordConfig::new(&out);
-    record_cfg.fps = args.fps.unwrap_or(30);
-    record_cfg.max_duration = args.duration_secs.map(Duration::from_secs_f64);
+    record_cfg.fps = settings.fps;
+    record_cfg.max_duration = settings.max_duration_secs.map(Duration::from_secs_f64);
     record_cfg.region = args.geometry.or(picked_region);
     record_cfg.monitor = args.monitor;
+    record_cfg.portal_restore_token = cfg.record.portal_restore_token.clone();
     record_cfg.source = match plan {
         RecordPlan::TestSrc => flintshot_record::RecordSource::TestSrc,
         RecordPlan::Portal | RecordPlan::X11 => flintshot_record::RecordSource::Session,
     };
 
     let recorder = flintshot_record::Recorder::prepare(record_cfg).await?;
-    let restore_token = recorder.restore_token().map(str::to_owned);
-    if let Some(token) = restore_token.as_deref() {
-        // Persistence is C4's [record] section; until then the token
-        // is at least visible for manual verification.
-        tracing::info!(
-            ?token,
-            "portal session token (persistence lands with [record])"
-        );
+    // Persist a fresh portal restore token (best-effort: a failed
+    // save costs the next prompt, never the recording).
+    if let Some(token) = recorder.restore_token() {
+        if cfg.record.portal_restore_token.as_deref() != Some(token) {
+            let mut updated = cfg.clone();
+            updated.record.portal_restore_token = Some(token.to_owned());
+            if let Err(err) = updated.save() {
+                tracing::warn!(%err, "saving the portal restore token failed");
+            }
+        }
     }
     let handle = std::sync::Arc::new(recorder.start()?);
     if args.json_events {
