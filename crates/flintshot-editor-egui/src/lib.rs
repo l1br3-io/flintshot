@@ -86,3 +86,25 @@ pub use shell::{
     AiEvent, CloseHandle, EditorPageBridge, EguiShell, ModelsArrival, VisionProbeArrival,
 };
 pub use window::{Route, RouteHost, RoutedEditor, WindowExit, WindowStart};
+
+/// Test-only layout probes shared by the responsiveness
+/// regressions: the invariant every surface must hold at any window
+/// size is that **readable content** (text) never escapes its clip
+/// rect — decorative shadows may bleed a few px by design.
+#[cfg(test)]
+pub(crate) mod test_layout {
+    /// The worst horizontal escape among `out`'s text shapes: how
+    /// far any galley's ink extends past its own clip rect on
+    /// either side. Positive = visually truncated text. Sub-pixel
+    /// fuzz is the caller's tolerance.
+    pub(crate) fn worst_text_clip_escape(out: &egui::FullOutput) -> f32 {
+        out.shapes
+            .iter()
+            .filter(|cs| matches!(cs.shape, egui::Shape::Text(_)))
+            .map(|cs| {
+                let b = cs.shape.visual_bounding_rect();
+                (b.right() - cs.clip_rect.right()).max(cs.clip_rect.left() - b.left())
+            })
+            .fold(0.0_f32, f32::max)
+    }
+}

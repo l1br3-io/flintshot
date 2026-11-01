@@ -53,6 +53,20 @@ const SHOW_PASTE: bool = true;
 /// The hero's pop-in ramp, seconds.
 const HERO_POP_IN_SECONDS: f32 = 0.25;
 
+/// The hero card's rest height, logical px — what one line of
+/// headline affords. A wrapped headline grows the card past this
+/// (see [`HomeApp::hero_card`]); it never crops the text.
+const HERO_REST_HEIGHT: f32 = 120.0;
+
+/// Vertical air around the headline inside the hero card. The
+/// wrapped headline's height plus twice this is the card's floor;
+/// [`HERO_REST_HEIGHT`] is the max of the two.
+const HERO_TEXT_INSET: f32 = 22.0;
+
+/// The flame badge's clear zone at the hero card's left edge — the
+/// headline never starts left of this, at any width.
+const HERO_TEXT_CLEAR: f32 = 60.0;
+
 /// Thumbnail card edge, logical px (decoded at 2× for crispness).
 const THUMB_EDGE: f32 = 96.0;
 
@@ -312,6 +326,62 @@ fn group_by_day(
 /// yields before the type does).
 fn recent_card_size(card_w: f32) -> egui::Vec2 {
     egui::vec2(card_w, (card_w - 16.0) + 40.0)
+}
+
+/// Which items share a row when laid left-to-right in `available`
+/// px with `gap` between neighbours: an item that cannot fit after
+/// the current row's cursor starts the next row — never squeezed,
+/// never dropped (an item wider than `available` still gets its own
+/// row and renders). Pure; unit-tested.
+fn wrap_rows(widths: &[f32], available: f32, gap: f32) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut cursor = 0.0_f32;
+    for (i, &w) in widths.iter().enumerate() {
+        let row = rows.last_mut().expect("the seed row exists");
+        let fits = if row.is_empty() {
+            w <= available
+        } else {
+            cursor + gap + w <= available
+        };
+        if fits {
+            cursor = if row.is_empty() { w } else { cursor + gap + w };
+            row.push(i);
+        } else {
+            rows.push(vec![i]);
+            cursor = w;
+        }
+    }
+    rows.retain(|row| !row.is_empty());
+    rows
+}
+
+/// The hero headline as one wrapped, centred layout job — cream
+/// lead, gold emphasis, the display face. Wrapping is what makes
+/// the hero responsive: the same job reflows as the card narrows,
+/// so the text never runs off the card's right edge. Pure
+/// construction; the galley comes from the caller's fonts.
+fn hero_headline_job(wrap_width: f32) -> egui::text::LayoutJob {
+    use crate::theme::palette as p;
+    let font = egui::FontId::new(
+        crate::theme::TYPE_XL,
+        egui::FontFamily::Name(crate::theme::FAMILY_DISPLAY.into()),
+    );
+    let mut job = egui::text::LayoutJob {
+        wrap: egui::text::TextWrapping::wrap_at_width(wrap_width),
+        halign: egui::Align::Center,
+        ..egui::text::LayoutJob::default()
+    };
+    job.append(
+        "Capture. Annotate. Hand it off — ",
+        0.0,
+        egui::text::TextFormat::simple(font.clone(), p::CREAM_TEXT),
+    );
+    job.append(
+        "in seconds.",
+        0.0,
+        egui::text::TextFormat::simple(font, p::GOLD),
+    );
+    job
 }
 
 /// A decoded recent: the downscaled thumbnail texture plus the
@@ -798,9 +868,11 @@ impl HomeApp {
     }
 
     /// The hero: a forest-filled cutout card with the 8 px white
-    /// border, spring pop-in on first open, "Take a screenshot" in
-    /// the display weight. Click (or the C accelerator, handled in
-    /// `logic_impl`) fires the existing capture flow.
+    /// border, spring pop-in on first open, the headline in the
+    /// display weight — wrapped, so a narrow window reflows the
+    /// words inside the card instead of running them off the edge
+    /// (the card grows to carry the extra lines). Click (or the C
+    /// accelerator, handled in `logic_impl`) fires the capture flow.
     fn hero_card(&mut self, ui: &mut egui::Ui) {
         use crate::theme::palette as p;
         let eased = crate::theme::ease::spring(self.age / HERO_POP_IN_SECONDS);
@@ -812,8 +884,19 @@ impl HomeApp {
         // Pop-in: the card grows from an inset; overshoot lets it
         // breathe slightly past the resting size.
         let inset = ((1.0 - eased) * 40.0).max(0.0);
-        let width = ui.available_width().max(320.0);
-        let full = egui::vec2(width, 120.0);
+        let width = ui.available_width();
+        // Lay the headline out first (wrapped into the width the
+        // badge and the card's padding leave), then size the card
+        // to the galley — one line keeps the 120 px rest height, a
+        // wrapped headline grows the card.
+        let wrap = (width - HERO_TEXT_CLEAR - HERO_TEXT_INSET).max(80.0);
+        let galley = ui
+            .ctx()
+            .fonts_mut(|f| f.layout_job(hero_headline_job(wrap)));
+        let full = egui::vec2(
+            width,
+            (galley.size().y + 2.0 * HERO_TEXT_INSET).max(HERO_REST_HEIGHT),
+        );
         let (rect, _) = ui.allocate_exact_size(full, egui::Sense::hover());
         let card = rect.shrink(inset);
         let resp = ui
@@ -866,32 +949,21 @@ impl HomeApp {
             egui::FontId::proportional(crate::theme::TYPE_SM),
             p::FOREST_INK,
         );
-        // The headline with the gold emphasis.
-        let lead = ui.painter().layout_no_wrap(
-            "Capture. Annotate. Hand it off — ".to_owned(),
-            egui::FontId::new(
-                crate::theme::TYPE_XL,
-                egui::FontFamily::Name(crate::theme::FAMILY_DISPLAY.into()),
-            ),
+        // The headline, centred on the card but never intruding on
+        // the badge's clear zone: the wrap budget already reserves
+        // it, so a narrow window's full lines start at the zone's
+        // right edge rather than under the flame. The job's
+        // `halign: Center` straddles rows around x = 0, so the paint
+        // origin is the block's centre, not its left edge.
+        let block_center_x = card
+            .center()
+            .x
+            .max(outline.left() + HERO_TEXT_CLEAR + galley.size().x / 2.0);
+        ui.painter().galley(
+            egui::pos2(block_center_x, card.center().y - galley.size().y / 2.0),
+            galley,
             p::CREAM_TEXT,
         );
-        let gold = ui.painter().layout_no_wrap(
-            "in seconds.".to_owned(),
-            egui::FontId::new(
-                crate::theme::TYPE_XL,
-                egui::FontFamily::Name(crate::theme::FAMILY_DISPLAY.into()),
-            ),
-            p::GOLD,
-        );
-        let text_w = lead.size().x + gold.size().x;
-        let lead_h = lead.size().y;
-        let base = egui::pos2(
-            (card.center().x - text_w / 2.0).max(outline.left() + 60.0),
-            card.center().y - lead_h / 2.0,
-        );
-        ui.painter().galley(base, lead.clone(), p::CREAM_TEXT);
-        ui.painter()
-            .galley(base + egui::vec2(lead.size().x, 0.0), gold, p::GOLD);
         if resp.clicked() {
             let ctx = ui.ctx().clone();
             self.start_capture(&ctx);
@@ -899,74 +971,98 @@ impl HomeApp {
     }
 
     /// The three mockup hcards: New capture / Open image / Paste —
-    /// cream cutouts with a hover lift.
+    /// cream cutouts with a hover lift. The row wraps: cards that
+    /// cannot fit the window's width flow onto extra rows instead
+    /// of rendering outside (see [`wrap_rows`]).
     fn secondary_cards(&mut self, ui: &mut egui::Ui) {
         use crate::theme::palette as p;
-        ui.horizontal(|ui| {
-            for (id, icon, label, hint) in [
-                ("home-capture", "✚", "New capture", " · C"),
-                ("home-open", "🗀", "Open image", " · O"),
-                ("home-paste", "📋", "Paste", " · P"),
-            ] {
+        let gap = crate::theme::SPACE_SCALE[1];
+        let specs: [(&'static str, &str, &str, &str); 3] = [
+            ("home-capture", "✚", "New capture", " · C"),
+            ("home-open", "🗀", "Open image", " · O"),
+            ("home-paste", "📋", "Paste", " · P"),
+        ];
+        // Measure first (chrome width is galley-driven), then flow
+        // the measured cards into rows.
+        let cards: Vec<(std::sync::Arc<egui::Galley>, f32)> = specs
+            .iter()
+            .map(|(_, _, label, hint)| {
                 let galley = ui.painter().layout_no_wrap(
                     format!("{label}{hint}"),
                     egui::FontId::proportional(crate::theme::TYPE_MD),
                     p::INK,
                 );
                 let w = 18.0 + 22.0 + 8.0 + galley.size().x + 18.0;
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 44.0), egui::Sense::hover());
-                let resp = ui
-                    .interact(rect, egui::Id::new(id), egui::Sense::click())
-                    .on_hover_text(label);
-                // Hover lift: 2 px up, a touch wider.
-                let lift = if resp.hovered() { 2.0 } else { 0.0 };
-                let card = rect.translate(egui::vec2(0.0, -lift));
-                ui.painter().add(if resp.hovered() {
-                    crate::theme::SHADOW_LIFT
-                        .as_shape(card, egui::CornerRadius::same(crate::theme::POD_RADIUS))
-                } else {
-                    crate::theme::SHADOW_RESTING
-                        .as_shape(card, egui::CornerRadius::same(crate::theme::POD_RADIUS))
-                });
-                ui.painter().rect(
-                    card,
-                    egui::CornerRadius::same(crate::theme::POD_RADIUS),
-                    if resp.hovered() {
-                        p::with_alpha(p::GOLD, 30)
+                (galley, w)
+            })
+            .collect();
+        let widths: Vec<f32> = cards.iter().map(|(_, w)| *w).collect();
+        let rows = wrap_rows(&widths, ui.available_width(), gap);
+        let last_row = rows.len().saturating_sub(1);
+        for (r, row) in rows.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for &i in row {
+                    let (id, icon, label, _hint) = specs[i];
+                    let (galley, w) = &cards[i];
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(*w, 44.0), egui::Sense::hover());
+                    let resp = ui
+                        .interact(rect, egui::Id::new(id), egui::Sense::click())
+                        .on_hover_text(label);
+                    // Hover lift: 2 px up, a touch wider.
+                    let lift = if resp.hovered() { 2.0 } else { 0.0 };
+                    let card = rect.translate(egui::vec2(0.0, -lift));
+                    ui.painter().add(if resp.hovered() {
+                        crate::theme::SHADOW_LIFT
+                            .as_shape(card, egui::CornerRadius::same(crate::theme::POD_RADIUS))
                     } else {
-                        p::PAPER_CREAM
-                    },
-                    if resp.hovered() {
-                        egui::Stroke::new(1.25, p::FOREST)
-                    } else {
-                        crate::theme::HAIRLINE_STROKE
-                    },
-                    egui::StrokeKind::Middle,
-                );
-                ui.painter().text(
-                    egui::pos2(card.left() + 18.0, card.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    icon,
-                    egui::FontId::proportional(crate::theme::TYPE_MD),
-                    p::INK,
-                );
-                let pos = egui::pos2(
-                    card.left() + 18.0 + 22.0 + 8.0,
-                    card.center().y - galley.size().y / 2.0,
-                );
-                ui.painter().galley(pos, galley, p::INK);
-                if resp.clicked() {
-                    let ctx = ui.ctx().clone();
-                    match id {
-                        "home-capture" => self.start_capture(&ctx),
-                        "home-open" => self.handle_open(&ctx),
-                        _ => {
-                            let _ = self.bridge.request_paste();
+                        crate::theme::SHADOW_RESTING
+                            .as_shape(card, egui::CornerRadius::same(crate::theme::POD_RADIUS))
+                    });
+                    ui.painter().rect(
+                        card,
+                        egui::CornerRadius::same(crate::theme::POD_RADIUS),
+                        if resp.hovered() {
+                            p::with_alpha(p::GOLD, 30)
+                        } else {
+                            p::PAPER_CREAM
+                        },
+                        if resp.hovered() {
+                            egui::Stroke::new(1.25, p::FOREST)
+                        } else {
+                            crate::theme::HAIRLINE_STROKE
+                        },
+                        egui::StrokeKind::Middle,
+                    );
+                    ui.painter().text(
+                        egui::pos2(card.left() + 18.0, card.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        icon,
+                        egui::FontId::proportional(crate::theme::TYPE_MD),
+                        p::INK,
+                    );
+                    let pos = egui::pos2(
+                        card.left() + 18.0 + 22.0 + 8.0,
+                        card.center().y - galley.size().y / 2.0,
+                    );
+                    ui.painter().galley(pos, galley.clone(), p::INK);
+                    if resp.clicked() {
+                        let ctx = ui.ctx().clone();
+                        match id {
+                            "home-capture" => self.start_capture(&ctx),
+                            "home-open" => self.handle_open(&ctx),
+                            _ => {
+                                let _ = self.bridge.request_paste();
+                            }
                         }
                     }
                 }
+            });
+            if r < last_row {
+                ui.add_space(gap);
             }
-        });
+        }
     }
 
     /// The "This session" grid: resumable unsaved captures, above
@@ -1286,7 +1382,9 @@ impl HomeApp {
     }
 
     /// The friendly empty card — a truly empty index *or* one whose
-    /// paths all went dead render this, never bare space.
+    /// paths all went dead render this, never bare space. The
+    /// caption wraps into the card, so a narrow window never clips
+    /// it.
     fn recents_empty_card(ui: &mut egui::Ui) {
         use crate::theme::palette as p;
         let (rect, _) = ui.allocate_exact_size(
@@ -1301,10 +1399,11 @@ impl HomeApp {
             crate::theme::HAIRLINE_STROKE,
             egui::StrokeKind::Middle,
         );
-        let galley = ui.painter().layout_no_wrap(
+        let galley = ui.painter().layout(
             "No captures yet — your recent shots will land here".to_owned(),
             egui::FontId::proportional(crate::theme::TYPE_SM),
             p::INK_SOFT,
+            (rect.width() - 24.0).max(60.0),
         );
         let pos = egui::pos2(
             rect.center().x - galley.size().x / 2.0,
@@ -3112,5 +3211,114 @@ mod tests {
             vec![drop],
             "the drop routes exactly once while egui holds the file"
         );
+    }
+
+    // --- Responsive layout (responsive-ui) ---------------------------
+    //
+    // The invariant: at any window width ≥ the floor (360 px) every
+    // readable thing stays inside the window — the hero's headline
+    // wraps inside its card instead of running off the right edge,
+    // and the three action cards flow onto extra rows instead of
+    // rendering outside the window.
+
+    /// The window floor the responsive layout is designed for (the
+    /// router pins it on the viewport; see `shell`).
+    const NARROW: egui::Vec2 = egui::vec2(360.0, 640.0);
+
+    /// A fresh app over a silent bridge at `screen`, one frame.
+    fn narrow_frame(screen: egui::Vec2) -> (HomeApp, egui::Context, egui::FullOutput) {
+        let mut app = HomeApp::new(Box::new(RecordingBridge::default()), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let out = welcome_frame_sized(&mut app, &ctx, vec![], screen);
+        (app, ctx, out)
+    }
+
+    #[test]
+    fn hero_headline_stays_inside_a_narrow_window() {
+        let (_app, ctx, out) = narrow_frame(NARROW);
+        let escape = crate::test_layout::worst_text_clip_escape(&out);
+        assert!(
+            escape <= 0.5,
+            "no text may be visually truncated at 360 px wide (worst escape {escape:.1} px)"
+        );
+        let hero = ctx
+            .read_response(egui::Id::new("hero-capture"))
+            .expect("the hero registers")
+            .rect;
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), NARROW);
+        assert!(
+            screen.contains_rect(hero.shrink(-0.5)),
+            "the hero card fits the window: {hero:?} vs {screen:?}"
+        );
+    }
+
+    #[test]
+    fn hero_grows_to_fit_a_wrapped_headline() {
+        // The headline cannot fit one line at 360 px — the card must
+        // grow past its 120 px rest height rather than crop the text.
+        let (_app, ctx, _out) = narrow_frame(NARROW);
+        let hero = ctx
+            .read_response(egui::Id::new("hero-capture"))
+            .expect("the hero registers")
+            .rect;
+        assert!(
+            hero.height() > 120.0,
+            "the card grew to carry the wrapped headline (height {})",
+            hero.height()
+        );
+    }
+
+    #[test]
+    fn hero_keeps_its_rest_height_on_a_wide_window() {
+        let (_app, ctx, _out) = narrow_frame(egui::vec2(1032.0, 648.0));
+        let hero = ctx
+            .read_response(egui::Id::new("hero-capture"))
+            .expect("the hero registers")
+            .rect;
+        assert!(
+            (hero.height() - 120.0).abs() < 1.0,
+            "one line of headline keeps the 120 px card (height {})",
+            hero.height()
+        );
+    }
+
+    #[test]
+    fn action_cards_wrap_inside_a_narrow_window() {
+        let (_app, ctx, out) = narrow_frame(NARROW);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), NARROW);
+        for id in ["home-capture", "home-open", "home-paste"] {
+            let rect = ctx
+                .read_response(egui::Id::new(id))
+                .unwrap_or_else(|| panic!("{id} renders"))
+                .rect;
+            assert!(
+                screen.contains_rect(rect.shrink(-0.5)),
+                "{id} fits the window: {rect:?}"
+            );
+        }
+        let escape = crate::test_layout::worst_text_clip_escape(&out);
+        assert!(
+            escape <= 0.5,
+            "no card label may be truncated (worst escape {escape:.1} px)"
+        );
+    }
+
+    /// The wrap row's pure seam: which card indices share a row.
+    /// Cards keep mockup order; a card that cannot fit after the
+    /// current row's cursor starts the next row (never squeezed,
+    /// never rendered outside).
+    #[test]
+    fn wrap_rows_break_only_where_cards_would_overflow() {
+        // 100 + 8 + 100 = 208 ≤ 210 → one row; a third 100 does not
+        // fit (308 > 210) and starts row 2.
+        let rows = wrap_rows(&[100.0, 100.0, 100.0], 210.0, 8.0);
+        assert_eq!(rows, vec![vec![0, 1], vec![2]]);
+        // A card wider than the window still renders (its own row).
+        let rows = wrap_rows(&[50.0, 400.0], 210.0, 8.0);
+        assert_eq!(rows, vec![vec![0], vec![1]]);
+        // Roomy window: one row.
+        let rows = wrap_rows(&[100.0, 100.0, 100.0], 400.0, 8.0);
+        assert_eq!(rows, vec![vec![0, 1, 2]]);
     }
 }
