@@ -53,16 +53,20 @@ pub(crate) fn run() -> eyre::Result<()> {
     // lives exactly as long as this process — ADR-0039/0042. No
     // session flavor since the settings swap: the menu is identical
     // on every session (the Wayland-only bind item moved to the
-    // settings page).
-    let _icon = crate::tray::build()?;
+    // settings page). The record item's handle is kept separately:
+    // its label flips as Recording* events arrive.
+    let (_icon, record_item) = crate::tray::build_with_state(false)?;
 
     // Daemon liveness: a Subscribe connection whose stream end means
-    // the daemon is gone → exit so the SNI item follows it.
+    // the daemon is gone → exit so the SNI item follows it. The same
+    // stream now also carries the recording state (a flip is stored
+    // for the event loop to apply to the menu).
     let daemon_gone = Arc::new(AtomicBool::new(false));
-    spawn_daemon_watch(&daemon_gone);
+    let recording = Arc::new(AtomicBool::new(false));
+    spawn_daemon_watch_with_state(&daemon_gone, &recording);
 
     tracing::info!("tray helper running");
-    let result = event_loop(&daemon_gone);
+    let result = event_loop(&daemon_gone, &recording, &record_item);
 
     // Orderly watchdog stop (bounded in-flight poke); the process exit
     // right after is the point — it unregisters the SNI item.
@@ -78,7 +82,13 @@ pub(crate) fn run() -> eyre::Result<()> {
 /// registration drops with the process exit right after — ADR-0039/
 /// ADR-0042). Every exit path is planned: a capture/quit click, or
 /// the daemon going away.
-fn event_loop(daemon_gone: &AtomicBool) -> eyre::Result<()> {
+fn event_loop(
+    daemon_gone: &AtomicBool,
+    recording: &Arc<AtomicBool>,
+    record_item: &tray_icon::menu::MenuItem,
+) -> eyre::Result<()> {
+    // The label's current state, so only real flips touch muda.
+    let mut label_is_recording = false;
     loop {
         #[cfg(target_os = "linux")]
         pump_glib_context();
@@ -88,9 +98,19 @@ fn event_loop(daemon_gone: &AtomicBool) -> eyre::Result<()> {
             return Ok(());
         }
 
+        let now_recording = recording.load(Ordering::Acquire);
+        if now_recording != label_is_recording {
+            // The label flips; the id stays stable — the click
+            // mapping below carries the state instead.
+            record_item.set_text(crate::tray::record_item_label(now_recording));
+            label_is_recording = now_recording;
+        }
+
         let rx = MenuEvent::receiver();
         while let Ok(event) = rx.try_recv() {
-            if let Some(TrayAction::Request(request)) = crate::tray::action_for(&event) {
+            if let Some(TrayAction::Request(request)) =
+                crate::tray::action_for_with_state(&event, label_is_recording)
+            {
                 forward(&request);
                 if exits_after_action(&request) {
                     // The causal close: this process's exit
@@ -124,6 +144,13 @@ fn forward(request: &Request) {
 /// always — the exit removes the popup the click left open
 /// (ADR-0042). `Quit`: the daemon is going away; follow it promptly
 /// instead of waiting for the stream-watch to notice.
+/// Test-visible alias for `exits_after_action` (the tray units pin
+/// which clicks keep the helper alive).
+#[cfg(test)]
+pub(crate) fn exits_for(request: &Request) -> bool {
+    exits_after_action(request)
+}
+
 fn exits_after_action(request: &Request) -> bool {
     crate::worker::spawns_capture_worker(request) || matches!(request, Request::Quit)
 }
@@ -145,7 +172,15 @@ const WATCH_CONNECT_INTERVAL: Duration = Duration::from_millis(250);
 /// (or its IPC accept loop drops). Connects retry inside
 /// [`WATCH_CONNECT_WINDOW`] (the startup race); once connected, any
 /// stream end marks gone immediately — daemon death stays prompt.
-async fn watch_daemon(path: &std::path::Path, gone: Arc<AtomicBool>) {
+/// Watch the daemon's event stream with a recording-state output:
+/// `Recording*` events flip the flag (the event loop applies it to
+/// the menu);
+/// everything else is still ignored.
+async fn watch_daemon_with_state(
+    path: &std::path::Path,
+    gone: Arc<AtomicBool>,
+    recording: &Arc<AtomicBool>,
+) {
     use crate::ipc_server::{encode_msg, read_frame, socket_name, write_frame, Stream};
     use interprocess::local_socket::traits::tokio::Stream as _;
 
@@ -163,9 +198,24 @@ async fn watch_daemon(path: &std::path::Path, gone: Arc<AtomicBool>) {
                         mark_gone();
                         return;
                     }
-                    // Events themselves are ignored — only the
-                    // stream's end matters.
-                    while read_frame(&mut stream).await.is_ok() {}
+                    // Only two things matter: the stream's end
+                    // (daemon death) and recording-state events.
+                    loop {
+                        let Ok(frame) = read_frame(&mut stream).await else {
+                            break;
+                        };
+                        if let Ok(event) = crate::ipc_server::decode_event(&frame) {
+                            let flip = match &event {
+                                flintshot_core::ipc::Event::RecordingStarted => Some(true),
+                                flintshot_core::ipc::Event::RecordingStopped { .. }
+                                | flintshot_core::ipc::Event::RecordingFailed { .. } => Some(false),
+                                _ => None,
+                            };
+                            if let Some(state) = flip {
+                                recording.store(state, Ordering::Release);
+                            }
+                        }
+                    }
                     mark_gone();
                     return;
                 }
@@ -184,8 +234,10 @@ async fn watch_daemon(path: &std::path::Path, gone: Arc<AtomicBool>) {
 /// the bounded [`WATCH_CONNECT_WINDOW`] retry, and the supervisor's
 /// respawn cycle recovers (the daemon may simply not be listening
 /// *yet* during its own startup).
-fn spawn_daemon_watch(daemon_gone: &Arc<AtomicBool>) {
+/// Spawn the stream watch with a recording-state output it flips.
+fn spawn_daemon_watch_with_state(daemon_gone: &Arc<AtomicBool>, recording: &Arc<AtomicBool>) {
     let gone = Arc::clone(daemon_gone);
+    let recording = Arc::clone(recording);
     let _ = std::thread::Builder::new()
         .name("flintshot-tray-watch".into())
         .spawn(move || {
@@ -201,7 +253,7 @@ fn spawn_daemon_watch(daemon_gone: &Arc<AtomicBool>) {
                 }
             };
             let path = flintshot_core::ipc::socket_path(None);
-            runtime.block_on(watch_daemon(&path, gone));
+            runtime.block_on(watch_daemon_with_state(&path, gone, &recording));
         });
 }
 
@@ -284,7 +336,7 @@ mod tests {
         use std::sync::Arc;
         use std::time::Duration;
 
-        use super::super::{watch_daemon, WATCH_CONNECT_INTERVAL, WATCH_CONNECT_WINDOW};
+        use super::super::{watch_daemon_with_state, WATCH_CONNECT_INTERVAL, WATCH_CONNECT_WINDOW};
 
         /// A listener appearing mid-window (the daemon-startup race:
         /// the supervisor may spawn this helper before the daemon's
@@ -302,7 +354,8 @@ mod tests {
             let watch_gone = Arc::clone(&gone);
             let watch_path: PathBuf = sock.clone();
             let watch = tokio::spawn(async move {
-                watch_daemon(&watch_path, watch_gone).await;
+                watch_daemon_with_state(&watch_path, watch_gone, &Arc::new(AtomicBool::new(false)))
+                    .await;
             });
 
             // A few failed connect attempts pass (no socket yet),
@@ -346,7 +399,8 @@ mod tests {
             let sock = dir.path().join("flintshot-watch-absent.sock");
             let gone = Arc::new(AtomicBool::new(false));
             let started = std::time::Instant::now();
-            watch_daemon(&sock, Arc::clone(&gone)).await;
+            watch_daemon_with_state(&sock, Arc::clone(&gone), &Arc::new(AtomicBool::new(false)))
+                .await;
             assert!(gone.load(Ordering::SeqCst), "no daemon → gone");
             assert!(
                 started.elapsed() >= WATCH_CONNECT_WINDOW,

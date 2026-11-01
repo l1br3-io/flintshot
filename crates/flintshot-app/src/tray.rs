@@ -30,6 +30,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 // short and namespaced so they don't collide with any muda defaults.
 const ID_TOGGLE_WINDOW: &str = "flintshot.toggle-window";
 const ID_CAPTURE: &str = "flintshot.capture";
+const ID_RECORD: &str = "flintshot.record";
 const ID_SETTINGS: &str = "flintshot.settings";
 const ID_QUIT: &str = "flintshot.quit";
 /// Stable `TrayIcon` id. Without it, `TrayIconBuilder::new()` mints a
@@ -51,26 +52,54 @@ pub(crate) enum TrayAction {
 /// unknown id (e.g. events not from our menu — including the retired
 /// *Open app window* / *Open config* / *Bind shortcuts…* ids, which
 /// are pinned dead by test and must never be reused).
+/// Idle-state mapping (the tests' baseline; production goes through
+/// [`action_for_with_state`] with the live recording state).
+#[cfg(test)]
 #[must_use]
-pub(crate) fn action_for(event: &MenuEvent) -> Option<TrayAction> {
+fn action_for(event: &MenuEvent) -> Option<TrayAction> {
+    action_for_with_state(event, false)
+}
+
+/// [`action_for`] with the current recording state: the single record
+/// item resolves to *Stop* while a recording is live.
+#[must_use]
+pub(crate) fn action_for_with_state(event: &MenuEvent, recording: bool) -> Option<TrayAction> {
     match event.id.as_ref() {
+        ID_RECORD => Some(TrayAction::Request(if recording {
+            Request::RecordStop
+        } else {
+            Request::RecordStart
+        })),
         ID_TOGGLE_WINDOW => Some(TrayAction::Request(Request::ToggleWindow)),
         ID_CAPTURE => Some(TrayAction::Request(Request::Capture { delay_ms: 0 })),
+
         ID_SETTINGS => Some(TrayAction::Request(Request::OpenSettings)),
         ID_QUIT => Some(TrayAction::Request(Request::Quit)),
         _ => None,
     }
 }
 
-/// Build the tray icon with its context menu: *Show/Hide flintshot* /
-/// *Capture* / *Settings* / *Quit*. The returned [`TrayIcon`] must
-/// be held alive for the daemon's **whole** lifetime — exactly one
-/// registration per process (a dropped handle never unregisters the
-/// SNI item, and a second build would duplicate it, ADR-0039);
-/// visibility is driven by `set_visible` flips. muda retains the
-/// menu items itself (they're reference-counted), so they can drop
-/// here.
-pub(crate) fn build() -> eyre::Result<TrayIcon> {
+/// The record menu item's label for the current recording state.
+#[must_use]
+pub(crate) fn record_item_label(recording: bool) -> &'static str {
+    if recording {
+        "Stop recording"
+    } else {
+        "Record"
+    }
+}
+
+/// Build the tray icon with its context menu for the given recording
+/// state, returning the icon plus the record item's handle — the
+/// helper flips the label via `set_text` as `Recording*` events
+/// arrive (it must be held; muda items are reference-counted).
+#[cfg(feature = "tray")]
+pub(crate) fn build_with_state(recording: bool) -> eyre::Result<(TrayIcon, MenuItem)> {
+    build_impl(recording)
+}
+
+#[cfg(feature = "tray")]
+fn build_impl(recording: bool) -> eyre::Result<(TrayIcon, MenuItem)> {
     // libappindicator (tray-icon's Linux backend) touches GTK widgets
     // for the menu, so GTK must be initialized first — on the main
     // thread, which is where the daemon calls us. macOS/Windows use
@@ -83,12 +112,14 @@ pub(crate) fn build() -> eyre::Result<TrayIcon> {
     let menu = Menu::new();
     let toggle_window = MenuItem::with_id(ID_TOGGLE_WINDOW, "Show/Hide flintshot", true, None);
     let capture = MenuItem::with_id(ID_CAPTURE, "Capture", true, None);
+    let record = MenuItem::with_id(ID_RECORD, record_item_label(recording), true, None);
     let settings = MenuItem::with_id(ID_SETTINGS, "Settings", true, None);
     let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
 
     if let Err(e) = menu
         .append(&toggle_window)
         .and_then(|()| menu.append(&capture))
+        .and_then(|()| menu.append(&record))
         .and_then(|()| menu.append(&settings))
         .and_then(|()| menu.append(&PredefinedMenuItem::separator()))
         .and_then(|()| menu.append(&quit))
@@ -97,13 +128,14 @@ pub(crate) fn build() -> eyre::Result<TrayIcon> {
     }
 
     let icon = icon()?;
-    TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .with_id(TRAY_ID)
         .with_tooltip("flintshot")
         .with_icon(icon)
         .with_menu(Box::new(menu))
         .build()
-        .map_err(|e| eyre::eyre!("building tray icon: {e}"))
+        .map_err(|e| eyre::eyre!("building tray icon: {e}"))?;
+    Ok((tray, record))
 }
 
 /// A simple two-tone 32×32 mark — a bright lens on a dark rounded
@@ -241,5 +273,41 @@ mod tests {
                 "legacy id `{legacy}` must not resolve anymore"
             );
         }
+    }
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn record_item_label_swaps_with_state() {
+        assert_eq!(record_item_label(false), "Record");
+        assert_eq!(record_item_label(true), "Stop recording");
+    }
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn record_click_maps_start_when_idle_stop_while_recording() {
+        use flintshot_core::ipc::Request;
+        let click = event("flintshot.record");
+        assert_eq!(
+            action_for_with_state(&click, false),
+            Some(TrayAction::Request(Request::RecordStart))
+        );
+        assert_eq!(
+            action_for_with_state(&click, true),
+            Some(TrayAction::Request(Request::RecordStop))
+        );
+    }
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn record_clicks_do_not_exit_the_helper() {
+        // Only capture/quit exit (the popup-close lever); record
+        // clicks keep the helper alive so the label can keep
+        // tracking state.
+        assert!(!crate::tray_helper::exits_for(
+            &flintshot_core::ipc::Request::RecordStart
+        ));
+        assert!(!crate::tray_helper::exits_for(
+            &flintshot_core::ipc::Request::RecordStop
+        ));
     }
 }
