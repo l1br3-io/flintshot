@@ -33,6 +33,14 @@ pub(crate) const HOME_WINDOW_TITLE: &str = "flintshot";
 /// statusbar +4) so the canvas keeps its old room.
 pub(crate) const EDITOR_PAGE_DEFAULT_SIZE: egui::Vec2 = egui::vec2(1032.0, 648.0);
 
+/// The minimum size every flintshot window pins on its viewport
+/// (responsive-ui): the layout adapts down to this floor — the
+/// home's hero and action cards wrap, the editor's panel yields —
+/// and the compositor stops below it. Min-size hints are honored by
+/// GNOME / KDE / Windows; compositors that ignore them still get
+/// the adaptive layout.
+pub(crate) const WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(360.0, 300.0);
+
 /// Margin reserved against the monitor edge when clamping the
 /// default editor-page size — approximates WM panels and
 /// decorations (egui exposes the full monitor size, not the work
@@ -484,6 +492,7 @@ impl EguiShell {
         let viewport = egui::ViewportBuilder::default()
             .with_title(geometry.title)
             .with_inner_size(geometry.size)
+            .with_min_inner_size(WINDOW_MIN_SIZE)
             .with_resizable(geometry.resizable);
 
         let options = NativeOptions {
@@ -577,6 +586,7 @@ fn run_editor_blocking(
     let viewport = egui::ViewportBuilder::default()
         .with_title(WINDOW_TITLE)
         .with_inner_size(inner_size)
+        .with_min_inner_size(WINDOW_MIN_SIZE)
         .with_resizable(true);
 
     let options = NativeOptions {
@@ -845,6 +855,14 @@ mod tests {
         // — grown by the density bump's chrome (rail +8, topbar +4,
         // statusbar +4) so the canvas keeps its old room.
         assert_eq!(EDITOR_PAGE_DEFAULT_SIZE, egui::vec2(1032.0, 648.0));
+    }
+
+    /// The responsive floor every window pins on its viewport: the
+    /// layout adapts down to here (hero wraps, cards wrap, panel
+    /// yields, statusbar discards), and the compositor stops below.
+    #[test]
+    fn window_min_size_is_pinned() {
+        assert_eq!(WINDOW_MIN_SIZE, egui::vec2(360.0, 300.0));
     }
 
     #[test]

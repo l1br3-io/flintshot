@@ -18,6 +18,22 @@ Categories used below:
 
 ## [Unreleased]
 
+### Fixed
+
+- **Responsive windows** (effort `responsive-ui`). The capture home
+  and the editor now adapt when the window is tiled or resized
+  small, instead of rendering outside the window: the home's hero
+  headline wraps inside its card (the card grows to carry the extra
+  lines) and the New capture / Open image / Paste cards flow onto
+  extra rows; the editor's side panel folds itself away before it
+  can starve the canvas (and returns when the window can afford it
+  again — your own Ctrl+B collapse is never overridden, and config
+  remembers your choice, not the window's); the statusbar drops its
+  centred hint and then its trailing kbd chips before anything can
+  collide with the image readout. Every window now carries a
+  360×300 minimum size hint; the layout adapts all the way down to
+  that floor.
+
 ## [0.1.1] - 2026-10-17
 
 ### Added
