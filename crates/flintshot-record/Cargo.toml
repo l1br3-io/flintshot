@@ -19,3 +19,9 @@ path = "src/lib.rs"
 gstreamer = "0.23"
 flintshot-core = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Integration tests finalize real pipelines into temp dirs and drive
+# the async prepare contract.
+tempfile = { workspace = true }
+tokio = { workspace = true }

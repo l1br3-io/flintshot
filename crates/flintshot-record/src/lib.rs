@@ -25,6 +25,8 @@
 #![warn(clippy::pedantic)]
 
 pub mod encoder;
+pub mod mp4;
+pub mod pipeline;
 pub mod probe;
 
 use std::path::PathBuf;
@@ -34,6 +36,7 @@ use flintshot_core::geom::Rect;
 use thiserror::Error;
 
 pub use encoder::{ElementRegistry, EncoderKind, ENCODER_CHAIN};
+pub use pipeline::{RecordHandle, Recorder};
 pub use probe::{probe_capabilities, GstElementRegistry, RecordCapability, RecordSourceKind};
 
 /// Default capture rate in frames per second.
@@ -42,6 +45,21 @@ pub const FPS_DEFAULT: u32 = 30;
 pub const FPS_MIN: u32 = 1;
 /// Upper bound for a sanitized capture rate.
 pub const FPS_MAX: u32 = 60;
+
+/// Which screen the pipeline records from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecordSource {
+    /// The user's real graphical session — the `Wayland` portal on
+    /// Wayland, `ximagesrc` on X11 (resolved by the X11/portal
+    /// tasks).
+    #[default]
+    Session,
+    /// The hidden testability spine: `GStreamer` `videotestsrc`,
+    /// headless-safe, so engine/CLI/UI integration tests run in CI
+    /// with no display or portal. Selected by the CLI's hidden
+    /// `--source testsrc`.
+    TestSrc,
+}
 
 /// Configuration for one recording.
 ///
@@ -67,11 +85,14 @@ pub struct RecordConfig {
     /// Monitor index to record when no [`Self::region`] is set.
     /// `None` lets the source pick its default.
     pub monitor: Option<u32>,
+    /// Where the frames come from. Defaults to the real session;
+    /// [`RecordSource::TestSrc`] is the CI spine.
+    pub source: RecordSource,
 }
 
 impl RecordConfig {
     /// A config for `out` with defaults: 30 fps, no duration cap,
-    /// whole source, default monitor.
+    /// whole source, default monitor, session source.
     #[must_use]
     pub fn new(out: impl Into<PathBuf>) -> Self {
         Self {
@@ -80,6 +101,7 @@ impl RecordConfig {
             max_duration: None,
             region: None,
             monitor: None,
+            source: RecordSource::default(),
         }
     }
 
@@ -132,27 +154,6 @@ pub enum RecordError {
     FinalizeTimeout,
 }
 
-/// A prepared, not-yet-started recording.
-///
-/// Type shell in the scaffold task; the engine tasks fill in
-/// `prepare` (portal session or X11 geometry) and `start`.
-pub struct Recorder;
-
-impl Recorder {
-    /// What this machine can record with — best source, available
-    /// encoders — straight from `GStreamer`'s plugin registry.
-    #[must_use]
-    pub fn probe() -> RecordCapability {
-        probe_capabilities(&GstElementRegistry)
-    }
-}
-
-/// A running recording.
-///
-/// Type shell in the scaffold task; the pipeline task fills in
-/// `stop` (EOS → moov finalize → the finished path).
-pub struct RecordHandle;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +172,7 @@ mod tests {
         assert_eq!(cfg.max_duration, None);
         assert_eq!(cfg.region, None);
         assert_eq!(cfg.monitor, None);
+        assert_eq!(cfg.source, RecordSource::Session);
     }
 
     #[test]
