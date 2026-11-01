@@ -373,7 +373,7 @@ pub struct RecordArgs {
     #[arg(long, value_name = "FPS")]
     pub fps: Option<u32>,
     /// Stop automatically after this many seconds.
-    #[arg(long = "duration", value_name = "SECS")]
+    #[arg(long = "duration", value_name = "SECS", value_parser = parse_positive_secs)]
     pub duration_secs: Option<f64>,
     /// Write the recording to `PATH` (an `.mp4`). Defaults to a
     /// timestamped name in the save location.
@@ -3211,6 +3211,100 @@ mod record_cli_tests {
         );
     }
 
+    fn test_record_args(out: &std::path::Path, duration: Option<f64>) -> RecordArgs {
+        RecordArgs {
+            monitor: None,
+            geometry: None,
+            fps: Some(10),
+            duration_secs: duration,
+            out: Some(out.to_path_buf()),
+            countdown: 0,
+            json_events: false,
+            source: Some(RecordSourceFlag::TestSrc),
+        }
+    }
+
+    #[tokio::test]
+    async fn record_testsrc_finalizes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("cli-test.mp4");
+        let (path, bytes) = crate::cli::run_record_flow(&test_record_args(&out, Some(0.8)))
+            .await
+            .expect("recording flow completes");
+        assert_eq!(path, out);
+        let file = std::fs::read(&path).expect("finalized file");
+        assert!(flintshot_record::mp4::has_box(&file, b"moov"));
+        assert!(
+            bytes > 1000,
+            "real encoded data, not an empty moov ({bytes})"
+        );
+    }
+
+    #[tokio::test]
+    async fn sigint_stop_finalizes() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = Arc::new(dir.path().join("cli-sigint.mp4"));
+        // Fire SIGINT only once the pipeline is provably recording
+        // (the output file exists) — the signal handler is installed
+        // before start, so this window is always safe.
+        let watch = Arc::clone(&out);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !watch.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let _ = std::process::Command::new("kill")
+                .arg("-INT")
+                .arg(std::process::id().to_string())
+                .status();
+        });
+        let flow = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            crate::cli::run_record_flow(&test_record_args(&out, None)),
+        )
+        .await
+        .expect("signal stop must not hang")
+        .expect("sigint stop finalizes");
+        let file = std::fs::read(&flow.0).expect("finalized file");
+        assert!(flintshot_record::mp4::has_box(&file, b"moov"));
+    }
+
+    #[test]
+    fn json_events_schema() {
+        use crate::cli::RecordEvent;
+        let lines = [
+            RecordEvent::Countdown { remaining: 3 }.to_json_line(),
+            RecordEvent::Started {
+                path: std::path::Path::new("/tmp/a.mp4"),
+            }
+            .to_json_line(),
+            RecordEvent::Stopped {
+                path: std::path::Path::new("/tmp/a.mp4"),
+                bytes: 1234,
+            }
+            .to_json_line(),
+            RecordEvent::Failed {
+                code: 3,
+                message: "missing",
+            }
+            .to_json_line(),
+        ];
+        let parsed: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).expect("each line is valid json"))
+            .collect();
+        assert_eq!(parsed[0]["type"], "countdown");
+        assert_eq!(parsed[0]["remaining"], 3);
+        assert_eq!(parsed[1]["type"], "started");
+        assert_eq!(parsed[1]["path"], "/tmp/a.mp4");
+        assert_eq!(parsed[2]["type"], "stopped");
+        assert_eq!(parsed[2]["bytes"], 1234);
+        assert_eq!(parsed[3]["type"], "failed");
+        assert_eq!(parsed[3]["code"], 3);
+        assert_eq!(parsed[3]["message"], "missing");
+    }
+
     #[test]
     fn record_exit_codes_distinguish_failure_kinds() {
         use crate::cli::record_exit_code;
@@ -3234,17 +3328,177 @@ mod record_cli_tests {
     }
 }
 
-/// `flintshot record` — the standalone recording path.
-///
-/// C1 wires the verb; the runner (signal handling, countdown,
-/// engine dispatch, json-events) is the next task and replaces this
-/// interim error.
+/// One machine-readable progress line for `flintshot record
+/// --json-events` — one JSON object per line on stdout, stable
+/// `"type"` discriminator (the daemon's worker reader parses them).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordEvent<'a> {
+    /// Countdown tick before recording starts.
+    Countdown { remaining: u32 },
+    /// The pipeline reached `PLAYING`.
+    Started { path: &'a std::path::Path },
+    /// The file finalized on disk.
+    Stopped {
+        path: &'a std::path::Path,
+        bytes: u64,
+    },
+    /// Recording failed; `code` is the process exit code.
+    Failed { code: i32, message: &'a str },
+}
+
+impl RecordEvent<'_> {
+    /// Serialize to the one-line JSON form.
+    #[must_use]
+    pub fn to_json_line(&self) -> String {
+        match self {
+            Self::Countdown { remaining } => {
+                serde_json::json!({"type": "countdown", "remaining": remaining})
+            }
+            Self::Started { path } => {
+                serde_json::json!({"type": "started", "path": path.display().to_string()})
+            }
+            Self::Stopped { path, bytes } => {
+                serde_json::json!({
+                    "type": "stopped",
+                    "path": path.display().to_string(),
+                    "bytes": bytes,
+                })
+            }
+            Self::Failed { code, message } => {
+                serde_json::json!({"type": "failed", "code": code, "message": message})
+            }
+        }
+        .to_string()
+    }
+}
+
+/// Clap `value_parser` for `--duration`: positive seconds.
+fn parse_positive_secs(value: &str) -> std::result::Result<f64, String> {
+    let secs: f64 = value
+        .parse()
+        .map_err(|_| format!("invalid duration `{value}` — expected positive seconds"))?;
+    if secs.is_finite() && secs > 0.0 {
+        Ok(secs)
+    } else {
+        Err(format!("invalid duration `{value}` — must be positive"))
+    }
+}
+
+/// The default output name: `flintshot-<date>-<time>.mp4` in the
+/// configured save directory, collision-suffixed.
+fn default_record_out(cfg: &Config) -> PathBuf {
+    let stem = format!(
+        "flintshot-{}-{}",
+        flintshot_core::chrono_date(),
+        flintshot_core::chrono_time()
+    );
+    flintshot_core::next_free_path(cfg.output.resolve_save_dir().join(format!("{stem}.mp4")))
+}
+
+/// `flintshot record` — the standalone recording path: countdown,
+/// engine dispatch, SIGINT/SIGTERM → stop-and-finalize, path (or
+/// json events) out, typed exit codes. The daemon spawns this same
+/// path as a worker for tray/window-initiated recordings.
 pub fn run_record(args: &RecordArgs) -> Result<()> {
-    let plan = resolve_record_source(args.source, SessionKind::detect()).unwrap_or_else(|err| {
-        eprintln!("flintshot record: {err}");
-        std::process::exit(record_exit_code(&err));
-    });
-    color_eyre::eyre::bail!(
-        "recording via {plan:?} is not wired yet (the runner lands with the next task)"
-    )
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| color_eyre::eyre::eyre!("creating tokio runtime: {e}"))?;
+    match runtime.block_on(run_record_flow(args)) {
+        Ok((path, bytes)) => {
+            if args.json_events {
+                println!(
+                    "{}",
+                    RecordEvent::Stopped { path: &path, bytes }.to_json_line()
+                );
+            } else {
+                println!("{}", path.display());
+            }
+            Ok(())
+        }
+        Err(err) => {
+            if args.json_events {
+                println!(
+                    "{}",
+                    RecordEvent::Failed {
+                        code: record_exit_code(&err),
+                        message: &err.to_string(),
+                    }
+                    .to_json_line()
+                );
+            } else {
+                eprintln!("flintshot record: {err}");
+            }
+            std::process::exit(record_exit_code(&err));
+        }
+    }
+}
+
+/// The recording flow proper (async, no process-level side effects)
+/// so tests drive it headless: resolve → countdown → record → stop
+/// on signal or duration. Returns the finalized path and its size.
+async fn run_record_flow(args: &RecordArgs) -> std::result::Result<(PathBuf, u64), RecordError> {
+    let plan = resolve_record_source(args.source, SessionKind::detect())?;
+    let cfg = Config::load().unwrap_or_default();
+
+    for remaining in (1..=args.countdown).rev() {
+        if args.json_events {
+            println!("{}", RecordEvent::Countdown { remaining }.to_json_line());
+        } else {
+            eprintln!("recording in {remaining}…");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    let out = args.out.clone().unwrap_or_else(|| default_record_out(&cfg));
+    let mut record_cfg = flintshot_record::RecordConfig::new(&out);
+    record_cfg.fps = args.fps.unwrap_or(30);
+    record_cfg.max_duration = args.duration_secs.map(Duration::from_secs_f64);
+    record_cfg.region = args.geometry;
+    record_cfg.monitor = args.monitor;
+    record_cfg.source = match plan {
+        RecordPlan::TestSrc => flintshot_record::RecordSource::TestSrc,
+        RecordPlan::Portal | RecordPlan::X11 => flintshot_record::RecordSource::Session,
+    };
+
+    let recorder = flintshot_record::Recorder::prepare(record_cfg).await?;
+    let restore_token = recorder.restore_token().map(str::to_owned);
+    if let Some(token) = restore_token.as_deref() {
+        // Persistence is C4's [record] section; until then the token
+        // is at least visible for manual verification.
+        tracing::info!(
+            ?token,
+            "portal session token (persistence lands with [record])"
+        );
+    }
+    let handle = std::sync::Arc::new(recorder.start()?);
+    if args.json_events {
+        println!("{}", RecordEvent::Started { path: &out }.to_json_line());
+    } else {
+        eprintln!("recording to {} — Ctrl-C to stop", out.display());
+    }
+
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|err| RecordError::PipelineFailed {
+            element: "signal".into(),
+            message: err.to_string(),
+        })?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|err| RecordError::PipelineFailed {
+            element: "signal".into(),
+            message: err.to_string(),
+        })?;
+
+    let cap = async {
+        match args.duration_secs {
+            Some(secs) => tokio::time::sleep(Duration::from_secs_f64(secs)).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = sigint.recv() => {}
+        _ = sigterm.recv() => {}
+        () = cap => {}
+    }
+    let path = handle.stop()?;
+    let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
+    Ok((path, bytes))
 }
