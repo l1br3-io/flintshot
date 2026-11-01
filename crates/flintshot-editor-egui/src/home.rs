@@ -27,6 +27,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use flintshot_core::recents::RecentKind;
+
 use eframe::App;
 use egui::{Context, Key, KeyboardShortcut, Modifiers, ViewportCommand};
 
@@ -166,6 +168,27 @@ pub trait HomeBridge {
     /// Default: none — test doubles and minimal bridges.
     fn recent_images(&mut self) -> Vec<PathBuf> {
         Vec::new()
+    }
+
+    /// The recents grid's kind-aware face: images **and** videos
+    /// (U6). Default: everything from [`Self::recent_images`] as
+    /// images, so pre-recording bridges and test doubles are
+    /// unchanged.
+    fn recent_media(&mut self) -> Vec<RecentMedia> {
+        self.recent_images()
+            .into_iter()
+            .map(|path| RecentMedia {
+                path,
+                kind: RecentKind::Image,
+            })
+            .collect()
+    }
+
+    /// Open a recent **video** row — the system player, not the
+    /// editor. Returns whether something launched. Default:
+    /// `false` (test doubles).
+    fn open_recent_media(&mut self, _path: &Path) -> bool {
+        false
     }
 
     /// The recents capacity the header's count promises
@@ -407,6 +430,17 @@ pub(crate) struct RecentThumb {
     mtime: u64,
 }
 
+/// One recents-grid row: a path and what it is (U6's kind-aware
+/// face of the recents index — images decode thumbnails, videos
+/// render a flat player card).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentMedia {
+    /// The row's filesystem path.
+    pub path: PathBuf,
+    /// Image or video — drives the card style and the click action.
+    pub kind: RecentKind,
+}
+
 /// One resumable session capture for the "This session" grid —
 /// the home bridge's face of a `SessionStore` entry.
 #[derive(Debug, Clone)]
@@ -427,9 +461,10 @@ pub struct SessionCard {
 pub(crate) struct HomeApp {
     /// Implementation-supplied world (pump, delegation).
     bridge: Box<dyn HomeBridge>,
-    /// Recent image paths for the welcome grid (refreshed at
-    /// construction, on `Show`, and after a routed image).
-    recent: Vec<PathBuf>,
+    /// Recents rows for the welcome grid — images and videos
+    /// (refreshed at construction, on `Show`, and after a routed
+    /// image).
+    recent: Vec<RecentMedia>,
     /// Decoded thumbnails keyed by path — in-memory only, never
     /// persisted (the recents index stores paths alone).
     thumbs: HashMap<PathBuf, RecentThumb>,
@@ -494,7 +529,7 @@ impl HomeApp {
     /// Construct the app over a bridge. Pure: no egui context is
     /// touched until the first `update`.
     pub(crate) fn new(mut bridge: Box<dyn HomeBridge>, initial_status: String) -> Self {
-        let recent = bridge.recent_images();
+        let recent = bridge.recent_media();
         let session = bridge.session_captures();
         Self {
             ui: HomeUiState {
@@ -774,7 +809,7 @@ impl HomeApp {
             if focus {
                 // Re-focus is the cheap refresh point: captures the
                 // saves that happened while the editor page was up.
-                self.recent = self.bridge.recent_images();
+                self.recent = self.bridge.recent_media();
             }
             self.ui.apply(&directive);
             if hide {
@@ -1344,13 +1379,26 @@ impl HomeApp {
         // the common frame; the decode itself stats only on first
         // sight). Idempotent per frame — egui holds no recents
         // state across passes here.
-        let pairs: Vec<(PathBuf, u64)> = self
+        // Decode pass: images get thumbnails (cache hit on the
+        // common frame); videos never decode — a metadata stat
+        // feeds the day bucket (U6: badge + player card, no
+        // thumbnail pipeline).
+        let pairs: Vec<(RecentMedia, u64)> = self
             .recent
             .clone()
             .into_iter()
-            .filter_map(|path| {
-                self.thumbnail(ui.ctx(), &path)
-                    .map(|thumb| (path, thumb.mtime))
+            .filter_map(|media| match media.kind {
+                RecentKind::Image => self
+                    .thumbnail(ui.ctx(), &media.path)
+                    .map(|thumb| (media, thumb.mtime)),
+                RecentKind::Video => {
+                    let mtime = std::fs::metadata(&media.path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_secs());
+                    Some((media, mtime))
+                }
             })
             .collect();
         let limit = self.bridge.recents_limit();
@@ -1375,7 +1423,12 @@ impl HomeApp {
             Self::recents_empty_card(ui);
             return;
         }
-        let groups = group_by_day(&pairs, unix_now());
+        let kinds: HashMap<PathBuf, RecentKind> = pairs
+            .iter()
+            .map(|(media, _)| (media.path.clone(), media.kind))
+            .collect();
+        let paths: Vec<(PathBuf, u64)> = pairs.iter().map(|(m, t)| (m.path.clone(), *t)).collect();
+        let groups = group_by_day(&paths, unix_now());
         let gap = crate::theme::SPACE_SCALE[2];
         let cols = columns_for_width(ui.available_width(), MIN_CARD_WIDTH, gap);
         let size = recent_card_size(column_width(ui.available_width(), cols, gap));
@@ -1389,7 +1442,12 @@ impl HomeApp {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                             for path in row {
-                                self.recent_card(ui, path, size);
+                                match kinds.get(path) {
+                                    Some(RecentKind::Video) => {
+                                        self.video_card(ui, path, size);
+                                    }
+                                    _ => self.recent_card(ui, path, size),
+                                }
                             }
                         });
                     }
@@ -1520,6 +1578,60 @@ impl HomeApp {
     /// square-ish box the width affords (source decodes at ≤ 2×
     /// [`THUMB_EDGE`], so very wide columns upscale softly —
     /// accepted for a thumbnail).
+    /// A video row (U6): the same cutout geometry as an image card,
+    /// but flat — no thumbnail decode, a ▶ badge, the file stem,
+    /// and a `video` chip. Click (or ▶) opens the system player via
+    /// the bridge; dead files render the same dead style as images.
+    fn video_card(&mut self, ui: &mut egui::Ui, path: &Path, size: egui::Vec2) {
+        use crate::theme::palette as p;
+        let alive = path.exists();
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let resp = ui
+            .interact(
+                rect,
+                egui::Id::new(("recent-video", path.to_string_lossy().to_string())),
+                egui::Sense::click(),
+            )
+            .on_hover_text(if alive {
+                "Open in your video player"
+            } else {
+                "Missing file"
+            });
+        let card = rect;
+        ui.painter().rect(
+            card,
+            egui::CornerRadius::same(crate::theme::CUTOUT_RADIUS),
+            p::PAPER_CREAM,
+            crate::theme::HAIRLINE_STROKE,
+            egui::StrokeKind::Middle,
+        );
+        let center = egui::pos2(card.left() + 28.0, card.center().y);
+        ui.painter().text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            "▶",
+            egui::FontId::proportional(crate::theme::TYPE_LG),
+            if alive { p::FOREST } else { p::PAPER_DIM },
+        );
+        let stem = path
+            .file_stem()
+            .map_or_else(|| "recording".into(), |s| s.to_string_lossy().into_owned());
+        let galley = ui.painter().layout(
+            stem,
+            egui::FontId::proportional(crate::theme::TYPE_SM),
+            p::INK,
+            (card.width() - 28.0 - 12.0 - card.width() * 0.0 - 8.0).max(40.0),
+        );
+        ui.painter().galley(
+            egui::pos2(center.x + 14.0, card.center().y - galley.size().y / 2.0),
+            galley,
+            p::INK,
+        );
+        if resp.clicked() && alive && !self.bridge.open_recent_media(path) {
+            self.ui.status = format!("could not open {}", path.display());
+        }
+    }
+
     fn recent_card(&mut self, ui: &mut egui::Ui, path: &PathBuf, size: egui::Vec2) {
         use crate::theme::palette as p;
         let Some(thumb) = self.thumbnail(ui.ctx(), path) else {
@@ -1618,7 +1730,7 @@ impl HomeApp {
         if resp.clicked() && !chip_clicked {
             self.delete_armed = None;
             let _ = self.bridge.open_image(path.clone());
-            self.recent = self.bridge.recent_images();
+            self.recent = self.bridge.recent_media();
         }
 
         // Leaving the card disarms a pending delete ("clicking
@@ -1715,7 +1827,7 @@ impl HomeApp {
                         if armed {
                             self.delete_armed = None;
                             self.bridge.delete_recent(path);
-                            self.recent = self.bridge.recent_images();
+                            self.recent = self.bridge.recent_media();
                             self.thumbs.remove(path);
                         } else {
                             self.delete_armed = Some(path.to_path_buf());
@@ -1819,7 +1931,7 @@ impl HomeApp {
         if let Some(path) = dropped {
             self.last_drop = Some(path.clone());
             let _ = self.bridge.open_image(path);
-            self.recent = self.bridge.recent_images();
+            self.recent = self.bridge.recent_media();
         }
     }
 }
@@ -1999,11 +2111,42 @@ mod tests {
         sessions: Arc<Mutex<Vec<SessionCard>>>,
         /// The capacity `recents_limit` answers with.
         limit: usize,
+        /// Kind-aware rows (U6): when set, `recent_media` answers
+        /// from here instead of deriving images from `recents`.
+        media: Arc<Mutex<Vec<RecentMedia>>>,
+        /// Paths handed to `open_recent_media`.
+        opened_media: Arc<Mutex<Vec<PathBuf>>>,
     }
 
     impl HomeBridge for RecordingBridge {
         fn request_capture(&mut self) {
             self.rec.0.lock().expect("recorder mutex").capture_requests += 1;
+        }
+
+        fn recent_media(&mut self) -> Vec<RecentMedia> {
+            let media = self.media.lock().expect("media mutex").clone();
+            if media.is_empty() {
+                return self
+                    .recents
+                    .lock()
+                    .expect("recents mutex")
+                    .clone()
+                    .into_iter()
+                    .map(|path| RecentMedia {
+                        path,
+                        kind: RecentKind::Image,
+                    })
+                    .collect();
+            }
+            media
+        }
+
+        fn open_recent_media(&mut self, path: &Path) -> bool {
+            self.opened_media
+                .lock()
+                .expect("opened-media mutex")
+                .push(path.to_path_buf());
+            true
         }
 
         fn open_image(&mut self, path: PathBuf) -> bool {
@@ -3337,5 +3480,94 @@ mod tests {
         // Roomy window: one row.
         let rows = wrap_rows(&[100.0, 100.0, 100.0], 400.0, 8.0);
         assert_eq!(rows, vec![vec![0, 1, 2]]);
+    }
+
+    #[test]
+    fn video_rows_render_without_decoding_and_open_in_the_player() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        std::fs::write(&clip, b"ftyp").unwrap();
+
+        let media = Arc::new(Mutex::new(vec![RecentMedia {
+            path: clip.clone(),
+            kind: RecentKind::Video,
+        }]));
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let bridge = RecordingBridge {
+            media: Arc::clone(&media),
+            opened_media: Arc::clone(&opened),
+            ..RecordingBridge::default()
+        };
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+
+        // The video card registered (and no empty card): a video
+        // row renders with NO thumbnail decode — the file is 4
+        // bytes, not a decodable image, so the image path would
+        // have filtered it out entirely.
+        let card = ctx
+            .read_response(egui::Id::new((
+                "recent-video",
+                clip.to_string_lossy().to_string(),
+            )))
+            .expect("the video card registers");
+        assert!(
+            ctx.read_response(egui::Id::new("recents-empty")).is_none(),
+            "a video row counts as a non-empty grid"
+        );
+
+        // Click opens the system player via the bridge.
+        let at = card.rect.center();
+        let _ = welcome_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        assert_eq!(
+            opened.lock().expect("opened-media mutex").as_slice(),
+            &[clip],
+            "the video click reached open_recent_media"
+        );
+    }
+
+    #[test]
+    fn image_rows_are_unchanged_by_the_kind_aware_grid() {
+        // The default bridge (no media set) derives images from
+        // recent_images exactly as before U6.
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("plain.png");
+        image::RgbaImage::from_pixel(20, 20, image::Rgba([10, 200, 90, 255]))
+            .save(&png)
+            .unwrap();
+        let bridge = RecordingBridge {
+            recents: Arc::new(Mutex::new(vec![png.clone()])),
+            ..RecordingBridge::default()
+        };
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new(("recent", png.to_string_lossy().to_string())))
+                .is_some(),
+            "image rows keep the thumbnail card"
+        );
+        assert!(ctx.read_response(egui::Id::new("recents-empty")).is_none());
     }
 }

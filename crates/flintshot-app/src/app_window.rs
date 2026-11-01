@@ -1975,6 +1975,33 @@ impl HomeBridge for Bridge {
             .collect()
     }
 
+    fn recent_media(&mut self) -> Vec<flintshot_editor_egui::RecentMedia> {
+        let limit = crate::capture_flow::recents_limit();
+        flintshot_core::recents::Recents::load()
+            .entries
+            .iter()
+            .take(limit)
+            .map(|entry| flintshot_editor_egui::RecentMedia {
+                path: entry.path.clone(),
+                kind: entry.kind,
+            })
+            .collect()
+    }
+
+    fn open_recent_media(&mut self, path: &std::path::Path) -> bool {
+        // The system player owns videos; the editor cannot open one.
+        match std::process::Command::new(opener_for_reveal())
+            .arg(path)
+            .spawn()
+        {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "opening video");
+                false
+            }
+        }
+    }
+
     fn copy_recent(&mut self, path: &std::path::Path) {
         let img = match image::open(path) {
             Ok(img) => img.to_rgba8(),

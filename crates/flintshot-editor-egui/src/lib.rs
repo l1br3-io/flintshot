@@ -82,7 +82,7 @@ mod widgets;
 mod window;
 
 pub use canvas::{CanvasView, EguiCanvas, EguiTexture};
-pub use home::{HomeBridge, HomeDirective, SessionCard};
+pub use home::{HomeBridge, HomeDirective, RecentMedia, SessionCard};
 pub use magnifier::{sample_zoomed_region, Magnifier};
 pub use shell::{
     AiEvent, CloseHandle, EditorPageBridge, EguiShell, ModelsArrival, VisionProbeArrival,
