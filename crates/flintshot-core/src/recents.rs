@@ -25,17 +25,60 @@ use crate::error::{FlintshotError, Result};
 /// Most recent first; anything past the cap drops off the back.
 pub const DEFAULT_RECENTS_LIMIT: usize = 50;
 
-/// One recents entry: an image path plus its last-recorded
-/// modification time (unix seconds).
+/// One recents entry: a path plus its last-recorded modification
+/// time (unix seconds) and what it is (image or recording).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub struct RecentEntry {
-    /// The image's filesystem path.
+    /// The entry's filesystem path (an image or, with
+    /// [`RecentKind::Video`], an MP4).
     pub path: PathBuf,
     /// Last-seen modification time, unix seconds (0 when
     /// unavailable at record time).
     pub mtime: u64,
+    /// What the entry is. `#[serde(default)]` keeps every
+    /// pre-recording index file loading as images (wire-compatible
+    /// addition — the record-ui plan decision 5).
+    #[serde(default)]
+    pub kind: RecentKind,
+}
+
+/// What a recents row points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecentKind {
+    /// A captured/annotated screenshot (the historical default).
+    #[default]
+    Image,
+    /// A screen recording (MP4).
+    Video,
+}
+
+impl RecentKind {
+    /// Short UI label for the home grid's kind badge.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+        }
+    }
+}
+
+/// Format a video row's duration as `m:ss` (durations over an hour
+/// render `h:mm:ss`); sub-second recordings show `0:00`. The MP4
+/// duration itself is not parsed here — callers derive seconds from
+/// the file's metadata and this stays a pure formatter.
+#[must_use]
+pub fn format_video_duration(total_seconds: u64) -> String {
+    let (h, rem) = (total_seconds / 3600, total_seconds % 3600);
+    let (m, s) = (rem / 60, rem % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 /// The recents index: an ordered list, front = most recent.
@@ -106,6 +149,22 @@ impl Recents {
             RecentEntry {
                 path: path.to_path_buf(),
                 mtime: mtime_secs(path),
+                kind: RecentKind::Image,
+            },
+        );
+        self.entries.truncate(limit.max(1));
+    }
+
+    /// Record a finalized recording's path: same dedup/limit rules
+    /// as [`Self::record`], tagged [`RecentKind::Video`].
+    pub fn record_video(&mut self, path: &Path, limit: usize) {
+        self.entries.retain(|e| e.path != path);
+        self.entries.insert(
+            0,
+            RecentEntry {
+                path: path.to_path_buf(),
+                mtime: mtime_secs(path),
+                kind: RecentKind::Video,
             },
         );
         self.entries.truncate(limit.max(1));
@@ -516,5 +575,57 @@ mod tests {
     #[test]
     fn day_bucket_clock_skew_lands_earlier_without_panicking() {
         assert_eq!(day_bucket(NOW + 1, NOW), DayBucket::Earlier);
+    }
+
+    #[test]
+    fn old_index_files_without_kind_load_as_images() {
+        // A pre-recording index file: entries with path+mtime only.
+        let legacy = r#"
+            entries = [
+                { path = "/tmp/shot.png", mtime = 100 }
+            ]
+        "#;
+        let recents: Recents = toml::from_str(legacy).expect("legacy file loads");
+        assert_eq!(recents.entries[0].kind, RecentKind::Image);
+    }
+
+    #[test]
+    fn record_video_tags_and_dedups_like_record() {
+        let mut recents = Recents::new();
+        recents.record_video(Path::new("/tmp/a.mp4"), 5);
+        recents.record(Path::new("/tmp/b.png"), 5);
+        // Re-recording the same path moves it to the front, once.
+        recents.record_video(Path::new("/tmp/a.mp4"), 5);
+        assert_eq!(recents.entries.len(), 2);
+        assert_eq!(recents.entries[0].kind, RecentKind::Video);
+        assert_eq!(recents.entries[0].path, PathBuf::from("/tmp/a.mp4"));
+        assert_eq!(recents.entries[1].kind, RecentKind::Image);
+    }
+
+    #[test]
+    fn video_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("recents.toml");
+        let clip = dir.path().join("clip.mp4");
+        std::fs::write(&clip, b"ftyp...").unwrap(); // survive prune_dead
+        let mut recents = Recents::new();
+        recents.record_video(&clip, 5);
+        recents.save_to(&index).unwrap();
+        let back = Recents::load_from(&index);
+        assert_eq!(back.entries[0].kind, RecentKind::Video);
+    }
+
+    #[test]
+    fn video_duration_formats_minutes_and_hours() {
+        assert_eq!(format_video_duration(0), "0:00");
+        assert_eq!(format_video_duration(59), "0:59");
+        assert_eq!(format_video_duration(75), "1:15");
+        assert_eq!(format_video_duration(3_723), "1:02:03");
+    }
+
+    #[test]
+    fn kind_labels_are_stable_ui_strings() {
+        assert_eq!(RecentKind::Image.label(), "image");
+        assert_eq!(RecentKind::Video.label(), "video");
     }
 }
