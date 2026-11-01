@@ -26,6 +26,8 @@ use crate::encoder::{select_encoder, ElementRegistry, EncoderKind};
 use crate::mp4;
 use crate::probe::GstElementRegistry;
 use crate::{RecordConfig, RecordError, RecordSource};
+use flintshot_core::capture::{MonitorInfo, SessionKind};
+use flintshot_core::geom::Rect;
 
 /// Seconds the pipeline gets to reach `PLAYING` (link negotiation
 /// and preroll) before start reports failure.
@@ -87,8 +89,8 @@ impl Recorder {
         let config = cfg.sanitized();
         let encoder_kind = select_encoder(&GstElementRegistry)?;
 
-        let source = build_source(&config)?;
-        let capsfilter = build_test_caps_filter(&config)?;
+        let (source, fixed_geometry) = build_source(&config)?;
+        let capsfilter = build_caps_filter(&config, fixed_geometry)?;
         let convert = make_element("videoconvert")?;
         let encoder = build_encoder(encoder_kind)?;
         // mp4mux only accepts avc/avc3 stream-format, while encoders
@@ -267,11 +269,14 @@ fn finalize_recording(
     }
 }
 
-/// Build the source element the config selects.
+/// Build the source element the config selects. The second return
+/// says whether the caps filter should pin a fixed geometry (the
+/// test spine) or pass the source's own through (real grabs).
 ///
-/// [`RecordSource::Session`] is resolved by the X11 and portal
-/// tasks; until they land it reports honestly instead of pretending.
-fn build_source(config: &RecordConfig) -> Result<gst::Element, RecordError> {
+/// [`RecordSource::Session`] resolves per session kind: X11 grabs
+/// directly, `Wayland` gets the portal (its task), anything else
+/// has no display to record.
+fn build_source(config: &RecordConfig) -> Result<(gst::Element, bool), RecordError> {
     match config.source {
         RecordSource::TestSrc => {
             // Deliberately NOT is-live: a live source stays silent in
@@ -279,26 +284,159 @@ fn build_source(config: &RecordConfig) -> Result<gst::Element, RecordError> {
             // stalls below PLAYING. Non-live videotestsrc prerolls
             // immediately and stamps frames at the negotiated rate,
             // which is all the headless spine needs.
-            make_element("videotestsrc")
+            Ok((make_element("videotestsrc")?, true))
         }
-        RecordSource::Session => Err(RecordError::PipelineFailed {
-            element: "source".into(),
-            message: "session sources land in the X11/portal tasks".into(),
-        }),
+        RecordSource::Session => match SessionKind::detect() {
+            SessionKind::X11 => {
+                let element = make_element("ximagesrc")?;
+                // Fixed-fps recording wants a frame every tick even
+                // when the screen is idle, not damage events.
+                element.set_property("use-damage", false);
+                let monitors: Vec<MonitorRect> = flintshot_core::capture::monitors()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(MonitorRect::from)
+                    .collect();
+                let grab = X11Grab::resolve(config.region, config.monitor, &monitors)?;
+                element.set_property("startx", grab.startx);
+                element.set_property("starty", grab.starty);
+                element.set_property("endx", grab.endx);
+                element.set_property("endy", grab.endy);
+                Ok((element, false))
+            }
+            SessionKind::Wayland => Err(RecordError::PipelineFailed {
+                element: "source".into(),
+                message: "the Wayland portal source lands in the portal task".into(),
+            }),
+            // Other (headless/tty) and any future session kind: no
+            // display to record from.
+            _ => Err(RecordError::NoDisplay),
+        },
     }
 }
 
-/// The test spine's caps: fixed low resolution at the configured
-/// frame rate, so headless runs are fast and deterministic.
-fn build_test_caps_filter(config: &RecordConfig) -> Result<gst::Element, RecordError> {
-    let caps = gst::Caps::builder("video/x-raw")
-        .field("width", 320_i32)
-        .field("height", 180_i32)
-        .field(
-            "framerate",
-            gst::Fraction::new(i32::try_from(config.fps).unwrap_or(i32::from(30u16)), 1),
-        )
-        .build();
+/// The grab rectangle `ximagesrc` needs, in virtual-desktop pixels.
+/// `endx`/`endy` are exclusive, matching both `ximagesrc`'s
+/// properties and core's [`Rect`] convention (`max` is the pixel
+/// just past the edge).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct X11Grab {
+    /// Left edge (inclusive).
+    pub startx: i32,
+    /// Top edge (inclusive).
+    pub starty: i32,
+    /// Right edge (exclusive).
+    pub endx: i32,
+    /// Bottom edge (exclusive).
+    pub endy: i32,
+}
+
+/// The monitor facts the grab planner needs — a narrow mirror of
+/// core's `MonitorInfo` (which is `#[non_exhaustive]`, hence not
+/// literal-constructible outside its crate) so the planner stays
+/// pure and unit-testable with synthetic desktops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorRect {
+    /// Enumeration index.
+    pub index: u32,
+    /// Whether the backend flags this monitor primary.
+    pub is_primary: bool,
+    /// Origin X in the virtual desktop (physical px).
+    pub x: i32,
+    /// Origin Y in the virtual desktop (physical px).
+    pub y: i32,
+    /// Width in physical px.
+    pub width: u32,
+    /// Height in physical px.
+    pub height: u32,
+}
+
+impl From<MonitorInfo> for MonitorRect {
+    fn from(m: MonitorInfo) -> Self {
+        Self {
+            index: m.index,
+            is_primary: m.is_primary,
+            x: m.x,
+            y: m.y,
+            width: m.width,
+            height: m.height,
+        }
+    }
+}
+
+impl X11Grab {
+    /// Resolve the grab: an explicit `region` wins; otherwise the
+    /// requested monitor, or the primary, or the first one listed.
+    ///
+    /// # Errors
+    /// [`RecordError::NoDisplay`] when no monitors exist;
+    /// [`RecordError::PipelineFailed`] for an out-of-range monitor
+    /// index.
+    pub fn resolve(
+        region: Option<Rect>,
+        monitor: Option<u32>,
+        monitors: &[MonitorRect],
+    ) -> Result<Self, RecordError> {
+        if let Some(rect) = region {
+            return Ok(Self {
+                startx: px(rect.min.x),
+                starty: px(rect.min.y),
+                endx: px(rect.max.x),
+                endy: px(rect.max.y),
+            });
+        }
+        if let Some(index) = monitor {
+            if !monitors.iter().any(|m| m.index == index) {
+                return Err(RecordError::PipelineFailed {
+                    element: "source".into(),
+                    message: format!("monitor {index} not found ({} available)", monitors.len()),
+                });
+            }
+        }
+        let Some(chosen) = monitor
+            .and_then(|index| monitors.iter().find(|m| m.index == index))
+            .or_else(|| monitors.iter().find(|m| m.is_primary))
+            .or_else(|| monitors.first())
+        else {
+            return Err(RecordError::NoDisplay);
+        };
+        Ok(Self {
+            startx: chosen.x,
+            starty: chosen.y,
+            endx: chosen.x.saturating_add(widen(chosen.width)),
+            endy: chosen.y.saturating_add(widen(chosen.height)),
+        })
+    }
+}
+
+/// Float geometry (core's [`Rect`]) to whole pixels, nearest.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "rounded screen coords fit i32"
+)]
+fn px(value: f32) -> i32 {
+    value.round() as i32
+}
+
+/// `u32` monitor extent into the `i32` coordinate space; screen
+/// sizes never approach the saturation bound.
+fn widen(value: u32) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+/// The source-side caps: frame rate always; fixed low resolution
+/// only for the test spine (`fixed_geometry`), so headless runs are
+/// fast while real grabs keep their own geometry.
+fn build_caps_filter(
+    config: &RecordConfig,
+    fixed_geometry: bool,
+) -> Result<gst::Element, RecordError> {
+    let framerate = gst::Fraction::new(i32::try_from(config.fps).unwrap_or(i32::from(30u16)), 1);
+    let mut builder = gst::Caps::builder("video/x-raw").field("framerate", framerate);
+    if fixed_geometry {
+        builder = builder.field("width", 320_i32).field("height", 180_i32);
+    }
+    let caps = builder.build();
     let filter = make_element("capsfilter")?;
     filter.set_property("caps", caps);
     Ok(filter)
@@ -379,4 +517,100 @@ fn pending_bus_detail(pipeline: &gst::Pipeline) -> String {
         }
     }
     detail
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flintshot_core::geom::Point;
+
+    fn mon(index: u32, x: i32, y: i32, width: u32, height: u32, primary: bool) -> MonitorRect {
+        MonitorRect {
+            index,
+            is_primary: primary,
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// A two-monitor desktop: m0 at origin (not primary), m1 to the
+    /// right and primary.
+    fn two_monitors() -> Vec<MonitorRect> {
+        vec![
+            mon(0, 0, 0, 1920, 1080, false),
+            mon(1, 1920, 0, 2560, 1440, true),
+        ]
+    }
+
+    #[test]
+    fn x11_explicit_region_wins_over_monitor_selection() {
+        let region = Rect::new(Point::new(10.0, 20.0), Point::new(110.0, 220.0));
+        let grab = X11Grab::resolve(Some(region), Some(1), &two_monitors()).expect("resolves");
+        assert_eq!(
+            grab,
+            X11Grab {
+                startx: 10,
+                starty: 20,
+                endx: 110,
+                endy: 220
+            }
+        );
+    }
+
+    #[test]
+    fn x11_monitor_index_picks_that_monitor_even_when_not_primary() {
+        let grab = X11Grab::resolve(None, Some(0), &two_monitors()).expect("resolves");
+        assert_eq!(grab.startx, 0);
+        assert_eq!(grab.starty, 0);
+        assert_eq!(grab.endx, 1920);
+        assert_eq!(grab.endy, 1080);
+    }
+
+    #[test]
+    fn x11_no_monitor_choice_falls_back_to_primary() {
+        let grab = X11Grab::resolve(None, None, &two_monitors()).expect("resolves");
+        // m1 is primary even though m0 owns the origin: the grab
+        // must use m1's virtual-desktop coordinates, not (0,0).
+        assert_eq!(grab.startx, 1920);
+        assert_eq!(grab.endx, 1920 + 2560);
+        assert_eq!(grab.endy, 1440);
+    }
+
+    #[test]
+    fn x11_no_primary_picks_the_first_monitor() {
+        let monitors = vec![mon(3, -2560, 100, 2560, 1440, false)];
+        let grab = X11Grab::resolve(None, None, &monitors).expect("resolves");
+        assert_eq!(grab.startx, -2560);
+        assert_eq!(grab.starty, 100);
+        assert_eq!(grab.endx, 0);
+        assert_eq!(grab.endy, 1540);
+    }
+
+    #[test]
+    fn x11_empty_desktop_reports_no_display() {
+        assert_eq!(
+            X11Grab::resolve(None, None, &[]),
+            Err(RecordError::NoDisplay)
+        );
+    }
+
+    #[test]
+    fn x11_out_of_range_monitor_is_a_named_pipeline_failure() {
+        let err = X11Grab::resolve(None, Some(7), &two_monitors()).unwrap_err();
+        assert!(matches!(err, RecordError::PipelineFailed { .. }));
+        assert!(err.to_string().contains("monitor 7"));
+        assert!(err.to_string().contains("2 available"));
+    }
+
+    #[test]
+    fn x11_region_coordinates_round_to_nearest_pixel() {
+        let region = Rect::new(Point::new(10.4, 20.6), Point::new(100.5, 200.49));
+        let grab = X11Grab::resolve(Some(region), None, &[]).expect("resolves");
+        assert_eq!(grab.startx, 10);
+        assert_eq!(grab.starty, 21);
+        assert_eq!(grab.endx, 101); // 100.5 rounds away from zero
+        assert_eq!(grab.endy, 200);
+    }
 }
