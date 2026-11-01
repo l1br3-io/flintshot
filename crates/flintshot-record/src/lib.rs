@@ -15,7 +15,7 @@
 //! Layering (filled in by the engine tasks):
 //!
 //! * [`RecordConfig`] / [`RecordError`] — the caller-facing contract
-//! * `encoder` / `probe` — capability probing over the encoder
+//! * [`encoder`] / [`probe`] — capability probing over the encoder
 //!   fallback chain
 //! * `pipeline` — construction, bus watch, EOS/finalize lifecycle
 //! * `portal` — the `Wayland` `ScreenCast` session dance
@@ -24,11 +24,17 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 
+pub mod encoder;
+pub mod probe;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use flintshot_core::geom::Rect;
 use thiserror::Error;
+
+pub use encoder::{ElementRegistry, EncoderKind, ENCODER_CHAIN};
+pub use probe::{probe_capabilities, GstElementRegistry, RecordCapability, RecordSourceKind};
 
 /// Default capture rate in frames per second.
 pub const FPS_DEFAULT: u32 = 30;
@@ -93,7 +99,7 @@ impl RecordConfig {
 /// never panics: each variant carries an actionable message (for
 /// [`RecordError::ElementMissing`], the exact plugin package to
 /// install).
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecordError {
     /// The `ScreenCast` portal request was refused — the user dismissed
@@ -131,6 +137,15 @@ pub enum RecordError {
 /// Type shell in the scaffold task; the engine tasks fill in
 /// `prepare` (portal session or X11 geometry) and `start`.
 pub struct Recorder;
+
+impl Recorder {
+    /// What this machine can record with — best source, available
+    /// encoders — straight from `GStreamer`'s plugin registry.
+    #[must_use]
+    pub fn probe() -> RecordCapability {
+        probe_capabilities(&GstElementRegistry)
+    }
+}
 
 /// A running recording.
 ///

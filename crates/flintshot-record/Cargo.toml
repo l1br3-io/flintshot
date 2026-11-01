@@ -13,5 +13,9 @@ authors.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+# The only crate in the workspace that links GStreamer (see lib.rs
+# docs). Needs libgstreamer1.0-dev at build time; elements are
+# probed at runtime so a sparse plugin set degrades, never panics.
+gstreamer = "0.23"
 flintshot-core = { workspace = true }
 thiserror = { workspace = true }
