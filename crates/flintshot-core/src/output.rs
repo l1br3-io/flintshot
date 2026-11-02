@@ -63,6 +63,8 @@ fn civil_from_days(days: u64) -> (i64, u32, u32) {
 pub fn output_ext(format: OutputFormat) -> &'static str {
     if format == OutputFormat::Jpeg {
         "jpg"
+    } else if format == OutputFormat::Webp {
+        "webp"
     } else {
         "png"
     }
@@ -192,6 +194,7 @@ mod tests {
     fn output_ext_maps_formats() {
         assert_eq!(output_ext(OutputFormat::Png), "png");
         assert_eq!(output_ext(OutputFormat::Jpeg), "jpg");
+        assert_eq!(output_ext(OutputFormat::Webp), "webp");
     }
 
     #[test]

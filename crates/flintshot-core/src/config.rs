@@ -664,6 +664,9 @@ pub enum OutputFormat {
     Png,
     /// Lossy JPEG at the configured quality.
     Jpeg,
+    /// Lossless WebP (`image-webp` encoder is lossless-only; the
+    /// JPEG quality knob does not apply).
+    Webp,
 }
 
 /// Resolve the configured output format; unknown values warn and
@@ -673,6 +676,7 @@ pub fn parse_output_format(raw: &str) -> OutputFormat {
     match raw {
         "png" => OutputFormat::Png,
         "jpeg" => OutputFormat::Jpeg,
+        "webp" => OutputFormat::Webp,
         other => {
             tracing::warn!("unknown output.format {other:?}; using \"png\"");
             OutputFormat::Png
@@ -1340,7 +1344,8 @@ mod tests {
 
         assert_eq!(parse_output_format("png"), OutputFormat::Png);
         assert_eq!(parse_output_format("jpeg"), OutputFormat::Jpeg);
-        assert_eq!(parse_output_format("webp"), OutputFormat::Png);
+        assert_eq!(parse_output_format("webp"), OutputFormat::Webp);
+        assert_eq!(parse_output_format("avif"), OutputFormat::Png);
 
         assert_eq!(parse_size_mode("heuristic"), SizeMode::Heuristic);
         assert_eq!(parse_size_mode("exact-png"), SizeMode::ExactPng);
