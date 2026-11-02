@@ -80,6 +80,9 @@ screenshot tools:
 - Upload (Imgur first; pluggable `Backend` trait)
 - Open with external app
 - Notification on completion (`notify-rust`)
+- Screen recording — MP4/H.264 short-snips on Linux (X11 + Wayland
+  portal; ADR-0070), from the CLI, tray, app window, and COSMIC
+  applet
 
 ### System integration
 - Background daemon (`flintshot daemon`)
@@ -97,8 +100,13 @@ screenshot tools:
 
 ## Non-goals
 
-- **Video / screen recording** — out of scope; use OBS
-- **OCR** — out of scope; integrate with `tesseract` externally if needed
+- **Audio and live-casting in recordings** — the short-snips profile
+  is video-only (ADR-0070); either addition means fMP4 finalize and
+  a new muxer, deferred until missed enough
+- **GIF output** — out of scope; consider `gpu-screen-recorder`
+- **In-process OCR** — OCR arrives, when it arrives, as an external
+  `tesseract` integration (queued post-Phase-7 in the ROADMAP),
+  never a linked dependency
 - **Self-hosting image hosting** — use a `Backend` plugin
 - **Mobile platforms** — desktop only
 - **WebAssembly** — out of scope

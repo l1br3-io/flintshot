@@ -1,16 +1,16 @@
 # Roadmap
 
 Thin index of directions and milestones for `flintshot`. Per-effort
-requirements live in [`specs/`](specs/) (one directory per effort,
-status-flipped in place when shipped). For the narrative "why", see
-[`VISION.md`](VISION.md); for decision rationale, see
-[`adrs/`](adrs/).
+requirements and outcomes live in git history — the trail of any
+effort is `git log --grep='<effort-slug>'` (see AGENTS.md "Git as
+docs"). For the narrative "why", see [`VISION.md`](VISION.md); for
+decision rationale, see [`adrs/`](adrs/).
 
-**CURRENT MILESTONE: Ask-the-shot shipped** (2026-09-25; see
-[`specs/ai-transforms/`](specs/ai-transforms/)). All planned phases
-through Phase 6 are shipped. Next up: Phase 7 (AI v2 — streaming
-first). The `1.0.0` clock is running: tag once we have 30 days of
-dogfooding (earliest 2026-09-14).
+**CURRENT MILESTONE: screen recording shipped** (2026-11-01; the
+`record-engine` → `record-cli` → `record-ui` efforts, ADR-0070).
+Next up: Phase 7 (AI v2 — streaming first). The `1.0.0` clock is
+running: tag once we have 30 days of dogfooding (earliest
+2026-09-14).
 
 ## Milestones
 
@@ -26,11 +26,13 @@ dogfooding (earliest 2026-09-14).
 | Phase 5 — Live overlay (Flameshot-style)       | Shipped       |
 | Phase 6 — Wayland global hotkeys via `ashpd`   | Shipped       |
 | Ask-the-shot — AI transforms over the canvas (`ai-transforms`, ADR-0069) | Shipped |
+| Screen recording — Linux MP4 engine + `record` verb + every UI surface (`record-*`, ADR-0070) | Shipped |
+| Flathub — `io.l1br3.Flintshot` in the COSMIC Store | Shipped |
 
 ## Phase 7 — Ask-the-shot v2 (next)
 
-Prioritized from the v1 non-goals list
-([`specs/ai-transforms/spec.md`](specs/ai-transforms/)):
+Prioritized from the v1 non-goals list (effort `ai-transforms`;
+`git log --grep='ai-transforms'`):
 
 1. **Streaming responses** — SSE on the OpenAI-compatible endpoint;
    token-by-token render in the AI tab, with a **Stop** control to
@@ -60,6 +62,8 @@ build on OCR.
 ## Versioning
 
 - `0.x.y` throughout development; no API stability guarantees.
+- First tagged release: `v0.1.1` (2026-10-17) via the cargo-dist
+  ring (ADR-0068).
 - `1.0.0` once Phase 4 (upload) lands and we have at least 30 days of
   dogfooding. Phase 4 shipped 2026-08-15; earliest `1.0.0` is
   2026-09-14, gated on no P1 regressions during dogfooding.
@@ -75,12 +79,17 @@ build on OCR.
 - Configurable after-capture actions — user-defined pipeline per
   capture: copy / save / upload / AI transform / OCR (ShareX
   pattern; our upload + AI pieces already exist)
-- GIF / short-video capture (probably out of scope; consider
+- GIF output for recordings (probably out of scope; consider
   `gpu-screen-recorder` integration instead)
+- Audio and live-casting in recordings — deferred with ADR-0070:
+  both force fMP4 finalize + a new muxer; the `Recorder` contract
+  stands as shipped
 - Annotation presets (named combinations of color + width + font)
 - Plugin system for `Backend` trait (dylib or WASM?)
-- Flatpak packaging with `xdg-desktop-portal` integration baked in
-- Windows packaging via MSI, macOS via notarized `.app`
+- Release-channel activation — the winget manifest PR, the AUR
+  `flintshot-bin` push, and macOS notarization (MSI/zip + DMG
+  already build via the cargo-dist ring, ADR-0068; runbook in
+  [`packaging/RELEASE.md`](../packaging/RELEASE.md))
 - Alternative editor shells: `flintshot-editor-iced`,
   `flintshot-editor-slint` (exercise the abstraction)
 - MCP server surface: expose `capture` as an MCP tool so agents
