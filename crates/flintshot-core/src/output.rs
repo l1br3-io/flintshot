@@ -96,8 +96,10 @@ pub fn next_free_path(path: PathBuf) -> PathBuf {
 }
 
 /// Write `img` to `dir/stem.ext` with `-2`-style collision
-/// suffixing, creating `dir` on first write. PNG (lossless) or JPEG
-/// at `jpeg_quality` per `format`. Returns the written path.
+/// suffixing, creating `dir` on first write. PNG (lossless), JPEG at
+/// `jpeg_quality`, or lossless WebP per `format` (the `image-webp`
+/// encoder is lossless-only; `jpeg_quality` does not apply). Returns
+/// the written path.
 ///
 /// # Errors
 /// Surfaces [`FlintshotError::Io`] on dir creation or the file
@@ -121,6 +123,10 @@ pub fn save_capture_image(
             u8::try_from(jpeg_quality.clamp(1, 100)).unwrap_or(90),
         );
         rgb.write_with_encoder(encoder)?;
+    } else if format == OutputFormat::Webp {
+        let file = std::fs::File::create(&path)?;
+        let encoder = image::codecs::webp::WebPEncoder::new_lossless(file);
+        img.write_with_encoder(encoder)?;
     } else {
         img.save_with_format(&path, image::ImageFormat::Png)?;
     }
@@ -245,6 +251,44 @@ mod tests {
         );
         let back = image::open(&written).unwrap();
         assert_eq!(back.dimensions(), (8, 6));
+    }
+
+    #[test]
+    fn save_capture_image_writes_lossless_webp_with_webp_ext() {
+        let dir = tempdir().unwrap();
+        let img = image::RgbaImage::from_pixel(8, 6, image::Rgba([10, 200, 30, 255]));
+        let written = save_capture_image(dir.path(), "shot", &img, OutputFormat::Webp, 90).unwrap();
+        assert_eq!(
+            written.extension().map(|e| e.to_string_lossy()),
+            Some("webp".into()),
+            "webp files take the .webp extension"
+        );
+        let back = image::open(&written).unwrap();
+        assert_eq!(back.dimensions(), (8, 6), "the written file decodes");
+        assert_eq!(
+            back.to_rgba8(),
+            img,
+            "lossless: WebP output round-trips the pixels exactly"
+        );
+    }
+
+    #[test]
+    fn webp_output_carries_the_riff_webp_magic() {
+        let dir = tempdir().unwrap();
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([7, 77, 177, 255]));
+        let written = save_capture_image(dir.path(), "shot", &img, OutputFormat::Webp, 90).unwrap();
+        let mut head = [0u8; 12];
+        std::io::Read::read_exact(
+            &mut std::io::BufReader::new(std::fs::File::open(&written).unwrap()),
+            &mut head,
+        )
+        .unwrap();
+        assert_eq!(&head[0..4], b"RIFF", "a WebP container starts with RIFF");
+        assert_eq!(
+            &head[8..12],
+            b"WEBP",
+            "a WebP container carries the WEBP tag"
+        );
     }
 
     #[test]
