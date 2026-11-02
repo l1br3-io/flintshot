@@ -22,6 +22,7 @@ verified, or open an issue and link it in the cell.
 - **PARTIAL** — works with caveats (note them in the cell)
 - **FAIL** — broken; link the issue
 - **N/A** — doesn't apply on this platform
+- **PENDING** — scaffolded cell awaiting its live run (Ask-the-shot section)
 - **(blank)** — not yet tested
 
 ## Platforms under test
@@ -2747,6 +2748,97 @@ flintshot backends    # the record row must show a source and ≥1 encoder
   x264/OpenH264); see ADR-0070.
 - macOS/Windows recording is deliberately unbuilt (future modules);
   their columns are N/A by design, not omission.
+
+## Ask-the-shot live verification (Phase 7)
+
+Spec: `git log --grep='ai-streaming'`; design: ADR-0069. The streaming
+stack (SSE token render, Stop, cancel-and-rerun, typed error cards,
+non-SSE fallback, remember-transform) shipped 2026-10-03 and is pinned
+headless by mockito + frame tests; **this section is the pass CI
+can't run** — real provider endpoints, real keys, a real desktop
+session. Pinned rule: a second distinct *model* on the same hosted
+provider satisfies the ≥2-live-provider floor (one hosted endpoint is
+still the minimum).
+
+### Test setup
+
+```sh
+cargo build --release
+flintshot config          # [ai] provider + model resolve as expected
+flintshot region          # capture → AI hero → run a transform
+```
+
+- **Spend-capped key only.** Create a fresh provider key with a hard
+  spending limit for this pass and revoke it afterwards. The key is
+  stored via the editor's AI settings route (keyring entry
+  `flintshot / ai:<provider>`, ADR-0069) — never in `config.toml`, a
+  cell, a log paste, or a screenshot.
+- **Provider pool** (ADR-0069 presets): hosted — `openai`, `xai`,
+  `gemini`, and OpenRouter via the `custom` preset's base-URL
+  override; local — Ollama / LM Studio via `custom` (keyless
+  first-class per ADR-0069). A provider counts as *live* when a real
+  key or local model answers at run time.
+- **Coverage floor:** ≥ 2 distinct live providers over all 8
+  scenarios, at least one hosted — local-only passes don't exercise
+  the hosted auth path.
+
+### Test script
+
+Run all 8 scenarios per live provider, on one commit, recording its
+hash in every cell.
+
+1. **Real-key auth (row 1).** In AI settings: pick the provider,
+   paste the spend-capped key, **Test connection** passes.
+   `flintshot config` shows the `[ai]` provider/model; the key
+   surfaces nowhere in config output, logs, or copied text.
+2. **Vision round-trip (row 2).** Capture a region containing legible
+   text → AI hero → a "what is in this image"-style transform → the
+   returned text matches the region's contents.
+3. **Model-sees-the-annotation (row 3).** Draw an arrow + a text
+   annotation on the capture → run a transform that must reference
+   them → the answer names both.
+4. **Follow-up thread (row 4).** Send a follow-up prompt in the same
+   conversation card → the answer lands in context (it references the
+   prior turn).
+5. **Token-by-token render (row 5).** Start a long answer → the
+   response card visibly grows during generation with the streaming
+   caret — not one all-at-once swap.
+6. **Stop mid-stream (row 6).** Press Stop during generation → the
+   partial finalizes within ~1 s; no hang, no lost partial.
+7. **Mid-stream failure (row 7).** Cut the network (or kill a local
+   provider) during generation → the partial is kept and the typed
+   error card appends (no panic, no silent loss).
+8. **Non-SSE fallback (row 8).** Manual only if a live provider
+   rejects `stream: true` (a 400 naming stream). If every live
+   provider streams, record the cell as covered by the mockito suite
+   with a pointer to it —
+   `streaming_worker_falls_back_on_a_400_that_mentions_stream` /
+   `streaming_worker_falls_back_to_non_streaming_on_json_body`
+   (`crates/flintshot-app/src/ai/worker.rs`).
+
+### Matrix
+
+| Scenario | OpenAI | xAI | Gemini | OpenRouter (custom) | Ollama (custom) | LM Studio (custom) |
+| -------- | ------ | --- | ------ | ------------------- | --------------- | ------------------ |
+| 1. Real-key auth; Test connection; key never surfaces | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 2. Vision round-trip returns the region's contents | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 3. Answer references the drawn arrow + text | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 4. Follow-up answered in context | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 5. Token-by-token render with caret | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 6. Stop mid-stream finalizes partial within ~1 s | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 7. Mid-stream failure keeps partial + typed error card | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 8. Non-SSE fallback (or mockito-covered pointer) | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+
+### Known caveats
+
+- Cells move `PENDING → PASS/PARTIAL/FAIL <commit> <date>` per "How
+  to verify a cell" below; a FAIL always links an issue — never a
+  silent skip, never a weakened scenario. The module completes when
+  the rows are honest, not when they are all PASS.
+- Local providers squeeze rows 1 and 7: Ollama/LM Studio are keyless
+  (row 1 reduces to *Test connection* + the model answering) and row
+  7's "provider kill" means stopping the local server; the hosted
+  auth and network-cut variants need a hosted provider.
 
 ## How to verify a cell
 
