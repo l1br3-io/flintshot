@@ -8,9 +8,13 @@ decision rationale, see [`adrs/`](adrs/).
 
 **CURRENT MILESTONE: screen recording shipped** (2026-11-01; the
 `record-engine` → `record-cli` → `record-ui` efforts, ADR-0070).
-Next up: Phase 7 (AI v2 — streaming first). The `1.0.0` clock is
-running: tag once we have 30 days of dogfooding (earliest
-2026-09-14).
+Phase 7's buildable items shipped even earlier — 2026-10-03, effort
+`ai-streaming` (streaming + Stop, remember-last-transform); only the
+live-provider verification pass remains (§ Phase 7 below). Next up:
+the post-recording feature batch (export depth, session resume, CLI
+scripting, OCR, replay buffer, window capture, …), specced
+in-session 2026-11. The `1.0.0` clock is running: tag once we have
+30 days of dogfooding (earliest 2026-09-14).
 
 ## Milestones
 
@@ -26,26 +30,23 @@ running: tag once we have 30 days of dogfooding (earliest
 | Phase 5 — Live overlay (Flameshot-style)       | Shipped       |
 | Phase 6 — Wayland global hotkeys via `ashpd`   | Shipped       |
 | Ask-the-shot — AI transforms over the canvas (`ai-transforms`, ADR-0069) | Shipped |
+| Phase 7 — Ask-the-shot v2: streaming + Stop, remember-transform (`ai-streaming`) | Shipped (live-provider pass pending) |
 | Screen recording — Linux MP4 engine + `record` verb + every UI surface (`record-*`, ADR-0070) | Shipped |
 | Flathub — `io.l1br3.Flintshot` in the COSMIC Store | Shipped |
 
-## Phase 7 — Ask-the-shot v2 (next)
+## Phase 7 — Ask-the-shot v2
 
-Prioritized from the v1 non-goals list (effort `ai-transforms`;
-`git log --grep='ai-transforms'`):
+Items 1–2 below shipped 2026-10-03 (effort `ai-streaming`;
+`git log --grep='ai-streaming'`): SSE streaming with token-by-token
+render, a Stop pill that aborts within ~100 ms keeping the partial,
+invisible non-streaming fallback for providers that reject
+`stream: true`, and remember-last-transform preselect. Remaining:
 
-1. **Streaming responses** — SSE on the OpenAI-compatible endpoint;
-   token-by-token render in the AI tab, with a **Stop** control to
-   cancel mid-generation (table-stakes pairing in every reference
-   chat app). Biggest perceived-latency win: vision round-trips run
-   5–30 s and today land all at once. Implementation reference:
-   `async-openai`'s SSE event loop (see
-   [`REFERENCES.md`](REFERENCES.md)).
-2. **Remember last-used transform** — pre-select it in the transform
-   dialog; most users run the same 1–2 transforms repeatedly.
-3. **Live-provider verification pass** — spec success criteria 2–5
-   still need a manual pass against a real endpoint (real key,
-   OCR round-trip, model-sees-the-annotation, follow-up thread).
+3. **Live-provider verification pass** — the v1 spec's success
+   criteria 2–5 still need a manual pass against a real endpoint
+   (real key, OCR round-trip, model-sees-the-annotation, follow-up
+   thread), now extended with the streaming-era rows (token render,
+   Stop mid-stream, partial-on-mid-stream-failure).
 
 Still deferred (re-prioritize after Phase 7): image references in
 follow-ups, multiple concurrent providers, transform prompt
