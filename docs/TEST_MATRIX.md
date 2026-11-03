@@ -2892,6 +2892,62 @@ cargo build --release
 - A second crash over an unhandled park wins (newest-wins): the
   older park is swept and logged, never merged.
 
+## Eyedropper — canvas + screen colour picking
+
+Spec: `git log --grep='eyedropper'`. The composited sampling (source
++ committed annotations), the unit-rgb conversion contract, the hex
+round-trips, the popover cluster frames (chip → pick mode → apply →
+recents/hex, Esc cancel), the portal screen chip's
+request/arrival/denial choreography, and the `K` shortcut all run
+under `cargo test -p flintshot-core color` + `cargo test -p
+flintshot-editor-egui popover`; **this section is the live portal
+pass** — the consent dialog, a real cross-window pick, and the
+magnifier's feel need a real session.
+
+### Test setup
+
+```sh
+cargo build --release
+```
+
+### Test script
+
+1. **Canvas pick + magnifier (row 1)**: open an editor on a capture;
+   in the colour bay click the crosshair chip (or press `K`) — the
+   cursor becomes a crosshair over the canvas and the 4× magnifier
+   rides along without holding any modifier; click a pixel — the
+   sampled colour becomes the edited colour (stroke slot for shape
+   tools, text colour under Text), the hex chip updates, and Esc
+   before a click cancels with nothing changed.
+2. **Portal screen pick, happy path (row 2, L2/L4/L5)**: click the
+   screen chip (only shown when xdg-desktop-portal runs) — the
+   portal's colour dialog appears; pick a colour **outside** the
+   editor window — the colour lands through the same apply path and
+   the popover stays usable.
+3. **Portal denial (row 3)**: cancel the portal dialog — a toast
+   ("Screen colour pick cancelled") appears; no error dialog, the
+   popover intact, no state change.
+4. **Hex copy (row 4)**: click the `#rrggbb` chip — the value lands
+   on the clipboard ("Copied #…" toast) and pastes elsewhere.
+
+| Behavior                              | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Canvas pick + magnifier + Esc (row 1) | | PENDING | | | | N/A | N/A | N/A | N/A | |
+| Portal PickColor consent + happy path (row 2) | | PENDING | | PENDING | PENDING | N/A | N/A | N/A | N/A | |
+| Portal denial → toast, popover intact (row 3) | | PENDING | | PENDING | PENDING | N/A | N/A | N/A | N/A | |
+| Hex copy gesture (row 4)              | | PENDING | | | | N/A | N/A | N/A | N/A | |
+
+### Known caveats
+
+- The screen chip is probe-gated, not display-server-gated: X11
+  sessions with a running xdg-desktop-portal show it too; worker
+  editor windows (no host bridge) never do.
+- The magnifier shows the **source** pixels (its architectural
+  contract — it reads `state.image` directly); the click itself
+  samples the composited canvas.
+- The portal round-trip is user-paced with a generous 10-minute
+  guard (const-pinned) — an idle consent dialog is not a hang.
+
 ## Annotate polish — Shift constraints + curved arrows
 
 Spec: `git log --grep='annotate-polish'`. The constraint math (both

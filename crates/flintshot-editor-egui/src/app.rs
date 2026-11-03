@@ -1208,6 +1208,29 @@ impl EditorApp {
         // the shell owns panning and never dispatches Hand presses).
         self.handle_view_input(ctx);
 
+        // `K` (kolour): the eyedropper chip's keyboard twin — arms
+        // canvas pick mode for the tool in force (Text tool → the
+        // text colour slot; every other tool → the stroke slot). A
+        // mode key, not a tool key: the tool itself never changes.
+        // Guarded on the event's own modifiers so chords over K stay
+        // free; text-editing mode returned early above, so a typed
+        // `k` can't arm a pick mid-draft. While a pick is already
+        // live this is a no-op (the mode owns single letters then).
+        if self.color_pick.is_none() {
+            let k_pressed = ctx.input(|i| {
+                i.raw.events.iter().rev().any(
+                    |e| matches!(e, egui::Event::Key { key, pressed: true, modifiers: m, .. } if *key == egui::Key::K && m.is_none()),
+                )
+            });
+            if k_pressed {
+                self.color_pick = Some(if self.state.tool == Tool::Text {
+                    crate::popover::ColorTarget::Text
+                } else {
+                    crate::popover::ColorTarget::Stroke
+                });
+            }
+        }
+
         // Single-key tool selection: unmodified S R E A L M P T B N
         // switch tools (advertised in the rail tooltips). Guarded on
         // the *event's own* modifiers so Ctrl+S / Ctrl+Shift+Z chords
@@ -3775,9 +3798,11 @@ mod tests {
         }
         // Keys that must never switch tools: chords are handled by the
         // dispatcher, and unrelated letters fall through. S is freed
-        // (formerly Select's key, now unbound).
+        // (formerly Select's key, now unbound); K is the eyedropper's
+        // pick-mode key (a mode, not a tool — see the kolour tests).
         for key in [
             egui::Key::S,
+            egui::Key::K,
             egui::Key::Z,
             egui::Key::Y,
             egui::Key::Escape,
@@ -4268,8 +4293,77 @@ mod tests {
         );
     }
 
-    // --- Portal screen pick (eyedropper ED3) ---
+    // --- The K shortcut (eyedropper ED4) ---
 
+    /// `K` (kolour) is the eyedropper chip's keyboard twin: it arms
+    /// canvas pick mode for the tool in force — the Text tool targets
+    /// the text colour, every other tool the stroke slot. A mode key,
+    /// not a tool key: the tool itself never changes.
+    #[test]
+    fn kolour_key_enters_pick_mode_for_the_tool_in_force() {
+        let key = || {
+            vec![egui::Event::Key {
+                key: egui::Key::K,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        };
+        // A shape tool → the stroke slot.
+        let (ctx, mut app) = solid_state_app([7, 11, 13, 255]);
+        app.state.set_tool(Tool::Rect);
+        logic_frame(&ctx, &mut app, key());
+        assert_eq!(
+            app.color_pick,
+            Some(crate::popover::ColorTarget::Stroke),
+            "K under a shape tool arms the stroke slot"
+        );
+        // The Text tool → the text colour slot.
+        app.state.set_tool(Tool::Text);
+        app.color_pick = None;
+        logic_frame(&ctx, &mut app, key());
+        assert_eq!(
+            app.color_pick,
+            Some(crate::popover::ColorTarget::Text),
+            "K under the Text tool arms the text colour slot"
+        );
+        // Never a tool switch.
+        assert_eq!(
+            app.state.tool,
+            Tool::Text,
+            "K changes the mode, not the tool"
+        );
+    }
+
+    /// A modified K (a future chord's letter) never arms a pick.
+    #[test]
+    fn modified_kolour_chord_never_arms_a_pick() {
+        let (ctx, mut app) = solid_state_app([7, 11, 13, 255]);
+        logic_frame_with_mods(
+            &ctx,
+            &mut app,
+            egui::Modifiers {
+                ctrl: true,
+                command: true,
+                ..egui::Modifiers::NONE
+            },
+            vec![egui::Event::Key {
+                key: egui::Key::K,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    ctrl: true,
+                    command: true,
+                    ..egui::Modifiers::NONE
+                },
+            }],
+        );
+        assert!(app.color_pick.is_none(), "Ctrl+K stays free for chords");
+    }
+
+    // --- Portal screen pick (eyedropper ED3) ---
     /// A full editor frame (production order: logic then ui) over the
     /// wide synthetic screen the panel needs.
     fn screen_pick_frame(ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>) {

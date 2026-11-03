@@ -20,6 +20,20 @@ Categories used below:
 
 ### Added
 
+- **Eyedropper — pick colours from the canvas or the screen** (effort
+  `eyedropper`, module 7 of the 2026-11 feature batch). The colour
+  bay's new cluster beside the custom chip: a canvas chip (shortcut
+  **K**) that arms crosshair pick mode — a click samples the
+  composited canvas (source + committed annotations: what you see is
+  what you sample) and applies the colour to the popover's target
+  (stroke slot for shape tools, text colour for Text), with the
+  pixel-zoom magnifier riding along; **Esc** cancels untouched. On
+  Linux with xdg-desktop-portal running, a screen chip picks a colour
+  from **anywhere on screen** via the portal's colour dialog
+  (denial/timeout degrade to a toast — never a modal, never blocking).
+  A `#rrggbb` chip shows the current colour and copies it on click
+  for colours destined elsewhere. `cargo test -p flintshot-core
+  color` + `cargo test -p flintshot-editor-egui popover` pin it.
 - **Shift-constrained drawing + curved arrows** (effort
   `annotate-polish`, module 6 of the 2026-11 feature batch). Holding
   Shift while dragging rect/ellipse clamps to a perfect square /
