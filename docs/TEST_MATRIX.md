@@ -2892,6 +2892,61 @@ cargo build --release
 - A second crash over an unhandled park wins (newest-wins): the
   older park is swept and logged, never merged.
 
+## Annotate polish — Shift constraints + curved arrows
+
+Spec: `git log --grep='annotate-polish'`. The constraint math (both
+drag directions, ratio grammar, length-preserving 45° snaps), the
+modifier routing through real editor frames, the sampled-bezier
+render/hit-test units, the session-file forward-compat tolerance, and
+the control-handle drag/undo frame tests all run under `cargo test`;
+**this section is the visual pass** — drawing feel and the curve's
+read over a real target need eyes.
+
+### Test setup
+
+```sh
+cargo build --release
+```
+
+### Test script
+
+1. **Shift-drag feel (row 1, L2 designated)**: pick Rectangle —
+   Shift+drag off-axis produces a perfect square (the longer axis
+   clamps to the shorter, both drag directions); same for Ellipse →
+   circle. Pick Line / Arrow — Shift+drag snaps to 0/45/90° while
+   the drag length stays live; releasing Shift mid-drag returns to
+   free angles, re-pressing re-constrains.
+2. **Curved arrow over a target (row 2)**: W arms the Curved arrow
+   tool (rail chip sits after Arrow). Drag a chord across a target —
+   the shaft starts straight; select it (V + click) — gold handles
+   appear (tail, head, control); drag the control handle out — the
+   curve bows around the target and the barbs follow the curve's
+   arrival angle, not the chord.
+3. **Undo/redo of control edits (row 3)**: after bending, Ctrl+Z
+   restores the previous control position (one gesture = one history
+   row, "Reshaped curved arrow"); Ctrl+Shift+Z re-bends; the History
+   tab shows the row with its clock.
+4. **Session-file tolerance** (no manual row): pinned headless — an
+   unknown annotation kind in a session sidecar is skipped with a
+   warn while the known annotations survive (`cargo test -p
+   flintshot-core session sidecar`).
+
+| Behavior                                | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| --------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Shift square/circle/snap feel (row 1)   | | PENDING | | | | N/A | N/A | N/A | N/A | |
+| Curved arrow draw + bend (row 2)        | | PENDING | | | | N/A | N/A | N/A | N/A | |
+| Control-edit undo/redo + history (row 3)| | PENDING | | | | N/A | N/A | N/A | N/A | |
+
+### Known caveats
+
+- Shift constrains exactly rect / ellipse / line / arrow drags (the
+  spec's four); blur and freehand tools pass through raw by design.
+- The curved arrow's initial drag is the straight chord — bending is
+  the control handle's job (a collinear control renders and hit-tests
+  as the straight arrow, pinned headless).
+- A Shift drag collapses to the anchor when one axis has zero extent
+  (every drawing tool's square-constrain feel).
+
 ## Ask-the-shot live verification (Phase 7)
 
 Spec: `git log --grep='ai-streaming'`; design: ADR-0069. The streaming

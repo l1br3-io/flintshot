@@ -20,6 +20,22 @@ Categories used below:
 
 ### Added
 
+- **Shift-constrained drawing + curved arrows** (effort
+  `annotate-polish`, module 6 of the 2026-11 feature batch). Holding
+  Shift while dragging rect/ellipse clamps to a perfect square /
+  circle (both drag directions), and while dragging line/arrow snaps
+  the angle to the 45° rose while preserving drag length — live, so
+  pressing or releasing Shift mid-drag re-constrains immediately. New
+  **Curved arrow** tool (rail chip after Arrow, shortcut **W**): a
+  quadratic-bézier arrow whose control handle (gold dot, offered
+  with tail + head when selected) bends it around the thing being
+  pointed at — barbs follow the curve's arrival angle, endpoint and
+  control drags are one-entry undoable like every edit ("Reshaped
+  curved arrow" in History), and a collinear control degrades to the
+  straight arrow. Session files stay forward-compatible: an
+  annotation kind this build doesn't know is skipped with a warning
+  instead of failing the sidecar, so older binaries (and parked
+  recovery runs) keep every annotation they do know (test-pinned).
 - **Crash recovery for unsaved captures** (effort `session-resume`,
   module 3 of the 2026-11 feature batch). A crashed, killed, or
   logged-out run no longer takes its unsaved captures with it:
