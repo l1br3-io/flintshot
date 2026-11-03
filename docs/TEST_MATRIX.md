@@ -2749,6 +2749,62 @@ flintshot backends    # the record row must show a source and ≥1 encoder
 - macOS/Windows recording is deliberately unbuilt (future modules);
   their columns are N/A by design, not omission.
 
+## CLI scripting — `capture` machine surface, completions, man page
+
+Spec: `git log --grep='cli-scripting'`. The parse/conflict/encode
+units and the X-display-gated e2es (exact `--geometry` dimensions,
+the `--json` stable line, `--stdout` payload purity + webp interop)
+run under `cargo test`; **this section is what needs a real session**
+— the portal consent on the Wayland crop path, interactive drags,
+and shell integration.
+
+### Test setup
+
+```sh
+cargo build --release
+just man    # renders packaging/man/flintshot.1 (recipe output)
+```
+
+### Test script
+
+1. **Wayland portal + `--geometry`** (L2–L5): `flintshot capture
+   --geometry 100,100,640,360 --out /tmp/g.png` → the portal consent
+   appears (as shipped) → the written image measures exactly
+   640×360 and contains the requested region of the (cropped) grab.
+   Multi-monitor HiDPI: the portal composite is logical-resolution —
+   a >1px-scale mismatch on such setups is PARTIAL, not FAIL (the
+   `--help` honesty line).
+2. **slurp round-trip** (any display): `flintshot capture
+   --print-geometry` → frozen frame → drag → stdout prints
+   `X,Y,W,H` and no image is written; then `flintshot capture
+   --geometry "$(…)" --out /tmp/r.png` grabs the same pixels.
+3. **`--json` composes** (any display): with `--out` the stable line
+   rides stdout; with `--stdout` it rides stderr and the stream stays
+   pure image bytes.
+4. **completions install** (one Linux row — L1 is the designated):
+   `flintshot completions zsh > ~/.zfunc/_flintshot` (with
+   `compinit`) and `flintshot completions fish >
+   ~/.config/fish/completions/flintshot.fish` → new shells complete
+   subcommands and `capture --<TAB>` flags in a fresh terminal.
+5. **man page**: `man -l packaging/man/flintshot.1` renders cleanly;
+   after a deb/rpm install, `man flintshot` opens it.
+
+| Behavior                                        | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Portal + `--geometry` crops after consent (row 1) | N/A | PENDING | | PENDING | PENDING | N/A | N/A | N/A | N/A | N/A |
+| `--print-geometry` slurp round-trip (row 2)      | | | | | | N/A | N/A | N/A | N/A | |
+| `--json` line + payload purity (row 3)           | | | | | | N/A | N/A | N/A | N/A | |
+| zsh + fish completion install (row 4)            | PENDING | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+| `man flintshot` post-install (row 5)             | | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |
+
+### Known caveats
+
+- `--print-geometry` and the portal-crop path are display-session
+  features; the headless CI rows cover parse/conflict/encode/shape
+  only (that split is the section's point).
+- Windows/macOS columns are N/A for the portal rows by design; the
+  flags themselves parse everywhere (units).
+
 ## Ask-the-shot live verification (Phase 7)
 
 Spec: `git log --grep='ai-streaming'`; design: ADR-0069. The streaming

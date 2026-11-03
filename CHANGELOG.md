@@ -20,6 +20,31 @@ Categories used below:
 
 ### Added
 
+- **`flintshot capture` becomes a first-class Unix citizen** (effort
+  `cli-scripting`, module 4 of the 2026-11 feature batch).
+  `capture --geometry x,y,w,h` grabs exactly that rectangle with no
+  selection UI (a direct framebuffer crop on X11/native; on the
+  Wayland portal path the portal session runs as shipped and the
+  result is cropped — stated in `--help`); `capture
+  --print-geometry` runs the selection picker and prints `X,Y,W,H`
+  to stdout, exit 0, writing no image — the slurp contract, so
+  `capture --geometry "$(flinshot capture --print-geometry)"`
+  composes; `capture --json` prints one stable kebab-case result
+  line (`path`, `width`, `height`, `format`, `backend`, `geometry`
+  when known — additive-only field policy) that composes with
+  `--out` (line on stdout) and `--stdout` (line on stderr, image
+  bytes own stdout); `capture --stdout` pipes the encoded image
+  (`flinshot capture --stdout > shot.png`, format follows
+  `--format`/`[output] format`) and hard-errors with `--out` — one
+  destination. Diagnostics moved to stderr on every path (they were
+  polluting stdout by default). New `flinshot completions
+  bash|zsh|fish|elvish|powershell` prints shell completion scripts,
+  and a `just man` recipe renders `packaging/man/flintshot.1` from
+  the CLI definition — recipe output, never committed — which the
+  deb and rpm now install under `/usr/share/man/man1/`. Wayland
+  portal+crop and zsh/fish completion-install verification are
+  recorded as pending manual rows in `docs/TEST_MATRIX.md`.
+
 - **WebP output, choosable at the moment of save** (effort
   `export-webp`, module 2 of the 2026-11 feature batch). Screenshots
   stop being a PNG-or-JPEG tool: the settings picker, the Save

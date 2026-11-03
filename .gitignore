@@ -13,3 +13,8 @@ SPEC*.md
 # plan artifacts here — derived, never source; ignored so its presence
 # doesn't trip the clean-baseline check /build auto runs.
 .zcode/
+
+# `just man` recipe output (man page) — generated from the CLI
+# definition at pack time, never committed; deb/rpm assets reference
+# it and packaging/linux/build-packages.sh regenerates it.
+packaging/man/

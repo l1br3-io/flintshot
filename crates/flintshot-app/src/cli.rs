@@ -95,6 +95,11 @@ pub enum Command {
     /// completions bash > /usr/share/bash-completion/completions/
     /// flintshot`.
     Completions(CompletionsArgs),
+    /// Internal: render the roff man page to stdout — the `just man`
+    /// recipe's engine, consumed by the deb/rpm packaging. Hidden
+    /// from `--help`; not for direct use.
+    #[command(hide = true)]
+    Man,
 }
 
 /// Arguments for `flintshot completions`.
@@ -114,6 +119,17 @@ pub fn run_completions(args: &CompletionsArgs) -> Result<()> {
     use clap::CommandFactory;
     let mut cmd = Cli::command();
     clap_complete::generate(args.shell, &mut cmd, "flintshot", &mut std::io::stdout());
+    Ok(())
+}
+
+/// `flintshot man` (hidden) — render `flintshot.1` roff to stdout.
+/// Recipe output, never committed: `just man` writes it under
+/// `packaging/man/` and the deb/rpm manifests carry it from there.
+pub fn run_man() -> Result<()> {
+    use clap::CommandFactory;
+    clap_mangen::Man::new(Cli::command())
+        .render(&mut std::io::stdout().lock())
+        .with_context(|| "writing the man page")?;
     Ok(())
 }
 
@@ -3323,6 +3339,32 @@ mod tests {
                 "{unsupported:?} must be rejected with usage"
             );
         }
+    }
+
+    /// The hidden `man` verb's roff renders from this build's real
+    /// command tree: non-empty, opens with the `.TH flintshot`
+    /// header, and stays out of `--help` (internal verb).
+    #[test]
+    fn man_verb_renders_roff_from_the_real_command_tree() {
+        use clap::CommandFactory;
+        let mut roff = Vec::new();
+        clap_mangen::Man::new(Cli::command())
+            .render(&mut roff)
+            .expect("the man page must render");
+        assert!(!roff.is_empty(), "the man page must render");
+        let text = String::from_utf8_lossy(&roff).into_owned();
+        assert!(
+            text.lines().take(5).any(|l| l.starts_with(".TH flintshot")),
+            "roff opens with the .TH header (after the mdoc prologue): {:?}",
+            &text[..text.len().min(60)]
+        );
+        assert!(
+            Cli::command()
+                .get_subcommands()
+                .find(|s| s.get_name() == "man")
+                .is_some_and(clap::builder::Command::is_hide_set),
+            "man stays a hidden verb (recipe output, not user surface)"
+        );
     }
 
     /// Every supported shell yields non-empty completion script

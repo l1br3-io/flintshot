@@ -54,6 +54,10 @@ clap = { version = "4.5", features = ["derive"] }
 # clap-org release train as clap 4.5; pre-approved in the
 # cli-scripting plan).
 clap_complete = "4"
+# Man-page rendering for the hidden `flinshot man` verb / `just man`
+# recipe (same clap-org train; pre-approved in the cli-scripting
+# plan).
+clap_mangen = "0.2"
 color-eyre = "0.6"
 dirs = "6"
 # Markdown rendering for the AI panel's assistant cards (Task 008).

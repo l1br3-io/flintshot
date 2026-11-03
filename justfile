@@ -151,6 +151,19 @@ watch args="check":
 msrv:
     cargo build -q --all-targets
 
+# Render the man page (packaging/man/flintshot.1) from this build's
+# CLI definition via the hidden `flinshot man` verb. Recipe output —
+# never committed (packaging/man/ is gitignored); the deb/rpm
+# manifests reference it and packaging/linux/build-packages.sh
+# regenerates it before packing. `test -s` fails the recipe on an
+# empty render (the recipe check).
+man:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p packaging/man
+    cargo run -q --bin flintshot -- man > packaging/man/flintshot.1
+    test -s packaging/man/flintshot.1
+
 # Build the opt-in COSMIC applet. Needs system deps; see AGENTS.md.
 # On Debian/Ubuntu: sudo apt-get install -y --no-install-recommends \
 #   cmake libxkbcommon-dev libfontconfig-dev libfreetype6-dev \

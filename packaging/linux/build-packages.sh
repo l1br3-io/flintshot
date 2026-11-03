@@ -42,6 +42,17 @@ if ! command -v cargo-generate-rpm >/dev/null 2>&1; then
     cargo install cargo-generate-rpm@0.21.0 --locked
 fi
 
+# --- man page ------------------------------------------------------------
+# Recipe output, never committed: the deb/rpm manifests reference
+# packaging/man/flintshot.1, so it must exist before either packager
+# runs. Regenerated here from this build's CLI definition (the same
+# hidden verb `just man` shells out to — inlined because the CI
+# container may not carry `just`).
+echo "== man page =="
+mkdir -p packaging/man
+cargo run -q --bin flintshot -- man > packaging/man/flintshot.1
+[[ -s packaging/man/flintshot.1 ]] || fail "man page rendered empty"
+
 # --- .deb --------------------------------------------------------------
 # Build first with the tray feature so the packaged binary is exactly
 # what we smoke-tested; --no-build keeps cargo-deb from rebuilding.
