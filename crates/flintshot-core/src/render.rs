@@ -853,6 +853,45 @@ pub fn compose_final_region(state: &EditorState, rect: Rect) -> image::RgbaImage
     crate::image_ops::crop_region(&full, rect)
 }
 
+/// Sample the composited canvas (source + committed annotations)
+/// at a point. Out-of-bounds points return the nearest edge pixel
+/// — a pick never fails, it always has a color under it.
+///
+/// The sample is taken from the same composite
+/// [`compose_final`](crate::render::compose_final) produces (each
+/// annotation rendered over the source in order), so what you see
+/// is what you sample. The containing pixel is the floored
+/// coordinate, clamped to the image on each axis independently;
+/// non-finite coordinates collapse to `0` before the cast. A
+/// degenerate empty image (no pixel under any point) yields black.
+#[must_use]
+pub fn sample_canvas(image: &image::RgbaImage, anns: &[Annotation], at: Point) -> Color {
+    let mut canvas = ImageCanvas::new(image.clone());
+    for ann in anns {
+        render_ann(&mut canvas, ann, image);
+    }
+    let composed = canvas.into_inner();
+    let (w, h) = composed.dimensions();
+    if w == 0 || h == 0 {
+        return Color::rgb(0, 0, 0);
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "image dims ≤ 2^24 are exact in f32"
+    )]
+    let (w_f, h_f) = (w as f32, h as f32);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "coords are clamped into [0, dim-1] before the cast; NaN floors and clamps to 0"
+    )]
+    let px = composed.get_pixel(
+        at.x.floor().clamp(0.0, w_f - 1.0) as u32,
+        at.y.floor().clamp(0.0, h_f - 1.0) as u32,
+    );
+    Color::rgba(px[0], px[1], px[2], px[3])
+}
+
 /// Headless [`Canvas`] that draws into an [`image::RgbaImage`]. Used
 /// by [`compose_final`] to render annotations into the saved / copied
 /// output without going through a GUI toolkit.
@@ -1999,6 +2038,82 @@ mod tests {
             }
             other => panic!("pending should be outline, got {other:?}"),
         }
+    }
+
+    // ── Canvas colour sampling (eyedropper ED1) ──
+
+    /// A solid source image samples to its own colour at any
+    /// interior point (the containing pixel = floored coords).
+    #[test]
+    fn sample_canvas_color_reads_solid_source() {
+        let mut img = image::RgbaImage::new(4, 4);
+        for (_x, _y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgba([12, 34, 56, 255]);
+        }
+        let got = sample_canvas(&img, &[], Point::new(1.6, 2.4));
+        assert_eq!(got, Color::rgb(12, 34, 56), "floors to pixel (1, 2)");
+    }
+
+    /// A committed annotation over the source is what the pick
+    /// samples — the composited canvas, not the bare source image
+    /// (the eyedropper spec's compositing proof).
+    #[test]
+    fn sample_canvas_color_reads_committed_annotation_over_source() {
+        let img = image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
+        let anns = [Annotation::Rect {
+            rect: Rect::from_xywh(2.0, 2.0, 6.0, 6.0),
+            stroke: Stroke::ZERO,
+            fill: Some(Color::rgb(255, 0, 0)),
+        }];
+        // Well inside the fill: the annotation's colour, not white.
+        assert_eq!(
+            sample_canvas(&img, &anns, Point::new(5.0, 5.0)),
+            Color::rgb(255, 0, 0)
+        );
+        // Well outside it: the source's white.
+        assert_eq!(
+            sample_canvas(&img, &anns, Point::new(0.0, 0.0)),
+            Color::rgb(255, 255, 255)
+        );
+    }
+
+    /// Out-of-bounds points clamp to the nearest edge pixel on each
+    /// axis independently — a pick never fails, it always has a
+    /// colour under it (the doc contract).
+    #[test]
+    fn sample_canvas_color_clamps_to_nearest_edge_pixel() {
+        let mut img = image::RgbaImage::new(3, 2);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            let v = u8::try_from(x * 10 + y).expect("fixture stays inside u8");
+            *px = image::Rgba([v, v, v, 255]);
+        }
+        let anns: [Annotation; 0] = [];
+        assert_eq!(
+            sample_canvas(&img, &anns, Point::new(-5.0, -5.0)),
+            Color::rgb(0, 0, 0),
+            "top-left clamp"
+        );
+        assert_eq!(
+            sample_canvas(&img, &anns, Point::new(100.0, 100.0)),
+            Color::rgb(21, 21, 21),
+            "bottom-right clamp (pixel 2,1 → 2·10+1)"
+        );
+        assert_eq!(
+            sample_canvas(&img, &anns, Point::new(-1.0, 1.5)),
+            Color::rgb(1, 1, 1),
+            "x clamps, y floors normally"
+        );
+    }
+
+    /// A degenerate empty image has no pixel under any point; the
+    /// documented fallback is black (still a colour, never a panic).
+    #[test]
+    fn sample_canvas_color_on_empty_image_is_black() {
+        let img = image::RgbaImage::new(0, 0);
+        assert_eq!(
+            sample_canvas(&img, &[], Point::new(0.0, 0.0)),
+            Color::rgb(0, 0, 0)
+        );
     }
 
     /// `render_ann` is the per-variant dispatch helper. Verify it

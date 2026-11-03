@@ -179,8 +179,37 @@ impl Color {
         }
     }
 
+    /// Construct an opaque color from unit-interval `f64` channels
+    /// (`0.0..=1.0` — the wire format the XDG `PickColor` portal
+    /// returns).
+    ///
+    /// Conversion contract (the documented rounding): each channel is
+    /// clamped to `0.0..=1.0`, scaled by 255, and rounded half away
+    /// from zero — `0.0 → 0`, `1.0 → 255`, and the exact midpoint
+    /// `0.5 → 128`. Non-finite channels collapse to `0` so a
+    /// malformed portal payload can never panic the picker.
+    #[must_use]
+    pub fn from_unit_rgb(r: f64, g: f64, b: f64) -> Self {
+        Self::rgb(unit_to_u8(r), unit_to_u8(g), unit_to_u8(b))
+    }
+
     /// Pure red convenience constant (default annotation color).
     pub const RED: Self = Self::rgb(255, 0, 0);
+}
+
+/// Map one unit-interval `f64` channel onto `u8` per
+/// [`Color::from_unit_rgb`]'s documented rounding: NaN → 0, clamp to
+/// `0.0..=1.0`, scale by 255, round half away from zero.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the clamp bounds the product to 0.0..=255.0, so the cast is exact"
+)]
+fn unit_to_u8(v: f64) -> u8 {
+    if v.is_nan() {
+        return 0;
+    }
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// Stroke style for outlined shapes.
@@ -286,6 +315,38 @@ mod tests {
     #[test]
     fn color_rgb_is_opaque() {
         assert_eq!(Color::rgb(1, 2, 3).a, 255);
+    }
+
+    // ── Unit-interval f64 conversion (eyedropper ED1) ──
+
+    #[test]
+    fn color_from_unit_rgb_hits_channel_endpoints() {
+        let black = Color::from_unit_rgb(0.0, 0.0, 0.0);
+        let white = Color::from_unit_rgb(1.0, 1.0, 1.0);
+        assert_eq!(black, Color::rgb(0, 0, 0));
+        assert_eq!(white, Color::rgb(255, 255, 255));
+        assert_eq!(white.a, 255, "the portal pick is opaque by construction");
+    }
+
+    #[test]
+    fn color_from_unit_rgb_rounds_the_midpoint_up() {
+        // 0.5 · 255 = 127.5 — the documented rounding is half away
+        // from zero, so the midpoint lands on 128.
+        assert_eq!(
+            Color::from_unit_rgb(0.5, 0.5, 0.5),
+            Color::rgb(128, 128, 128)
+        );
+    }
+
+    #[test]
+    fn color_from_unit_rgb_clamps_out_of_range_and_maps_nan_to_zero() {
+        let c = Color::from_unit_rgb(-0.2, 1.5, 0.0);
+        assert_eq!(c, Color::rgb(0, 255, 0), "out-of-range channels clamp");
+        assert_eq!(
+            Color::from_unit_rgb(f64::NAN, 0.0, 0.0),
+            Color::rgb(0, 0, 0),
+            "a non-finite channel collapses to 0, never a panic"
+        );
     }
 
     #[test]

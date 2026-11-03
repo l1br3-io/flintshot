@@ -77,8 +77,8 @@ pub use output::{
     persist_clipboard_copy, save_capture_image,
 };
 pub use render::{
-    arrow_barbs, compose_final, compose_final_region, render, render_ann, BlurCache, Canvas,
-    DrawCall, MockCanvas,
+    arrow_barbs, compose_final, compose_final_region, render, render_ann, sample_canvas, BlurCache,
+    Canvas, DrawCall, MockCanvas,
 };
 pub use session::{
     parked_dir, session_dir, ParkedRun, SessionCapture, SessionId, SessionStore, SessionSummary,
