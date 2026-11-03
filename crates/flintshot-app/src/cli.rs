@@ -69,6 +69,15 @@ pub enum Command {
     /// Exit codes: 0 success · 1 other failure (decode, stdin) ·
     /// 2 no engine (the error names the cure) · 3 engine failure
     Ocr(OcrArgs),
+    /// Decode every QR code in an image and print the payloads to
+    /// stdout, one per line, largest first (payload only — logs go
+    /// to stderr). `-` reads the image from stdin, so `flinshot
+    /// capture --stdout | flinshot qr -` works.
+    ///
+    /// Exit codes: 0 success · 1 other failure (decode, stdin) ·
+    /// 2 no code found (the error names the re-capture cure) ·
+    /// 3 decode error (detected but unreadable)
+    Qr(QrArgs),
     /// Record the screen to an MP4 file (video-only, H.264):
     /// the whole `--monitor` or a `--geometry` rectangle, stopped
     /// with Ctrl-C or `--duration`.
@@ -127,6 +136,69 @@ pub struct OcrArgs {
     /// the explicit consent for the download.
     #[arg(long)]
     pub fetch_models: bool,
+}
+
+/// Arguments for `flinshot qr`. Flagless by design: one engine
+/// (`rqrr`), nothing to choose.
+#[derive(Debug, Args)]
+pub struct QrArgs {
+    /// Image to read: a file path, or `-` for stdin.
+    pub image: String,
+}
+
+/// Process exit code for a failed `flinshot qr`, documented on the
+/// verb: no-code-found is curable (a closer re-capture — the copy
+/// on stderr already names it), so it gets its own code, mirroring
+/// the OCR verb's no-engine grammar.
+#[must_use]
+pub fn qr_exit_code(no_codes: bool) -> i32 {
+    if no_codes {
+        2
+    } else {
+        3
+    }
+}
+
+/// The verb's payload-only stdout: one line per payload, in the
+/// engine's largest-first order, nothing else.
+#[must_use]
+pub fn qr_stdout_lines(payloads: &[String]) -> String {
+    let mut out = String::new();
+    for payload in payloads {
+        out.push_str(payload);
+        out.push('\n');
+    }
+    out
+}
+
+/// `flinshot qr <image>` — decode, print payloads to stdout.
+///
+/// Payload-only discipline: decoded payloads are the only thing on
+/// stdout; diagnostics go to stderr. Decode work runs through the
+/// same pass helper the editor page uses
+/// ([`crate::app_window::run_qr_pass`]) — one engine path for both
+/// surfaces.
+pub fn run_qr(args: &QrArgs) -> Result<()> {
+    use std::io::Write as _;
+    let bytes = read_image_source(&args.image, &mut std::io::stdin().lock())?;
+    let image = image::load_from_memory(&bytes)
+        .with_context(|| format!("decoding image {:?}", args.image))?
+        .to_rgba8();
+
+    match crate::app_window::run_qr_pass(&image) {
+        flintshot_editor_egui::QrEvent::Done { payloads } => {
+            let mut stdout = std::io::stdout().lock();
+            write!(stdout, "{}", qr_stdout_lines(&payloads))
+                .with_context(|| "writing the decoded payloads")?;
+            Ok(())
+        }
+        flintshot_editor_egui::QrEvent::Failed { message, no_codes } => {
+            eprintln!("{message}");
+            std::process::exit(qr_exit_code(no_codes));
+        }
+        // A pass produces only pass events.
+        _ => unreachable!("unexpected event from a QR pass"),
+    }
 }
 
 /// `--engine` values, mapped onto core's choice enum.
@@ -4900,6 +4972,58 @@ async fn run_record_flow(args: &RecordArgs) -> std::result::Result<(PathBuf, u64
     let path = handle.stop()?;
     let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
     Ok((path, bytes))
+}
+
+// ── QR verb (qr-decode QD3) ───────────────────────────────────────
+
+#[cfg(test)]
+mod qr_tests {
+    use super::*;
+
+    /// The bare surface parses: one positional image (`-` = stdin,
+    /// the `capture --stdout` composition). The verb is flagless —
+    /// one engine, nothing to choose.
+    #[test]
+    fn qr_verb_parses() {
+        let cli = Cli::try_parse_from(["flinshot", "qr", "-"]).expect("dash image source parses");
+        let Some(Command::Qr(args)) = cli.command else {
+            panic!("qr is a verb");
+        };
+        assert_eq!(args.image, "-");
+        let plain =
+            Cli::try_parse_from(["flinshot", "qr", "shot.png"]).expect("bare invocation parses");
+        let Some(Command::Qr(args)) = plain.command else {
+            panic!("qr is a verb");
+        };
+        assert_eq!(args.image, "shot.png");
+        // Flagless: any flag refuses to parse.
+        assert!(Cli::try_parse_from(["flinshot", "qr", "x.png", "--engine", "rqrr"]).is_err());
+    }
+
+    /// Exit codes: 2 no-code-found (the curable state — the copy
+    /// names the re-capture cure), 3 decode-error (something was
+    /// detected but would not decode), documented on the verb.
+    #[test]
+    fn qr_exit_code_distinguishes_outcomes() {
+        assert_eq!(qr_exit_code(true), 2);
+        assert_eq!(qr_exit_code(false), 3);
+    }
+
+    /// The verb's stdout shape: one line per payload, largest-first,
+    /// nothing else on stdout (payload-only discipline).
+    #[test]
+    fn qr_stdout_lines_one_per_payload_largest_first() {
+        let lines = qr_stdout_lines(&[
+            "https://flintshot.example/first".to_owned(),
+            "second-code".to_owned(),
+        ]);
+        assert_eq!(
+            lines, "https://flintshot.example/first\nsecond-code\n",
+            "each payload on its own line, in engine order"
+        );
+        // A single payload is one line.
+        assert_eq!(qr_stdout_lines(&["only".to_owned()]), "only\n");
+    }
 }
 
 // ── OCR verb (ocr-region OR6) ─────────────────────────────────────

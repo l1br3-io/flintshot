@@ -54,6 +54,7 @@ fn main() -> Result<()> {
         Some(Command::Open(args)) => cli::run_open(&args),
         Some(Command::Upload(args)) => cli::run_upload(&args),
         Some(Command::Ocr(args)) => cli::run_ocr(&args),
+        Some(Command::Qr(args)) => cli::run_qr(&args),
         Some(Command::Record(args)) => cli::run_record(&args),
         Some(Command::RecordPick(args)) => cli::run_record_pick(&args),
         Some(Command::Auth(args)) => cli::run_auth(&args),
