@@ -66,6 +66,12 @@ fn main() -> Result<()> {
 ///
 /// `RUST_LOG` overrides the default; otherwise we land on `info` for
 /// `flintshot` crates and `warn` for everything else.
+///
+/// Diagnostics ride **stderr** (not tracing-subscriber's stdout
+/// default): stdout is payload-only on the machine-surface paths —
+/// `capture --json` / `--stdout` / `--print-geometry` — and
+/// dependency noise routed through the `log` bridge (libwayland's
+/// `wl_output` spam) would otherwise corrupt the payload stream.
 fn init_reporting() {
     let _ = color_eyre::install();
 
@@ -75,5 +81,6 @@ fn init_reporting() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 }

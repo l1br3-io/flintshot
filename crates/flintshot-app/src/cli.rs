@@ -135,6 +135,11 @@ pub struct OutputArgs {
     /// `--standalone` does not).
     #[arg(long)]
     pub standalone: bool,
+    /// Print one JSON result line to stdout on completion (`--out`
+    /// writes the image as usual; the two compose). Diagnostics stay
+    /// on stderr — stdout stays payload-only.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Per-invocation interaction-mode override flags (Phase 5). Mutually
@@ -698,7 +703,11 @@ pub fn run_capture(args: &CaptureArgs) -> Result<()> {
         else {
             return Ok(());
         };
-        return dispatch_native_grab(img, &args.output, interaction, &watch, post_grab);
+        let ctx = GrabCtx {
+            backend: backend.id(),
+            geometry: Some(geometry_line(&rect)),
+        };
+        return dispatch_native_grab(img, &args.output, interaction, &watch, post_grab, &ctx);
     }
     if backend.supports_selection() {
         let post_grab = resolve_post_grab(
@@ -722,7 +731,16 @@ pub fn run_capture(args: &CaptureArgs) -> Result<()> {
         // on `after_grab`. The mode label stays "region" so the
         // editor's selection-first landing phase and logs stay
         // byte-identical.
-        capture_and_dispatch("region", &args.output, interaction, args.backend.as_deref())
+        capture_and_dispatch(
+            "region",
+            &args.output,
+            interaction,
+            args.backend.as_deref(),
+            &GrabCtx {
+                backend: backend.id(),
+                geometry: None,
+            },
+        )
     }
 }
 
@@ -782,7 +800,26 @@ fn native_capture_and_dispatch(
     let Some(img) = native_grab_prepared(watch, backend, None)? else {
         return Ok(());
     };
-    dispatch_native_grab(img, output, interaction, watch, post_grab)
+    dispatch_native_grab(
+        img,
+        output,
+        interaction,
+        watch,
+        post_grab,
+        &GrabCtx {
+            backend: backend.id(),
+            geometry: None,
+        },
+    )
+}
+
+/// What a completed grab knows about itself for `--json` reporting:
+/// the backend that grabbed it and, when the grab was rect-driven,
+/// the rect in `x,y,w,h` form.
+#[derive(Debug, Clone, Default)]
+struct GrabCtx {
+    backend: &'static str,
+    geometry: Option<String>,
 }
 
 /// Post-grab dispatch shared by the native flow (the OS selection UI)
@@ -797,6 +834,7 @@ fn dispatch_native_grab(
     interaction: Option<InteractionMode>,
     watch: &SupersedeWatch,
     post_grab: PostGrabAction,
+    ctx: &GrabCtx,
 ) -> Result<()> {
     if let Some(path) = &output.out {
         let (format, notice) = resolve_out_format(path, output.format.as_deref());
@@ -804,6 +842,17 @@ fn dispatch_native_grab(
             eprintln!("{notice}");
         }
         write_out(&img, path, format)?;
+        report_capture_json(
+            output,
+            &CaptureJsonReport {
+                path: path.display().to_string(),
+                width: img.width(),
+                height: img.height(),
+                format: output_format_name(format),
+                backend: ctx.backend,
+                geometry: ctx.geometry.clone(),
+            },
+        );
         tracing::info!(path = %path.display(), "native capture saved");
         return Ok(());
     }
@@ -1031,6 +1080,7 @@ fn capture_and_dispatch(
     output: &OutputArgs,
     interaction: Option<InteractionMode>,
     backend_pin: Option<&str>,
+    ctx: &GrabCtx,
 ) -> Result<()> {
     let watch = SupersedeWatch::subscribe_at(None);
     if watch.superseded() {
@@ -1048,6 +1098,17 @@ fn capture_and_dispatch(
             eprintln!("{notice}");
         }
         write_out(&img, path, format)?;
+        report_capture_json(
+            output,
+            &CaptureJsonReport {
+                path: path.display().to_string(),
+                width: img.width(),
+                height: img.height(),
+                format: output_format_name(format),
+                backend: ctx.backend,
+                geometry: ctx.geometry.clone(),
+            },
+        );
         tracing::info!(path = %path.display(), "{mode} capture saved");
     } else {
         if watch.superseded() {
@@ -2029,6 +2090,48 @@ fn resolve_out_format(out: &std::path::Path, flag: Option<&str>) -> (OutputForma
     (format, notice)
 }
 
+/// Machine-readable capture result for `--json` (kebab-case, our
+/// convention for flintshot-owned JSON): stable field set — treat
+/// additions as compatible, renames as breaking.
+#[derive(Debug, serde::Serialize)]
+struct CaptureJsonReport {
+    /// The written file's path (only `--out`/`--stdout` completions
+    /// report; the editor flow has no line).
+    path: String,
+    width: u32,
+    height: u32,
+    /// The encoded format's id: `png`, `jpeg`, `webp`.
+    format: &'static str,
+    /// The backend id that performed the grab (`xcap`, `portal`).
+    backend: &'static str,
+    /// The grab rectangle in `x,y,w,h` form when it is known
+    /// (`--geometry`); absent otherwise, never null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geometry: Option<String>,
+}
+
+/// The wire name for an [`OutputFormat`] (the `--json` `format`
+/// field and `--format` vocabulary share it).
+fn output_format_name(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Jpeg => "jpeg",
+        OutputFormat::Webp => "webp",
+        _ => "png",
+    }
+}
+
+/// Emit the `--json` result line after a completed capture write.
+/// Payload-only stdout discipline: this is the one stdout writer on
+/// the output paths; everything diagnostic rides stderr via tracing.
+fn report_capture_json(output: &OutputArgs, report: &CaptureJsonReport) {
+    if output.json {
+        match serde_json::to_string(report) {
+            Ok(line) => println!("{line}"),
+            Err(e) => tracing::warn!(error = %e, "serializing the --json result line"),
+        }
+    }
+}
+
 /// Encode `img` to `path` in `format`, creating parent directories
 /// as needed. JPEG encodes at the configured `[output]`
 /// `jpeg-quality` (90 when config loading fails — the pixels are
@@ -2987,6 +3090,57 @@ mod tests {
         );
     }
 
+    /// Snapshot: the `--json` result line carries the exact stable
+    /// key set in declaration order; `geometry` appears only when
+    /// known. Additions are compatible, renames are breaking — this
+    /// test is the pin.
+    #[test]
+    fn capture_json_report_serializes_the_stable_key_set() {
+        let report = CaptureJsonReport {
+            path: "/tmp/shot.png".into(),
+            width: 300,
+            height: 400,
+            format: "png",
+            backend: "xcap",
+            geometry: Some("10,20,300,400".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&report).unwrap(),
+            r#"{"path":"/tmp/shot.png","width":300,"height":400,"format":"png","backend":"xcap","geometry":"10,20,300,400"}"#
+        );
+
+        let no_geometry = CaptureJsonReport {
+            path: "/tmp/shot.webp".into(),
+            width: 10,
+            height: 10,
+            format: "webp",
+            backend: "portal",
+            geometry: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&no_geometry).unwrap(),
+            r#"{"path":"/tmp/shot.webp","width":10,"height":10,"format":"webp","backend":"portal"}"#,
+            "geometry is absent when unknown (never null)"
+        );
+    }
+
+    /// `--json` parses and composes with `--out` (the flag pair the
+    /// e2e exercises against the real binary).
+    #[test]
+    fn capture_json_flag_parses_and_composes_with_out() {
+        let cli = Cli::parse_from(["flintshot", "capture", "--json", "--out", "/tmp/shot.png"]);
+        match cli.command {
+            Some(Command::Capture(args)) => {
+                assert!(args.output.json);
+                assert_eq!(
+                    args.output.out.as_deref(),
+                    Some(std::path::Path::new("/tmp/shot.png"))
+                );
+            }
+            other => panic!("expected capture, got {other:?}"),
+        }
+    }
+
     /// `--print-geometry` parses bare (the slurp contract: nothing
     /// but the flag) and its stdout line is `X,Y,W,H` in whole
     /// pixels.
@@ -3105,6 +3259,7 @@ mod tests {
                 out: Some(path.clone()),
                 format: None,
                 standalone: true,
+                json: false,
             },
         };
         run_capture(&args).expect("the geometry grab + write succeed");
@@ -3154,6 +3309,7 @@ mod tests {
                 out: None,
                 format: None,
                 standalone: false,
+                json: false,
             },
         };
         assert!(run_capture(&args).is_err());
@@ -3192,6 +3348,7 @@ mod tests {
             out: None,
             format: None,
             standalone: false,
+            json: false,
         };
         assert!(
             !delegate_to_daemon(
@@ -3594,6 +3751,7 @@ mod tests {
             out: None,
             format: None,
             standalone: false,
+            json: false,
         };
         assert!(
             !delegate_to_daemon(
