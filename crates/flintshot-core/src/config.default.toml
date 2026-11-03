@@ -186,3 +186,18 @@ scale = 1.0
 # countdown = 3
 # max-duration = 300
 # portal-restore-token = ""
+
+# OCR (region → text; the `ocr` editor tool and `flinshot ocr`).
+#
+# engine: "auto" (the built-in pure-Rust engine when its models are
+#   present — fetched only with your consent — else the system
+#   tesseract binary), "ocrs" (built-in only), or "tesseract" (the
+#   system binary only). Unknown values fall back to "auto" with a
+#   warning.
+# lang: tesseract-only language code ("eng", "deu", ...); empty =
+#   tesseract's own default. The built-in engine recognizes Latin
+#   script and has no language switch.
+#
+# [ocr]
+# engine = "auto"
+# lang = ""

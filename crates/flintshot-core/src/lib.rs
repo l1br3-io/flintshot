@@ -55,11 +55,11 @@ pub use capture::{
 };
 pub use config::{
     config_path, default_config_toml, ensure_user_config, ensure_user_config_at,
-    estimate_size_bytes, heuristic_bytes, parse_default_mode, parse_output_format, parse_size_mode,
-    parse_watermark_position, render_filename_template, resolve_save_dir_with, sanitize_filename,
-    AiConfig, CaptureConfig, Config, DefaultMode, HotkeyConfig, OutputConfig, OutputFormat,
-    SizeMode, UiConfig, UploadConfig, WatermarkConfig, WatermarkPosition, PANEL_MAX_WIDTH,
-    PANEL_MIN_WIDTH,
+    estimate_size_bytes, heuristic_bytes, parse_default_mode, parse_ocr_engine,
+    parse_output_format, parse_size_mode, parse_watermark_position, render_filename_template,
+    resolve_save_dir_with, sanitize_filename, AiConfig, CaptureConfig, Config, DefaultMode,
+    HotkeyConfig, OcrConfig, OutputConfig, OutputFormat, SizeMode, UiConfig, UploadConfig,
+    WatermarkConfig, WatermarkPosition, PANEL_MAX_WIDTH, PANEL_MIN_WIDTH,
 };
 pub use editor::{
     constrain_drag, Annotation, BlurKind, DragKind, EditorState, HandleDrag, PointHandle, Snapshot,

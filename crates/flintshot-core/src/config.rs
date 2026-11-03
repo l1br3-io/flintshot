@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::ai::ProviderPreset;
 use crate::error::{FlintshotError, Result};
 use crate::geom::Color;
+use crate::ocr::OcrEngineChoice;
 use crate::serde_util::format_color;
 
 /// Top-level config root. Maps to the entire `config.toml` file.
@@ -52,6 +53,69 @@ pub struct Config {
     /// files without the section load with defaults.
     #[serde(default)]
     pub record: RecordingConfig,
+    /// OCR defaults (see [`OcrConfig`]) — the `[ocr]` section.
+    /// Same additive policy: older files without the section load
+    /// with defaults.
+    #[serde(default)]
+    pub ocr: OcrConfig,
+}
+
+/// OCR defaults (the `[ocr]` section; the ocr-region initiative).
+/// Every field is additive with a default — an old config lacking
+/// the whole section loads unchanged, unknown keys inside it are
+/// ignored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub struct OcrConfig {
+    /// Engine selector: `"auto"` (built-in if its models are
+    /// present, else tesseract), `"ocrs"` (built-in), or
+    /// `"tesseract"`. Unknown values warn at resolution time and
+    /// resolve `"auto"` (see [`parse_ocr_engine`]).
+    #[serde(default = "default_ocr_engine")]
+    pub engine: String,
+    /// Tesseract-only language code (`"eng"`, `"deu"`, …); empty =
+    /// tesseract's own default. The built-in engine has no language
+    /// switch (Latin script).
+    #[serde(default)]
+    pub lang: String,
+}
+
+impl OcrConfig {
+    /// The parsed engine choice (unknown strings resolve `Auto`
+    /// with a warning, the [`parse_ocr_engine`] contract).
+    #[must_use]
+    pub fn choice(&self) -> OcrEngineChoice {
+        parse_ocr_engine(&self.engine)
+    }
+}
+
+impl Default for OcrConfig {
+    fn default() -> Self {
+        Self {
+            engine: default_ocr_engine(),
+            lang: String::new(),
+        }
+    }
+}
+
+fn default_ocr_engine() -> String {
+    "auto".to_owned()
+}
+
+/// Resolve an `[ocr] engine` string: `"auto"` / `"ocrs"` /
+/// `"tesseract"`, anything else warns and resolves [`crate::ocr`'s
+/// default] `Auto` — a typo never bricks OCR.
+pub fn parse_ocr_engine(raw: &str) -> OcrEngineChoice {
+    match raw {
+        "auto" => OcrEngineChoice::Auto,
+        "ocrs" => OcrEngineChoice::Ocrs,
+        "tesseract" => OcrEngineChoice::Tesseract,
+        other => {
+            tracing::warn!("unknown ocr.engine {other:?}; using \"auto\"");
+            OcrEngineChoice::Auto
+        }
+    }
 }
 
 /// Screen-recording defaults (the `[record]` section; the recording
@@ -1598,6 +1662,35 @@ mod tests {
     }
 
     #[test]
+    fn ocr_section_merges_tolerantly() {
+        // No [ocr] section at all: defaults (the additive promise for
+        // pre-OCR configs).
+        let old = toml::from_str::<Config>("[ui]\n").unwrap();
+        assert_eq!(old.ocr, OcrConfig::default());
+        assert_eq!(old.ocr.choice(), OcrEngineChoice::Auto);
+        assert_eq!(old.ocr.lang, "");
+
+        // Partial section + unknown key: known fields load, unknown
+        // ones are ignored, missing ones default.
+        let partial = toml::from_str::<Config>(
+            "[ocr]\nengine = \"tesseract\"\nlang = \"deu\"\nfuture-key = 1\n",
+        )
+        .unwrap();
+        assert_eq!(partial.ocr.engine, "tesseract");
+        assert_eq!(partial.ocr.lang, "deu");
+        assert_eq!(partial.ocr.choice(), OcrEngineChoice::Tesseract);
+    }
+
+    #[test]
+    fn parse_ocr_engine_maps_and_falls_back_to_auto() {
+        assert_eq!(parse_ocr_engine("auto"), OcrEngineChoice::Auto);
+        assert_eq!(parse_ocr_engine("ocrs"), OcrEngineChoice::Ocrs);
+        assert_eq!(parse_ocr_engine("tesseract"), OcrEngineChoice::Tesseract);
+        // Unknown ids never brick OCR — they resolve "auto" (warned).
+        assert_eq!(parse_ocr_engine("turbo"), OcrEngineChoice::Auto);
+    }
+
+    #[test]
     fn save_to_then_load_from_roundtrips_values() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -2262,6 +2355,8 @@ backend = \"portal\"
             from_asset.record.portal_restore_token,
             d.record.portal_restore_token
         );
+
+        assert_eq!(from_asset.ocr, d.ocr);
 
         assert_eq!(from_asset.hotkeys.capture, d.hotkeys.capture);
         assert_eq!(from_asset.upload.default_backend, d.upload.default_backend);
