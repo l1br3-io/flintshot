@@ -80,7 +80,7 @@ pub use render::{
     DrawCall, MockCanvas,
 };
 pub use session::{
-    parked_dir, session_dir, SessionCapture, SessionId, SessionStore, SessionSummary,
+    parked_dir, session_dir, ParkedRun, SessionCapture, SessionId, SessionStore, SessionSummary,
 };
 pub use shell::{EditorOutcome, EditorShell, NewCaptureMode};
 pub use text::{

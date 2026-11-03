@@ -88,6 +88,21 @@ struct SessionSidecar {
     anns: Vec<Annotation>,
 }
 
+/// A parked run read back from quarantine: the recoverable
+/// captures plus how many pairs were skipped as corrupt. The skip
+/// count keeps partial damage visible to the caller (the recovery
+/// UI), instead of silently shrinking the offer.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ParkedRun {
+    /// Recoverable captures, in draw order — id ascending, the
+    /// same arrival order the ids encoded live.
+    pub captures: Vec<SessionCapture>,
+    /// Pairs skipped as corrupt (undecodable PNG, or a missing /
+    /// unparseable sidecar). Each skip warns; none is fatal.
+    pub skipped: usize,
+}
+
 /// In-memory index entry: an insertion-order id plus the metadata
 /// Home cards need. The image itself lives only on disk (written
 /// off-thread on arrival) so a session full of captures costs a
@@ -314,6 +329,41 @@ impl SessionStore {
             Self::sweep_stale(dir);
         }
     }
+
+    /// Read the parked run back from quarantine. `dir` is the live
+    /// session dir — the same path [`SessionStore::park_previous_run`]
+    /// took; the park is its [`parked_dir`] sibling. Recovery is
+    /// committed state only: each numeric-stem `<id>.png` + `<id>.json`
+    /// pair becomes a [`SessionCapture`] with its committed
+    /// annotations in draw order. A pair whose PNG will not decode or
+    /// whose sidecar is missing or unparseable is warned and skipped
+    /// (counted in [`ParkedRun::skipped`], never fatal); a missing or
+    /// empty park reads as empty. Adoption is read-only — the park
+    /// itself is left for the caller to consume.
+    #[must_use]
+    pub fn load_parked(dir: &Path) -> ParkedRun {
+        let park = parked_dir(dir);
+        let ids = parked_ids(&park);
+        let mut captures = Vec::with_capacity(ids.len());
+        let mut skipped = 0;
+        for id in ids {
+            match read_parked_pair(&park, SessionId(id)) {
+                Some(capture) => captures.push(capture),
+                None => skipped += 1,
+            }
+        }
+        ParkedRun { captures, skipped }
+    }
+
+    /// Cheaply count the parked run's pairs — a directory scan of
+    /// numeric-stem PNGs whose sidecar exists, no image decoding.
+    /// The recovery banner's number; zero when no park exists. A
+    /// corrupt pair still counts here and shows up as a skip in
+    /// [`SessionStore::load_parked`] instead.
+    #[must_use]
+    pub fn parked_count(dir: &Path) -> usize {
+        parked_ids(&parked_dir(dir)).len()
+    }
 }
 
 impl Default for SessionStore {
@@ -406,6 +456,63 @@ fn read_sidecar(dir: &Path, id: SessionId) -> Option<SessionSidecar> {
     }
 }
 
+/// The parked run's pair ids, ascending — the intersection of
+/// numeric-stem PNGs and their sidecars, in draw order. Anything
+/// else in the park (junk names, orphaned halves) is invisible:
+/// it never forms a recoverable pair.
+fn parked_ids(park: &Path) -> Vec<u64> {
+    let Ok(entries) = std::fs::read_dir(park) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<u64> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let stem = path.file_stem()?.to_str()?.parse::<u64>().ok()?;
+            let is_pair = path.extension().is_some_and(|ext| ext == "png")
+                && json_path(park, SessionId(stem)).exists();
+            is_pair.then_some(stem)
+        })
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Read one parked pair. `None` means corrupt — warned by the
+/// caller-visible skip, not propagated (advisory posture).
+fn read_parked_pair(park: &Path, id: SessionId) -> Option<SessionCapture> {
+    let png = png_path(park, id);
+    let image = match image::open(&png) {
+        Ok(image) => image.to_rgba8(),
+        Err(e) => {
+            tracing::warn!(path = %png.display(), error = %e, "decoding a parked PNG; skipping the pair");
+            return None;
+        }
+    };
+    let json = json_path(park, id);
+    let parsed = std::fs::read_to_string(&json)
+        .map_err(|e| {
+            tracing::warn!(path = %json.display(), error = %e, "reading a parked sidecar; skipping the pair");
+            e
+        })
+        .ok()
+        .and_then(|body| {
+            serde_json::from_str::<SessionSidecar>(&body)
+                .map_err(|e| {
+                    tracing::warn!(path = %json.display(), error = %e, "parsing a parked sidecar; skipping the pair");
+                    e
+                })
+                .ok()
+        });
+    let sidecar = parsed?;
+    Some(SessionCapture {
+        id,
+        created_at: sidecar.created_at,
+        image,
+        anns: sidecar.anns,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +530,15 @@ mod tests {
             a: Point::new(1.0, 2.0),
             b: Point::new(3.0, 4.0),
             stroke: Stroke::new(Color::rgb(255, 255, 255), 2.0),
+        }
+    }
+
+    fn other_line_ann() -> Annotation {
+        use crate::geom::{Color, Point, Stroke};
+        Annotation::Line {
+            a: Point::new(9.0, 8.0),
+            b: Point::new(7.0, 6.0),
+            stroke: Stroke::new(Color::rgb(255, 0, 0), 5.0),
         }
     }
 
@@ -684,6 +800,134 @@ mod tests {
             "the rename failed, so the old sweep behavior took over"
         );
         assert!(park.is_file(), "the undeletable squatter is untouched");
+    }
+
+    #[test]
+    fn load_parked_round_trips_pairs_in_draw_order() {
+        let dir = tempdir().unwrap();
+        let park = parked_dir(&dir.path().join("session"));
+        fs::create_dir_all(&park).unwrap();
+        // Written out of id order to prove the read sorts by id —
+        // draw order is arrival order, and parked ids are monotonic
+        // like live ones.
+        for (id, created_at) in [(2u64, 300u64), (0, 100), (1, 200)] {
+            tiny_image(8, 8)
+                .save(park.join(format!("{id}.png")))
+                .unwrap();
+            let body = serde_json::to_string(&SessionSidecar {
+                created_at,
+                anns: vec![test_line_ann()],
+            })
+            .unwrap();
+            fs::write(park.join(format!("{id}.json")), body).unwrap();
+        }
+
+        let run = SessionStore::load_parked(&dir.path().join("session"));
+
+        let ids: Vec<u64> = run.captures.iter().map(|c| c.id.raw()).collect();
+        assert_eq!(ids, [0, 1, 2], "draw order: id ascending");
+        assert_eq!(run.skipped, 0);
+        assert_eq!(run.captures[0].created_at, 100, "the sidecar survives");
+        assert_eq!(run.captures[0].anns, vec![test_line_ann()]);
+        assert_eq!(run.captures[0].image.dimensions(), (8, 8));
+        assert_eq!(
+            SessionStore::parked_count(&dir.path().join("session")),
+            3,
+            "the cheap count agrees with the pairs on disk"
+        );
+    }
+
+    #[test]
+    fn load_parked_skips_corrupt_pairs_with_a_visible_count() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("session");
+        let park = parked_dir(&session);
+        fs::create_dir_all(&park).unwrap();
+
+        // A good pair.
+        tiny_image(4, 4).save(park.join("0.png")).unwrap();
+        fs::write(
+            park.join("0.json"),
+            serde_json::to_string(&SessionSidecar {
+                created_at: 7,
+                anns: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Corrupt sidecar: the pair is skipped, not fatal.
+        tiny_image(4, 4).save(park.join("1.png")).unwrap();
+        fs::write(park.join("1.json"), "{{{ not json").unwrap();
+
+        // Undecodable PNG: skipped as well.
+        fs::write(park.join("2.png"), b"not a png at all").unwrap();
+        fs::write(
+            park.join("2.json"),
+            serde_json::to_string(&SessionSidecar {
+                created_at: 9,
+                anns: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let run = SessionStore::load_parked(&session);
+
+        assert_eq!(run.captures.len(), 1, "only the good pair recovers");
+        assert_eq!(run.captures[0].id, SessionId(0));
+        assert_eq!(run.skipped, 2, "each corrupt pair is visible to the caller");
+    }
+
+    #[test]
+    fn load_parked_on_a_missing_or_empty_park_is_empty() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("session");
+
+        let run = SessionStore::load_parked(&session);
+        assert!(run.captures.is_empty());
+        assert_eq!(run.skipped, 0);
+        assert_eq!(SessionStore::parked_count(&session), 0);
+
+        let park = parked_dir(&session);
+        fs::create_dir_all(&park).unwrap();
+        let run = SessionStore::load_parked(&session);
+        assert!(run.captures.is_empty(), "an empty park reads as empty");
+        assert_eq!(SessionStore::parked_count(&session), 0);
+    }
+
+    #[test]
+    fn crash_simulation_recovers_committed_annotations_in_draw_order() {
+        // The crash: a store with committed work is dropped without
+        // the graceful clear, exactly as a kill -9 would leave it.
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("session");
+        let store = SessionStore::in_dir(session.clone());
+        let first = store.insert(tiny_image(6, 4), 100);
+        let second = store.insert(tiny_image(4, 6), 200);
+        let first_anns = vec![test_line_ann()];
+        let second_anns = vec![test_line_ann(), other_line_ann()];
+        store.update_anns(first, &first_anns);
+        store.update_anns(second, &second_anns);
+        for id in [first, second] {
+            soon(|| png_path(&session, id).exists().then_some(()));
+        }
+        drop(store);
+
+        SessionStore::park_previous_run(&session);
+        let run = SessionStore::load_parked(&session);
+
+        assert_eq!(run.skipped, 0);
+        assert_eq!(run.captures.len(), 2, "both captures come back");
+        assert_eq!(run.captures[0].id.raw(), 0, "arrival order preserved");
+        assert_eq!(run.captures[0].created_at, 100);
+        assert_eq!(
+            run.captures[0].anns, first_anns,
+            "committed anns in draw order"
+        );
+        assert_eq!(run.captures[1].created_at, 200);
+        assert_eq!(run.captures[1].anns, second_anns);
+        assert_eq!(run.captures[1].image.dimensions(), (4, 6));
     }
 
     #[test]
