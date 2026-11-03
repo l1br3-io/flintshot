@@ -3003,6 +3003,81 @@ cargo build --release
 - A Shift drag collapses to the anchor when one axis has zero extent
   (every drawing tool's square-constrain feel).
 
+## OCR — region → text → clipboard
+
+Spec: `git log --grep='ocr-region'`. The engine trait's
+auto-resolution (models-present / tesseract-only / neither, over an
+injected probe), the tesseract CLI-wrapper parse/classification
+(fake binaries), the consent-gated model fetch (no transport call
+without consent — pinned), the `[ocr]` config merge, the editor
+tool's frames (region-crop-before-recognize by request dims,
+clipboard + toast + card, consent dialog exactly once, retry), and
+the CLI verb's parse/exit-code/stdin units all run under
+`cargo test -p flintshot-core ocr` + `cargo test -p flintshot-core
+config` + `cargo test -p flintshot-editor-egui ocr` +
+`cargo test -p flintshot-app ocr`; **this section is the live pass**
+— real recognition quality, the consent dialog's feel, and a
+non-English tesseract machine need a real session with real models.
+
+### Test setup
+
+```sh
+cargo build --release
+# Row 1/3 (ocrs): fetch the models once, with consent:
+./target/release/flintshot ocr --fetch-models
+# Row 4 (tesseract): a machine with tesseract + a non-English
+# language pack installed (e.g. tesseract-ocr-deu).
+```
+
+### Test script
+
+1. **Editor drag → clipboard (row 1, L2)**: open an editor on a
+   capture with text on screen; select the OCR tool (rail, beside
+   Crop; `O`); drag a region over a line of text — release runs the
+   pass, a "Copied N chars" toast appears, pasting elsewhere yields
+   exactly the recognized text, and the panel's OCR result card
+   shows it with the built-in badge (hover: the Latin/early-preview
+   caveat).
+2. **Consent flow (row 2, L2)**: remove `~/.cache/flintshot/ocrs`
+   first; drag a region — the consent dialog appears (URLs printed,
+   exactly once), **Download models** fetches, the pass re-runs
+   automatically, the text lands as in row 1. Esc-dismiss, then
+   fail again: no second dialog.
+3. **Enter whole image + CLI (row 3)**: with the OCR tool armed and
+   no drag, press Enter — the whole image is recognized (card
+   updates). Then `flinshot ocr shot.png` prints the text
+   (payload-only) and `flinshot capture --stdout | flinshot ocr -`
+   composes; exit codes: 2 with no engine available, 3 on an engine
+   failure (guidance printed to stderr).
+4. **tesseract, non-English (row 4, L2 w/ tesseract+deu)**:
+   `flinshot ocr german.png --engine tesseract --lang deu` — the
+   German text prints (proves `--lang` reaches the binary); the
+   editor with `[ocr] engine = "tesseract"`, `lang = "deu"` behaves
+   the same through the card.
+
+| Behavior                                   | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ------------------------------------------ | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Editor drag → clipboard + toast + card (row 1) | | PENDING | | | | N/A | N/A | N/A | N/A | |
+| Consent dialog once → fetch → auto-retry (row 2) | | PENDING | | | | N/A | N/A | N/A | N/A | |
+| Enter whole image + CLI payload/exit codes (row 3) | | PENDING | | | | N/A | N/A | N/A | N/A | |
+| tesseract `--lang deu` non-English (row 4) | | PENDING | | | | N/A | N/A | N/A | N/A | |
+
+### Known caveats
+
+- The built-in engine is Latin-script only and upstream
+  self-describes as early preview (the card badge's tooltip says
+  so); tesseract reaches every installed language.
+- Models are never embedded and never fetched silently: the consent
+  dialog (editor) or `--fetch-models` (CLI) are the only fetch
+  paths; a consented fetch writes `~/.cache/flintshot/ocrs/`
+  (packaging may pre-seed `/usr/share/flintshot/ocrs/` instead).
+- Worker editor windows and the frozen-capture overlay have no OCR
+  (the bridge-only seam); the overlay's tool row omits the chip.
+- The model-gated fixture test (`FLINTSHOT OCR 42`) is
+  `#[ignore]`d — run after `--fetch-models` with
+  `cargo test -p flintshot-core ocr::ocrs -- --ignored`; CI stays
+  offline.
+
 ## Ask-the-shot live verification (Phase 7)
 
 Spec: `git log --grep='ai-streaming'`; design: ADR-0069. The streaming

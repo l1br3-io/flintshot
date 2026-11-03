@@ -20,6 +20,27 @@ Categories used below:
 
 ### Added
 
+- **OCR — region → text → clipboard** (effort `ocr-region`, module 8
+  of the 2026-11 feature batch; flameshot #702, the oldest ask in
+  the queue). A new **OCR tool beside Crop** in the editor (`O`):
+  drag a region — or press **Enter** for the whole image — and the
+  recognized text lands on the clipboard with a "Copied N chars"
+  toast, plus a result card (copy / retry, engine badge with the
+  honesty caveat). Two engines share one seam: a pure-Rust built-in
+  (default; Latin script; its model files download only through an
+  explicit consent dialog that prints the exact source URLs) and the
+  system **tesseract** binary via a CLI wrapper (`--lang` reaches
+  every installed language). `flinshot ocr <image>` prints the text
+  payload-only, composes with `capture --stdout` (`flinshot ocr -`),
+  and exits 0/1/2/3 (success / other / no-engine / engine-failure).
+  New `[ocr]` config section (`engine = "auto"` resolves
+  ocrs-if-models → tesseract → an error naming both cures). Zero
+  network without explicit consent (test-pinned); models cache under
+  `~/.cache/flintshot/ocrs` (distro pre-seeds at
+  `/usr/share/flintshot/ocrs` honored). `cargo test -p
+  flintshot-core ocr` + `cargo test -p flintshot-editor-egui ocr` +
+  `cargo test -p flintshot-app ocr` pin it; live rows in
+  `docs/TEST_MATRIX.md`.
 - **Eyedropper — pick colours from the canvas or the screen** (effort
   `eyedropper`, module 7 of the 2026-11 feature batch). The colour
   bay's new cluster beside the custom chip: a canvas chip (shortcut
