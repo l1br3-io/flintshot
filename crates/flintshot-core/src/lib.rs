@@ -30,6 +30,7 @@ pub mod inspector;
 pub mod ipc;
 pub mod ocr;
 pub mod output;
+pub mod qr;
 pub mod recents;
 pub mod render;
 pub mod serde_util;
@@ -83,6 +84,7 @@ pub use output::{
     apply_watermark, chrono_date, chrono_time, clipboard_copy_stem, next_free_path, output_ext,
     persist_clipboard_copy, save_capture_image,
 };
+pub use qr::{decode_region, is_url, QrCode, QrEngine, QrError, RqrrEngine};
 pub use render::{
     arrow_barbs, compose_final, compose_final_region, render, render_ann, sample_canvas, BlurCache,
     Canvas, DrawCall, MockCanvas,

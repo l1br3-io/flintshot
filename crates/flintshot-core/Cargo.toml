@@ -26,6 +26,11 @@ keyring = { workspace = true }
 # ocr-region plan (SPEC-ocr-region.md "Tech Stack").
 ocrs = "0.13"
 postcard = { workspace = true }
+# Pure-Rust QR decoder (qr-decode's only engine — barcode-beyond-QR
+# stays rejected on record: every mature barcode decoder is C/C++).
+# Default `img` feature adds no system deps. Pre-approved in the
+# qr-decode plan (SPEC-qr-decode.md "Tech Stack").
+rqrr = "0.11"
 # Direct edge onto ocrs's own NN runtime (same 0.26 the lockfile
 # already resolves via ocrs): the engine loader names
 # rten::Model/LoadError when feeding OcrEngineParams.
@@ -54,3 +59,7 @@ xcap = { workspace = true }
 zbus = { workspace = true }
 
 [dev-dependencies]
+# Dev-only fixture generator: deterministic QR codes for the decode
+# suite (SPEC-qr-decode.md "Testing Strategy"). Never linked in
+# release builds.
+qrcode = "0.14"
