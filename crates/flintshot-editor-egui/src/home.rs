@@ -2921,9 +2921,15 @@ mod tests {
     fn recents_render_grouped_in_calendar_order() {
         let dir = tempfile::tempdir().unwrap();
         let now = unix_now();
+        // "yesterday" is seeded as noon of the previous epoch day,
+        // not `now - 25 h`: within the first hour after UTC midnight
+        // a 25 h offset crosses two midnights and the file buckets
+        // as Earlier (day_bucket's epoch-day math is right; the old
+        // seed made this test flaky in 00:00–01:00 UTC runs).
+        let yesterday = (now / 86_400 - 1) * 86_400 + 43_200;
         let mtimes = [
             ("today.png", now - 60),
-            ("yesterday.png", now - 25 * 3_600),
+            ("yesterday.png", yesterday),
             ("earlier.png", now - 8 * 86_400),
         ];
         let mut paths = Vec::new();
