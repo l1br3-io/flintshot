@@ -68,6 +68,7 @@ mod panel;
 mod pick;
 pub use pick::run_rect_pick_blocking;
 mod popover;
+mod qr;
 mod rail;
 mod settings;
 mod shell;
@@ -86,7 +87,8 @@ pub use canvas::{CanvasView, EguiCanvas, EguiTexture};
 pub use home::{HomeBridge, HomeDirective, RecentMedia, SessionCard};
 pub use magnifier::{sample_zoomed_region, Magnifier};
 pub use shell::{
-    AiEvent, CloseHandle, EditorPageBridge, EguiShell, ModelsArrival, OcrEvent, VisionProbeArrival,
+    AiEvent, CloseHandle, EditorPageBridge, EguiShell, ModelsArrival, OcrEvent, QrEvent,
+    VisionProbeArrival,
 };
 pub use window::{Route, RouteHost, RoutedEditor, WindowExit, WindowStart};
 

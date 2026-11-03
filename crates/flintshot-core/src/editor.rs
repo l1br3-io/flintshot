@@ -32,6 +32,11 @@ pub enum Tool {
     /// ocr-region initiative. Like Crop the drag is shell-owned; no
     /// annotation is ever created.
     Ocr,
+    /// QR decode: drag a region (Enter = whole image) and every
+    /// code's payload lands on the clipboard — region → payloads →
+    /// clipboard, the qr-decode initiative. Same shell-owned drag
+    /// contract as OCR; no annotation is ever created.
+    Qr,
     /// Pan the view (the photo-editor hand). Presses are shell-owned
     /// and never dispatched; core no-ops them defensively.
     Hand,
@@ -778,10 +783,10 @@ impl EditorState {
                 };
                 Annotation::text(at, "", style)
             }
-            // Number / Select / Crop / Ocr / Hand have non-drag input
-            // models; their entry points are tool-specific (see
+            // Number / Select / Crop / Ocr / Qr / Hand have non-drag
+            // input models; their entry points are tool-specific (see
             // method doc).
-            Tool::Number | Tool::Select | Tool::Crop | Tool::Ocr | Tool::Hand => return,
+            Tool::Number | Tool::Select | Tool::Crop | Tool::Ocr | Tool::Qr | Tool::Hand => return,
         };
         if self.tool == Tool::Text {
             self.text_cursor = 0;

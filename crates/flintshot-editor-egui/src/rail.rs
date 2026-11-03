@@ -87,6 +87,12 @@ const SELECTION_POD: &[ToolSpec] = &[
         key: "O",
         glyph: g_ocr,
     },
+    ToolSpec {
+        tool: Tool::Qr,
+        name: "QR",
+        key: "Q",
+        glyph: g_qr,
+    },
 ];
 
 const SHAPES_POD: &[ToolSpec] = &[
@@ -350,6 +356,28 @@ fn g_ocr(p: &egui::Painter, r: egui::Rect, c: Color32) {
         ((-6.0, 4.0), (1.0, 4.0)),
     ] {
         seg(p, r, a, b, c, 2.0);
+    }
+}
+
+/// A QR code's silhouette: square frame with the three finder
+/// squares (top-left, top-right, bottom-left — the fourth corner
+/// stays empty, exactly like the real glyph).
+fn g_qr(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    let frame = egui::Rect::from_min_size(pt(r, -6.0, -6.0), egui::vec2(12.0, 12.0));
+    p.rect(
+        frame,
+        CornerRadius::same(0),
+        Color32::TRANSPARENT,
+        Stroke::new(1.5, c),
+        StrokeKind::Middle,
+    );
+    for (x, y) in [(-4.5, -4.5), (2.5, -4.5), (-4.5, 2.5)] {
+        let at = pt(r, x, y);
+        p.rect_filled(
+            egui::Rect::from_min_size(at, egui::vec2(2.0, 2.0)),
+            CornerRadius::same(0),
+            c,
+        );
     }
 }
 
@@ -659,7 +687,7 @@ mod tests {
         let expected: &[(&str, &[Tool])] = &[
             (
                 "selection",
-                &[Tool::Select, Tool::Hand, Tool::Crop, Tool::Ocr],
+                &[Tool::Select, Tool::Hand, Tool::Crop, Tool::Ocr, Tool::Qr],
             ),
             (
                 "shapes",
@@ -763,7 +791,7 @@ mod tests {
             }
             fns.push(spec.key);
         }
-        assert_eq!(fns.len(), 14, "the full vocabulary rides the rail");
+        assert_eq!(fns.len(), 15, "the full vocabulary rides the rail");
     }
 
     #[test]

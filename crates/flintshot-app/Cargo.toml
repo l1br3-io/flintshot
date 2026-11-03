@@ -174,5 +174,8 @@ single-instance = { workspace = true }
 [dev-dependencies]
 image = { workspace = true }
 mockito = { workspace = true }
+# Dev-only fixture generator for the QR pass tests (same pin as
+# flintshot-core's dev-dep).
+qrcode = "0.14"
 serde_json = "1"
 tempfile = { workspace = true }

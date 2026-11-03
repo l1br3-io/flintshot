@@ -328,6 +328,26 @@ pub trait EditorPageBridge {
     /// [`Self::poll_ocr_event`] as [`OcrEvent::ModelsFetched`] /
     /// [`OcrEvent::ModelsFetchFailed`]. Default no-op.
     fn ocr_fetch_models(&mut self) {}
+
+    /// Fire a QR decode pass over `image` (already cropped to the
+    /// user's region — only the rect's pixels reach the engine). The
+    /// host decodes off-thread and answers on
+    /// [`Self::poll_qr_event`]. Default no-op (headless tests:
+    /// requests just never answer).
+    fn qr_request(&mut self, _image: image::RgbaImage) {}
+
+    /// Take one arrived QR event, oldest first (a pass result). One
+    /// arrival per fired request. Default: always `None`.
+    fn poll_qr_event(&mut self) -> Option<QrEvent> {
+        None
+    }
+
+    /// Open `url` with the system's URL handler (the QR card's Open
+    /// click — an explicit user action; [`flintshot_core::is_url`]
+    /// already vetted the scheme when the affordance was shown, so
+    /// only absolute http(s) URLs ever arrive here). Default no-op
+    /// (headless tests: opens are recorded, never executed).
+    fn open_url(&mut self, _url: &str) {}
 }
 
 /// An OCR event, host → page (the `AiEvent` poll choreography). One
@@ -358,6 +378,33 @@ pub enum OcrEvent {
     ModelsFetched,
     /// A consented model fetch failed (transport, disk).
     ModelsFetchFailed(String),
+}
+
+/// A QR decode event, host → page (the [`OcrEvent`] poll
+/// choreography). One event per fired request; the QR flow's state
+/// machine consumes them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QrEvent {
+    /// The pass succeeded: every decoded payload, largest-first (the
+    /// code the user framed leads; the clipboard takes `payloads[0]`).
+    Done {
+        /// Decoded payloads, largest-area first.
+        payloads: Vec<String>,
+    },
+    /// The pass failed. `no_codes` distinguishes the friendly
+    /// nothing-found shape (the message already names the
+    /// re-capture cure) from a decode failure — the same
+    /// curable-state grammar as [`OcrEvent::Failed`]'s
+    /// `missing_models`.
+    Failed {
+        /// One-line actionable copy (the cure is a closer
+        /// re-capture).
+        message: String,
+        /// Whether nothing QR-shaped was found (vs a detected code
+        /// that would not decode).
+        no_codes: bool,
+    },
 }
 
 /// One arrived vision-probe result: the persisted verdict + triple

@@ -294,6 +294,9 @@ pub(crate) struct EditorApp {
     /// The OCR tool's flow: region drag → bridge request → clipboard
     /// + result card (see `crate::ocr`).
     ocr: crate::ocr::OcrFlow,
+    /// The QR tool's flow: same grammar, payloads instead of text
+    /// (see `crate::qr`).
+    qr: crate::qr::QrFlow,
 }
 
 /// The paper-cutout ring around the image: 8 px cream — the cutout
@@ -429,6 +432,7 @@ impl EditorApp {
             screen_pick_flight: None,
             toast: None,
             ocr: crate::ocr::OcrFlow::default(),
+            qr: crate::qr::QrFlow::default(),
             flushed_anns,
         };
         // Ask-the-shot snapshot (page mode): the saved-transform list
@@ -1462,6 +1466,9 @@ impl EditorApp {
                 // mode): no `PointerDown` ever reaches the dispatcher,
                 // so an OCR drag can never smudge an annotation.
                 self.ocr.press(at);
+            } else if self.state.tool == Tool::Qr && self.qr.accepts_press() {
+                // QR region drag — the OCR tool's exact contract.
+                self.qr.press(at);
             } else {
                 self.canvas_drag_active = true;
                 if !annotation_gated {
@@ -1516,20 +1523,11 @@ impl EditorApp {
             }
         }
 
-        // OCR drag continuation + release (the press was consumed
+        // OCR/QR drag continuation + release (the press was consumed
         // above into the pick machine). Release with a real rect
         // fires the pass; a degenerate click leaves the flow idle
         // (Enter = whole image stays available).
-        if self.state.tool == Tool::Ocr && self.ocr.dragging() {
-            if primary_down {
-                self.ocr.drag_to(at);
-            }
-            if primary_released {
-                if let Some(rect) = self.ocr.release() {
-                    self.start_ocr(Some(rect));
-                }
-            }
-        }
+        self.continue_region_tool_drag(primary_down, primary_released, at);
         for event in pointer_events {
             // Outcome capture (dblclick-select-properties):
             // quick-select's FocusProperties is the first
@@ -1687,6 +1685,10 @@ impl EditorApp {
         // the selection-clear Esc and before Enter reaches the core
         // dispatcher — the Ocr tool has no Enter contract there.
         if self.handle_ocr_keys(ctx) {
+            return true;
+        }
+        // QR tool keys — the same pre-dispatcher contract.
+        if self.handle_qr_keys(ctx) {
             return true;
         }
         // Canvas pick mode is the innermost mode: Esc cancels the
@@ -1905,6 +1907,7 @@ impl EditorApp {
             &mut self.panel,
             &mut self.ai,
             &mut self.ocr,
+            &mut self.qr,
         );
 
         // Selection-first phase: the toolbar's "Crop · Enter" button
@@ -2042,23 +2045,9 @@ impl EditorApp {
             None => {}
         }
         // Result-card actions (fired inside the panel pass above).
-        if let Some(action) = self.ocr.card_action.take() {
-            let now = ui.ctx().input(|i| i.time);
-            match action {
-                crate::ocr::OcrCardAction::CopyText => {
-                    if let crate::ocr::OcrPhase::Done { text, .. } = &self.ocr.phase {
-                        let chars = text.chars().count();
-                        let text = text.clone();
-                        self.clipboard_write_text(&text);
-                        self.toast = Some(crate::toast::Toast::new(
-                            format!("Copied {chars} chars"),
-                            now,
-                        ));
-                    }
-                }
-                crate::ocr::OcrCardAction::Retry => self.retry_ocr(),
-            }
-        }
+        self.consume_ocr_card_action(ui.ctx().input(|i| i.time));
+        // QR result-card actions (fired inside the panel pass above).
+        self.consume_qr_card_action(ui.ctx().input(|i| i.time));
 
         // Handle toolbar actions outside the toolbar drawing code so
         // we can borrow `&self.outcome` cleanly (see
@@ -2369,6 +2358,36 @@ impl EditorApp {
                 }
             }
         }
+        // QR arrivals (region → payloads → clipboard): Done writes
+        // the first payload (largest — the code the user framed),
+        // toasts, and lands the card listing every code; Failed
+        // lands the cure copy. Same `loop`-not-`while-let` shape as
+        // the OCR block above — the borrow must drop before the body.
+        loop {
+            let event = bridge.borrow_mut().poll_qr_event();
+            let Some(event) = event else {
+                break;
+            };
+            let now = ctx.input(|i| i.time);
+            match event {
+                crate::shell::QrEvent::Done { payloads } => {
+                    let toast_copy = if payloads.len() > 1 {
+                        format!("Copied first of {} QR payloads", payloads.len())
+                    } else {
+                        "Copied QR payload".to_owned()
+                    };
+                    if let Some(first) = payloads.first() {
+                        let first = first.clone();
+                        self.clipboard_write_text(&first);
+                    }
+                    self.toast = Some(crate::toast::Toast::new(toast_copy, now));
+                    self.qr.note_done(payloads);
+                }
+                crate::shell::QrEvent::Failed { message, .. } => {
+                    self.qr.note_failure(message);
+                }
+            }
+        }
         // The advisory vision badge: while the AI tab is visible,
         // refresh the persisted verdict's applicability (a config
         // read — zero network; the small file reads fine at the
@@ -2383,7 +2402,10 @@ impl EditorApp {
         // without user input: a short repaint timer carries the poll.
         // No cross-thread `Context` clone — the worker signals only
         // through the bridge's channel.
-        if self.ai.is_pending() || self.ocr.phase == crate::ocr::OcrPhase::Pending {
+        if self.ai.is_pending()
+            || self.ocr.phase == crate::ocr::OcrPhase::Pending
+            || self.qr.phase == crate::qr::QrPhase::Pending
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
@@ -2719,6 +2741,97 @@ impl EditorApp {
         }
     }
 
+    /// Region-tool drag continuation + release for the OCR and QR
+    /// tools (the press was consumed into the pick machine by
+    /// [`Self::handle_pointer_input`]). Release with a real rect
+    /// fires that tool's pass; a degenerate click leaves the flow
+    /// idle (Enter = whole image stays available).
+    fn continue_region_tool_drag(
+        &mut self,
+        primary_down: bool,
+        primary_released: bool,
+        at: flintshot_core::Point,
+    ) {
+        let dragging_ocr = self.state.tool == Tool::Ocr && self.ocr.dragging();
+        let dragging_qr = self.state.tool == Tool::Qr && self.qr.dragging();
+        if dragging_ocr {
+            if primary_down {
+                self.ocr.drag_to(at);
+            }
+            if primary_released {
+                if let Some(rect) = self.ocr.release() {
+                    self.start_ocr(Some(rect));
+                }
+            }
+        } else if dragging_qr {
+            if primary_down {
+                self.qr.drag_to(at);
+            }
+            if primary_released {
+                if let Some(rect) = self.qr.release() {
+                    self.start_qr(Some(rect));
+                }
+            }
+        }
+    }
+
+    /// Consume the OCR card's fired action: Copy re-copies the
+    /// recognized text, Retry re-sends the last region. (Split out of
+    /// `ui_impl` beside its QR twin.)
+    fn consume_ocr_card_action(&mut self, now: f64) {
+        let Some(action) = self.ocr.card_action.take() else {
+            return;
+        };
+        match action {
+            crate::ocr::OcrCardAction::CopyText => {
+                if let crate::ocr::OcrPhase::Done { text, .. } = &self.ocr.phase {
+                    let chars = text.chars().count();
+                    let text = text.clone();
+                    self.clipboard_write_text(&text);
+                    self.toast = Some(crate::toast::Toast::new(
+                        format!("Copied {chars} chars"),
+                        now,
+                    ));
+                }
+            }
+            crate::ocr::OcrCardAction::Retry => self.retry_ocr(),
+        }
+    }
+
+    /// Consume the QR card's fired action (the OCR block's shape,
+    /// split out of `ui_impl`): Copy re-copies a payload, Open hands
+    /// a vetted URL to the host bridge (the click is the only
+    /// opener), Retry re-sends the last region.
+    fn consume_qr_card_action(&mut self, now: f64) {
+        let Some(action) = self.qr.card_action.take() else {
+            return;
+        };
+        let payloads = match &self.qr.phase {
+            crate::qr::QrPhase::Done { payloads } => payloads.clone(),
+            _ => Vec::new(),
+        };
+        match action {
+            crate::qr::QrCardAction::Copy(idx) => {
+                if let Some(payload) = payloads.get(idx) {
+                    let payload = payload.clone();
+                    self.clipboard_write_text(&payload);
+                    self.toast = Some(crate::toast::Toast::new("Copied QR payload", now));
+                }
+            }
+            crate::qr::QrCardAction::Open(idx) => {
+                // The click is the only opener; is_url vetted the
+                // scheme when the affordance was shown.
+                if let Some(url) = payloads.get(idx).filter(|p| flintshot_core::is_url(p)) {
+                    let url = url.clone();
+                    if let Some(bridge) = self.page.clone() {
+                        bridge.borrow_mut().open_url(&url);
+                    }
+                }
+            }
+            crate::qr::QrCardAction::Retry => self.retry_qr(),
+        }
+    }
+
     /// OCR tool keys (the crop-tool analogue): Enter runs the whole
     /// image when no drag is armed, Esc resets the flow (card
     /// included). Returns whether the frame was consumed.
@@ -2771,6 +2884,50 @@ impl EditorApp {
                 &self.config.ocr.lang,
             );
             self.ocr.note_request(pixels);
+        }
+    }
+
+    /// QR tool keys (the OCR analogue): Enter runs the whole image
+    /// when no drag is armed, Esc resets the flow (card included).
+    /// Returns whether the frame was consumed.
+    fn handle_qr_keys(&mut self, ctx: &Context) -> bool {
+        if self.state.tool != Tool::Qr {
+            return false;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && self.qr.accepts_press() {
+            self.start_qr(None);
+            return true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && self.qr.phase != crate::qr::QrPhase::Idle
+        {
+            self.qr.reset();
+            return true;
+        }
+        false
+    }
+
+    /// Dispatch a QR pass for `rect` (`None` = the whole image,
+    /// Enter's contract) through the page bridge. The crop happens
+    /// here — only these pixels ever reach the engine.
+    fn start_qr(&mut self, rect: Option<flintshot_core::Rect>) {
+        let Some(bridge) = self.page.clone() else {
+            tracing::warn!("qr: no page bridge; the QR tool needs the single window");
+            return;
+        };
+        let pixels = crate::qr::region_pixels(&self.state.image, rect);
+        bridge.borrow_mut().qr_request(pixels.clone());
+        self.qr.note_request(pixels);
+    }
+
+    /// Re-send the last region (the card's Retry).
+    fn retry_qr(&mut self) {
+        let Some(pixels) = self.qr.retry_pixels().cloned() else {
+            return;
+        };
+        if let Some(bridge) = self.page.clone() {
+            bridge.borrow_mut().qr_request(pixels.clone());
+            self.qr.note_request(pixels);
         }
     }
 
@@ -3655,6 +3812,7 @@ pub(crate) fn tool_for_key(key: egui::Key) -> Option<Tool> {
         egui::Key::B => Some(Tool::Blur),
         egui::Key::N => Some(Tool::Number),
         egui::Key::O => Some(Tool::Ocr),
+        egui::Key::Q => Some(Tool::Qr),
         _ => None,
     }
 }
@@ -5000,6 +5158,246 @@ mod tests {
         );
     }
 
+    // --- QR tool through the shell (qr-decode QD2) ---
+
+    /// One page-mode frame (the `ocr_frame` shape, named for this
+    /// suite).
+    fn qr_frame(ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>) {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1024.0, 768.0),
+                )),
+                events,
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            },
+        );
+    }
+
+    /// The QR suite's shared harness handles.
+    type QrHarness = (
+        egui::Context,
+        EditorApp,
+        Arc<Mutex<VecDeque<crate::shell::QrEvent>>>,
+        Arc<Mutex<Vec<(u32, u32)>>>,
+        Arc<Mutex<Vec<String>>>,
+    );
+
+    /// One Enter press as egui needs to see it.
+    fn qr_fire_enter(ctx: &egui::Context, app: &mut EditorApp) {
+        qr_frame(
+            ctx,
+            app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+    }
+
+    /// A page-mode app over the QR tool, with its bridge handles out
+    /// for seeding arrivals and reading requests/opens.
+    fn qr_page_app() -> QrHarness {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let bridge = RecordingPageBridge::default();
+        let arrivals = Arc::clone(&bridge.qr_arrivals);
+        let requests = Arc::clone(&bridge.qr_requests);
+        let opened = Arc::clone(&bridge.opened_urls);
+        let slot: PageBridgeSlot = Rc::new(RefCell::new(Box::new(bridge)));
+        let mut app = EditorApp::new_page(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+            slot,
+        );
+        app.state.set_tool(Tool::Qr);
+        // Settle the layout (the OCR suite's 30 frames): the canvas
+        // view the drag positions map through must be frame-stable.
+        for _ in 0..30 {
+            qr_frame(&ctx, &mut app, vec![]);
+        }
+        (ctx, app, arrivals, requests, opened)
+    }
+
+    /// The full happy path: drag a region, the engine receives
+    /// exactly those pixels (the region-crop rule), the largest
+    /// payload lands on the clipboard (toast), the card lists every
+    /// code, and Open appears only on the URL row.
+    #[test]
+    fn qr_drag_region_crops_to_engine_copies_and_cards() {
+        let (ctx, mut app, arrivals, requests, opened) = qr_page_app();
+        let press = screen_at(&app, (10.0, 20.0));
+        let drag = screen_at(&app, (30.0, 32.0));
+        qr_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        qr_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(drag)]);
+        qr_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: drag,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert_eq!(
+            *requests.lock().expect("requests"),
+            vec![(20, 12)],
+            "only the dragged rect's pixels reach the engine"
+        );
+        assert!(
+            opened.lock().expect("opened").is_empty(),
+            "nothing ever opens without a click"
+        );
+        // Seed the arrival only now: arrivals queue behind the
+        // request they answer.
+        arrivals
+            .lock()
+            .expect("arrivals")
+            .push_back(crate::shell::QrEvent::Done {
+                payloads: vec!["https://flintshot.example/qr".into(), "plain text".into()],
+            });
+        qr_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.qr.phase,
+            crate::qr::QrPhase::Done {
+                payloads: vec![
+                    "https://flintshot.example/qr".to_owned(),
+                    "plain text".to_owned()
+                ]
+            },
+            "the arrival landed the result card with every payload"
+        );
+        assert_eq!(
+            app.toast.as_ref().expect("copy toast").message(),
+            "Copied first of 2 QR payloads",
+            "the toast carries the clipboard copy of the largest code"
+        );
+        // Settle the card's section fold spring (the OCR suite's
+        // lesson; read_response lags a pass on top).
+        for _ in 0..30 {
+            qr_frame(&ctx, &mut app, vec![]);
+        }
+        assert!(
+            ctx.read_response(egui::Id::new("qr_card_open_0")).is_some(),
+            "the URL row shows Open"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new("qr_card_open_1")).is_none(),
+            "the plain-text row shows no Open"
+        );
+    }
+
+    /// THE Open pin: the URL's Open fires exactly once, and only on
+    /// the click — the arrival itself (and every settle frame before
+    /// it) never opens anything.
+    #[test]
+    fn qr_open_fires_only_on_click() {
+        let (ctx, mut app, arrivals, _requests, opened) = qr_page_app();
+        qr_fire_enter(&ctx, &mut app);
+        arrivals
+            .lock()
+            .expect("arrivals")
+            .push_back(crate::shell::QrEvent::Done {
+                payloads: vec!["https://flintshot.example/only-on-click".into()],
+            });
+        qr_frame(&ctx, &mut app, vec![]);
+        for _ in 0..30 {
+            qr_frame(&ctx, &mut app, vec![]);
+        }
+        assert!(
+            opened.lock().expect("opened").is_empty(),
+            "the decoded URL never opens by itself"
+        );
+        let at = ctx
+            .read_response(egui::Id::new("qr_card_open_0"))
+            .expect("the open button registers once a result shows")
+            .rect
+            .center();
+        qr_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(
+            *opened.lock().expect("opened"),
+            vec!["https://flintshot.example/only-on-click".to_owned()],
+            "the click opened exactly the vetted URL"
+        );
+    }
+
+    /// Enter without a drag runs the whole image through the engine.
+    #[test]
+    fn qr_enter_without_drag_runs_the_whole_image() {
+        let (ctx, mut app, _arrivals, requests, _opened) = qr_page_app();
+        qr_fire_enter(&ctx, &mut app);
+        assert_eq!(
+            *requests.lock().expect("requests"),
+            vec![(64, 64)],
+            "Enter's contract is the whole image"
+        );
+    }
+
+    /// A failure lands the cure copy as the card (no toast — nothing
+    /// was copied).
+    #[test]
+    fn qr_failure_lands_the_cure_copy() {
+        let (ctx, mut app, arrivals, _requests, _opened) = qr_page_app();
+        qr_fire_enter(&ctx, &mut app);
+        arrivals
+            .lock()
+            .expect("arrivals")
+            .push_back(crate::shell::QrEvent::Failed {
+                message: "no QR code found — move closer or re-capture a tighter region".into(),
+                no_codes: true,
+            });
+        qr_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.qr.phase,
+            crate::qr::QrPhase::Failed {
+                detail: "no QR code found — move closer or re-capture a tighter region".into()
+            },
+            "the failure card carries the re-capture cure"
+        );
+        assert!(app.toast.is_none(), "a failed pass copies nothing");
+    }
+
     // --- Point-handle reshape through the shell (annotate-polish AP5) ---
 
     /// A pinned-canvas editor app over a selected `CurvedArrow`, with
@@ -5860,6 +6258,12 @@ mod tests {
         ocr_requests: Arc<Mutex<Vec<(u32, u32)>>>,
         ocr_arrivals: Arc<Mutex<VecDeque<crate::shell::OcrEvent>>>,
         ocr_fetches: Arc<Mutex<usize>>,
+        /// QR seams (qr-decode QD2): requested dims, replayable
+        /// arrivals, and the Open-click URLs (never executed — the
+        /// test-pinned "only on click" record).
+        qr_requests: Arc<Mutex<Vec<(u32, u32)>>>,
+        qr_arrivals: Arc<Mutex<VecDeque<crate::shell::QrEvent>>>,
+        opened_urls: Arc<Mutex<Vec<String>>>,
     }
 
     impl EditorPageBridge for RecordingPageBridge {
@@ -5946,6 +6350,27 @@ mod tests {
 
         fn ocr_fetch_models(&mut self) {
             *self.ocr_fetches.lock().expect("ocr fetches mutex") += 1;
+        }
+
+        fn qr_request(&mut self, image: image::RgbaImage) {
+            self.qr_requests
+                .lock()
+                .expect("qr requests mutex")
+                .push(image.dimensions());
+        }
+
+        fn poll_qr_event(&mut self) -> Option<crate::shell::QrEvent> {
+            self.qr_arrivals
+                .lock()
+                .expect("qr arrivals mutex")
+                .pop_front()
+        }
+
+        fn open_url(&mut self, url: &str) {
+            self.opened_urls
+                .lock()
+                .expect("opened urls mutex")
+                .push(url.to_owned());
         }
     }
 

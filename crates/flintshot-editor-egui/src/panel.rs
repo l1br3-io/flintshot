@@ -500,6 +500,7 @@ pub(crate) fn show(
     panel: &mut PanelState,
     ai: &mut crate::ai_panel::AiConversation,
     ocr: &mut crate::ocr::OcrFlow,
+    qr: &mut crate::qr::QrFlow,
 ) -> ToolbarAction {
     if panel.collapsed {
         return ToolbarAction::None;
@@ -528,7 +529,7 @@ pub(crate) fn show(
             tab_header(ui, panel);
             match panel.tab {
                 PanelTab::Properties => {
-                    action = properties_body(ui, state, panel, inspector, caps, ocr);
+                    action = properties_body(ui, state, panel, inspector, caps, ocr, qr);
                 }
                 PanelTab::History => history_body(ui, state),
                 PanelTab::Ai => {
@@ -714,6 +715,7 @@ fn properties_body(
     inspector: bool,
     caps: flintshot_core::SelectionCapabilities,
     ocr: &mut crate::ocr::OcrFlow,
+    qr: &mut crate::qr::QrFlow,
 ) -> ToolbarAction {
     let title = panel_title(state);
     let galley = ui.painter().layout_no_wrap(
@@ -791,6 +793,8 @@ fn properties_body(
     // The OCR result card rides the Properties tab regardless of the
     // active tool — switching tools never loses the recognized text.
     crate::ocr::show_result_card(ui, ocr);
+    // The QR result card rides beside it, same persistence rule.
+    crate::qr::show_result_card(ui, qr);
     action
 }
 
@@ -2206,7 +2210,8 @@ mod tests {
         let mut fired = ToolbarAction::None;
         let _ = ctx.run_ui(raw, |ui| {
             let mut ocr = crate::ocr::OcrFlow::default();
-            fired = show(ui, state, panel, ai, &mut ocr);
+            let mut qr = crate::qr::QrFlow::default();
+            fired = show(ui, state, panel, ai, &mut ocr, &mut qr);
         });
         fired
     }
@@ -3238,7 +3243,8 @@ mod tests {
         let _ = ctx.run_ui(raw, |ui| {
             let mut ai = crate::ai_panel::AiConversation::default();
             let mut ocr = crate::ocr::OcrFlow::default();
-            let _ = show(ui, state, panel, &mut ai, &mut ocr);
+            let mut qr = crate::qr::QrFlow::default();
+            let _ = show(ui, state, panel, &mut ai, &mut ocr, &mut qr);
             let central = egui::CentralPanel::default().show(ui, |_ui| {});
             right = central.response.rect.right();
         });

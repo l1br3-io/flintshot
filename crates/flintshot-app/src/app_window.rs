@@ -1300,6 +1300,7 @@ fn run_generation(
                 screen_pick_probe: None,
                 screen_pick_rx: None,
                 ocr_rx: None,
+                qr_rx: None,
             }),
             Box::new(RouteHostBridge {
                 shared: Arc::clone(shared),
@@ -2303,6 +2304,9 @@ struct PageBridge {
     /// arrival channel. One at a time — a retry replaces the
     /// receiver, the superseded worker's send failing into the void.
     ocr_rx: Option<std::sync::mpsc::Receiver<flintshot_editor_egui::OcrEvent>>,
+    /// QR (qr-decode): the in-flight pass's arrival channel — the
+    /// OCR field's one-shot shape.
+    qr_rx: Option<std::sync::mpsc::Receiver<flintshot_editor_egui::QrEvent>>,
 }
 
 /// The bridge's AI plumbing. One stream at a time: a second request
@@ -2892,6 +2896,50 @@ impl EditorPageBridge for PageBridge {
             .expect("spawn flintshot-ocr-fetch");
         self.ocr_rx = Some(rx);
     }
+
+    fn qr_request(&mut self, image: image::RgbaImage) {
+        // The ocr_request pattern: named thread, one-shot channel; a
+        // retry replaces the receiver and the superseded worker's
+        // send fails into the void.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("flintshot-qr".into())
+            .spawn(move || {
+                let _ = tx.send(run_qr_pass(&image));
+            })
+            .expect("spawn flintshot-qr");
+        self.qr_rx = Some(rx);
+    }
+
+    fn poll_qr_event(&mut self) -> Option<flintshot_editor_egui::QrEvent> {
+        // Non-blocking; the arrival is terminal (same contract as the
+        // OCR pass above).
+        let arrived = self.qr_rx.as_ref()?.try_recv().ok();
+        if arrived.is_some() {
+            self.qr_rx = None;
+        }
+        arrived
+    }
+
+    fn open_url(&mut self, url: &str) {
+        // A card Open click is the only caller; is_url vetted the
+        // scheme (absolute http(s)) before the affordance was shown.
+        // Fire-and-forget spawn, one argv element — no shell between
+        // us and the handler, so the payload cannot inject.
+        let opener = url_opener();
+        match std::process::Command::new(opener).arg(url).spawn() {
+            Ok(mut child) => {
+                // Reap on a short-lived detached thread so we never
+                // accumulate zombies across many opens.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, opener, "opening a decoded URL");
+            }
+        }
+    }
 }
 
 /// One OCR pass, off the UI thread: resolve the configured choice
@@ -2952,6 +3000,39 @@ pub(crate) fn run_ocr_model_fetch() -> flintshot_editor_egui::OcrEvent {
     match flintshot_core::fetch_models_into(&dir, true, &mut downloader) {
         Ok(()) => OcrEvent::ModelsFetched,
         Err(e) => OcrEvent::ModelsFetchFailed(e.to_string()),
+    }
+}
+
+/// One QR decode pass, off the UI thread — the shared engine path
+/// for the editor bridge and the `qr` CLI verb (the `run_ocr_pass`
+/// "one path for both surfaces" rule). Nothing found is a friendly
+/// failure whose copy names the cure; a detected-but-undecodable
+/// code keeps the engine's error copy.
+pub(crate) fn run_qr_pass(image: &image::RgbaImage) -> flintshot_editor_egui::QrEvent {
+    use flintshot_editor_egui::QrEvent;
+    match flintshot_core::decode_region(image, None, &flintshot_core::RqrrEngine) {
+        Ok(payloads) if payloads.is_empty() => QrEvent::Failed {
+            message: "no QR code found — move closer or re-capture a tighter region".into(),
+            no_codes: true,
+        },
+        Ok(payloads) => QrEvent::Done { payloads },
+        Err(e) => QrEvent::Failed {
+            message: e.to_string(),
+            no_codes: false,
+        },
+    }
+}
+
+/// The platform URL opener for the QR card's Open click — the
+/// folder-reveal opener's cfg-table shape. explorer handles absolute
+/// http(s) URLs on Windows by dispatching to the default browser.
+fn url_opener() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
     }
 }
 
@@ -4285,6 +4366,78 @@ mod tests {
         assert_eq!(opener_for_reveal(), expected);
     }
 
+    // ── QR decode pass (qr-decode QD2) ────────────────────────────
+
+    #[test]
+    fn url_opener_matches_the_platform() {
+        let expected = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(target_os = "windows") {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(url_opener(), expected);
+    }
+
+    /// The shared pass's grammar: payloads flow largest-first;
+    /// nothing found is the friendly no-codes failure; the engine's
+    /// Unreadable error keeps its cure copy and the `no_codes=false`
+    /// flag.
+    #[test]
+    fn qr_pass_maps_codes_friendly_empty_and_unreadable() {
+        use flintshot_editor_egui::QrEvent;
+        // A real fixture: the shared path runs the same engine the
+        // CLI will (no seam here to fake).
+        let mut code = {
+            let luma = qrcode_probe_code("https://flintshot.example/pass");
+            let mut rgba = image::DynamicImage::ImageLuma8(luma).to_rgba8();
+            // Damage the data region so detection finds a grid that
+            // will not decode (the core suite's damaged fixture).
+            let (w, h) = rgba.dimensions();
+            for y in h / 3..2 * h / 3 {
+                for x in w / 3..2 * w / 3 {
+                    rgba.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+                }
+            }
+            rgba
+        };
+        match run_qr_pass(&code) {
+            QrEvent::Failed {
+                message,
+                no_codes: false,
+            } => assert!(message.contains("unreadable"), "keeps the cure: {message}"),
+            other => panic!("damaged code maps to an unreadable failure, got {other:?}"),
+        }
+        // Blank region → the friendly no-codes copy.
+        let blank = image::RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        match run_qr_pass(&blank) {
+            QrEvent::Failed {
+                message,
+                no_codes: true,
+            } => assert!(message.contains("re-capture"), "names the cure: {message}"),
+            other => panic!("blank maps to the friendly no-codes failure, got {other:?}"),
+        }
+        // A clean fixture decodes through the shared path.
+        let luma = qrcode_probe_code("https://flintshot.example/pass");
+        code = image::DynamicImage::ImageLuma8(luma).to_rgba8();
+        match run_qr_pass(&code) {
+            QrEvent::Done { payloads } => {
+                assert_eq!(payloads, vec!["https://flintshot.example/pass".to_owned()]);
+            }
+            other => panic!("a clean fixture decodes, got {other:?}"),
+        }
+    }
+
+    /// Render a deterministic fixture QR (dev-dep `qrcode`, the same
+    /// generator as the core suite's fixtures).
+    fn qrcode_probe_code(payload: &str) -> image::GrayImage {
+        let code = qrcode::QrCode::new(payload).expect("fixture encodes");
+        code.render::<image::Luma<u8>>()
+            .module_dimensions(4, 4)
+            .build()
+    }
+
     #[test]
     fn delete_recent_file_removes_and_tolerates_missing() {
         let dir = tempfile::tempdir().unwrap();
@@ -4982,6 +5135,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
 
         bridge.report_outcome(&EditorOutcome::Saved(std::path::PathBuf::from(
@@ -5014,6 +5168,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
 
         // Default config: no model set ⇒ unconfigured, and the
@@ -5056,6 +5211,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -5116,6 +5272,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
 
         // Startup fired nothing (no save yet ⇒ no flight).
@@ -5195,6 +5352,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
         bridge.save_config(&config);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -5220,6 +5378,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
         let reloaded = flintshot_core::Config::load_from(&dir.path().join("config.toml"))
             .expect("the verdict persisted");
@@ -5273,6 +5432,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
         bridge.save_config(&config);
 
@@ -5306,6 +5466,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
         bridge.ai.config_override = Some(flintshot_core::Config::default());
         (bridge, vec![session])
@@ -5430,6 +5591,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -5472,6 +5634,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
         (bridge, mockito::Server::new(), dir)
     }
@@ -5609,6 +5772,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
 
         let mut config = flintshot_core::Config::default();
@@ -5654,6 +5818,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
 
         for outcome in [
@@ -5687,6 +5852,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
 
         let anns = vec![test_line_ann()];
@@ -5737,6 +5903,7 @@ mod tests {
             screen_pick_probe: None,
             screen_pick_rx: None,
             ocr_rx: None,
+            qr_rx: None,
         };
         let _ = &mut bridge;
         (bridge, stop)

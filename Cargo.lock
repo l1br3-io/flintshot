@@ -2501,6 +2501,7 @@ dependencies = [
  "notify",
  "notify-rust",
  "postcard",
+ "qrcode",
  "reqwest",
  "rpassword",
  "serde",
