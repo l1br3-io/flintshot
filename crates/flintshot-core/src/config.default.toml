@@ -128,6 +128,30 @@ save-dir = ""
 # fails the copy.
 save-clipboard-copies = true
 
+# Opt-in watermark stamped onto everything that LEAVES the app —
+# saved files, clipboard copies, --out/--stdout. The editing canvas
+# and the session store's recovery mirrors stay unstamped. Disabled
+# by default; the app never surprise-stamps.
+[output.watermark]
+# Master switch: true stamps every egress path.
+enabled = false
+
+# The stamped text; blank text stamps nothing.
+text = "© flintshot"
+
+# Placement on a 3x3 grid: "top-left", "top", "top-right", "left",
+# "center", "right", "bottom-left", "bottom", or "bottom-right"
+# (default). Unknown values fall back to "bottom-right" with a
+# warning.
+position = "bottom-right"
+
+# Glyph opacity, 0.05-1.0 (clamped at use).
+opacity = 0.6
+
+# Font size relative to the image height; 1.0 stamps text about
+# 1/16 of the height.
+scale = 1.0
+
 # AI (Ask-the-shot) provider choice. The API key never lives in
 # this file — it's stored in your system's secret store (keychain)
 # and managed from Settings -> AI.

@@ -566,6 +566,10 @@ pub struct OutputConfig {
     /// copy — the clipboard write already succeeded.
     #[serde(default = "default_save_clipboard_copies")]
     pub save_clipboard_copies: bool,
+    /// The opt-in egress watermark (see [`WatermarkConfig`]). An
+    /// absent table = disabled = today's byte-identical output.
+    #[serde(default)]
+    pub watermark: WatermarkConfig,
 }
 
 impl OutputConfig {
@@ -606,6 +610,130 @@ impl Default for OutputConfig {
             filename_template: String::new(),
             save_dir: String::new(),
             save_clipboard_copies: default_save_clipboard_copies(),
+            watermark: WatermarkConfig::default(),
+        }
+    }
+}
+
+/// The `[output.watermark]` table: an opt-in watermark stamped on
+/// everything that **leaves** the app (saved files, clipboard
+/// copies, `--out`/`--stdout`) while the editing canvas and the
+/// session store's recovery mirrors stay pristine. Every field is
+/// additive with a default, so older files without the table load
+/// with the watermark off — the app never surprise-stamps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub struct WatermarkConfig {
+    /// Master switch. **OFF by default** — the watermark exists only
+    /// when the user turned it on.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The stamped text; blank text disables the stamp (an enabled
+    /// watermark with nothing to say stamps nothing).
+    #[serde(default = "default_watermark_text")]
+    pub text: String,
+    /// 9-grid placement (see [`WatermarkPosition`]). Unknown values
+    /// warn and resolve [`WatermarkPosition::BottomRight`].
+    #[serde(default = "default_watermark_position")]
+    pub position: String,
+    /// Glyph opacity, clamped into `0.05..=1.0` at use
+    /// ([`WatermarkConfig::opacity_clamped`]) — never invisible,
+    /// never fully opaque by accident.
+    #[serde(default = "default_watermark_opacity")]
+    pub opacity: f32,
+    /// Font size relative to the image height (`1.0` ≈ a stamp
+    /// 1/16 of the height); see [`apply_watermark`](crate::output::apply_watermark).
+    #[serde(default = "default_watermark_scale")]
+    pub scale: f32,
+}
+
+impl WatermarkConfig {
+    /// The stamp predicate every egress path shares: only an enabled
+    /// watermark with non-blank text stamps.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.text.trim().is_empty()
+    }
+
+    /// Opacity clamped into the documented `0.05..=1.0` band at use.
+    #[must_use]
+    pub fn opacity_clamped(&self) -> f32 {
+        self.opacity.clamp(0.05, 1.0)
+    }
+}
+
+impl Default for WatermarkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            text: default_watermark_text(),
+            position: default_watermark_position(),
+            opacity: default_watermark_opacity(),
+            scale: default_watermark_scale(),
+        }
+    }
+}
+
+fn default_watermark_text() -> String {
+    "© flintshot".to_owned()
+}
+
+fn default_watermark_position() -> String {
+    "bottom-right".to_owned()
+}
+
+fn default_watermark_opacity() -> f32 {
+    0.6
+}
+
+fn default_watermark_scale() -> f32 {
+    1.0
+}
+
+/// The `output.watermark.position` vocabulary: a 3×3 grid over the
+/// image. Kebab-case strings resolve via [`parse_watermark_position`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WatermarkPosition {
+    /// Top-left cell.
+    TopLeft,
+    /// Top-centre cell.
+    Top,
+    /// Top-right cell.
+    TopRight,
+    /// Middle-left cell.
+    Left,
+    /// Centre cell.
+    Center,
+    /// Middle-right cell.
+    Right,
+    /// Bottom-left cell.
+    BottomLeft,
+    /// Bottom-centre cell.
+    Bottom,
+    /// Bottom-right cell (the default corner).
+    BottomRight,
+}
+
+/// Resolve the configured watermark position; unknown values warn
+/// and resolve [`WatermarkPosition::BottomRight`] (string-tolerant
+/// policy, matching [`parse_output_format`]).
+#[must_use]
+pub fn parse_watermark_position(raw: &str) -> WatermarkPosition {
+    match raw {
+        "top-left" => WatermarkPosition::TopLeft,
+        "top" => WatermarkPosition::Top,
+        "top-right" => WatermarkPosition::TopRight,
+        "left" => WatermarkPosition::Left,
+        "center" => WatermarkPosition::Center,
+        "right" => WatermarkPosition::Right,
+        "bottom-left" => WatermarkPosition::BottomLeft,
+        "bottom" => WatermarkPosition::Bottom,
+        "bottom-right" => WatermarkPosition::BottomRight,
+        other => {
+            tracing::warn!("unknown output.watermark.position {other:?}; using \"bottom-right\"");
+            WatermarkPosition::BottomRight
         }
     }
 }
@@ -2118,6 +2246,11 @@ backend = \"portal\"
         assert_eq!(from_asset.ai.provider, d.ai.provider);
         assert_eq!(from_asset.ai.model, d.ai.model);
         assert_eq!(from_asset.ai.base_url, d.ai.base_url);
+
+        assert_eq!(
+            from_asset.output.watermark, d.output.watermark,
+            "the asset's watermark block mirrors the code defaults"
+        );
     }
 
     // ── [ai] section (ai-transforms Task 003) ────────────────────
@@ -2383,6 +2516,110 @@ base-url = \"\"
 
         let after = fs::read_to_string(&path).unwrap();
         assert_eq!(after, sentinel, "byte-identical after the call");
+    }
+
+    // ── [output.watermark] section (watermark WM1) ────────────────
+
+    /// Absent section = today's behavior: the nested table loads
+    /// with the disabled default, so every pre-watermark config
+    /// parses unchanged and nothing is ever surprise-stamped.
+    #[test]
+    fn watermark_absent_section_loads_disabled() {
+        let cfg: Config = toml::from_str("[output]\nformat = \"png\"\n").unwrap();
+        assert_eq!(
+            cfg.output.watermark,
+            WatermarkConfig::default(),
+            "no [output.watermark] table: the defaults load"
+        );
+        assert!(!cfg.output.watermark.enabled, "OFF by default");
+    }
+
+    /// Every field parses from the nested kebab-case table.
+    #[test]
+    fn watermark_section_parses_every_field() {
+        let cfg: Config = toml::from_str(
+            "[output.watermark]\nenabled = true\ntext = \"© me\"\nposition = \"top-left\"\nopacity = 0.35\nscale = 2.5\n",
+        )
+        .unwrap();
+        let wm = cfg.output.watermark;
+        assert!(wm.enabled);
+        assert_eq!(wm.text, "© me");
+        assert_eq!(wm.position, "top-left");
+        assert_eq!(wm.opacity, 0.35);
+        assert_eq!(wm.scale, 2.5);
+    }
+
+    /// A partially-populated table fills serde defaults — the same
+    /// forward-compat policy as every other section.
+    #[test]
+    fn watermark_partial_section_fills_serde_defaults() {
+        let cfg: Config = toml::from_str("[output.watermark]\nenabled = true\n").unwrap();
+        let wm = cfg.output.watermark;
+        assert_eq!(wm.text, "© flintshot");
+        assert_eq!(wm.position, "bottom-right");
+        assert_eq!(wm.opacity, 0.6);
+        assert_eq!(wm.scale, 1.0);
+    }
+
+    /// Unknown keys inside the table are silently ignored.
+    #[test]
+    fn watermark_unknown_keys_are_ignored() {
+        let cfg: Config =
+            toml::from_str("[output.watermark]\nenabled = true\nfuture-knob = 7\n").unwrap();
+        assert!(cfg.output.watermark.enabled, "known keys still parse");
+    }
+
+    /// The 9-grid vocabulary maps; unknown values warn and fall back
+    /// to bottom-right (string-tolerant policy).
+    #[test]
+    fn parse_watermark_position_maps_the_nine_grid_and_falls_back() {
+        use WatermarkPosition::*;
+        let grid = [
+            ("top-left", TopLeft),
+            ("top", Top),
+            ("top-right", TopRight),
+            ("left", Left),
+            ("center", Center),
+            ("right", Right),
+            ("bottom-left", BottomLeft),
+            ("bottom", Bottom),
+            ("bottom-right", BottomRight),
+        ];
+        for (raw, expected) in grid {
+            assert_eq!(parse_watermark_position(raw), expected, "{raw}");
+        }
+        assert_eq!(
+            parse_watermark_position("middle"),
+            BottomRight,
+            "unknown values fall back to the default corner"
+        );
+    }
+
+    /// Opacity is clamped into the documented 0.05–1.0 band at use,
+    /// so hand-edited extremes still land on a visible stamp.
+    #[test]
+    fn watermark_opacity_clamps_into_the_documented_band() {
+        let mut wm = WatermarkConfig::default();
+        wm.opacity = 0.0;
+        assert_eq!(wm.opacity_clamped(), 0.05, "floor");
+        wm.opacity = 2.0;
+        assert_eq!(wm.opacity_clamped(), 1.0, "ceiling");
+        wm.opacity = 0.6;
+        assert_eq!(wm.opacity_clamped(), 0.6, "in-band values pass through");
+    }
+
+    /// The stamp predicate: only an enabled config with non-blank
+    /// text stamps — the identity condition every egress path shares.
+    #[test]
+    fn watermark_is_active_requires_enabled_and_non_blank_text() {
+        let mut wm = WatermarkConfig::default();
+        assert!(!wm.is_active(), "disabled by default");
+        wm.enabled = true;
+        assert!(wm.is_active(), "enabled + default text stamps");
+        wm.text = "   ".into();
+        assert!(!wm.is_active(), "blank text is a no-op");
+        wm.text = String::new();
+        assert!(!wm.is_active(), "empty text is a no-op");
     }
 
     // ── Recent-captures-v2 Task 001 ───────────────────────────────
