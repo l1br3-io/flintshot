@@ -159,6 +159,30 @@ pub trait HomeBridge {
     /// no-op.
     fn discard_session_capture(&mut self, _id: flintshot_core::SessionId) {}
 
+    // -- Session recovery (session-resume; defaults keep test
+    //    doubles and minimal bridges compiling; the app crate's
+    //    bridge overrides these) --
+
+    /// How many captures the previous run's park holds — the
+    /// "Recovered from last run" banner's count; 0 means no banner.
+    /// Default: 0 — nothing parked.
+    fn parked_count(&mut self) -> usize {
+        0
+    }
+
+    /// Restore the parked captures into the session grid (the
+    /// banner's **Restore** pill): each re-enters the store with its
+    /// committed annotations, and the park is consumed. Returns how
+    /// many were restored. Default: nothing to restore.
+    fn restore_parked(&mut self) -> usize {
+        0
+    }
+
+    /// Discard the park outright (the banner's **Discard** pill) —
+    /// the previous run's unsaved captures go for good. Default:
+    /// no-op.
+    fn discard_parked(&mut self) {}
+
     /// Take one pending directive, oldest first. Called every
     /// frame (see [`REPOLL_INTERVAL`]).
     fn poll_directive(&mut self) -> Option<HomeDirective>;
@@ -503,6 +527,9 @@ pub(crate) struct HomeApp {
     /// The session card whose Discard chip is in the "Sure?"
     /// confirm step. `None` = none armed.
     discard_armed: Option<flintshot_core::SessionId>,
+    /// The parked captures the previous run left (refreshed per
+    /// frame); zero renders no recovery banner.
+    parked: usize,
 }
 
 /// Pure UI state of the home window — the part directives mutate.
@@ -531,6 +558,7 @@ impl HomeApp {
     pub(crate) fn new(mut bridge: Box<dyn HomeBridge>, initial_status: String) -> Self {
         let recent = bridge.recent_media();
         let session = bridge.session_captures();
+        let parked = bridge.parked_count();
         Self {
             ui: HomeUiState {
                 status: initial_status,
@@ -549,6 +577,7 @@ impl HomeApp {
             delete_armed: None,
             session,
             discard_armed: None,
+            parked,
         }
     }
 
@@ -743,6 +772,55 @@ pub(crate) fn session_header_caption(count: usize) -> String {
     count.to_string()
 }
 
+/// One pill on the recovery banner — the session card's chip
+/// language (shadow, cream fill, hairline ring), one click. The
+/// returned bool is the action; the caller owns what it means.
+fn banner_pill(ui: &mut egui::Ui, id: egui::Id, label: &str) -> bool {
+    use crate::theme::palette as p;
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(crate::theme::TYPE_XS),
+        p::INK,
+    );
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(galley.size().x + 20.0, 24.0),
+        egui::Sense::hover(),
+    );
+    let resp = ui
+        .interact(rect, id, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let radius = egui::CornerRadius::same(crate::theme::POD_RADIUS);
+    ui.painter().add(if resp.hovered() {
+        crate::theme::SHADOW_LIFT.as_shape(rect, radius)
+    } else {
+        crate::theme::SHADOW_RESTING.as_shape(rect, radius)
+    });
+    ui.painter().rect(
+        rect,
+        radius,
+        p::PAPER_CREAM,
+        egui::Stroke::NONE,
+        egui::StrokeKind::Middle,
+    );
+    let inner = rect.shrink(2.0);
+    ui.painter().rect(
+        inner,
+        radius,
+        p::PAPER_CREAM,
+        egui::Stroke::new(1.5, p::PAPER),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        p::INK,
+    );
+    resp.clicked()
+}
+
 /// A caption's character budget for a card of `width` px, at the
 /// conservative per-char estimate; floored so tiny cards keep a
 /// readable head. Pure; unit-tested.
@@ -897,16 +975,17 @@ impl HomeApp {
         let _ = panel;
     }
 
-    /// The welcome body: hero, secondaries, the session grid, the
-    /// recents grid / empty card, and the bottom status line
-    /// (ADR-0047's watchdog contract lives above this in
-    /// `logic_impl`).
+    /// The welcome body: hero, secondaries, the recovery banner,
+    /// the session grid, the recents grid / empty card, and the
+    /// bottom status line (ADR-0047's watchdog contract lives above
+    /// this in `logic_impl`).
     fn welcome_body(&mut self, ui: &mut egui::Ui) {
         ui.add_space(crate::theme::SPACE_SCALE[2]);
         self.hero_card(ui);
         ui.add_space(crate::theme::SPACE_SCALE[2]);
         self.secondary_cards(ui);
         ui.add_space(crate::theme::SPACE_SCALE[3]);
+        self.recovery_banner(ui);
         self.session_section(ui);
         self.recents_section(ui);
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -1115,6 +1194,52 @@ impl HomeApp {
                 ui.add_space(gap);
             }
         }
+    }
+
+    /// The "Recovered from last run" banner: when the previous run
+    /// parked unsaved captures (a crash, a kill, a logout), offer
+    /// them back — above "This session". **Restore** adopts the
+    /// park into the session grid (the cards appear under it);
+    /// **Discard** removes the park for good. Either decision
+    /// clears the banner: recovery is opt-in, never automatic.
+    fn recovery_banner(&mut self, ui: &mut egui::Ui) {
+        use crate::theme::palette as p;
+        self.parked = self.bridge.parked_count();
+        if self.parked == 0 {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("RECOVERED FROM LAST RUN")
+                    .size(crate::theme::TYPE_SM)
+                    .color(p::GOLD_DEEP),
+            );
+            ui.label(
+                egui::RichText::new(format!("· {}", session_header_caption(self.parked)))
+                    .size(crate::theme::TYPE_XS)
+                    .color(p::INK_SOFT),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // right_to_left lays out backwards: Discard lands last.
+                if banner_pill(ui, egui::Id::new("recovery-discard"), "Discard") {
+                    self.bridge.discard_parked();
+                    self.parked = self.bridge.parked_count();
+                }
+                if banner_pill(ui, egui::Id::new("recovery-restore"), "Restore") {
+                    self.bridge.restore_parked();
+                    self.parked = self.bridge.parked_count();
+                    self.session = self.bridge.session_captures();
+                }
+            });
+        });
+        ui.label(
+            egui::RichText::new(
+                "Unsaved captures from the previous run — restore them into this session, or let them go.",
+            )
+            .size(crate::theme::TYPE_XS)
+            .color(p::INK_SOFT),
+        );
+        ui.add_space(crate::theme::SPACE_SCALE[3]);
     }
 
     /// The "This session" grid: resumable unsaved captures, above
@@ -2098,6 +2223,10 @@ mod tests {
         /// Session-card targets: resume clicks and discards.
         resumed: Vec<flintshot_core::SessionId>,
         discarded: Vec<flintshot_core::SessionId>,
+        /// Recovery-banner actions: restores (the count adopted)
+        /// and park discards.
+        restored: usize,
+        discarded_park: usize,
         /// Open-folder chip clicks.
         opened_folder: usize,
     }
@@ -2109,6 +2238,12 @@ mod tests {
         pending: Arc<Mutex<VecDeque<HomeDirective>>>,
         recents: Arc<Mutex<Vec<PathBuf>>>,
         sessions: Arc<Mutex<Vec<SessionCard>>>,
+        /// The parked count the double answers with (the recovery
+        /// banner's source).
+        parked: Arc<Mutex<usize>>,
+        /// Cards `restore_parked` moves into `sessions` — the park
+        /// the banner promised.
+        restored_cards: Arc<Mutex<Vec<SessionCard>>>,
         /// The capacity `recents_limit` answers with.
         limit: usize,
         /// Kind-aware rows (U6): when set, `recent_media` answers
@@ -2227,6 +2362,33 @@ mod tests {
                 .lock()
                 .expect("sessions mutex")
                 .retain(|c| c.id != id);
+        }
+
+        fn parked_count(&mut self) -> usize {
+            *self.parked.lock().expect("parked mutex")
+        }
+
+        fn restore_parked(&mut self) -> usize {
+            let count = *self.parked.lock().expect("parked mutex");
+            if count == 0 {
+                return 0;
+            }
+            *self.parked.lock().expect("parked mutex") = 0;
+            self.rec.0.lock().expect("recorder mutex").restored += count;
+            // The real bridge's adoption, mirrored: the promised
+            // cards join the session grid.
+            let cards = self
+                .restored_cards
+                .lock()
+                .expect("restored-cards mutex")
+                .clone();
+            self.sessions.lock().expect("sessions mutex").extend(cards);
+            count
+        }
+
+        fn discard_parked(&mut self) {
+            self.rec.0.lock().expect("recorder mutex").discarded_park += 1;
+            *self.parked.lock().expect("parked mutex") = 0;
         }
     }
 
@@ -3342,6 +3504,132 @@ mod tests {
         assert!(
             last.top() > 420.0,
             "the below-the-fold card sits beyond the viewport"
+        );
+    }
+
+    /// The recovery banner renders only when the park is non-empty
+    /// — a clean close (or a handled one) leaves no banner at all.
+    #[test]
+    fn recovery_banner_renders_only_for_a_non_empty_park() {
+        let parked = Arc::new(Mutex::new(0usize));
+        let bridge = RecordingBridge {
+            parked: Arc::clone(&parked),
+            ..RecordingBridge::default()
+        };
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("recovery-restore"))
+                .is_none(),
+            "no park: no banner at all"
+        );
+
+        *parked.lock().expect("parked mutex") = 2;
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("recovery-restore"))
+                .is_some(),
+            "a non-empty park renders the banner's Restore pill"
+        );
+        assert!(ctx
+            .read_response(egui::Id::new("recovery-discard"))
+            .is_some());
+        assert_eq!(app.parked, 2, "the count refreshes per frame");
+    }
+
+    /// The Restore pill moves the parked captures into the session
+    /// grid and clears the banner — recovery is one click.
+    #[test]
+    fn restore_pill_moves_parked_entries_into_the_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("recovered.png");
+        image::RgbaImage::from_pixel(40, 30, image::Rgba([90, 40, 200, 255]))
+            .save(&png)
+            .unwrap();
+        let restored: Vec<SessionCard> = (0..2u64)
+            .map(|i| SessionCard {
+                id: flintshot_core::SessionId::from_raw(100 + i),
+                png_path: png.clone(),
+                dims: (40, 30),
+                created_at: 0,
+            })
+            .collect();
+        let bridge = RecordingBridge {
+            parked: Arc::new(Mutex::new(2)),
+            restored_cards: Arc::new(Mutex::new(restored)),
+            ..RecordingBridge::default()
+        };
+        let rec = bridge.rec.clone();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let pill = ctx
+            .read_response(egui::Id::new("recovery-restore"))
+            .expect("the banner is up")
+            .rect;
+
+        let _ = welcome_frame(&mut app, &ctx, click_at(pill.center()));
+
+        assert_eq!(
+            rec.0.lock().expect("recorder mutex").restored,
+            2,
+            "the Restore pill fired the bridge"
+        );
+        assert_eq!(app.parked, 0, "the banner cleared");
+        assert_eq!(
+            app.session.len(),
+            2,
+            "the recovered captures joined the session grid"
+        );
+        // One frame to age out the pill's stale response (egui
+        // keeps the previous pass's), then the banner must be gone.
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("recovery-restore"))
+                .is_none(),
+            "the consumed park renders no banner"
+        );
+    }
+
+    /// The Discard pill removes the park outright — nothing joins
+    /// the grid, the banner clears.
+    #[test]
+    fn discard_pill_removes_the_park() {
+        let bridge = RecordingBridge {
+            parked: Arc::new(Mutex::new(1)),
+            ..RecordingBridge::default()
+        };
+        let rec = bridge.rec.clone();
+        let mut app = HomeApp::new(Box::new(bridge), "connected".into());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let pill = ctx
+            .read_response(egui::Id::new("recovery-discard"))
+            .expect("the banner is up")
+            .rect;
+
+        let _ = welcome_frame(&mut app, &ctx, click_at(pill.center()));
+
+        assert_eq!(
+            rec.0.lock().expect("recorder mutex").discarded_park,
+            1,
+            "the Discard pill fired the bridge"
+        );
+        assert_eq!(app.parked, 0, "the banner cleared");
+        assert!(app.session.is_empty(), "discard adopts nothing");
+        // Age out the pill's stale response (previous pass), then
+        // the banner must be gone.
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        let _ = welcome_frame(&mut app, &ctx, vec![]);
+        assert!(
+            ctx.read_response(egui::Id::new("recovery-discard"))
+                .is_none(),
+            "the discarded park renders no banner"
         );
     }
 

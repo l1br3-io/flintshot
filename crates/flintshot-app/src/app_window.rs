@@ -1835,6 +1835,45 @@ impl HomeBridge for Bridge {
         self.shared.session.remove(id);
     }
 
+    // -- Session recovery: the previous run's parked captures --
+
+    fn parked_count(&mut self) -> usize {
+        flintshot_core::SessionStore::parked_count(&self.shared.session_dir)
+    }
+
+    fn restore_parked(&mut self) -> usize {
+        let run = flintshot_core::SessionStore::load_parked(&self.shared.session_dir);
+        let restored = run.captures.len();
+        for cap in &run.captures {
+            // Adoption re-inserts into this run's store (fresh ids),
+            // preserving the arrival time and committed annotations.
+            let id = self
+                .shared
+                .session
+                .insert(cap.image.clone(), cap.created_at);
+            self.shared.session.update_anns(id, &cap.anns);
+        }
+        if run.skipped > 0 {
+            tracing::warn!(
+                skipped = run.skipped,
+                "corrupt parked pairs skipped during restore"
+            );
+        }
+        tracing::info!(restored, "parked captures restored into the session");
+        // The park is consumed — adoption was read-only while loading.
+        flintshot_core::SessionStore::sweep_stale(&flintshot_core::parked_dir(
+            &self.shared.session_dir,
+        ));
+        restored
+    }
+
+    fn discard_parked(&mut self) {
+        tracing::info!("parked run discarded");
+        flintshot_core::SessionStore::sweep_stale(&flintshot_core::parked_dir(
+            &self.shared.session_dir,
+        ));
+    }
+
     // -- Settings-route plumbing (the real config handle) --
 
     fn load_config(&mut self) -> flintshot_core::Config {
@@ -3137,6 +3176,84 @@ mod tests {
             0,
             "no false positive: the next launch offers no banner"
         );
+    }
+
+    /// A shared whose previous run crashed: one committed capture
+    /// parked, the live path free. The session dir is a *child* of
+    /// the tempdir (parking renames it to a sibling — the tempdir
+    /// root must survive), and the tempdir stays alive for the
+    /// test's lifetime.
+    fn shared_with_parked_run() -> (std::sync::Arc<Shared>, PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("session");
+        let crashed = flintshot_core::SessionStore::in_dir(session.clone());
+        let id = crashed.insert(fixture_png_state((5, 7)).image, 42);
+        crashed.update_anns(id, &[test_line_ann()]);
+        let png = crashed.png_path(id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !png.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(crashed);
+        flintshot_core::SessionStore::park_previous_run(&session);
+        let shared = std::sync::Arc::new(Shared::with_session(
+            flintshot_core::SessionStore::in_dir(session.clone()),
+            session.clone(),
+        ));
+        (shared, session, dir)
+    }
+
+    /// The real bridge's Restore adopts the parked captures into
+    /// this run's store — committed annotations intact — and
+    /// consumes the park.
+    #[test]
+    fn bridge_restore_adopts_parked_captures_into_the_store() {
+        use flintshot_editor_egui::HomeBridge as _;
+
+        let (shared, session, _keep) = shared_with_parked_run();
+        let mut bridge = Bridge {
+            shared: std::sync::Arc::clone(&shared),
+        };
+
+        assert_eq!(bridge.parked_count(), 1, "the parked pair is visible");
+        assert_eq!(bridge.restore_parked(), 1, "one capture adopted");
+        assert_eq!(bridge.parked_count(), 0, "the park is consumed");
+        assert_eq!(
+            shared.session.list().len(),
+            1,
+            "the capture joined this run's store"
+        );
+        let adopted = shared.session.list()[0].id;
+        wait_for_store_entry(&shared, adopted);
+        let cap = shared
+            .session
+            .load(adopted)
+            .expect("the adopted pair decodes");
+        assert_eq!(
+            cap.anns,
+            vec![test_line_ann()],
+            "committed annotations came along"
+        );
+        assert_eq!(cap.created_at, 42, "the arrival time survives");
+        assert!(!flintshot_core::parked_dir(&session).exists());
+    }
+
+    /// The real bridge's Discard removes the park outright —
+    /// nothing joins the store.
+    #[test]
+    fn bridge_discard_removes_the_park() {
+        use flintshot_editor_egui::HomeBridge as _;
+
+        let (shared, session, _keep) = shared_with_parked_run();
+        let mut bridge = Bridge {
+            shared: std::sync::Arc::clone(&shared),
+        };
+
+        assert_eq!(bridge.parked_count(), 1);
+        bridge.discard_parked();
+        assert_eq!(bridge.parked_count(), 0, "nothing left to recover");
+        assert!(shared.session.list().is_empty(), "discard adopts nothing");
+        assert!(!flintshot_core::parked_dir(&session).exists());
     }
 
     #[test]
