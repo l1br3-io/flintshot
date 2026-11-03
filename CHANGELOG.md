@@ -20,6 +20,22 @@ Categories used below:
 
 ### Added
 
+- **Crash recovery for unsaved captures** (effort `session-resume`,
+  module 3 of the 2026-11 feature batch). A crashed, killed, or
+  logged-out run no longer takes its unsaved captures with it:
+  startup parks the leftover session dir
+  (`$XDG_RUNTIME_DIR/flintshot/session-parked`) instead of deleting
+  it, and the Home window offers a **Recovered from last run**
+  banner — **Restore** brings the captures back into This session
+  with their committed annotations in draw order (they stay
+  unsaved; saving/discarding then works like any session capture),
+  **Discard** drops them for good. Park replacement is newest-wins
+  (a second crash sweeps the unhandled older park, logged), so disk
+  stays bounded to one parked run. Corrupt entries are skipped with
+  a warning and a visible count, never fatal. Honest limits:
+  recovery is committed state only — the undo stack and an
+  in-flight gesture are not persisted — and a clean close leaves
+  nothing to recover (test-pinned).
 - **Opt-in egress watermark** (effort `watermark`, module 5 of the
   2026-11 feature batch). New `[output.watermark]` config — **off by
   default**, absent table = today's byte-identical output — with

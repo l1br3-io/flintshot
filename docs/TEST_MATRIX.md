@@ -2848,6 +2848,50 @@ cargo build --release
   only `flintshot upload <saved file>` does. Flagged in the module
   closeout for a future revisit.
 
+## Session resume — crash recovery banner
+
+Spec: `git log --grep='session-resume'`. The park/load/adopt
+round-trips, the newest-wins replacement, the corrupt-pair skip
+count, the graceful-exit-clears-everything pin, and the banner's
+frame tests all run under `cargo test`; **this section is the one
+row set that needs a real session** — a real kill and eyes on the
+restored annotations.
+
+### Test setup
+
+```sh
+cargo build --release
+# Default case: XDG_RUNTIME_DIR present (tmpfs-backed park). The
+# temp_dir fallback path is exercised by unsetting it where
+# practical.
+```
+
+### Test script
+
+1. **Crash → recover (row 1, L2 designated)**: open the app
+   window, take a capture, draw a couple of annotations (committed
+   strokes mirror to disk by construction), then `kill -9` the app
+   process. Relaunch `flintshot app`: the **Recovered from last
+   run** banner is up; **Restore** moves the capture into This
+   session; opening it shows the annotations in draw order; **Save**
+   writes the annotated file.
+2. **Clean close (row 2)**: a normal window close + relaunch shows
+   **no banner** — the recovery offer appears only after an
+   unclean exit.
+
+| Behavior                                  | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| kill -9 → banner → Restore → Save (row 1) | | PENDING | | | | N/A | N/A | N/A | N/A | |
+| Clean close shows no banner (row 2)       | | PENDING | | | | N/A | N/A | N/A | N/A | |
+
+### Known caveats
+
+- Recovery restores committed state only — the undo stack and an
+  in-flight uncommitted gesture are out of scope (the spec's
+  honest limits).
+- A second crash over an unhandled park wins (newest-wins): the
+  older park is swept and logged, never merged.
+
 ## Ask-the-shot live verification (Phase 7)
 
 Spec: `git log --grep='ai-streaming'`; design: ADR-0069. The streaming
