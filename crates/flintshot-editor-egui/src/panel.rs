@@ -723,7 +723,10 @@ fn properties_body(
         widgets::section(ui, id, title, true, |body| match section {
             Section::Stroke if inspector => selection_stroke(body, state, caps, panel),
             Section::Stroke => {
-                swatch_row(body, &mut state.color);
+                if let Some(evt) = swatch_row(body, &mut state.color, popover::ColorTarget::Stroke)
+                {
+                    action = evt.into();
+                }
                 stroke_chips(body, state);
             }
             Section::Fill if inspector => selection_fill(body, state),
@@ -735,7 +738,9 @@ fn properties_body(
             Section::Text if inspector => selection_text(body, state, panel),
             Section::Text => {
                 text_style_row(body, state);
-                popover::pod_button(body, state, popover::ColorTarget::Text);
+                if let Some(evt) = popover::pod_button(body, state, popover::ColorTarget::Text) {
+                    action = evt.into();
+                }
             }
             Section::Number if inspector => selection_number(body, state),
             Section::Number => {
@@ -1181,7 +1186,7 @@ fn dims_label(rect: flintshot_core::Rect) -> String {
 /// ever constructs `None` / `Delete` today (Save / Copy / Upload
 /// live on the topbar; the overlay's accept row still constructs
 /// its own set — out of redesign scope).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) enum ToolbarAction {
     /// No control clicked.
     #[default]
@@ -1198,6 +1203,24 @@ pub(crate) enum ToolbarAction {
     Redo,
     /// Delete button — replay a Del (no modifiers) dispatch.
     Delete,
+    /// The colour cluster's eyedropper chip: enter canvas pick mode
+    /// for this target (eyedropper).
+    StartColorPick {
+        /// Which colour slot the pick applies to.
+        target: popover::ColorTarget,
+    },
+    /// The hex field's copy gesture; the payload is the formatted
+    /// `#rrggbb` (eyedropper).
+    CopyHexToClipboard(String),
+}
+
+impl From<popover::ColorBayEvent> for ToolbarAction {
+    fn from(evt: popover::ColorBayEvent) -> Self {
+        match evt {
+            popover::ColorBayEvent::Pick(target) => Self::StartColorPick { target },
+            popover::ColorBayEvent::CopyHex(hex) => Self::CopyHexToClipboard(hex),
+        }
+    }
 }
 
 /// Wrap a pod's chips in a rounded white cutout island — the
@@ -1444,11 +1467,18 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
     resp
 }
 
-/// The swatch row + the custom-color chip, flowing left-to-right and
+/// The swatch row + the custom-color chip + the eyedropper cluster
+/// (canvas-pick chip, hex copy chip), flowing left-to-right and
 /// wrapping when the body narrows (the section body itself is a
 /// justified top-down column — without this wrapper every swatch
-/// stacks on its own row).
-pub(crate) fn swatch_row(ui: &mut egui::Ui, color: &mut Color) {
+/// stacks on its own row). The cluster reports through
+/// [`popover::ColorBayEvent`]; the caller decides what acting on it
+/// means (the shell owns pick mode).
+pub(crate) fn swatch_row(
+    ui: &mut egui::Ui,
+    color: &mut Color,
+    target: popover::ColorTarget,
+) -> Option<popover::ColorBayEvent> {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         for sw in theme::palette::SWATCHES {
@@ -1458,7 +1488,77 @@ pub(crate) fn swatch_row(ui: &mut egui::Ui, color: &mut Color) {
         }
         let mut pop_live = false;
         custom_color_chip(ui, color, &mut pop_live);
-    });
+        if eyedropper_chip(ui) {
+            return Some(popover::ColorBayEvent::Pick(target));
+        }
+        if hex_chip(ui, *color) {
+            return Some(popover::ColorBayEvent::CopyHex(
+                flintshot_core::serde_util::format_color(color),
+            ));
+        }
+        None
+    })
+    .inner
+}
+
+/// The cluster's canvas-pick chip: a crosshair over a cutout square.
+/// Entering pick mode is the shell's job — this only reports the
+/// click.
+fn eyedropper_chip(ui: &mut egui::Ui) -> bool {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
+    let resp = ui
+        .interact(rect, egui::Id::new("eyedropper_pick"), Sense::click())
+        .on_hover_text("Pick a colour from the canvas · K");
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(4),
+        theme::palette::PAPER_CREAM,
+        theme::HAIRLINE_STROKE,
+        StrokeKind::Middle,
+    );
+    g_crosshair(ui.painter(), rect, theme::palette::INK);
+    resp.clicked()
+}
+
+/// The hex copy chip: the current colour as `#rrggbb`, click to copy
+/// (the value's usual destination is elsewhere, not this editor).
+fn hex_chip(ui: &mut egui::Ui, color: Color) -> bool {
+    let hex = flintshot_core::serde_util::format_color(&color);
+    let galley = ui.painter().layout_no_wrap(
+        hex,
+        FontId::proportional(theme::TYPE_SM),
+        theme::palette::INK,
+    );
+    let galley_size = galley.size();
+    let width = 9.0 + galley_size.x + 9.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 22.0), Sense::hover());
+    let resp = ui
+        .interact(rect, egui::Id::new("copy_hex"), Sense::click())
+        .on_hover_text("Copy colour code");
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(4),
+        theme::palette::PAPER_CREAM,
+        theme::HAIRLINE_STROKE,
+        StrokeKind::Middle,
+    );
+    let pos = egui::pos2(rect.left() + 9.0, rect.center().y - galley_size.y / 2.0);
+    ui.painter().galley(pos, galley, theme::palette::INK);
+    resp.clicked()
+}
+
+/// A crosshair glyph: the pick affordance (a click samples the
+/// composited canvas under the cross).
+fn g_crosshair(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    p.circle_stroke(r.center(), 4.0, Stroke::new(1.6, c));
+    for (a, b) in [
+        ((0.0, -7.0), (0.0, -4.5)),
+        ((0.0, 4.5), (0.0, 7.0)),
+        ((-7.0, 0.0), (-4.5, 0.0)),
+        ((4.5, 0.0), (7.0, 0.0)),
+    ] {
+        crate::rail::seg(p, r, a, b, c, 1.6);
+    }
 }
 
 /// `+` chip opening a custom-color popup (full sRGB editor).
@@ -2057,8 +2157,65 @@ mod tests {
         ]
     }
 
-    // --- Tool switching + gate (migrated from the rail era) ---
+    // --- Eyedropper cluster (eyedropper ED2) ---
 
+    /// The shape-tool Stroke row's eyedropper chip asks the shell for
+    /// canvas pick mode targeted at the stroke colour slot — the
+    /// "stroke for shapes" arm of the per-target contract.
+    #[test]
+    fn stroke_row_eyedropper_chip_requests_stroke_target_pick() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut state = panel_state();
+        state.tool = Tool::Rect;
+        let mut panel = PanelState::default();
+        let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        let at = ctx
+            .read_response(egui::Id::new("eyedropper_pick"))
+            .expect("the eyedropper chip registers in the Stroke row")
+            .rect
+            .center();
+        let fired = draw(&ctx, &mut state, &mut panel, click_events(at));
+        assert_eq!(
+            fired,
+            ToolbarAction::StartColorPick {
+                target: popover::ColorTarget::Stroke
+            },
+            "the chip fires the pick request for the stroke target"
+        );
+    }
+
+    /// The hex copy chip fires the clipboard action with the
+    /// formatted current colour.
+    #[test]
+    fn stroke_row_hex_chip_fires_the_copy_action() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut state = panel_state();
+        state.color = Color::rgb(0xAB, 0xCD, 0xEF);
+        state.tool = Tool::Rect;
+        let mut panel = PanelState::default();
+        // Settle the section's fold spring first: while the fold is
+        // still animating, the sections below the Stroke body lay out
+        // inside its natural extent and own the hit-test over the
+        // wrapped row's later lines (real use settles in a blink).
+        for _ in 0..30 {
+            let _ = draw(&ctx, &mut state, &mut panel, vec![]);
+        }
+        let at = ctx
+            .read_response(egui::Id::new("copy_hex"))
+            .expect("the hex chip registers")
+            .rect
+            .center();
+        let fired = draw(&ctx, &mut state, &mut panel, click_events(at));
+        assert_eq!(
+            fired,
+            ToolbarAction::CopyHexToClipboard("#abcdef".into()),
+            "the hex chip carries the formatted colour"
+        );
+    }
+
+    // --- Tool switching + gate (migrated from the rail era) ---
     /// The Stroke section's swatches flow left-to-right in a row (the
     /// section body is a justified top-down column — without the
     /// wrapper every swatch stacks on its own row, the "stroke

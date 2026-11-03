@@ -274,6 +274,16 @@ pub(crate) struct EditorApp {
     /// width field). Opened by the topbar overflow's Resize item;
     /// applies through [`EditorState::resize`].
     resize_menu: topbar::ResizeMenu,
+    /// Live canvas colour-pick mode (eyedropper): `Some(target)`
+    /// while the next canvas click samples the composited canvas and
+    /// applies the colour to `target`. Shell-owned like the
+    /// selection-first phase — the popover only requests it. Esc
+    /// cancels with no state change; the magnifier rides along.
+    color_pick: Option<crate::popover::ColorTarget>,
+    /// The editor surface's transient toast (eyedropper hex-copy
+    /// feedback; the screen-pick denial notice). Painted every frame
+    /// in [`Self::ui_impl`]; expires on egui's frame time.
+    toast: Option<crate::toast::Toast>,
 }
 
 /// The paper-cutout ring around the image: 8 px cream — the cutout
@@ -404,6 +414,8 @@ impl EditorApp {
             rail: rail::RailState::default(),
             floating_rects: Vec::new(),
             resize_menu: topbar::ResizeMenu::default(),
+            color_pick: None,
+            toast: None,
             flushed_anns,
         };
         // Ask-the-shot snapshot (page mode): the saved-transform list
@@ -947,8 +959,7 @@ impl EditorApp {
         if self.state.is_editing_text() {
             return;
         }
-        let active = self.magnifier_always_on || ctx.input(|i| i.key_down(self.magnifier_key));
-        if !active {
+        if !self.magnifier_active(ctx) {
             return;
         }
         let Some(canvas_rect) = self.canvas_rect else {
@@ -969,6 +980,16 @@ impl EditorApp {
         let cursor_phys = view.logical_to_image(pos);
         self.magnifier
             .show(painter, ctx, &self.state.image, cursor_phys, view);
+    }
+
+    /// Whether the magnifier inset shows this frame: the config's
+    /// always-on flag, the hold key, or a live canvas pick (the
+    /// eyedropper's pixel-precision affordance — the loupe rides
+    /// along whenever a pick is armed, no modifier needed).
+    fn magnifier_active(&self, ctx: &Context) -> bool {
+        self.magnifier_always_on
+            || self.color_pick.is_some()
+            || ctx.input(|i| i.key_down(self.magnifier_key))
     }
 
     /// Paint the Hand-tool hover / grab outline (see
@@ -1180,21 +1201,26 @@ impl EditorApp {
         // While the selection-first phase is live, every mapping
         // except Crop is ignored — the region is the phase's only
         // job (C stays harmless: Crop is what the phase armed).
-        // Post-crop the keys work again. Switches route through core
+        // Post-crop the keys work again. A live canvas pick owns the
+        // single-letter keys for its lifetime (a stray tool switch
+        // mid-pick would strand the mode's context); Esc or the
+        // picking click ends it. Switches route through core
         // `set_tool`: leaving Hand drops the persistent selection.
-        if let Some(tool) = ctx.input(|i| {
-            i.raw.events.iter().rev().find_map(|e| match e {
-                egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers: m,
-                    ..
-                } if m.is_none() => tool_for_key(*key),
-                _ => None,
-            })
-        }) {
-            if !self.phase_active() || tool == Tool::Crop {
-                self.state.set_tool(tool);
+        if self.color_pick.is_none() {
+            if let Some(tool) = ctx.input(|i| {
+                i.raw.events.iter().rev().find_map(|e| match e {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers: m,
+                        ..
+                    } if m.is_none() => tool_for_key(*key),
+                    _ => None,
+                })
+            }) {
+                if !self.phase_active() || tool == Tool::Crop {
+                    self.state.set_tool(tool);
+                }
             }
         }
 
@@ -1367,7 +1393,18 @@ impl EditorApp {
         // release, so no stale drag state survives the gate.
         let annotation_gated = self.phase_active() && self.state.tool != Tool::Crop;
         let mut pointer_events: Vec<InputEvent> = Vec::new();
-        if primary_pressed && canvas_rect.contains(pos) && !on_floating {
+        // Canvas pick mode (eyedropper): the first canvas press
+        // samples the composited canvas and applies the colour — it
+        // consumes the press entirely (no `PointerDown`, no drag, no
+        // `canvas_drag_active`), so picking can never smudge an
+        // annotation or start a crop. Presses outside the canvas
+        // leave the mode armed (the user can still Esc).
+        if primary_pressed && canvas_rect.contains(pos) && !on_floating && self.color_pick.is_some()
+        {
+            let target = self.color_pick.take().expect("checked Some above");
+            let picked = flintshot_core::sample_canvas(&self.state.image, &self.state.anns, at);
+            self.apply_picked_color(target, picked);
+        } else if primary_pressed && canvas_rect.contains(pos) && !on_floating {
             if self.state.tool == Tool::Hand {
                 // Pan-only contract: a Hand press starts a view pan —
                 // no `PointerDown` ever reaches the dispatcher, so
@@ -1463,6 +1500,11 @@ impl EditorApp {
         at: flintshot_core::Point,
         on_floating: bool,
     ) {
+        // Pick mode's crosshair leads: while a colour pick is armed,
+        // the canvas is a target, not a drawing surface.
+        if self.color_pick.is_some() && canvas_rect.contains(pos) && !on_floating {
+            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
         // Hand cursor: the pan affordance — grab on hover, grabbing
         // mid-drag (over the canvas; the default arrow elsewhere).
         if self.state.tool == Tool::Hand && canvas_rect.contains(pos) && !on_floating {
@@ -1482,6 +1524,26 @@ impl EditorApp {
             // Text-tool hover affordance (text-select-edit): the I-beam
             // announces "click to select / double-click to re-edit".
             ctx.set_cursor_icon(egui::CursorIcon::Text);
+        }
+    }
+
+    /// Apply a picked colour to its target. The Stroke slot writes
+    /// the session default exactly like a swatch click in the
+    /// properties row; the Text slot routes through the panel's
+    /// discrete-gesture commit (selection restyle + defaults sync +
+    /// one undo entry) exactly like a swatch click in the popover.
+    fn apply_picked_color(
+        &mut self,
+        target: crate::popover::ColorTarget,
+        color: flintshot_core::Color,
+    ) {
+        match target {
+            crate::popover::ColorTarget::Stroke => self.state.color = color,
+            crate::popover::ColorTarget::Text => {
+                let mut st = panel::effective_text_style(&self.state);
+                st.color = color;
+                panel::commit_text_style_change(&mut self.state, st);
+            }
         }
     }
 
@@ -1528,6 +1590,14 @@ impl EditorApp {
             && !(modifiers.ctrl || modifiers.shift || modifiers.alt || modifiers.super_key)
         {
             self.open_ai_dialog();
+            return true;
+        }
+        // Canvas pick mode is the innermost mode: Esc cancels the
+        // pick (never the selection, never the editor) and consumes
+        // the frame. Checked before the selection-clear Esc below —
+        // a pick armed over a selection must fall back cleanly.
+        if self.color_pick.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.color_pick = None;
             return true;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.state.selected.is_empty() {
@@ -1894,8 +1964,20 @@ impl EditorApp {
             }
             // Save / Copy / Upload / NewCapture are unreachable from
             // the panel today — the topbar owns them.
+            ToolbarAction::StartColorPick { target } => {
+                // The popover/panel chip only asked; this app owns the
+                // mode (see `color_pick`).
+                self.color_pick = Some(target);
+            }
+            ToolbarAction::CopyHexToClipboard(hex) => {
+                let now = ui.input(|i| i.time);
+                self.handle_copy_hex(&hex, now);
+            }
             _ => {}
         }
+        // The editor surface's toast (hex-copy feedback, screen-pick
+        // denial): painted last so it floats over the panels.
+        crate::toast::show(ui, &mut self.toast);
         self.flush_committed_annotations();
     }
 }
@@ -2421,6 +2503,27 @@ impl EditorApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
+    }
+
+    /// Copy a `#rrggbb` value to the clipboard (the hex field's
+    /// gesture). The write reuses the session clipboard handle (the
+    /// X11 owner rule — same as image copies) and is best-effort: a
+    /// headless display refusing the write still raises the toast,
+    /// because the toast — not the clipboard — is the UI contract the
+    /// gesture promised.
+    fn handle_copy_hex(&mut self, hex: &str, now: f64) {
+        let write = |mut c: arboard::Clipboard| c.set_text(hex.to_owned()).map(|()| c);
+        let written = match self.clipboard.take() {
+            Some(c) => write(c),
+            None => arboard::Clipboard::new().and_then(write),
+        };
+        match written {
+            Ok(c) => self.clipboard = Some(c),
+            // A refused write logs and toasts anyway — the colour
+            // value is in the message, so the user still gets it.
+            Err(err) => tracing::warn!(error = %err, "hex clipboard write failed"),
+        }
+        self.toast = Some(crate::toast::Toast::new(format!("Copied {hex}"), now));
     }
 
     /// Copy button handler: compose the final image, hand it to
@@ -3861,6 +3964,256 @@ mod tests {
     }
 
     // --- Shift-constrained drawing (annotate-polish AP2) ---
+
+    // --- Eyedropper canvas pick (eyedropper ED2) ---
+
+    /// A pinned-canvas editor app over a solid-colour image: any
+    /// click samples that colour.
+    fn solid_state_app(color: [u8; 4]) -> (egui::Context, EditorApp) {
+        let ctx = egui::Context::default();
+        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba(color));
+        let state = EditorState::new(img);
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        app.canvas_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 380.0),
+        ));
+        app.update_fit(&ctx);
+        (ctx, app)
+    }
+
+    /// A canvas pick click applies the sampled composited colour to
+    /// the stroke slot, consumes the mode, and never starts a draw.
+    #[test]
+    fn popover_canvas_pick_applies_the_sampled_stroke_colour() {
+        let (ctx, mut app) = solid_state_app([7, 11, 13, 255]);
+        app.state.set_tool(Tool::Rect);
+        app.color_pick = Some(crate::popover::ColorTarget::Stroke);
+        let at = screen_at(&app, (32.0, 32.0));
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(
+            app.state.color,
+            flintshot_core::Color::rgb(7, 11, 13),
+            "the click samples the canvas"
+        );
+        assert!(app.color_pick.is_none(), "the pick consumes the mode");
+        assert!(
+            app.state.pending.is_none() && app.state.anns.is_empty(),
+            "the pick press never starts an annotation"
+        );
+    }
+
+    /// Esc cancels a live pick with no state change of any kind.
+    #[test]
+    fn popover_canvas_pick_esc_cancels_untouched() {
+        let (ctx, mut app) = solid_state_app([7, 11, 13, 255]);
+        let before = app.state.color;
+        app.color_pick = Some(crate::popover::ColorTarget::Stroke);
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.color_pick.is_none(), "Esc exits pick mode");
+        assert_eq!(app.state.color, before, "the colour slot is untouched");
+    }
+
+    /// A Text-target pick routes through the same commit path a
+    /// swatch click takes: the selection restyles, the defaults
+    /// sync, and the gesture records exactly one undo entry.
+    #[test]
+    fn popover_canvas_pick_applies_text_colour_through_commit_path() {
+        let (ctx, mut app) = solid_state_app([9, 8, 7, 255]);
+        app.state.set_tool(Tool::Text);
+        app.state.anns.push(Annotation::text(
+            Point::new(4.0, 4.0),
+            "hi",
+            flintshot_core::text::TextStyle::simple(23.0, flintshot_core::Color::rgb(0, 0, 255)),
+        ));
+        app.state.selected = vec![0];
+        app.color_pick = Some(crate::popover::ColorTarget::Text);
+        let at = screen_at(&app, (32.0, 32.0));
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let want = flintshot_core::Color::rgb(9, 8, 7);
+        match &app.state.anns[0] {
+            Annotation::Text { color, .. } => assert_eq!(*color, want, "the selection recolours"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_eq!(app.state.text_color, want, "defaults synced");
+        assert_eq!(app.state.undo.len(), 1, "one entry for the pick gesture");
+    }
+
+    /// The magnifier rides along while a pick is live (the pick's
+    /// pixel-precision affordance) even with no modifier held.
+    #[test]
+    fn popover_pick_forces_the_magnifier_on() {
+        let (ctx, mut app) = solid_state_app([7, 11, 13, 255]);
+        assert!(
+            !app.magnifier_active(&ctx),
+            "baseline: no always-on flag, no key held, no pick"
+        );
+        app.color_pick = Some(crate::popover::ColorTarget::Stroke);
+        assert!(
+            app.magnifier_active(&ctx),
+            "a live pick forces the magnifier"
+        );
+    }
+
+    /// Full-editor path: clicking the panel Stroke row's eyedropper
+    /// chip enters pick mode for the stroke target.
+    #[test]
+    fn popover_eyedropper_chip_click_enters_pick_mode() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        app.state.set_tool(Tool::Rect);
+        app.panel = panel::PanelState::default();
+        let raw = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1024.0, 768.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        };
+        // One settle frame registers the panel's chips.
+        let _ = ctx.run_ui(raw(vec![]), |ui| {
+            app.logic_impl(ui.ctx());
+            app.ui_impl(ui);
+        });
+        let at = ctx
+            .read_response(egui::Id::new("eyedropper_pick"))
+            .expect("the panel's eyedropper chip registers")
+            .rect
+            .center();
+        let _ = ctx.run_ui(
+            raw(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]),
+            |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            },
+        );
+        assert_eq!(
+            app.color_pick,
+            Some(crate::popover::ColorTarget::Stroke),
+            "the chip click armed pick mode for the stroke target"
+        );
+    }
+
+    /// Full-editor path: the hex chip's copy gesture raises the
+    /// "Copied #rrggbb" toast (the clipboard write itself is
+    /// best-effort headless; the toast is the observable contract).
+    #[test]
+    fn popover_hex_copy_gesture_raises_a_copied_toast() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = EditorApp::new(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+        );
+        app.state.set_tool(Tool::Rect);
+        app.panel = panel::PanelState::default();
+        let raw = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1024.0, 768.0),
+            )),
+            events,
+            ..egui::RawInput::default()
+        };
+        // Settle the section fold spring: while the fold animates,
+        // later sections own the hit-test over the wrapped colour
+        // row's lower lines (real use settles in a blink).
+        for _ in 0..30 {
+            let _ = ctx.run_ui(raw(vec![]), |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            });
+        }
+        let at = ctx
+            .read_response(egui::Id::new("copy_hex"))
+            .expect("the hex chip registers")
+            .rect
+            .center();
+        let _ = ctx.run_ui(
+            raw(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]),
+            |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            },
+        );
+        let toast = app.toast.as_ref().expect("the copy raised a toast");
+        assert!(
+            toast.message().contains('#'),
+            "the toast carries the hex value: {}",
+            toast.message()
+        );
+    }
 
     // --- Point-handle reshape through the shell (annotate-polish AP5) ---
 

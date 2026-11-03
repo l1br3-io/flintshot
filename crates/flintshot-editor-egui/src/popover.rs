@@ -18,6 +18,24 @@ use crate::theme;
 pub(crate) enum ColorTarget {
     /// `EditorState::text_color` — the Text tool's own color.
     Text,
+    /// `EditorState::color` — the shape tools' shared stroke color.
+    /// Routed through the properties panel's Stroke row (the same
+    /// swatch-row cluster the popover hosts), never through the pod
+    /// button itself.
+    Stroke,
+}
+
+/// What the colour bay's eyedropper cluster fired this frame. Pick
+/// mode is shell-owned (a click on the composited canvas must outrank
+/// every tool gesture), so the bay only *reports*; the app acts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ColorBayEvent {
+    /// Enter canvas pick mode for this target — crosshair over the
+    /// canvas, click samples, Esc cancels back untouched.
+    Pick(ColorTarget),
+    /// Copy the shown `#rrggbb` value (the "colour destined
+    /// elsewhere" affordance).
+    CopyHex(String),
 }
 
 /// Stable pod-button id (the popup hangs off its response).
@@ -25,15 +43,22 @@ const POD_ID: &str = "color-stroke-pod";
 
 /// Draw the picker pod button: a cutout chip whose leading square
 /// shows the live color, labeled `Color · Stroke`. Opens the
-/// popover on click.
-pub(crate) fn pod_button(ui: &mut egui::Ui, state: &mut EditorState, target: ColorTarget) {
+/// popover on click. Returns the bay's eyedropper-cluster event, if
+/// one fired inside the popover this frame.
+pub(crate) fn pod_button(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    target: ColorTarget,
+) -> Option<ColorBayEvent> {
     // The pod's chip shows — and the popover edits — the same source
     // the panel's Text section reads (session draft > selection >
     // defaults); a colour change applies as one discrete gesture.
     let color = match target {
         ColorTarget::Text => panel::effective_text_style(state).color,
+        ColorTarget::Stroke => state.color,
     };
     let resp = labeled_color_chip(ui, color, target);
+    let mut event = None;
     egui::Popup::from_toggle_button_response(&resp)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
@@ -45,10 +70,14 @@ pub(crate) fn pod_button(ui: &mut egui::Ui, state: &mut EditorState, target: Col
                 .stroke(theme::HAIRLINE_STROKE)
                 .show(ui, |ui| {
                     ui.vertical(|ui| match target {
-                        ColorTarget::Text => text_color_bay(ui, state),
+                        ColorTarget::Text => event = text_color_bay(ui, state),
+                        // The Stroke target has no popover: its cluster
+                        // lives in the properties row itself.
+                        ColorTarget::Stroke => {}
                     });
                 });
         });
+    event
 }
 
 /// The Text colour bay the pod's popover shows: the shared swatch row
@@ -56,15 +85,18 @@ pub(crate) fn pod_button(ui: &mut egui::Ui, state: &mut EditorState, target: Col
 /// edits (session draft > selection > defaults), one discrete gesture
 /// per pick. Split out of `pod_button` so the interaction is drivable
 /// at the root ui (the popup machinery is orthogonal to the retarget).
-pub(crate) fn text_color_bay(ui: &mut egui::Ui, state: &mut EditorState) {
+pub(crate) fn text_color_bay(ui: &mut egui::Ui, state: &mut EditorState) -> Option<ColorBayEvent> {
     let before = panel::effective_text_style(state).color;
     let mut picked = before;
-    ui.horizontal(|ui| panel::swatch_row(ui, &mut picked));
+    let event = ui
+        .horizontal(|ui| panel::swatch_row(ui, &mut picked, ColorTarget::Text))
+        .inner;
     if picked != before {
         let mut st = panel::effective_text_style(state);
         st.color = picked;
         panel::commit_text_style_change(state, st);
     }
+    event
 }
 
 /// The pod chip itself: current-color square + label, galley-sized,
@@ -72,6 +104,7 @@ pub(crate) fn text_color_bay(ui: &mut egui::Ui, state: &mut EditorState) {
 fn labeled_color_chip(ui: &mut egui::Ui, color: Color, target: ColorTarget) -> egui::Response {
     let label = match target {
         ColorTarget::Text => "Text color",
+        ColorTarget::Stroke => "Shape colour",
     };
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
@@ -280,5 +313,92 @@ mod tests {
         }
         assert_eq!(s.text_color, want, "defaults synced");
         assert_eq!(s.undo.len(), 1, "one entry for the discrete click");
+    }
+
+    // --- Eyedropper cluster (eyedropper ED2) ---
+
+    /// Click a chip inside the text colour bay and return whatever
+    /// event the bay reported on the release frame.
+    fn click_bay(
+        ctx: &egui::Context,
+        s: &mut EditorState,
+        id: &'static str,
+    ) -> Option<ColorBayEvent> {
+        let _ = ctx.run_ui(screen(), |ui| {
+            text_color_bay(ui, s);
+        });
+        let at = ctx
+            .read_response(egui::Id::new(id))
+            .unwrap_or_else(|| panic!("{id} registers"))
+            .rect
+            .center();
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::PointerMoved(at), press(at, true)],
+                ..screen()
+            },
+            |ui| {
+                text_color_bay(ui, s);
+            },
+        );
+        // `run_ui` hands back the full output, not the closure's
+        // value — the release frame's event is captured through a
+        // cell.
+        let fired = std::cell::RefCell::new(None);
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![press(at, false)],
+                ..screen()
+            },
+            |ui| *fired.borrow_mut() = text_color_bay(ui, s),
+        );
+        fired.into_inner()
+    }
+
+    /// The bay offers the eyedropper chip and the hex copy field
+    /// beside the custom-color chip.
+    #[test]
+    fn text_bay_offers_the_eyedropper_chip_and_hex_field() {
+        let mut s = state();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(screen(), |ui| {
+            text_color_bay(ui, &mut s);
+        });
+        assert!(
+            ctx.read_response(egui::Id::new("eyedropper_pick"))
+                .is_some(),
+            "the canvas eyedropper chip registers"
+        );
+        assert!(
+            ctx.read_response(egui::Id::new("copy_hex")).is_some(),
+            "the hex copy chip registers"
+        );
+    }
+
+    /// Clicking the eyedropper chip asks the shell for canvas pick
+    /// mode targeted at the bay's colour slot (Text here).
+    #[test]
+    fn eyedropper_chip_click_requests_text_target_pick() {
+        let mut s = state();
+        let ctx = egui::Context::default();
+        let evt = click_bay(&ctx, &mut s, "eyedropper_pick");
+        assert_eq!(evt, Some(ColorBayEvent::Pick(ColorTarget::Text)));
+    }
+
+    /// The hex field's copy gesture carries the formatted current
+    /// colour — the "colour destined elsewhere" loop-closer.
+    #[test]
+    fn hex_field_click_copies_the_current_colour() {
+        let mut s = state();
+        s.text_color = Color::rgb(0xAB, 0xCD, 0xEF);
+        let ctx = egui::Context::default();
+        let evt = click_bay(&ctx, &mut s, "copy_hex");
+        assert_eq!(evt, Some(ColorBayEvent::CopyHex("#abcdef".into())));
     }
 }

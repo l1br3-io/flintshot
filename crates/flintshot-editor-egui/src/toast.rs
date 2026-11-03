@@ -35,11 +35,19 @@ impl Toast {
     pub(crate) fn expired(&self, now: f64) -> bool {
         now - self.born >= LIFETIME_SECS
     }
+
+    /// The notice text (frame-test seam: assert what was raised).
+    #[cfg(test)]
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 /// Draw the live toast (if any), expiring it past its lifetime. The
-/// single consumer is the window router's `ui_impl` — one pill per
-/// frame, replaced wholesale by a newer notice.
+/// consumers are the window router's `ui_impl` (the Settings route's
+/// ping) and the editor surface (`EditorApp::ui_impl` — hex-copy
+/// feedback, screen-pick denial) — one pill per frame, replaced
+/// wholesale by a newer notice.
 pub(crate) fn show(ui: &mut egui::Ui, toast: &mut Option<Toast>) {
     let now = ui.input(|i| i.time);
     if toast.as_ref().is_some_and(|t| t.expired(now)) {

@@ -1309,7 +1309,7 @@ impl OverlayApp {
             self.perform_close(ctx, close);
             return;
         }
-        self.apply_toolbar_action(ctx, action);
+        self.apply_toolbar_action(ctx, &action);
     }
 
     /// Act on a floating-toolbar action. History + Delete chips
@@ -1318,7 +1318,7 @@ impl OverlayApp {
     /// Copy is Enter-equivalent (the same accept-copy pipeline Enter
     /// triggers); Save / Upload run their output pipelines
     /// (Task 006) — the editor window's handlers' overlay twins.
-    fn apply_toolbar_action(&mut self, ctx: &Context, action: ToolbarAction) {
+    fn apply_toolbar_action(&mut self, ctx: &Context, action: &ToolbarAction) {
         match action {
             ToolbarAction::Copy => self.perform_close(ctx, OverlayClose::Accept),
             ToolbarAction::Undo => {
@@ -1347,7 +1347,12 @@ impl OverlayApp {
             }
             ToolbarAction::Save => self.handle_save(ctx),
             ToolbarAction::Upload => self.handle_upload(ctx),
-            ToolbarAction::None => {}
+            // The colour cluster lives in the properties panel /
+            // popover — surfaces the overlay never shows — so its
+            // actions can't arise here; exhaustive for the compiler.
+            ToolbarAction::StartColorPick { .. }
+            | ToolbarAction::CopyHexToClipboard(_)
+            | ToolbarAction::None => {}
         }
     }
 
@@ -3478,7 +3483,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = move_overlay_app();
         app.state.selected = vec![0];
-        app.apply_toolbar_action(&ctx, ToolbarAction::Delete);
+        app.apply_toolbar_action(&ctx, &ToolbarAction::Delete);
         assert!(
             app.state.anns.is_empty(),
             "the Delete action's Del replay removes exactly the selected annotation"
