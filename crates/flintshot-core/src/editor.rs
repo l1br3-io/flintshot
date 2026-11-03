@@ -38,6 +38,9 @@ pub enum Tool {
     Line,
     /// Arrow with barbs.
     Arrow,
+    /// Curved (quadratic-bézier) arrow: the drag draws the tail→head
+    /// chord, the control handle bends it.
+    CurvedArrow,
     /// Marker (semi-transparent thick stroke).
     Marker,
     /// Freehand pencil.
@@ -103,6 +106,25 @@ pub enum Annotation {
         /// Stroke style.
         stroke: Stroke,
         /// barb length in physical px.
+        head_size: f32,
+    },
+    /// Curved arrow: a quadratic bezier from `a` to `b` bulging
+    /// toward `control`, with barbs at `b` along the end tangent
+    /// (the `t = 1` tangent direction, `b − control`). Same stroke
+    /// grammar as [`Annotation::Arrow`].
+    CurvedArrow {
+        /// Tail endpoint.
+        a: Point,
+        /// Bezier control point: the curve leaves `a` toward it and
+        /// arrives at `b` from it, so it bows to whichever side the
+        /// handle sits on. Collinear with the chord it degenerates
+        /// to the straight [`Annotation::Arrow`] shape.
+        control: Point,
+        /// Head endpoint.
+        b: Point,
+        /// Stroke style.
+        stroke: Stroke,
+        /// Barb length in physical px.
         head_size: f32,
     },
     /// Semi-transparent thick stroke.
@@ -671,6 +693,13 @@ impl EditorState {
                 stroke,
                 head_size: ARROW_DEFAULT_HEAD_SIZE,
             },
+            Tool::CurvedArrow => Annotation::CurvedArrow {
+                a: at,
+                control: at,
+                b: at,
+                stroke,
+                head_size: ARROW_DEFAULT_HEAD_SIZE,
+            },
             Tool::Marker => Annotation::Marker {
                 points: vec![at],
                 // Drop alpha at construction so every backend renders a
@@ -735,6 +764,13 @@ impl EditorState {
             | Annotation::Ellipse { rect, .. }
             | Annotation::Blur { rect, .. } => rect.max = at,
             Annotation::Line { b, .. } | Annotation::Arrow { b, .. } => *b = at,
+            // The drag draws the chord; the control rides its
+            // midpoint so an unbent curve is the straight arrow
+            // (bending is the control handle's job, AP5).
+            Annotation::CurvedArrow { a, control, b, .. } => {
+                *control = Point::new(f32::midpoint(a.x, at.x), f32::midpoint(a.y, at.y));
+                *b = at;
+            }
             Annotation::Marker { points, .. } | Annotation::Pencil { points, .. } => {
                 points.push(at);
             }
@@ -2288,7 +2324,13 @@ impl EditorState {
             }
             // Line and Arrow are both two-point tools; a sub-1px span is
             // a click-without-drag and commits nothing visible.
-            Some(Annotation::Line { a, b, .. } | Annotation::Arrow { a, b, .. }) => {
+            // CurvedArrow commits on the same chord test — a bent
+            // curve with no head-to-tail span has no arrow to read.
+            Some(
+                Annotation::Line { a, b, .. }
+                | Annotation::Arrow { a, b, .. }
+                | Annotation::CurvedArrow { a, b, .. },
+            ) => {
                 let dx = b.x - a.x;
                 let dy = b.y - a.y;
                 (dx * dx + dy * dy).sqrt() < 1.0
@@ -2385,6 +2427,7 @@ fn owning_tool(ann: &Annotation) -> Tool {
         Annotation::Ellipse { .. } => Tool::Ellipse,
         Annotation::Line { .. } => Tool::Line,
         Annotation::Arrow { .. } => Tool::Arrow,
+        Annotation::CurvedArrow { .. } => Tool::CurvedArrow,
         Annotation::Marker { .. } => Tool::Marker,
         Annotation::Pencil { .. } => Tool::Pencil,
         Annotation::Text { .. } => Tool::Text,
@@ -2404,6 +2447,7 @@ fn is_flip_eligible(tool: Tool) -> bool {
             | Tool::Ellipse
             | Tool::Line
             | Tool::Arrow
+            | Tool::CurvedArrow
             | Tool::Marker
             | Tool::Pencil
             | Tool::Blur
@@ -2438,6 +2482,34 @@ fn scale_strength(strength: u8, factor: f32) -> u8 {
 }
 
 impl Annotation {
+    /// Deserialize an annotation list from already-parsed JSON
+    /// values, skipping every entry this build cannot decode — an
+    /// unknown annotation kind (a newer session file read by an
+    /// older binary, including session-resume's parked sessions) or
+    /// a malformed entry — with a `warn!` per skip.
+    ///
+    /// This is the session-file forward-compat seam: the whole list
+    /// never fails because one entry is from the future; the known
+    /// annotations survive. Callers that must not lose data silently
+    /// (nothing today — the session store is advisory) get the skip
+    /// count by diffing lengths.
+    #[must_use]
+    pub fn from_json_values_tolerant(values: Vec<serde_json::Value>) -> Vec<Self> {
+        values
+            .into_iter()
+            .filter_map(|value| match serde_json::from_value::<Self>(value) {
+                Ok(ann) => Some(ann),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "skipping an unrecognized annotation in a session file"
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Build the [`crate::text::TextStyle`] describing how a `Text`
     /// variant should be rendered.
     ///
@@ -2533,6 +2605,23 @@ impl Annotation {
                 b.y -= dy;
                 true
             }
+            Annotation::CurvedArrow { a, control, b, .. } => {
+                // Span of all three defining points, inline — the
+                // arm holds `&mut` bindings, so `bounding_box()`
+                // (which borrows all of `self`) cannot ride along.
+                let min = Point::new(a.x.min(control.x).min(b.x), a.y.min(control.y).min(b.y));
+                let max = Point::new(a.x.max(control.x).max(b.x), a.y.max(control.y).max(b.y));
+                if Rect::new(min, max).intersect(n).is_none() {
+                    return false;
+                }
+                a.x -= dx;
+                a.y -= dy;
+                control.x -= dx;
+                control.y -= dy;
+                b.x -= dx;
+                b.y -= dy;
+                true
+            }
             Annotation::Marker { points, .. } | Annotation::Pencil { points, .. } => {
                 if !points.iter().any(|&p| n.contains(p)) {
                     return false;
@@ -2576,6 +2665,14 @@ impl Annotation {
             Annotation::Line { a, b, .. } | Annotation::Arrow { a, b, .. } => {
                 a.x += dx;
                 a.y += dy;
+                b.x += dx;
+                b.y += dy;
+            }
+            Annotation::CurvedArrow { a, control, b, .. } => {
+                a.x += dx;
+                a.y += dy;
+                control.x += dx;
+                control.y += dy;
                 b.x += dx;
                 b.y += dy;
             }
@@ -2633,6 +2730,19 @@ impl Annotation {
                 stroke.width *= factor;
                 *head_size *= factor;
             }
+            Annotation::CurvedArrow {
+                a,
+                control,
+                b,
+                stroke,
+                head_size,
+            } => {
+                scale_point(a, factor);
+                scale_point(control, factor);
+                scale_point(b, factor);
+                stroke.width *= factor;
+                *head_size *= factor;
+            }
             Annotation::Marker { points, width, .. } | Annotation::Pencil { points, width, .. } => {
                 for p in points {
                     scale_point(p, factor);
@@ -2677,6 +2787,21 @@ impl Annotation {
             | Annotation::Ellipse { rect, .. }
             | Annotation::Blur { rect, .. } => *rect,
             Annotation::Line { a, b, .. } | Annotation::Arrow { a, b, .. } => Rect::new(*a, *b),
+            // The control point bows outside the chord on every bent
+            // curve, so selection chrome and marquee hits must span
+            // all three defining points.
+            Annotation::CurvedArrow { a, control, b, .. } => {
+                let pts = [*a, *control, *b];
+                let mut min = pts[0];
+                let mut max = pts[0];
+                for &p in &pts[1..] {
+                    min.x = min.x.min(p.x);
+                    min.y = min.y.min(p.y);
+                    max.x = max.x.max(p.x);
+                    max.y = max.y.max(p.y);
+                }
+                Rect::new(min, max)
+            }
             Annotation::Marker { points, .. } | Annotation::Pencil { points, .. } => {
                 if points.is_empty() {
                     return None;
@@ -2745,7 +2870,9 @@ impl Annotation {
                 let n = rect.normalized();
                 point_in_rect(point, n)
             }
-            Annotation::Line { a, b, stroke } | Annotation::Arrow { a, b, stroke, .. } => {
+            Annotation::Line { a, b, stroke }
+            | Annotation::Arrow { a, b, stroke, .. }
+            | Annotation::CurvedArrow { a, b, stroke, .. } => {
                 distance_to_segment(point, *a, *b) <= stroke.width / 2.0 + HIT_TEST_TOLERANCE_PX
             }
             Annotation::Marker { points, width, .. } | Annotation::Pencil { points, width, .. } => {
@@ -3371,6 +3498,123 @@ mod tests {
             }
             other => panic!("expected pending Marker, got {other:?}"),
         }
+    }
+
+    // ── CurvedArrow variant + serde tolerance (annotate-polish AP3) ──
+
+    #[test]
+    fn curved_arrow_serializes_roundtrip() {
+        let ann = Annotation::CurvedArrow {
+            a: Point::new(1.0, 2.0),
+            control: Point::new(5.0, 0.0),
+            b: Point::new(9.0, 2.0),
+            stroke: Stroke::new(Color::RED, 2.5),
+            head_size: 10.0,
+        };
+        let json = serde_json::to_string(&ann).expect("serialize");
+        let back: Annotation = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(ann, back);
+    }
+
+    /// The draft model: press seeds the degenerate triple, drag walks
+    /// `b` with the control riding the chord midpoint (the straight
+    /// form — bending is the control handle's job, AP5).
+    #[test]
+    fn curved_arrow_drag_seeds_control_at_chord_midpoint() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::CurvedArrow;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+            modifiers: Modifiers::default(),
+        });
+        match &s.pending {
+            Some(Annotation::CurvedArrow { a, control, b, .. }) => {
+                assert_eq!(
+                    (*a, *control, *b),
+                    (
+                        Point::new(10.0, 10.0),
+                        Point::new(10.0, 10.0),
+                        Point::new(10.0, 10.0)
+                    ),
+                    "press seeds the degenerate triple"
+                );
+            }
+            other => panic!("expected pending CurvedArrow, got {other:?}"),
+        }
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(30.0, 40.0),
+            modifiers: Modifiers::default(),
+        });
+        match &s.pending {
+            Some(Annotation::CurvedArrow { a, control, b, .. }) => {
+                assert_eq!(*a, Point::new(10.0, 10.0), "tail anchors the drag");
+                assert_eq!(*b, Point::new(30.0, 40.0), "head follows the pointer");
+                assert_eq!(
+                    *control,
+                    Point::new(20.0, 25.0),
+                    "control rides the chord midpoint"
+                );
+            }
+            other => panic!("expected pending CurvedArrow, got {other:?}"),
+        }
+    }
+
+    /// A sub-1px chord is a click-without-drag: cancelled like Line /
+    /// Arrow, never committed.
+    #[test]
+    fn curved_arrow_degenerate_chord_cancels_on_release() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::CurvedArrow;
+        s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+            modifiers: Modifiers::default(),
+        });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(10.5, 10.0),
+            modifiers: Modifiers::default(),
+        });
+        s.dispatch_input(&InputEvent::PointerUp);
+        assert!(s.anns.is_empty(), "degenerate chord commits nothing");
+        assert!(s.pending.is_none(), "pending is dropped, not left dangling");
+    }
+
+    /// Forward-compat: a session list carrying a kind this build
+    /// doesn't know keeps every known annotation and skips the
+    /// unknown one — an older binary stays functional on a newer
+    /// file (also protects session-resume's parked sessions).
+    #[test]
+    fn annotation_list_tolerates_unknown_kinds() {
+        let arrow: serde_json::Value =
+            serde_json::to_value(arrow_ann(1.0, 2.0, 3.0, 4.0)).expect("serialize arrow");
+        let line = serde_json::json!({
+            "Line": { "a": {"x": 0.0, "y": 0.0}, "b": {"x": 5.0, "y": 5.0},
+                      "stroke": { "color": "#ff0000", "width": 3.0 } }
+        });
+        let unknown = serde_json::json!({ "Hologram": { "hue": 42 } });
+        let kept = Annotation::from_json_values_tolerant(vec![arrow, unknown, line]);
+        assert_eq!(
+            kept.len(),
+            2,
+            "the unknown kind is skipped, both known survive"
+        );
+        assert!(matches!(kept[0], Annotation::Arrow { .. }));
+        assert!(matches!(kept[1], Annotation::Line { .. }));
+    }
+
+    /// Malformed entries of a *known* kind degrade the same way —
+    /// skipped per entry, the rest of the session intact.
+    #[test]
+    fn annotation_list_tolerates_malformed_entries() {
+        let arrow: serde_json::Value =
+            serde_json::to_value(arrow_ann(1.0, 2.0, 3.0, 4.0)).expect("serialize arrow");
+        let broken = serde_json::json!({ "Arrow": { "a": {"x": 0.0} } });
+        let kept = Annotation::from_json_values_tolerant(vec![broken, arrow]);
+        assert_eq!(
+            kept.len(),
+            1,
+            "the malformed entry drops, the sound one survives"
+        );
+        assert!(matches!(kept[0], Annotation::Arrow { .. }));
     }
 
     /// `begin_annotation` then `update_annotation` should grow the

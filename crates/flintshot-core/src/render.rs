@@ -339,11 +339,22 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::R
             canvas.draw_ellipse(rect.normalized(), stroke, *fill);
         }
         Annotation::Line { a, b, stroke } => canvas.draw_line(*a, *b, stroke),
+        // CurvedArrow renders its collinear-control degenerate form
+        // (the straight arrow) until AP4 lands the sampled bezier
+        // and its end-tangent barbs; Arrow is the straight form
+        // itself.
         Annotation::Arrow {
             a,
             b,
             stroke,
             head_size,
+        }
+        | Annotation::CurvedArrow {
+            a,
+            b,
+            stroke,
+            head_size,
+            ..
         } => canvas.draw_arrow(*a, *b, stroke, *head_size),
         Annotation::Marker {
             points,

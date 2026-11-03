@@ -91,6 +91,7 @@ fn tool_noun(tool: Tool) -> &'static str {
         Tool::Ellipse => "ellipse",
         Tool::Line => "line",
         Tool::Arrow => "arrow",
+        Tool::CurvedArrow => "curved arrow",
         Tool::Marker => "marker",
         Tool::Pencil => "pencil",
         Tool::Text => "text",

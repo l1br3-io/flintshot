@@ -145,7 +145,8 @@ impl EditorState {
                 Annotation::Rect { stroke, .. }
                 | Annotation::Ellipse { stroke, .. }
                 | Annotation::Line { stroke, .. }
-                | Annotation::Arrow { stroke, .. } => stroke.color = color,
+                | Annotation::Arrow { stroke, .. }
+                | Annotation::CurvedArrow { stroke, .. } => stroke.color = color,
                 Annotation::Marker { color: c, .. } => *c = color.with_alpha(MARKER_ALPHA),
                 Annotation::Pencil { color: c, .. } | Annotation::Number { color: c, .. } => {
                     *c = color;
@@ -180,7 +181,8 @@ impl EditorState {
                 Annotation::Rect { stroke, .. }
                 | Annotation::Ellipse { stroke, .. }
                 | Annotation::Line { stroke, .. }
-                | Annotation::Arrow { stroke, .. } => stroke.width = width,
+                | Annotation::Arrow { stroke, .. }
+                | Annotation::CurvedArrow { stroke, .. } => stroke.width = width,
                 Annotation::Marker { width: w, .. } | Annotation::Pencil { width: w, .. } => {
                     *w = width;
                 }

@@ -84,8 +84,22 @@ pub struct SessionSummary {
 #[serde(rename_all = "kebab-case")]
 struct SessionSidecar {
     created_at: u64,
-    #[serde(default)]
+    /// Tolerant list read: an annotation kind this build doesn't
+    /// know (a newer file, or a parked session from a newer run) is
+    /// skipped with a warn instead of failing the whole sidecar —
+    /// the known annotations survive (annotate-polish forward-compat).
+    #[serde(default, deserialize_with = "de_anns_tolerant")]
     anns: Vec<Annotation>,
+}
+
+/// Deserialize the sidecar's annotation list tolerantly: parse the
+/// array as raw JSON values first, then keep what this build knows.
+fn de_anns_tolerant<'de, D>(deserializer: D) -> Result<Vec<Annotation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(Annotation::from_json_values_tolerant(values))
 }
 
 /// A parked run read back from quarantine: the recoverable
@@ -606,6 +620,68 @@ mod tests {
             "committed annotations survive the round-trip"
         );
         assert_eq!(loaded.image.dimensions(), (8, 8));
+    }
+
+    /// Forward-compat (annotate-polish): a sidecar written by a
+    /// newer build — carrying an annotation kind this binary doesn't
+    /// know — still loads its known annotations instead of degrading
+    /// to an empty session. This is the seam that keeps older
+    /// binaries and session-resume's parked runs functional on
+    /// newer files.
+    #[test]
+    fn sidecar_with_unknown_annotation_kind_keeps_the_known_anns() {
+        let dir = tempdir().unwrap();
+        let id = SessionId(7);
+        // Hand-written sidecar in the shape a future build would
+        // write: a known Line, an unknown kind, another known Line.
+        // Field names follow the sidecar's kebab-case wire format.
+        let body = serde_json::json!({
+            "created-at": 7,
+            "anns": [
+                test_line_ann(),
+                { "Hologram": { "hue": 42, "sparkle": true } },
+                other_line_ann(),
+            ]
+        });
+        fs::write(
+            json_path(dir.path(), id),
+            serde_json::to_string(&body).unwrap(),
+        )
+        .unwrap();
+
+        let sidecar = read_sidecar(dir.path(), id).expect("the sidecar parses tolerantly");
+        assert_eq!(
+            sidecar.anns,
+            vec![test_line_ann(), other_line_ann()],
+            "the unknown kind is skipped; both known annotations survive"
+        );
+    }
+
+    /// The tolerance is per entry: a malformed known-kind entry drops
+    /// alone, never the whole list.
+    #[test]
+    fn sidecar_with_malformed_annotation_keeps_the_rest() {
+        let dir = tempdir().unwrap();
+        let id = SessionId(8);
+        let body = serde_json::json!({
+            "created-at": 8,
+            "anns": [
+                { "Line": { "a": { "x": 0.0 } } },
+                test_line_ann(),
+            ]
+        });
+        fs::write(
+            json_path(dir.path(), id),
+            serde_json::to_string(&body).unwrap(),
+        )
+        .unwrap();
+
+        let sidecar = read_sidecar(dir.path(), id).expect("the sidecar parses tolerantly");
+        assert_eq!(
+            sidecar.anns,
+            vec![test_line_ann()],
+            "the malformed entry drops; the sound annotation survives"
+        );
     }
 
     #[test]
