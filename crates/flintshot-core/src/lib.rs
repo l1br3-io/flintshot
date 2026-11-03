@@ -79,7 +79,9 @@ pub use render::{
     arrow_barbs, compose_final, compose_final_region, render, render_ann, BlurCache, Canvas,
     DrawCall, MockCanvas,
 };
-pub use session::{session_dir, SessionCapture, SessionId, SessionStore, SessionSummary};
+pub use session::{
+    parked_dir, session_dir, SessionCapture, SessionId, SessionStore, SessionSummary,
+};
 pub use shell::{EditorOutcome, EditorShell, NewCaptureMode};
 pub use text::{
     FontFamily, FontStyle, FontWeight, TextAlign, TextMetrics, TextOutline, TextStyle,

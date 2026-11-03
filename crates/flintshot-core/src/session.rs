@@ -13,9 +13,11 @@
 //! Persistence is **advisory**, like the recents index: any IO
 //! failure logs a warning and degrades to memory-only for that
 //! entry; nothing here is ever a user-facing error. And the store
-//! never crosses a process boundary: startup sweeps any leftover
-//! dir from a crashed run, graceful exit clears it, and nothing
-//! resumes from a previous process's files.
+//! never *writes* across a process boundary: startup parks any
+//! leftover dir from a crashed run into a quarantine sibling
+//! ([`parked_dir`]) instead of deleting it, graceful exit clears
+//! the live dir, and adoption of a parked run is read-only — the
+//! park is only ever renamed into or swept, never written to.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -281,6 +283,37 @@ impl SessionStore {
             }
         }
     }
+
+    /// Park a previous run's leftover session dir instead of
+    /// sweeping it, so Home can offer recovery. The dir is atomically
+    /// renamed to its fixed quarantine sibling ([`parked_dir`]); a new
+    /// park replaces any older one — newest-wins, the older park is
+    /// swept and logged, keeping disk bounded to one parked run. No
+    /// leftover is a no-op. Advisory: on failure this warns and
+    /// degrades to the old [`SessionStore::sweep_stale`] behavior.
+    pub fn park_previous_run(dir: &Path) {
+        if !dir.is_dir() {
+            return;
+        }
+        let park = parked_dir(dir);
+        if park.exists() {
+            // Newest-wins (the plan's pinned answer to a second crash
+            // parking over an unhandled one): the park holds unsaved
+            // screenshots, not archives, and bounded disk beats
+            // merge complexity.
+            tracing::info!(park = %park.display(), "sweeping an older never-handled park");
+            Self::sweep_stale(&park);
+        }
+        if let Err(e) = std::fs::rename(dir, &park) {
+            tracing::warn!(
+                dir = %dir.display(),
+                park = %park.display(),
+                error = %e,
+                "parking the previous run's session dir; degrading to the old sweep"
+            );
+            Self::sweep_stale(dir);
+        }
+    }
 }
 
 impl Default for SessionStore {
@@ -304,6 +337,21 @@ fn session_dir_from(xdg: Option<PathBuf>) -> PathBuf {
     xdg.unwrap_or_else(std::env::temp_dir)
         .join("flintshot")
         .join("session")
+}
+
+/// The fixed quarantine sibling a leftover session dir is parked
+/// into (`<…>/session-parked`): [`SessionStore::park_previous_run`]
+/// renames there, [`SessionStore::load_parked`] reads back from
+/// there. A path with no final component gets a child name — still
+/// fixed, still derived.
+#[must_use]
+pub fn parked_dir(session_dir: &Path) -> PathBuf {
+    let Some(name) = session_dir.file_name() else {
+        return session_dir.join("parked");
+    };
+    let mut parked = std::ffi::OsString::from(name);
+    parked.push("-parked");
+    session_dir.with_file_name(parked)
 }
 
 /// A lock that survives poisoning — store state is advisory, so a
@@ -547,6 +595,95 @@ mod tests {
 
         SessionStore::sweep_stale(&stale);
         SessionStore::sweep_stale(&dir.path().join("never-existed"));
+    }
+
+    #[test]
+    fn parked_dir_is_a_fixed_sibling_of_the_session_dir() {
+        assert_eq!(
+            parked_dir(Path::new("/runtime/flintshot/session")),
+            PathBuf::from("/runtime/flintshot/session-parked")
+        );
+        // A path without a final component falls back to a child
+        // name — still fixed, still derived.
+        assert_eq!(parked_dir(Path::new("/")), PathBuf::from("/parked"));
+    }
+
+    #[test]
+    fn park_previous_run_renames_a_leftover_dir() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("session");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("1.png"), b"junk").unwrap();
+        fs::write(session.join("1.json"), b"junk").unwrap();
+
+        SessionStore::park_previous_run(&session);
+
+        assert!(!session.exists(), "the leftover is renamed away");
+        let park = parked_dir(&session);
+        assert!(park.join("1.png").exists(), "the pair survived the move");
+        assert!(park.join("1.json").exists());
+    }
+
+    #[test]
+    fn park_previous_run_without_a_leftover_is_a_no_op() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("session");
+
+        SessionStore::park_previous_run(&session);
+        SessionStore::park_previous_run(&session);
+
+        assert!(
+            !parked_dir(&session).exists(),
+            "no leftover means no park is created"
+        );
+    }
+
+    #[test]
+    fn park_previous_run_replaces_an_older_park_newest_wins() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("session");
+        let park = parked_dir(&session);
+
+        // An older park the user never handled, plus a fresh crash.
+        fs::create_dir_all(&park).unwrap();
+        fs::write(park.join("1.png"), b"older run").unwrap();
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("2.png"), b"newer run").unwrap();
+
+        SessionStore::park_previous_run(&session);
+
+        assert!(!session.exists(), "the newer leftover moved into the park");
+        assert!(
+            park.join("2.png").exists(),
+            "the newer run's captures are the park now"
+        );
+        assert!(
+            !park.join("1.png").exists(),
+            "the older park was swept — disk stays bounded to one run"
+        );
+    }
+
+    #[test]
+    fn park_io_failure_warns_and_degrades_to_the_sweep() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("session");
+        let park = parked_dir(&session);
+
+        // A regular file squatting on the park path: the old park
+        // cannot be removed and the rename cannot land onto a file
+        // — both fail on every platform, root included, so the
+        // degrade path runs deterministically.
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("3.png"), b"junk").unwrap();
+        fs::write(&park, b"a file, not a dir").unwrap();
+
+        SessionStore::park_previous_run(&session);
+
+        assert!(
+            !session.exists(),
+            "the rename failed, so the old sweep behavior took over"
+        );
+        assert!(park.is_file(), "the undeletable squatter is untouched");
     }
 
     #[test]
