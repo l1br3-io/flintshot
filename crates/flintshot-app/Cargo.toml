@@ -122,6 +122,7 @@ flintshot-editor-egui = { workspace = true, optional = true }
 flintshot-record = { workspace = true }
 arboard = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 color-eyre = { workspace = true }
 futures-util = { workspace = true }
 global-hotkey = { workspace = true }

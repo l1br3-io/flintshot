@@ -56,6 +56,7 @@ fn main() -> Result<()> {
         Some(Command::Auth(args)) => cli::run_auth(&args),
         Some(Command::Hotkeys(args)) => cli::run_hotkeys(&args),
         Some(Command::App(args)) => cli::run_app(&args),
+        Some(Command::Completions(args)) => cli::run_completions(&args),
         #[cfg(feature = "tray")]
         Some(Command::Tray) => cli::run_tray_helper(),
         None => Ok(()),

@@ -90,6 +90,31 @@ pub enum Command {
     #[cfg(feature = "tray")]
     #[command(hide = true)]
     Tray,
+    /// Print a shell completion script to stdout for `bash`, `zsh`,
+    /// `fish`, `elvish`, or `powershell` — e.g. `flintshot
+    /// completions bash > /usr/share/bash-completion/completions/
+    /// flintshot`.
+    Completions(CompletionsArgs),
+}
+
+/// Arguments for `flintshot completions`.
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// The target shell.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
+}
+
+/// `flintshot completions <shell>` — print the completion script.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "every run_* dispatch arm returns Result<()>; stdout write failures abort via clap's writer"
+)]
+pub fn run_completions(args: &CompletionsArgs) -> Result<()> {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    clap_complete::generate(args.shell, &mut cmd, "flintshot", &mut std::io::stdout());
+    Ok(())
 }
 
 /// Arguments for `flintshot daemon`.
@@ -3269,6 +3294,55 @@ mod tests {
                 );
             }
             other => panic!("expected capture, got {other:?}"),
+        }
+    }
+
+    /// `completions` accepts exactly the five supported shells and
+    /// rejects anything else with clap's own usage error.
+    #[test]
+    fn completions_verb_parses_all_five_shells_and_rejects_others() {
+        use clap_complete::Shell;
+        for (raw, shell) in [
+            ("bash", Shell::Bash),
+            ("zsh", Shell::Zsh),
+            ("fish", Shell::Fish),
+            ("elvish", Shell::Elvish),
+            ("powershell", Shell::PowerShell),
+        ] {
+            let cli = Cli::parse_from(["flintshot", "completions", raw]);
+            match cli.command {
+                Some(Command::Completions(args)) => {
+                    assert_eq!(args.shell, shell, "{raw} parses to its shell");
+                }
+                other => panic!("expected completions, got {other:?}"),
+            }
+        }
+        for unsupported in ["tcsh", "nushell", ""] {
+            assert!(
+                Cli::try_parse_from(["flintshot", "completions", unsupported]).is_err(),
+                "{unsupported:?} must be rejected with usage"
+            );
+        }
+    }
+
+    /// Every supported shell yields non-empty completion script
+    /// bytes from this build's real command tree (hidden verbs
+    /// included as clap sees them).
+    #[test]
+    fn completions_generate_non_empty_scripts_for_every_shell() {
+        use clap::CommandFactory;
+        use clap_complete::Shell;
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::Elvish,
+            Shell::PowerShell,
+        ] {
+            let mut buf = Vec::new();
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "flintshot", &mut buf);
+            assert!(!buf.is_empty(), "{shell:?} script must not be empty");
         }
     }
 

@@ -50,6 +50,10 @@ ashpd = { version = "0.13", default-features = false, features = ["tokio", "glob
 # no transitive deps beyond itself.
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
+# Shell completion generation for `flinshot completions` (same
+# clap-org release train as clap 4.5; pre-approved in the
+# cli-scripting plan).
+clap_complete = "4"
 color-eyre = "0.6"
 dirs = "6"
 # Markdown rendering for the AI panel's assistant cards (Task 008).
