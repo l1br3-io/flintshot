@@ -2870,10 +2870,30 @@ impl Annotation {
                 let n = rect.normalized();
                 point_in_rect(point, n)
             }
-            Annotation::Line { a, b, stroke }
-            | Annotation::Arrow { a, b, stroke, .. }
-            | Annotation::CurvedArrow { a, b, stroke, .. } => {
+            Annotation::Line { a, b, stroke } | Annotation::Arrow { a, b, stroke, .. } => {
                 distance_to_segment(point, *a, *b) <= stroke.width / 2.0 + HIT_TEST_TOLERANCE_PX
+            }
+            // The curve hit-tests through the same sampled polyline
+            // the render path draws (WYSIWYG: what you tap is what
+            // you drew), at the stroke-width tolerance every other
+            // stroked annotation uses.
+            Annotation::CurvedArrow {
+                a,
+                control,
+                b,
+                stroke,
+                ..
+            } => {
+                let tol = stroke.width / 2.0 + HIT_TEST_TOLERANCE_PX;
+                let curve = crate::render::quadratic_bezier_points(
+                    *a,
+                    *control,
+                    *b,
+                    crate::render::CURVE_SEGMENTS,
+                );
+                curve
+                    .windows(2)
+                    .any(|w| distance_to_segment(point, w[0], w[1]) <= tol)
             }
             Annotation::Marker { points, width, .. } | Annotation::Pencil { points, width, .. } => {
                 let tol = width / 2.0 + HIT_TEST_TOLERANCE_PX;
@@ -3615,6 +3635,77 @@ mod tests {
             "the malformed entry drops, the sound one survives"
         );
         assert!(matches!(kept[0], Annotation::Arrow { .. }));
+    }
+
+    // ── CurvedArrow hit-test (annotate-polish AP4) ──
+
+    /// A curve bowing up off its chord: the apex (10, −5) is a hit
+    /// while the chord point directly below it (10, 0) is a miss —
+    /// hit-testing follows the sampled curve, never the chord.
+    #[test]
+    fn curved_arrow_hit_test_follows_the_curve_not_the_chord() {
+        let ann = Annotation::CurvedArrow {
+            a: Point::new(0.0, 0.0),
+            control: Point::new(10.0, -10.0),
+            b: Point::new(20.0, 0.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 5.0,
+        };
+        // Tolerance = 3/2 + 3 = 4.5 px from the polyline.
+        assert!(
+            ann.contains(Point::new(10.0, -5.0)),
+            "the curve's apex is on the curve"
+        );
+        assert!(
+            !ann.contains(Point::new(10.0, 0.0)),
+            "the chord midpoint is 5 px off the curve (tolerance 4.5)"
+        );
+        // The tolerance band, measured off the apex: inside hits,
+        // outside misses.
+        assert!(
+            ann.contains(Point::new(10.0, -5.0 - 4.4)),
+            "4.4 px off the apex is within the stroke-width tolerance"
+        );
+        assert!(
+            !ann.contains(Point::new(10.0, -5.0 - 4.6)),
+            "4.6 px off the apex is outside it"
+        );
+    }
+
+    /// Collinear control: the sampled curve is the chord, so the
+    /// annotation hits exactly like a straight arrow along it.
+    #[test]
+    fn curved_arrow_collinear_control_hits_like_straight_arrow() {
+        let ann = Annotation::CurvedArrow {
+            a: Point::new(0.0, 0.0),
+            control: Point::new(10.0, 0.0),
+            b: Point::new(20.0, 0.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 5.0,
+        };
+        assert!(ann.contains(Point::new(10.0, 0.0)), "on the chord");
+        assert!(
+            !ann.contains(Point::new(10.0, -5.0)),
+            "5 px above the chord, outside the band"
+        );
+        // Endpoints inclusive.
+        assert!(ann.contains(Point::new(0.0, 0.0)), "the tail is hittable");
+    }
+
+    /// The editor-level `hit_test` resolves the topmost `CurvedArrow`
+    /// through the same sampled-polyline path.
+    #[test]
+    fn hit_test_resolves_curved_arrow_by_its_curve() {
+        let mut s = EditorState::new(blank_image());
+        s.anns.push(Annotation::CurvedArrow {
+            a: Point::new(0.0, 0.0),
+            control: Point::new(10.0, -10.0),
+            b: Point::new(20.0, 0.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 5.0,
+        });
+        assert_eq!(s.hit_test(Point::new(10.0, -5.0)), Some(0), "apex hit");
+        assert_eq!(s.hit_test(Point::new(10.0, 0.0)), None, "chord-only miss");
     }
 
     /// `begin_annotation` then `update_annotation` should grow the

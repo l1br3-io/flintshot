@@ -339,23 +339,30 @@ pub fn render_ann<C: Canvas>(canvas: &mut C, ann: &Annotation, source: &image::R
             canvas.draw_ellipse(rect.normalized(), stroke, *fill);
         }
         Annotation::Line { a, b, stroke } => canvas.draw_line(*a, *b, stroke),
-        // CurvedArrow renders its collinear-control degenerate form
-        // (the straight arrow) until AP4 lands the sampled bezier
-        // and its end-tangent barbs; Arrow is the straight form
-        // itself.
         Annotation::Arrow {
             a,
             b,
             stroke,
             head_size,
-        }
-        | Annotation::CurvedArrow {
+        } => canvas.draw_arrow(*a, *b, stroke, *head_size),
+        // The curve draws as one sampled polyline; the barbs anchor
+        // at `b` along the end tangent (the t = 1 direction,
+        // `b − control`), so the head follows the curve's arrival
+        // angle. A collinear control samples onto the chord — the
+        // degenerate form is exactly the straight arrow.
+        Annotation::CurvedArrow {
             a,
+            control,
             b,
             stroke,
             head_size,
-            ..
-        } => canvas.draw_arrow(*a, *b, stroke, *head_size),
+        } => {
+            let curve = quadratic_bezier_points(*a, *control, *b, CURVE_SEGMENTS);
+            canvas.draw_polyline(&curve, stroke);
+            let [left, right] = arrow_barbs(*control, *b, *head_size);
+            canvas.draw_line(*b, left, stroke);
+            canvas.draw_line(*b, right, stroke);
+        }
         Annotation::Marker {
             points,
             color,
@@ -494,6 +501,37 @@ fn contrast_text_color(bg: Color) -> Color {
 const ARROW_BARB_COS30: f32 = 0.866_025_4;
 /// sin(30°).
 const ARROW_BARB_SIN30: f32 = 0.5;
+
+/// Segments a [`Annotation::CurvedArrow`] bezier is sampled into for
+/// both drawing and hit-testing. Both paths must sample identically
+/// (WYSIWYG: what you tap is what you drew), so they share this
+/// constant; 24 keeps consecutive-sample chord error far below a
+/// physical pixel at annotation stroke widths while staying cheap
+/// enough to re-sample every frame.
+pub const CURVE_SEGMENTS: usize = 24;
+
+/// Sample the quadratic bezier `a → control → b` into
+/// `segments + 1` points (t = 0..=1 inclusive). Pure geometry,
+/// shared by the `CurvedArrow` render path and its hit-test so the
+/// two can never disagree about where the curve runs.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "segment indices and counts are tiny and exact in f32"
+)]
+#[must_use]
+pub fn quadratic_bezier_points(a: Point, control: Point, b: Point, segments: usize) -> Vec<Point> {
+    let segments = segments.max(1);
+    (0..=segments)
+        .map(|i| {
+            let t = i as f32 / segments as f32;
+            let u = 1.0 - t;
+            Point::new(
+                u * u * a.x + 2.0 * u * t * control.x + t * t * b.x,
+                u * u * a.y + 2.0 * u * t * control.y + t * t * b.y,
+            )
+        })
+        .collect()
+}
 
 /// Compute the two barb endpoints for an arrow whose shaft runs from
 /// `a` (tail) to `b` (head). Each barb is `head_size` long and angled
@@ -3544,6 +3582,173 @@ mod tests {
         }) {
             Some(c) => assert_eq!(c, Color::rgb(0, 0, 0), "black text on yellow bubble"),
             None => panic!("expected a DrawText call"),
+        }
+    }
+
+    // ── CurvedArrow sampling + render (annotate-polish AP4) ──
+
+    fn curved_arrow_ann(control: Point) -> Annotation {
+        Annotation::CurvedArrow {
+            a: Point::new(0.0, 0.0),
+            control,
+            b: Point::new(20.0, 0.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 5.0,
+        }
+    }
+
+    /// Approximate point equality for sampled-curve assertions
+    /// (bezier arithmetic is exact at the endpoints, float-dusted
+    /// in between).
+    fn pt_approx(actual: Point, expected: Point, what: &str) {
+        let eps = 1e-4;
+        assert!(
+            (actual.x - expected.x).abs() < eps && (actual.y - expected.y).abs() < eps,
+            "{what}: expected ≈{expected:?}, got {actual:?}"
+        );
+    }
+
+    /// The sampler pins the curve's defining facts: exact endpoints
+    /// and the de Casteljau midpoint (¼a + ½control + ¼b at t = ½).
+    #[test]
+    fn quadratic_bezier_samples_endpoints_and_midpoint() {
+        let a = Point::new(0.0, 0.0);
+        let control = Point::new(10.0, 0.0);
+        let b = Point::new(0.0, 20.0);
+        let pts = quadratic_bezier_points(a, control, b, 4);
+        assert_eq!(pts.len(), 5, "segments + 1 samples");
+        assert_eq!(pts.first(), Some(&a), "t=0 is the tail");
+        assert_eq!(pts.last(), Some(&b), "t=1 is the head");
+        // t=0.5: 0.25·a + 0.5·control + 0.25·b = (5, 5).
+        pt_approx(
+            pts[2],
+            Point::new(5.0, 5.0),
+            "midpoint follows de Casteljau",
+        );
+    }
+
+    /// A control collinear with the chord samples onto the chord —
+    /// the degenerate form is exactly the straight arrow.
+    #[test]
+    fn collinear_control_samples_stay_on_the_chord() {
+        let pts = quadratic_bezier_points(
+            Point::new(0.0, 0.0),
+            Point::new(5.0, 5.0),
+            Point::new(10.0, 10.0),
+            CURVE_SEGMENTS,
+        );
+        for (i, p) in pts.iter().enumerate() {
+            assert!((p.x - p.y).abs() < 1e-4, "sample {i} left the chord: {p:?}");
+        }
+    }
+
+    /// The barbs at `b` follow the end tangent (t=1 direction,
+    /// `b − control`), not the chord: each barb is `head_size` long
+    /// and the pair is symmetric about the tangent line.
+    #[test]
+    fn curved_arrow_barbs_follow_the_end_tangent() {
+        // Chord runs +x; control pulls the curve up, so the tangent
+        // at b arrives from above-left: direction (1, 1)/√2.
+        let control = Point::new(10.0, -10.0);
+        let b = Point::new(20.0, 0.0);
+        let [l, r] = arrow_barbs(control, b, 5.0);
+        for (name, barb) in [("left", l), ("right", r)] {
+            let d = ((barb.x - b.x).powi(2) + (barb.y - b.y).powi(2)).sqrt();
+            assert!((d - 5.0).abs() < 1e-3, "{name} barb is head_size long: {d}");
+        }
+        // The pair's midpoint sits head_size·cos(30°) back along the
+        // tangent from b.
+        let mid = Point::new(f32::midpoint(l.x, r.x), f32::midpoint(l.y, r.y));
+        let back = ((mid.x - b.x).powi(2) + (mid.y - b.y).powi(2)).sqrt();
+        assert!(
+            (back - 5.0 * ARROW_BARB_COS30).abs() < 1e-3,
+            "barbs open 30° off the reversed tangent: {back}"
+        );
+    }
+
+    /// A degenerate tangent (control at `b`) barbs nothing — the
+    /// same guard `arrow_barbs` gives a sub-1px shaft.
+    #[test]
+    fn curved_arrow_degenerate_tangent_barbs_nothing() {
+        let b = Point::new(20.0, 0.0);
+        assert_eq!(arrow_barbs(b, b, 5.0), [b, b]);
+    }
+
+    /// The render path draws the sampled curve as one polyline plus
+    /// two barb lines at the head — the same call grammar both
+    /// backends translate (WYSIWYG by construction).
+    #[test]
+    fn render_ann_curved_arrow_draws_curve_and_tangent_barbs() {
+        let mut canvas = MockCanvas::default();
+        let source = image::RgbaImage::new(1, 1);
+        // Control above the chord: the curve bows up, apex at (10, -5).
+        render_ann(
+            &mut canvas,
+            &curved_arrow_ann(Point::new(10.0, -10.0)),
+            &source,
+        );
+
+        let curve = canvas
+            .calls
+            .iter()
+            .find_map(|c| match c {
+                DrawCall::DrawPolyline { points, .. } => Some(points.clone()),
+                _ => None,
+            })
+            .expect("the curve draws as one polyline");
+        assert_eq!(curve.len(), CURVE_SEGMENTS + 1, "segments + 1 samples");
+        assert_eq!(
+            curve.first(),
+            Some(&Point::new(0.0, 0.0)),
+            "starts at the tail"
+        );
+        assert_eq!(
+            curve.last(),
+            Some(&Point::new(20.0, 0.0)),
+            "ends at the head"
+        );
+        pt_approx(
+            curve[CURVE_SEGMENTS / 2],
+            Point::new(10.0, -5.0),
+            "apex at t=0.5",
+        );
+
+        let lines: Vec<(Point, Point)> = canvas
+            .calls
+            .iter()
+            .filter_map(|c| match c {
+                DrawCall::DrawLine { a, b, .. } => Some((*a, *b)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 2, "exactly two barb lines");
+        for (start, _) in &lines {
+            assert_eq!(*start, Point::new(20.0, 0.0), "barbs anchor at the head b");
+        }
+        assert_ne!(lines[0].1, lines[1].1, "the two barbs are distinct");
+    }
+
+    /// Collinear control renders the degenerate straight form: the
+    /// sampled "curve" is the chord, so every sample sits on it.
+    #[test]
+    fn render_ann_collinear_control_degrades_to_the_chord() {
+        let mut canvas = MockCanvas::default();
+        let source = image::RgbaImage::new(1, 1);
+        render_ann(
+            &mut canvas,
+            &curved_arrow_ann(Point::new(10.0, 0.0)),
+            &source,
+        );
+        let curve = canvas
+            .calls
+            .iter()
+            .find_map(|c| match c {
+                DrawCall::DrawPolyline { points, .. } => Some(points.clone()),
+                _ => None,
+            })
+            .expect("the curve draws as one polyline");
+        for (i, p) in curve.iter().enumerate() {
+            assert!((p.y - 0.0).abs() < 1e-4, "sample {i} left the chord: {p:?}");
         }
     }
 }
