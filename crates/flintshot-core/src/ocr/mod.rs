@@ -15,6 +15,10 @@
 //! the cure (install/config guidance). Engine implementations live in
 //! `ocrs.rs` and `tesseract.rs`.
 
+pub mod tesseract;
+
+pub use tesseract::TesseractEngine;
+
 use std::path::Path;
 
 use image::RgbaImage;
