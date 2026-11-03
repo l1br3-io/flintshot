@@ -20,6 +20,21 @@ Categories used below:
 
 ### Added
 
+- **WebP output, choosable at the moment of save** (effort
+  `export-webp`, module 2 of the 2026-11 feature batch). Screenshots
+  stop being a PNG-or-JPEG tool: the settings picker, the Save
+  dialog (filter set with the configured format first), and
+  `capture --out path.webp` all write **lossless WebP** — the
+  pure-Rust `image-webp` encoder has no lossy mode, and every
+  surface that offers it says so. `--out` is now extension-driven
+  (`.png` / `.jpg` / `.jpeg` / `.webp`; unknown extensions stay
+  PNG), and a new `capture --format png|jpeg|webp` overrides the
+  extension with a one-line notice when the two disagree (typos are
+  rejected up front, never a silent PNG). The Save dialog's written
+  format follows the path you picked. rfd dialog behavior on each
+  platform (Linux/macOS/Windows filters + default extension) is
+  recorded as a pending manual row.
+
 - **Recording from every surface** (effort `record-ui`, module 3 of
   the recording initiative). The tray grows a **Record / Stop
   recording** item whose label tracks the live state; the app
