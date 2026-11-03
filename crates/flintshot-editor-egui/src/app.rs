@@ -291,6 +291,9 @@ pub(crate) struct EditorApp {
     /// feedback; the screen-pick denial notice). Painted every frame
     /// in [`Self::ui_impl`]; expires on egui's frame time.
     toast: Option<crate::toast::Toast>,
+    /// The OCR tool's flow: region drag → bridge request → clipboard
+    /// + result card (see `crate::ocr`).
+    ocr: crate::ocr::OcrFlow,
 }
 
 /// The paper-cutout ring around the image: 8 px cream — the cutout
@@ -425,6 +428,7 @@ impl EditorApp {
             screen_pick_available: false,
             screen_pick_flight: None,
             toast: None,
+            ocr: crate::ocr::OcrFlow::default(),
             flushed_anns,
         };
         // Ask-the-shot snapshot (page mode): the saved-transform list
@@ -1419,8 +1423,9 @@ impl EditorApp {
         // an annotation drag. Misses between chips pass through
         // (the pointer-miss passthrough contract). The Ask-the-shot
         // dialog is fully modal while open.
-        let on_floating =
-            self.floating_rects.iter().any(|r| r.contains(pos)) || self.ai_dialog.is_open();
+        let on_floating = self.floating_rects.iter().any(|r| r.contains(pos))
+            || self.ai_dialog.is_open()
+            || self.ocr.consent_open;
         // Selection-first phase drag gate: a live phase with a
         // non-Crop tool skips pointer dispatch entirely — the
         // phase is annotation-proof by drag as well as by chip and
@@ -1452,6 +1457,11 @@ impl EditorApp {
                     anchor: pos,
                     start_pan: self.pan,
                 });
+            } else if self.state.tool == Tool::Ocr && self.ocr.accepts_press() {
+                // OCR region drag (shell-owned, like the canvas pick
+                // mode): no `PointerDown` ever reaches the dispatcher,
+                // so an OCR drag can never smudge an annotation.
+                self.ocr.press(at);
             } else {
                 self.canvas_drag_active = true;
                 if !annotation_gated {
@@ -1503,6 +1513,21 @@ impl EditorApp {
                 self.drag_pending_text_to(ctx, view, at);
             } else {
                 pointer_events.push(InputEvent::PointerDrag { pos: at, modifiers });
+            }
+        }
+
+        // OCR drag continuation + release (the press was consumed
+        // above into the pick machine). Release with a real rect
+        // fires the pass; a degenerate click leaves the flow idle
+        // (Enter = whole image stays available).
+        if self.state.tool == Tool::Ocr && self.ocr.dragging() {
+            if primary_down {
+                self.ocr.drag_to(at);
+            }
+            if primary_released {
+                if let Some(rect) = self.ocr.release() {
+                    self.start_ocr(Some(rect));
+                }
             }
         }
         for event in pointer_events {
@@ -1656,6 +1681,12 @@ impl EditorApp {
             && !(modifiers.ctrl || modifiers.shift || modifiers.alt || modifiers.super_key)
         {
             self.open_ai_dialog();
+            return true;
+        }
+        // OCR tool keys (the crop-tool analogue), consumed before
+        // the selection-clear Esc and before Enter reaches the core
+        // dispatcher — the Ocr tool has no Enter contract there.
+        if self.handle_ocr_keys(ctx) {
             return true;
         }
         // Canvas pick mode is the innermost mode: Esc cancels the
@@ -1868,7 +1899,13 @@ impl EditorApp {
         // keeps the borrow of `&mut self.state` disjoint from the
         // panel's own state. Returns the Selection section's fired
         // Delete, if any.
-        let panel_action = panel::show(ui, &mut self.state, &mut self.panel, &mut self.ai);
+        let panel_action = panel::show(
+            ui,
+            &mut self.state,
+            &mut self.panel,
+            &mut self.ai,
+            &mut self.ocr,
+        );
 
         // Selection-first phase: the toolbar's "Crop · Enter" button
         // crops through `confirm_crop`, bypassing `logic` — so
@@ -1989,6 +2026,39 @@ impl EditorApp {
             self.ai_pending_action = Some(action);
         }
         self.handle_ai_actions(ui.ctx());
+
+        // OCR consent dialog (modal while open — the press gate
+        // blocks canvas gestures beneath it, like the AI dialog).
+        // The Download click IS the consent; the fetch's outcome
+        // arrives on the poll seam.
+        match crate::ocr::show_consent_dialog(ui.ctx(), &mut self.ocr) {
+            Some(crate::ocr::OcrConsentAction::Download) => {
+                self.ocr.dismiss_consent();
+                if let Some(bridge) = self.page.clone() {
+                    bridge.borrow_mut().ocr_fetch_models();
+                }
+            }
+            Some(crate::ocr::OcrConsentAction::Dismiss) => self.ocr.dismiss_consent(),
+            None => {}
+        }
+        // Result-card actions (fired inside the panel pass above).
+        if let Some(action) = self.ocr.card_action.take() {
+            let now = ui.ctx().input(|i| i.time);
+            match action {
+                crate::ocr::OcrCardAction::CopyText => {
+                    if let crate::ocr::OcrPhase::Done { text, .. } = &self.ocr.phase {
+                        let chars = text.chars().count();
+                        let text = text.clone();
+                        self.clipboard_write_text(&text);
+                        self.toast = Some(crate::toast::Toast::new(
+                            format!("Copied {chars} chars"),
+                            now,
+                        ));
+                    }
+                }
+                crate::ocr::OcrCardAction::Retry => self.retry_ocr(),
+            }
+        }
 
         // Handle toolbar actions outside the toolbar drawing code so
         // we can borrow `&self.outcome` cleanly (see
@@ -2258,6 +2328,47 @@ impl EditorApp {
             }
             self.panel.focus_ai();
         }
+        // OCR arrivals (region → text → clipboard): Done writes the
+        // clipboard, toasts, and lands the result card; the
+        // missing-model failure opens the consent dialog exactly once
+        // per state (OcrFlow's rule); a finished consent fetch
+        // auto-retries the pending region. The `loop` (not
+        // `while let`) drops the borrow before the body — the
+        // auto-retry re-borrows the same bridge.
+        loop {
+            let event = bridge.borrow_mut().poll_ocr_event();
+            let Some(event) = event else {
+                break;
+            };
+            let now = ctx.input(|i| i.time);
+            match event {
+                crate::shell::OcrEvent::Done { text, engine } => {
+                    let chars = text.chars().count();
+                    self.clipboard_write_text(&text);
+                    self.toast = Some(crate::toast::Toast::new(
+                        format!("Copied {chars} chars"),
+                        now,
+                    ));
+                    self.ocr.note_done(text, engine);
+                }
+                crate::shell::OcrEvent::Failed {
+                    message,
+                    missing_models,
+                } => {
+                    self.ocr.note_failure(message, missing_models);
+                }
+                crate::shell::OcrEvent::ModelsFetched => {
+                    self.ocr.dismiss_consent();
+                    self.toast = Some(crate::toast::Toast::new("OCR models ready", now));
+                    self.retry_ocr();
+                }
+                crate::shell::OcrEvent::ModelsFetchFailed(detail) => {
+                    self.ocr.dismiss_consent();
+                    self.ocr
+                        .note_failure(format!("model download failed: {detail}"), false);
+                }
+            }
+        }
         // The advisory vision badge: while the AI tab is visible,
         // refresh the persisted verdict's applicability (a config
         // read — zero network; the small file reads fine at the
@@ -2272,7 +2383,7 @@ impl EditorApp {
         // without user input: a short repaint timer carries the poll.
         // No cross-thread `Context` clone — the worker signals only
         // through the bridge's channel.
-        if self.ai.is_pending() {
+        if self.ai.is_pending() || self.ocr.phase == crate::ocr::OcrPhase::Pending {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
@@ -2588,18 +2699,79 @@ impl EditorApp {
     /// because the toast — not the clipboard — is the UI contract the
     /// gesture promised.
     fn handle_copy_hex(&mut self, hex: &str, now: f64) {
-        let write = |mut c: arboard::Clipboard| c.set_text(hex.to_owned()).map(|()| c);
+        self.clipboard_write_text(hex);
+        self.toast = Some(crate::toast::Toast::new(format!("Copied {hex}"), now));
+    }
+
+    /// Best-effort text write through the session clipboard handle
+    /// (the X11 owner rule — same as image copies). A refused write
+    /// (headless display) only warns: callers toast regardless, the
+    /// toast — not the clipboard — being the UI contract.
+    fn clipboard_write_text(&mut self, text: &str) {
+        let write = |mut c: arboard::Clipboard| c.set_text(text.to_owned()).map(|()| c);
         let written = match self.clipboard.take() {
             Some(c) => write(c),
             None => arboard::Clipboard::new().and_then(write),
         };
         match written {
             Ok(c) => self.clipboard = Some(c),
-            // A refused write logs and toasts anyway — the colour
-            // value is in the message, so the user still gets it.
-            Err(err) => tracing::warn!(error = %err, "hex clipboard write failed"),
+            Err(err) => tracing::warn!(error = %err, "text clipboard write failed"),
         }
-        self.toast = Some(crate::toast::Toast::new(format!("Copied {hex}"), now));
+    }
+
+    /// OCR tool keys (the crop-tool analogue): Enter runs the whole
+    /// image when no drag is armed, Esc resets the flow (card
+    /// included). Returns whether the frame was consumed.
+    fn handle_ocr_keys(&mut self, ctx: &Context) -> bool {
+        if self.state.tool != Tool::Ocr || self.ocr.consent_open {
+            return false;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && self.ocr.accepts_press() {
+            self.start_ocr(None);
+            return true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+            && self.ocr.phase != crate::ocr::OcrPhase::Idle
+        {
+            self.ocr.reset();
+            return true;
+        }
+        false
+    }
+
+    /// Dispatch an OCR pass for `rect` (`None` = the whole image,
+    /// Enter's contract) through the page bridge. The region crop
+    /// happens here — only these pixels ever reach an engine.
+    fn start_ocr(&mut self, rect: Option<flintshot_core::Rect>) {
+        let Some(bridge) = self.page.clone() else {
+            // Worker windows have no bridge (the Ask-the-shot
+            // precedent): the tool stays inert rather than pretending.
+            tracing::warn!("ocr: no page bridge; the OCR tool needs the single window");
+            return;
+        };
+        let pixels = crate::ocr::region_pixels(&self.state.image, rect);
+        bridge.borrow_mut().ocr_request(
+            pixels.clone(),
+            self.config.ocr.choice(),
+            &self.config.ocr.lang,
+        );
+        self.ocr.note_request(pixels);
+    }
+
+    /// Re-send the last region (the card's Retry, and the automatic
+    /// re-run after a consented model fetch).
+    fn retry_ocr(&mut self) {
+        let Some(pixels) = self.ocr.retry_pixels().cloned() else {
+            return;
+        };
+        if let Some(bridge) = self.page.clone() {
+            bridge.borrow_mut().ocr_request(
+                pixels.clone(),
+                self.config.ocr.choice(),
+                &self.config.ocr.lang,
+            );
+            self.ocr.note_request(pixels);
+        }
     }
 
     /// Copy button handler: compose the final image, hand it to
@@ -3482,6 +3654,7 @@ pub(crate) fn tool_for_key(key: egui::Key) -> Option<Tool> {
         egui::Key::T => Some(Tool::Text),
         egui::Key::B => Some(Tool::Blur),
         egui::Key::N => Some(Tool::Number),
+        egui::Key::O => Some(Tool::Ocr),
         _ => None,
     }
 }
@@ -4502,6 +4675,331 @@ mod tests {
         assert_eq!(app.state.color, before, "denial changed nothing");
     }
 
+    // --- OCR tool through the shell (ocr-region OR5) ---
+
+    /// One page-mode frame over a full 1024×768 screen (the
+    /// `screen_pick_frame` shape, named for this suite).
+    fn ocr_frame(ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>) {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1024.0, 768.0),
+                )),
+                events,
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            },
+        );
+    }
+
+    /// The OCR suite's shared harness handles (the app plus its
+    /// bridge's arrival/request/fetch seams).
+    type OcrHarness = (
+        egui::Context,
+        EditorApp,
+        Arc<Mutex<VecDeque<crate::shell::OcrEvent>>>,
+        Arc<Mutex<Vec<(u32, u32)>>>,
+        Arc<Mutex<usize>>,
+    );
+
+    /// One Enter press as egui needs to see it.
+    fn fire_enter(ctx: &egui::Context, app: &mut EditorApp) {
+        ocr_frame(
+            ctx,
+            app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: Some(egui::Key::Enter),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+    }
+
+    /// A page-mode app over the OCR tool, with its bridge handles
+    /// out for seeding arrivals and reading requests.
+    fn ocr_page_app() -> OcrHarness {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let bridge = RecordingPageBridge::default();
+        let arrivals = Arc::clone(&bridge.ocr_arrivals);
+        let requests = Arc::clone(&bridge.ocr_requests);
+        let fetches = Arc::clone(&bridge.ocr_fetches);
+        let slot: PageBridgeSlot = Rc::new(RefCell::new(Box::new(bridge)));
+        let mut app = EditorApp::new_page(
+            blank_state(64, 64),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+            slot,
+        );
+        app.state.set_tool(Tool::Ocr);
+        // Settle the layout (the screen-pick suite's 30 frames): the
+        // canvas view the drag positions map through must be the
+        // frame-stable one.
+        for _ in 0..30 {
+            ocr_frame(&ctx, &mut app, vec![]);
+        }
+        (ctx, app, arrivals, requests, fetches)
+    }
+
+    /// The full happy path: drag a region, the engine receives
+    /// exactly those pixels (the region-crop rule), the text lands
+    /// on the clipboard surface (toast) and the result card holds
+    /// it with the engine badge.
+    #[test]
+    fn ocr_drag_region_crops_to_engine_copies_and_cards() {
+        let (ctx, mut app, arrivals, requests, _fetches) = ocr_page_app();
+        let press = screen_at(&app, (10.0, 20.0));
+        let drag = screen_at(&app, (30.0, 32.0));
+        ocr_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        ocr_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(drag)]);
+        ocr_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: drag,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert_eq!(
+            *requests.lock().expect("requests"),
+            vec![(20, 12)],
+            "only the dragged rect's pixels reach the engine"
+        );
+        // Seed the arrival only now (the ED replay shape): arrivals
+        // queue behind the request they answer.
+        arrivals
+            .lock()
+            .expect("arrivals")
+            .push_back(crate::shell::OcrEvent::Done {
+                text: "hello\nworld".into(),
+                engine: flintshot_core::OcrEngineKind::Ocrs,
+            });
+        ocr_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.ocr.phase,
+            crate::ocr::OcrPhase::Done {
+                text: "hello\nworld".into(),
+                engine: flintshot_core::OcrEngineKind::Ocrs,
+            },
+            "the arrival landed the result card"
+        );
+        assert_eq!(
+            app.toast.as_ref().expect("copy toast").message(),
+            "Copied 11 chars",
+            "the toast carries the clipboard copy"
+        );
+        assert!(
+            !app.ocr.consent_open,
+            "a successful pass never raises the consent dialog"
+        );
+    }
+
+    /// Enter without a drag runs the whole image through the engine.
+    #[test]
+    fn ocr_enter_without_drag_runs_the_whole_image() {
+        let (ctx, mut app, _arrivals, requests, _fetches) = ocr_page_app();
+        fire_enter(&ctx, &mut app);
+        assert_eq!(
+            *requests.lock().expect("requests"),
+            vec![(64, 64)],
+            "Enter's contract is the whole image"
+        );
+    }
+
+    /// The consent rule end-to-end: a missing-model failure opens
+    /// the dialog once; Download fetches; the fetched models retry
+    /// automatically and the second miss in the same state stays
+    /// quiet.
+    #[test]
+    fn ocr_consent_dialog_once_then_fetch_retries() {
+        let (ctx, mut app, arrivals, requests, fetches) = ocr_page_app();
+        let fail = crate::shell::OcrEvent::Failed {
+            message: "the built-in OCR models are not installed".into(),
+            missing_models: true,
+        };
+
+        // Enter fires the pass; the arrival (seeded behind it, the ED
+        // replay shape) opens the consent dialog.
+        fire_enter(&ctx, &mut app);
+        arrivals.lock().expect("arrivals").push_back(fail.clone());
+        ocr_frame(&ctx, &mut app, vec![]);
+        assert!(
+            app.ocr.consent_open,
+            "the missing-model failure opens the dialog"
+        );
+        // Settle the dialog area (read_response lags a pass and the
+        // area's auto-size settles over its first frames — the click
+        // must land on the settled button rect).
+        for _ in 0..30 {
+            ocr_frame(&ctx, &mut app, vec![]);
+        }
+
+        // The Download click is the consent: the fetch leaves, the
+        // dialog closes.
+        let at = ctx
+            .read_response(egui::Id::new("ocr_consent_download"))
+            .expect("the download button registers")
+            .rect
+            .center();
+        ocr_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(*fetches.lock().expect("fetches"), 1, "the click fetched");
+        assert!(!app.ocr.consent_open, "downloading closes the dialog");
+
+        // ModelsFetched auto-retries the same pixels…
+        arrivals
+            .lock()
+            .expect("arrivals")
+            .push_back(crate::shell::OcrEvent::ModelsFetched);
+        ocr_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            requests.lock().expect("requests").len(),
+            2,
+            "the fetch's arrival re-sent the region"
+        );
+        // …and a later Done is a plain success.
+        arrivals
+            .lock()
+            .expect("arrivals")
+            .push_back(crate::shell::OcrEvent::Done {
+                text: "text".into(),
+                engine: flintshot_core::OcrEngineKind::Ocrs,
+            });
+        ocr_frame(&ctx, &mut app, vec![]);
+        assert!(
+            matches!(app.ocr.phase, crate::ocr::OcrPhase::Done { .. }),
+            "the retry landed"
+        );
+    }
+
+    /// The once-half of the consent rule: a dismissed dialog stays
+    /// dismissed for the same missing-model state (Esc, then fail
+    /// again — no second ask).
+    #[test]
+    fn ocr_consent_second_miss_in_same_state_stays_quiet() {
+        let (ctx, mut app, arrivals, _requests, _fetches) = ocr_page_app();
+        let fail = crate::shell::OcrEvent::Failed {
+            message: "the built-in OCR models are not installed".into(),
+            missing_models: true,
+        };
+        // First miss: the dialog opens…
+        fire_enter(&ctx, &mut app);
+        arrivals.lock().expect("arrivals").push_back(fail.clone());
+        ocr_frame(&ctx, &mut app, vec![]);
+        assert!(app.ocr.consent_open, "the first miss opens the dialog");
+        // …Esc dismisses it…
+        ocr_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: Some(egui::Key::Escape),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        assert!(!app.ocr.consent_open, "Esc dismisses the dialog");
+        // …and the second miss in the same state never re-asks.
+        fire_enter(&ctx, &mut app);
+        arrivals.lock().expect("arrivals").push_back(fail);
+        ocr_frame(&ctx, &mut app, vec![]);
+        assert!(
+            !app.ocr.consent_open,
+            "the second miss in the same state stays quiet"
+        );
+    }
+
+    /// The card's Retry re-sends the last region.
+    #[test]
+    fn ocr_card_retry_resends_the_region() {
+        let (ctx, mut app, arrivals, requests, _fetches) = ocr_page_app();
+        fire_enter(&ctx, &mut app);
+        arrivals
+            .lock()
+            .expect("arrivals")
+            .push_back(crate::shell::OcrEvent::Done {
+                text: "once".into(),
+                engine: flintshot_core::OcrEngineKind::Tesseract,
+            });
+        ocr_frame(&ctx, &mut app, vec![]);
+        assert_eq!(requests.lock().expect("requests").len(), 1);
+        // Settle the card's section fold spring (the eyedropper
+        // suite's lesson: the spring owns hit-tests for its first
+        // ~dozen frames; read_response lags a pass on top).
+        for _ in 0..30 {
+            ocr_frame(&ctx, &mut app, vec![]);
+        }
+
+        let at = ctx
+            .read_response(egui::Id::new("ocr_card_retry"))
+            .expect("the retry button registers once a result shows")
+            .rect
+            .center();
+        ocr_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(
+            *requests.lock().expect("requests"),
+            vec![(64, 64), (64, 64)],
+            "retry re-sent the same pixels"
+        );
+    }
+
     // --- Point-handle reshape through the shell (annotate-polish AP5) ---
 
     /// A pinned-canvas editor app over a selected `CurvedArrow`, with
@@ -5357,6 +5855,11 @@ mod tests {
         screen_available: Arc<std::sync::atomic::AtomicBool>,
         screen_requests: Arc<Mutex<usize>>,
         screen_arrivals: Arc<Mutex<VecDeque<Result<flintshot_core::Color, String>>>>,
+        /// OCR seams (ocr-region OR5): the requested image dims (the
+        /// region-crop pin), replayable arrivals, fetch count.
+        ocr_requests: Arc<Mutex<Vec<(u32, u32)>>>,
+        ocr_arrivals: Arc<Mutex<VecDeque<crate::shell::OcrEvent>>>,
+        ocr_fetches: Arc<Mutex<usize>>,
     }
 
     impl EditorPageBridge for RecordingPageBridge {
@@ -5420,6 +5923,29 @@ mod tests {
                 .lock()
                 .expect("arrivals mutex")
                 .pop_front()
+        }
+
+        fn ocr_request(
+            &mut self,
+            image: image::RgbaImage,
+            _choice: flintshot_core::OcrEngineChoice,
+            _lang: &str,
+        ) {
+            self.ocr_requests
+                .lock()
+                .expect("ocr requests mutex")
+                .push(image.dimensions());
+        }
+
+        fn poll_ocr_event(&mut self) -> Option<crate::shell::OcrEvent> {
+            self.ocr_arrivals
+                .lock()
+                .expect("ocr arrivals mutex")
+                .pop_front()
+        }
+
+        fn ocr_fetch_models(&mut self) {
+            *self.ocr_fetches.lock().expect("ocr fetches mutex") += 1;
         }
     }
 

@@ -302,6 +302,62 @@ pub trait EditorPageBridge {
     fn poll_screen_color_pick(&mut self) -> Option<Result<flintshot_core::Color, String>> {
         None
     }
+
+    /// Fire an OCR pass over `image` (already cropped to the user's
+    /// region — only the rect ever reaches an engine). The host
+    /// resolves the configured engine choice off-thread and answers
+    /// on [`Self::poll_ocr_event`]. Default no-op (headless tests:
+    /// requests just never answer).
+    fn ocr_request(
+        &mut self,
+        _image: image::RgbaImage,
+        _choice: flintshot_core::OcrEngineChoice,
+        _lang: &str,
+    ) {
+    }
+
+    /// Take one arrived OCR event, oldest first (a pass result, or a
+    /// consented model fetch's outcome). Default: always `None`.
+    fn poll_ocr_event(&mut self) -> Option<OcrEvent> {
+        None
+    }
+
+    /// The OCR consent dialog's **Download models** click: fetch the
+    /// built-in engine's model pair into the XDG cache (the click is
+    /// the consent — no other path fetches). The outcome arrives on
+    /// [`Self::poll_ocr_event`] as [`OcrEvent::ModelsFetched`] /
+    /// [`OcrEvent::ModelsFetchFailed`]. Default no-op.
+    fn ocr_fetch_models(&mut self) {}
+}
+
+/// An OCR event, host → page (the `AiEvent` poll choreography). One
+/// event per fired request; the page's flow state machine consumes
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OcrEvent {
+    /// The pass succeeded: the recognized text (per-line newlines)
+    /// and which engine produced it (the card's badge).
+    Done {
+        /// Recognized text.
+        text: String,
+        /// The engine that recognized it.
+        engine: flintshot_core::OcrEngineKind,
+    },
+    /// The pass (or engine resolution) failed. `missing_models`
+    /// marks the built-in engine's models-absent shape — the one
+    /// failure the consent dialog can cure.
+    Failed {
+        /// One-line actionable copy (the guidance names the cure).
+        message: String,
+        /// Whether the cure is a consented model download.
+        missing_models: bool,
+    },
+    /// A consented model fetch finished: the built-in engine is now
+    /// loadable (the page auto-retries the pending region).
+    ModelsFetched,
+    /// A consented model fetch failed (transport, disk).
+    ModelsFetchFailed(String),
 }
 
 /// One arrived vision-probe result: the persisted verdict + triple

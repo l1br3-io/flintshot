@@ -62,6 +62,7 @@ mod dblclick;
 mod floating;
 mod home;
 mod magnifier;
+mod ocr;
 mod overlay;
 mod panel;
 mod pick;
@@ -85,7 +86,7 @@ pub use canvas::{CanvasView, EguiCanvas, EguiTexture};
 pub use home::{HomeBridge, HomeDirective, RecentMedia, SessionCard};
 pub use magnifier::{sample_zoomed_region, Magnifier};
 pub use shell::{
-    AiEvent, CloseHandle, EditorPageBridge, EguiShell, ModelsArrival, VisionProbeArrival,
+    AiEvent, CloseHandle, EditorPageBridge, EguiShell, ModelsArrival, OcrEvent, VisionProbeArrival,
 };
 pub use window::{Route, RouteHost, RoutedEditor, WindowExit, WindowStart};
 

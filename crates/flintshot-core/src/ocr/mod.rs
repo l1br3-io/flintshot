@@ -19,8 +19,8 @@ pub mod ocrs;
 pub mod tesseract;
 
 pub use ocrs::{
-    fetch_models_into, ModelDownloader, ModelFileSpec, OcrsEngine, DETECTION_MODEL_URL,
-    MODEL_SPECS, RECOGNITION_MODEL_URL,
+    fetch_models_into, model_cache_dir, ModelDownloader, ModelFileSpec, OcrsEngine,
+    DETECTION_MODEL_URL, MODEL_SPECS, RECOGNITION_MODEL_URL,
 };
 pub use tesseract::TesseractEngine;
 

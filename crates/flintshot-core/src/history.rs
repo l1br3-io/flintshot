@@ -89,11 +89,12 @@ fn item_word(count: usize) -> &'static str {
 
 /// The user-facing noun for an annotation owned by `tool`.
 ///
-/// Select / Crop / Hand own no annotations; the defensive noun keeps
-/// the match exhaustive when a future tool lands without a label.
+/// Select / Crop / Ocr / Hand own no annotations; the defensive noun
+/// keeps the match exhaustive when a future tool lands without a
+/// label.
 fn tool_noun(tool: Tool) -> &'static str {
     match tool {
-        Tool::Select | Tool::Crop | Tool::Hand => "annotation",
+        Tool::Select | Tool::Crop | Tool::Ocr | Tool::Hand => "annotation",
         Tool::Rect => "rect",
         Tool::Ellipse => "ellipse",
         Tool::Line => "line",

@@ -564,6 +564,12 @@ fn overlay_rail_row(ui: &mut egui::Ui, state: &mut EditorState) -> ToolbarAction
     for pod in rail::TOOL_PODS {
         panel::pod_island(ui, |ui| {
             for spec in pod.tools {
+                // OCR rides the editor page's bridge; the overlay has
+                // none, so its chip never appears here (accepting into
+                // the editor is the overlay's OCR path).
+                if spec.tool == Tool::Ocr {
+                    continue;
+                }
                 let selected = state.tool == spec.tool;
                 let tooltip = format!("{} · {}", spec.name, spec.key);
                 // Select renders labeled (rail emphasis — it is the
@@ -2876,6 +2882,9 @@ mod tests {
         let rects = rail::TOOL_PODS
             .iter()
             .flat_map(|p| p.tools.iter())
+            // The overlay renders no OCR chip (no page bridge there)
+            // — that chip never registers.
+            .filter(|spec| spec.tool != Tool::Ocr)
             .map(|spec| {
                 ctx.read_response(egui::Id::new(("overlay_tool", spec.key)))
                     .expect("rail layout registers every tool chip")
@@ -2907,8 +2916,12 @@ mod tests {
             assert!(w[0].max.x < w[1].min.x, "chips run left to right");
         }
         // Pod boundaries sit after each pod's last chip (the history
-        // pod trails the tool pods).
-        let mut sizes: Vec<usize> = rail::TOOL_PODS.iter().map(|p| p.tools.len()).collect();
+        // pod trails the tool pods). The overlay renders no OCR chip
+        // (no page bridge), so its slot is absent from the rects.
+        let mut sizes: Vec<usize> = rail::TOOL_PODS
+            .iter()
+            .map(|p| p.tools.iter().filter(|t| t.tool != Tool::Ocr).count())
+            .collect();
         sizes.push(3);
         let mut boundary = vec![false; rects.len() - 1];
         let mut i = 0;

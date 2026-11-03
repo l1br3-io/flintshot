@@ -27,6 +27,11 @@ pub enum Tool {
     /// Region crop: drag a region, then Enter or the Crop button
     /// narrows the image to it.
     Crop,
+    /// OCR: drag a region (Enter = whole image) and its text lands
+    /// on the clipboard — region → text → clipboard, the
+    /// ocr-region initiative. Like Crop the drag is shell-owned; no
+    /// annotation is ever created.
+    Ocr,
     /// Pan the view (the photo-editor hand). Presses are shell-owned
     /// and never dispatched; core no-ops them defensively.
     Hand,
@@ -700,8 +705,8 @@ impl EditorState {
     /// text-editing branch).
     ///
     /// Tools with a different input model (`Number`, `Select`,
-    /// `Crop`, `Hand`) are no-ops here; they have dedicated entry
-    /// points.
+    /// `Crop`, `Ocr`, `Hand`) are no-ops here; they have dedicated
+    /// entry points.
     ///
     /// If a `pending` annotation already exists it is replaced — the
     /// shell should `commit_annotation()` or `cancel_annotation()`
@@ -773,10 +778,10 @@ impl EditorState {
                 };
                 Annotation::text(at, "", style)
             }
-            // Number / Select / Crop / Hand have non-drag input
+            // Number / Select / Crop / Ocr / Hand have non-drag input
             // models; their entry points are tool-specific (see
             // method doc).
-            Tool::Number | Tool::Select | Tool::Crop | Tool::Hand => return,
+            Tool::Number | Tool::Select | Tool::Crop | Tool::Ocr | Tool::Hand => return,
         };
         if self.tool == Tool::Text {
             self.text_cursor = 0;

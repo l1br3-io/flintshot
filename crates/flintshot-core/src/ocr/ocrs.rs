@@ -78,6 +78,14 @@ pub(crate) fn model_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// The production fetch destination: the XDG cache dir's
+/// `flintshot/ocrs` subdir (`None` where the platform has no cache
+/// dir).
+#[must_use]
+pub fn model_cache_dir() -> Option<PathBuf> {
+    super::cache_subdir_under(dirs::cache_dir())
+}
+
 /// The engine itself: models loaded, ready for recognition passes.
 ///
 /// Construction is where models load; recognition never touches the

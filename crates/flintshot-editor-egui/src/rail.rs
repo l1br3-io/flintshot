@@ -81,6 +81,12 @@ const SELECTION_POD: &[ToolSpec] = &[
         key: "C",
         glyph: g_crop,
     },
+    ToolSpec {
+        tool: Tool::Ocr,
+        name: "OCR",
+        key: "O",
+        glyph: g_ocr,
+    },
 ];
 
 const SHAPES_POD: &[ToolSpec] = &[
@@ -331,6 +337,17 @@ fn g_crop(p: &egui::Painter, r: egui::Rect, c: Color32) {
         ((-3.0, 3.0), (6.0, 3.0)),
         ((3.0, 6.0), (3.0, -3.0)),
         ((3.0, -3.0), (-6.0, -3.0)),
+    ] {
+        seg(p, r, a, b, c, 2.0);
+    }
+}
+
+/// OCR: three text lines (the recognized-text glyph).
+fn g_ocr(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    for (a, b) in [
+        ((-6.0, -4.0), (6.0, -4.0)),
+        ((-6.0, 0.0), (6.0, 0.0)),
+        ((-6.0, 4.0), (1.0, 4.0)),
     ] {
         seg(p, r, a, b, c, 2.0);
     }
@@ -640,7 +657,10 @@ mod tests {
     #[test]
     fn tool_pods_partition_every_variant_in_spec_order() {
         let expected: &[(&str, &[Tool])] = &[
-            ("selection", &[Tool::Select, Tool::Hand, Tool::Crop]),
+            (
+                "selection",
+                &[Tool::Select, Tool::Hand, Tool::Crop, Tool::Ocr],
+            ),
             (
                 "shapes",
                 &[
@@ -743,7 +763,7 @@ mod tests {
             }
             fns.push(spec.key);
         }
-        assert_eq!(fns.len(), 13, "the full vocabulary rides the rail");
+        assert_eq!(fns.len(), 14, "the full vocabulary rides the rail");
     }
 
     #[test]

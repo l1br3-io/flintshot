@@ -1299,6 +1299,7 @@ fn run_generation(
                 ai: AiHost::default(),
                 screen_pick_probe: None,
                 screen_pick_rx: None,
+                ocr_rx: None,
             }),
             Box::new(RouteHostBridge {
                 shared: Arc::clone(shared),
@@ -2298,6 +2299,10 @@ struct PageBridge {
     /// in-flight round-trip's arrival channel.
     screen_pick_probe: Option<bool>,
     screen_pick_rx: Option<std::sync::mpsc::Receiver<Result<flintshot_core::Color, String>>>,
+    /// OCR (ocr-region): the in-flight pass's (or consented fetch's)
+    /// arrival channel. One at a time — a retry replaces the
+    /// receiver, the superseded worker's send failing into the void.
+    ocr_rx: Option<std::sync::mpsc::Receiver<flintshot_editor_egui::OcrEvent>>,
 }
 
 /// The bridge's AI plumbing. One stream at a time: a second request
@@ -2843,6 +2848,136 @@ impl EditorPageBridge for PageBridge {
             self.screen_pick_rx = None;
         }
         arrived
+    }
+
+    fn ocr_request(
+        &mut self,
+        image: image::RgbaImage,
+        choice: flintshot_core::OcrEngineChoice,
+        lang: &str,
+    ) {
+        // The spawn_chat_worker pattern: named thread, one-shot
+        // channel; a retry replaces the receiver and the superseded
+        // worker's send fails into the void.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let lang = lang.to_owned();
+        std::thread::Builder::new()
+            .name("flintshot-ocr".into())
+            .spawn(move || {
+                let _ = tx.send(run_ocr_pass(&image, choice, &lang));
+            })
+            .expect("spawn flintshot-ocr");
+        self.ocr_rx = Some(rx);
+    }
+
+    fn poll_ocr_event(&mut self) -> Option<flintshot_editor_egui::OcrEvent> {
+        // Non-blocking; the arrival is terminal (same contract as the
+        // screen pick above).
+        let arrived = self.ocr_rx.as_ref()?.try_recv().ok();
+        if arrived.is_some() {
+            self.ocr_rx = None;
+        }
+        arrived
+    }
+
+    fn ocr_fetch_models(&mut self) {
+        // The dialog's Download click IS the consent; the fetch rides
+        // the same one-shot channel shape as a pass.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("flintshot-ocr-fetch".into())
+            .spawn(move || {
+                let _ = tx.send(run_ocr_model_fetch());
+            })
+            .expect("spawn flintshot-ocr-fetch");
+        self.ocr_rx = Some(rx);
+    }
+}
+
+/// One OCR pass, off the UI thread: resolve the configured choice
+/// against the machine, load and run the engine, map the outcome.
+/// Recognition failure surfaces the same actionable copy the
+/// resolution failure would (the guidance names the cure).
+fn run_ocr_pass(
+    image: &image::RgbaImage,
+    choice: flintshot_core::OcrEngineChoice,
+    lang: &str,
+) -> flintshot_editor_egui::OcrEvent {
+    use flintshot_core::OcrEngine as _;
+    use flintshot_editor_egui::OcrEvent;
+    let kind = match flintshot_core::resolve_engine(choice, &flintshot_core::SystemOcrProbe) {
+        Ok(kind) => kind,
+        Err(e) => return ocr_failure(&e),
+    };
+    let pass = match kind {
+        flintshot_core::OcrEngineKind::Ocrs => {
+            flintshot_core::OcrsEngine::load().and_then(|engine| engine.recognize(image))
+        }
+        flintshot_core::OcrEngineKind::Tesseract => {
+            flintshot_core::TesseractEngine::new(lang).recognize(image)
+        }
+    };
+    match pass {
+        Ok(out) => OcrEvent::Done {
+            text: out.text().to_owned(),
+            engine: kind,
+        },
+        Err(e) => ocr_failure(&e),
+    }
+}
+
+/// Map an [`flintshot_core::OcrError`] into an event, flagging the
+/// missing-models shape by its guidance marker (the fetch cure's
+/// copy carries `--fetch-models`) so the page knows the consent
+/// dialog applies.
+fn ocr_failure(e: &flintshot_core::OcrError) -> flintshot_editor_egui::OcrEvent {
+    let missing_models = matches!(
+        &e,
+        flintshot_core::OcrError::NoEngine { guidance } if guidance.contains("--fetch-models")
+    );
+    flintshot_editor_egui::OcrEvent::Failed {
+        message: e.to_string(),
+        missing_models,
+    }
+}
+
+/// The consented model fetch: download the pair into the XDG cache
+/// over reqwest (the click consented; nothing else calls this).
+fn run_ocr_model_fetch() -> flintshot_editor_egui::OcrEvent {
+    use flintshot_editor_egui::OcrEvent;
+    let Some(dir) = flintshot_core::model_cache_dir() else {
+        return OcrEvent::ModelsFetchFailed("no cache directory on this platform".into());
+    };
+    let mut downloader = ReqwestModelDownloader;
+    match flintshot_core::fetch_models_into(&dir, true, &mut downloader) {
+        Ok(()) => OcrEvent::ModelsFetched,
+        Err(e) => OcrEvent::ModelsFetchFailed(e.to_string()),
+    }
+}
+
+/// reqwest-backed [`flintshot_core::ModelDownloader`]: a short-lived
+/// current-thread runtime per fetch (two per model pair — the
+/// `spawn_chat_worker` thread pattern, sized down).
+struct ReqwestModelDownloader;
+
+impl flintshot_core::ModelDownloader for ReqwestModelDownloader {
+    fn fetch(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("building the download runtime: {e}"))?;
+        rt.block_on(async {
+            let response = reqwest::get(url).await.map_err(|e| e.to_string())?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("HTTP {status}"));
+            }
+            response
+                .bytes()
+                .await
+                .map_err(|e| e.to_string())
+                .map(|bytes| bytes.to_vec())
+        })
     }
 }
 
@@ -4846,6 +4981,7 @@ mod tests {
             ai: AiHost::default(),
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
 
         bridge.report_outcome(&EditorOutcome::Saved(std::path::PathBuf::from(
@@ -4877,6 +5013,7 @@ mod tests {
             },
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
 
         // Default config: no model set ⇒ unconfigured, and the
@@ -4918,6 +5055,7 @@ mod tests {
             },
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -4977,6 +5115,7 @@ mod tests {
             },
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
 
         // Startup fired nothing (no save yet ⇒ no flight).
@@ -5055,6 +5194,7 @@ mod tests {
             },
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
         bridge.save_config(&config);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -5079,6 +5219,7 @@ mod tests {
             },
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
         let reloaded = flintshot_core::Config::load_from(&dir.path().join("config.toml"))
             .expect("the verdict persisted");
@@ -5131,6 +5272,7 @@ mod tests {
             },
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
         bridge.save_config(&config);
 
@@ -5163,6 +5305,7 @@ mod tests {
             ai: AiHost::default(),
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
         bridge.ai.config_override = Some(flintshot_core::Config::default());
         (bridge, vec![session])
@@ -5286,6 +5429,7 @@ mod tests {
             ai: AiHost::default(),
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -5327,6 +5471,7 @@ mod tests {
             },
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
         (bridge, mockito::Server::new(), dir)
     }
@@ -5463,6 +5608,7 @@ mod tests {
             },
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
 
         let mut config = flintshot_core::Config::default();
@@ -5507,6 +5653,7 @@ mod tests {
             ai: AiHost::default(),
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
 
         for outcome in [
@@ -5539,6 +5686,7 @@ mod tests {
             ai: AiHost::default(),
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
 
         let anns = vec![test_line_ann()];
@@ -5588,6 +5736,7 @@ mod tests {
             },
             screen_pick_probe: None,
             screen_pick_rx: None,
+            ocr_rx: None,
         };
         let _ = &mut bridge;
         (bridge, stop)
