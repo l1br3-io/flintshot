@@ -303,6 +303,13 @@ pub struct CaptureArgs {
     /// usual) and the grab is then cropped to the rectangle.
     #[arg(long, value_name = "X,Y,W,H", value_parser = parse_geometry)]
     pub geometry: Option<flintshot_core::geom::Rect>,
+    /// Run the selection UI, print `X,Y,W,H` to stdout, exit 0 — the
+    /// slurp contract: `flintshot capture --geometry "$(flintshot
+    /// capture --print-geometry)"`. Writes no image and implies
+    /// no-editor semantics (`--out` and `--after` are conflicts —
+    /// there is no image to write and nothing grabbed to route).
+    #[arg(long, conflicts_with_all = ["out", "after"])]
+    pub print_geometry: bool,
     /// Post-grab action on the native path: `editor` (default),
     /// `clipboard` (copy the grab, no windows), or `upload` (default
     /// upload backend; URL → clipboard). Overrides
@@ -434,6 +441,28 @@ fn pick_rect_json(rect: &flintshot_core::geom::Rect) -> String {
         "height": rect.max.y - rect.min.y,
     })
     .to_string()
+}
+
+/// The `--print-geometry` stdout line: `x,y,w,h` in whole pixels.
+/// The picker reports whole-pixel drags, so the rounding only guards
+/// the `f32` representation — and the line must parse back through
+/// the `--geometry` value parser (that round-trip is the slurp
+/// contract).
+fn geometry_line(rect: &flintshot_core::geom::Rect) -> String {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "whole-pixel screen coordinates; rounding guards the f32 representation"
+    )]
+    fn whole(v: f32) -> i32 {
+        v.round() as i32
+    }
+    format!(
+        "{},{},{},{}",
+        whole(rect.min.x),
+        whole(rect.min.y),
+        whole(rect.width()),
+        whole(rect.height())
+    )
 }
 
 /// Parse the picker handshake line back into a rect (`None` for
@@ -636,9 +665,15 @@ pub fn run_capture(args: &CaptureArgs) -> Result<()> {
         &args.output,
         "capture",
         interaction,
-        args.after.is_some() || args.geometry.is_some(),
+        args.after.is_some() || args.geometry.is_some() || args.print_geometry,
     ) {
         return Ok(());
+    }
+    if args.print_geometry {
+        // The slurp contract: selection → stdout, no image anywhere
+        // (the clap conflicts on --out/--after pin the no-editor
+        // semantics), before any delay or grab machinery.
+        return print_geometry_and_exit();
     }
     if args.delay_ms > 0 {
         tracing::debug!(delay_ms = args.delay_ms, "sleeping before capture");
@@ -702,6 +737,25 @@ fn cfg_for_post_grab() -> Config {
             Config::default()
         }
     }
+}
+
+/// `capture --print-geometry`: run the frozen-frame region picker and
+/// print the selection as `X,Y,W,H` (virtual-desktop pixels) — the
+/// slurp contract, composing with `--geometry`. Writes no image;
+/// the clap-level conflicts with `--out`/`--after` pin the no-editor
+/// semantics. Requires the editor build (the picker is a window).
+#[cfg(feature = "egui")]
+fn print_geometry_and_exit() -> Result<()> {
+    let rect = pick_region_interactively(None)
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
+        .with_context(|| "picking the region for --print-geometry")?;
+    println!("{}", geometry_line(&rect));
+    Ok(())
+}
+
+#[cfg(not(feature = "egui"))]
+fn print_geometry_and_exit() -> Result<()> {
+    color_eyre::eyre::bail!("--print-geometry needs the editor build (the picker is a window)")
 }
 
 /// Native flow: run the OS's selection UI under the prepare handshake
@@ -2933,6 +2987,55 @@ mod tests {
         );
     }
 
+    /// `--print-geometry` parses bare (the slurp contract: nothing
+    /// but the flag) and its stdout line is `X,Y,W,H` in whole
+    /// pixels.
+    #[test]
+    fn print_geometry_parses_bare_and_formats_the_line() {
+        use flintshot_core::geom::{Point, Rect};
+        let cli = Cli::parse_from(["flintshot", "capture", "--print-geometry"]);
+        match cli.command {
+            Some(Command::Capture(args)) => {
+                assert!(args.print_geometry);
+                assert_eq!(args.output.out, None, "no image destination by default");
+            }
+            other => panic!("expected capture, got {other:?}"),
+        }
+        let rect = Rect::new(Point::new(10.0, 20.0), Point::new(310.0, 420.0));
+        assert_eq!(geometry_line(&rect), "10,20,300,400");
+    }
+
+    /// Pinned no-editor semantics, enforced at parse level: there is
+    /// no image to write (`--out`) and nothing grabbed to route
+    /// (`--after`) — both combinations are hard CLI errors.
+    #[test]
+    fn print_geometry_conflicts_with_image_output_and_after() {
+        let err = Cli::try_parse_from([
+            "flintshot",
+            "capture",
+            "--print-geometry",
+            "--out",
+            "/tmp/shot.png",
+        ])
+        .expect_err("--print-geometry + --out must not parse");
+        assert!(
+            err.to_string().to_lowercase().contains("out"),
+            "the error names the conflicting flag: {err}"
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "flintshot",
+                "capture",
+                "--print-geometry",
+                "--after",
+                "clipboard"
+            ])
+            .is_err(),
+            "--print-geometry + --after must not parse (no grab to route)"
+        );
+    }
+
     /// `capture --geometry` reuses the record verb's parser: same
     /// `x,y,width,height` shape, same errors, same zero-size rejection.
     #[test]
@@ -2992,6 +3095,7 @@ mod tests {
             delay_ms: 0,
             backend: Some("xcap".into()),
             geometry: Some(Rect::new(Point::new(10.0, 20.0), Point::new(310.0, 420.0))),
+            print_geometry: false,
             after: None,
             interaction: InteractionArgs {
                 overlay: false,
@@ -3040,6 +3144,7 @@ mod tests {
             delay_ms: 0,
             backend: Some("nope".into()),
             geometry: None,
+            print_geometry: false,
             after: None,
             interaction: InteractionArgs {
                 overlay: false,
