@@ -296,6 +296,13 @@ pub struct CaptureArgs {
     /// Defaults to config's `[capture] backend`.
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
+    /// Grab exactly this rectangle — `x,y,width,height` in pixels,
+    /// no selection UI. Region, not monitor. On direct-grab backends
+    /// (X11/native) this crops the monitor framebuffer; on the
+    /// Wayland portal path the portal session still runs (consent as
+    /// usual) and the grab is then cropped to the rectangle.
+    #[arg(long, value_name = "X,Y,W,H", value_parser = parse_geometry)]
+    pub geometry: Option<flintshot_core::geom::Rect>,
     /// Post-grab action on the native path: `editor` (default),
     /// `clipboard` (copy the grab, no windows), or `upload` (default
     /// upload backend; URL → clipboard). Overrides
@@ -629,7 +636,7 @@ pub fn run_capture(args: &CaptureArgs) -> Result<()> {
         &args.output,
         "capture",
         interaction,
-        args.after.is_some(),
+        args.after.is_some() || args.geometry.is_some(),
     ) {
         return Ok(());
     }
@@ -645,6 +652,19 @@ pub fn run_capture(args: &CaptureArgs) -> Result<()> {
     }
 
     let backend = resolve_capture_backend(args.backend.as_deref())?;
+    if let Some(rect) = args.geometry {
+        // The scripted region: no OS selection UI anywhere — the rect
+        // is the selection. Same post-grab dispatch as the native
+        // path (editor default, `--out` write, `--after` routing).
+        let cfg = cfg_for_post_grab();
+        let post_grab = resolve_post_grab(&cfg.capture.after_grab, args.after.as_deref());
+        let Some(img) =
+            crate::capture_flow::region_grab_prepared(&watch, backend.as_ref(), rect, None, &cfg)?
+        else {
+            return Ok(());
+        };
+        return dispatch_native_grab(img, &args.output, interaction, &watch, post_grab);
+    }
     if backend.supports_selection() {
         let post_grab = resolve_post_grab(
             &cfg_for_post_grab().capture.after_grab,
@@ -708,7 +728,22 @@ fn native_capture_and_dispatch(
     let Some(img) = native_grab_prepared(watch, backend, None)? else {
         return Ok(());
     };
+    dispatch_native_grab(img, output, interaction, watch, post_grab)
+}
 
+/// Post-grab dispatch shared by the native flow (the OS selection UI)
+/// and the `--geometry` flow (the rect is the selection): `--out`
+/// write (wins over everything), editor shell, clipboard copy that
+/// then opens the editor shell too, or upload. Mode label "capture"
+/// throughout — selection already happened before this point, so the
+/// editor opens plain (never selection-first).
+fn dispatch_native_grab(
+    img: image::RgbaImage,
+    output: &OutputArgs,
+    interaction: Option<InteractionMode>,
+    watch: &SupersedeWatch,
+    post_grab: PostGrabAction,
+) -> Result<()> {
     if let Some(path) = &output.out {
         let (format, notice) = resolve_out_format(path, output.format.as_deref());
         if let Some(notice) = notice {
@@ -2898,6 +2933,81 @@ mod tests {
         );
     }
 
+    /// `capture --geometry` reuses the record verb's parser: same
+    /// `x,y,width,height` shape, same errors, same zero-size rejection.
+    #[test]
+    fn capture_geometry_parses_via_the_record_parser() {
+        use flintshot_core::geom::{Point, Rect};
+        let cli = Cli::parse_from(["flintshot", "capture", "--geometry", "10,20,300,400"]);
+        match cli.command {
+            Some(Command::Capture(args)) => {
+                assert_eq!(
+                    args.geometry,
+                    Some(Rect::new(Point::new(10.0, 20.0), Point::new(310.0, 420.0)))
+                );
+            }
+            other => panic!("expected capture, got {other:?}"),
+        }
+
+        let err = Cli::try_parse_from(["flintshot", "capture", "--geometry", "10,20,300"])
+            .expect_err("three fields must not parse");
+        assert!(err.to_string().contains("x,y,width,height"));
+        assert!(
+            Cli::try_parse_from(["flintshot", "capture", "--geometry", "0,0,0,100"]).is_err(),
+            "zero size must be rejected at parse time"
+        );
+    }
+
+    /// The portal-crop honesty line rides `--help`: a Wayland user
+    /// must see that `--geometry` crops a portal grab rather than
+    /// grabbing the rect directly.
+    #[test]
+    fn capture_help_states_the_geometry_portal_crop_honesty() {
+        let err = Cli::try_parse_from(["flintshot", "capture", "--help"])
+            .expect_err("--help renders as a clap error");
+        let help = err.to_string();
+        assert!(
+            help.contains("portal"),
+            "honesty copy names the portal: {help}"
+        );
+        assert!(
+            help.to_lowercase().contains("crop"),
+            "honesty copy says the portal result is cropped: {help}"
+        );
+    }
+
+    /// End-to-end geometry grab on any X display (Xvfb in CI-style
+    /// runs, X-Wayland on a session): `--geometry 10,20,300,400 --out`
+    /// must write an image measuring exactly 300×400. Soft-skips
+    /// headless (the parse/seam units cover the rest there).
+    #[test]
+    fn capture_geometry_writes_exact_dimensions_on_a_display() {
+        use flintshot_core::geom::{Point, Rect};
+        if std::env::var_os("DISPLAY").is_none() {
+            return; // headless: covered by the parse + seam units
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geom.png");
+        let args = CaptureArgs {
+            delay_ms: 0,
+            backend: Some("xcap".into()),
+            geometry: Some(Rect::new(Point::new(10.0, 20.0), Point::new(310.0, 420.0))),
+            after: None,
+            interaction: InteractionArgs {
+                overlay: false,
+                editor: false,
+            },
+            output: OutputArgs {
+                out: Some(path.clone()),
+                format: None,
+                standalone: true,
+            },
+        };
+        run_capture(&args).expect("the geometry grab + write succeed");
+        let img = image::open(&path).expect("the out file decodes");
+        assert_eq!((img.width(), img.height()), (300, 400));
+    }
+
     #[test]
     fn capture_parses_after_flag() {
         let cli = Cli::parse_from(["flintshot", "capture", "--after", "clipboard"]);
@@ -2929,6 +3039,7 @@ mod tests {
         let args = CaptureArgs {
             delay_ms: 0,
             backend: Some("nope".into()),
+            geometry: None,
             after: None,
             interaction: InteractionArgs {
                 overlay: false,

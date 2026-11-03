@@ -636,10 +636,233 @@ pub(crate) fn monitor_grab_prepared(
         .with_context(|| format!("capturing {mode} on the primary monitor"))
 }
 
+/// A monitor's rect in virtual-desktop coordinates (physical px, as
+/// [`flintshot_core::capture::MonitorInfo`] reports them).
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "screen coordinates and sizes fit f32's mantissa exactly"
+)]
+fn monitor_rect(m: &flintshot_core::capture::MonitorInfo) -> flintshot_core::geom::Rect {
+    flintshot_core::geom::Rect::new(
+        flintshot_core::geom::Point::new(m.x as f32, m.y as f32),
+        flintshot_core::geom::Point::new(m.x as f32 + m.width as f32, m.y as f32 + m.height as f32),
+    )
+}
+
+/// Pick the monitor (by index) whose virtual-desktop rect has the
+/// largest overlap with `rect` (full containment falls out as the
+/// degenerate max). `None` when nothing overlaps or the list is
+/// empty — the caller then grabs the primary and the crop reports
+/// the miss. Takes `(index, rect)` pairs so tests construct inputs
+/// without [`flintshot_core::capture::MonitorInfo`]
+/// (`#[non_exhaustive]`); pure, so the routing is unit-testable
+/// headless.
+pub(crate) fn select_rect_monitor(
+    monitors: &[(u32, flintshot_core::geom::Rect)],
+    rect: flintshot_core::geom::Rect,
+) -> Option<u32> {
+    monitors
+        .iter()
+        .filter_map(|(index, mrect)| {
+            rect.intersect(*mrect)
+                .map(|ix| (*index, ix.width() * ix.height()))
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(index, _)| index)
+}
+
+/// Crop the virtual-desktop `rect` out of a monitor grab whose
+/// top-left corner sits at `origin` in the virtual desktop:
+/// translate into image coordinates, clamp to the image bounds, and
+/// report a miss as `None` (never an empty image). Pure, so the
+/// geometry math is unit-testable headless.
+pub(crate) fn crop_virtual_rect(
+    src: &image::RgbaImage,
+    rect: flintshot_core::geom::Rect,
+    origin: (f32, f32),
+) -> Option<image::RgbaImage> {
+    // Image-space edges, floored at zero (a rect poking left/above the
+    // monitor keeps its in-image part).
+    let x0 = (rect.min.x - origin.0).max(0.0);
+    let y0 = (rect.min.y - origin.1).max(0.0);
+    let x1 = (rect.max.x - origin.0).max(0.0);
+    let y1 = (rect.max.y - origin.1).max(0.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "values clamped to [0, image bound] before truncation; image dims fit f32 exactly"
+    )]
+    let (x0, y0, x1, y1) = (
+        x0.min(src.width() as f32) as u32,
+        y0.min(src.height() as f32) as u32,
+        x1.min(src.width() as f32) as u32,
+        y1.min(src.height() as f32) as u32,
+    );
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+    Some(image::imageops::crop_imm(src, x0, y0, x1 - x0, y1 - y0).to_image())
+}
+
+/// The `--geometry` grab under the prepare handshake: route to the
+/// best-overlap monitor, grab it through `backend` (a direct
+/// framebuffer crop on X11/native; the portal session plus composite
+/// crop on Wayland — the `--help` honesty line), then crop to the
+/// translated rectangle. `Ok(None)` is a quiet exit (superseded
+/// before the grab).
+pub(crate) fn region_grab_prepared(
+    watch: &SupersedeWatch,
+    backend: &dyn flintshot_core::capture::Capturer,
+    rect: flintshot_core::geom::Rect,
+    override_path: Option<&std::path::Path>,
+    cfg: &Config,
+) -> Result<Option<image::RgbaImage>> {
+    let _prepared = CaptureGuard::request_at(override_path);
+    if watch.superseded() {
+        tracing::info!("geometry capture superseded before the grab; exiting");
+        return Ok(None);
+    }
+    // `CaptureOptions` is `#[non_exhaustive]`: mutate-from-default is
+    // the cross-crate construction path.
+    let mut opts = CaptureOptions::default();
+    opts.include_cursor = cfg.capture.include_cursor;
+
+    let monitors = backend.monitors().unwrap_or_default();
+    let pairs: Vec<(u32, flintshot_core::geom::Rect)> = monitors
+        .iter()
+        .map(|m| (m.index, monitor_rect(m)))
+        .collect();
+    let monitor = select_rect_monitor(&pairs, rect);
+    tracing::info!(
+        backend = backend.id(),
+        monitor = ?monitor,
+        "grabbing the --geometry rectangle (monitor grab, then crop)"
+    );
+    let img = backend
+        .capture_monitor(monitor, &opts)
+        .map_err(|e| color_eyre::eyre::eyre!(e.to_string()))
+        .with_context(|| "grabbing the monitor for --geometry")?;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "screen coordinates fit f32's mantissa exactly"
+    )]
+    let origin = monitor
+        .and_then(|i| monitors.iter().find(|m| m.index == i))
+        .map_or((0.0, 0.0), |m| (m.x as f32, m.y as f32));
+    crop_virtual_rect(&img, rect, origin)
+        .map(Some)
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "the --geometry rectangle does not intersect the captured monitor"
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::SupersedeWatch;
+
+    // ── --geometry region routing (cli-scripting CS1) ────────────
+
+    use flintshot_core::geom::Rect;
+
+    /// `(index, virtual-desktop rect)` — the seam's input shape.
+    fn mon(index: u32, x: f32, y: f32, width: f32, height: f32) -> (u32, Rect) {
+        (
+            index,
+            Rect::new(
+                flintshot_core::geom::Point::new(x, y),
+                flintshot_core::geom::Point::new(x + width, y + height),
+            ),
+        )
+    }
+
+    #[test]
+    fn select_rect_monitor_picks_the_best_overlap() {
+        let single = vec![mon(0, 0.0, 0.0, 800.0, 600.0)];
+        let inside = Rect::from_xywh(10.0, 20.0, 300.0, 400.0);
+        assert_eq!(select_rect_monitor(&single, inside), Some(0));
+
+        // Two side-by-side monitors; the rect lives entirely on the
+        // second → the second is grabbed.
+        let pair = vec![
+            mon(0, 0.0, 0.0, 800.0, 600.0),
+            mon(1, 800.0, 0.0, 800.0, 600.0),
+        ];
+        let on_second = Rect::from_xywh(900.0, 10.0, 100.0, 100.0);
+        assert_eq!(select_rect_monitor(&pair, on_second), Some(1));
+
+        // Spanning rect: more area on the second monitor → the second.
+        let spanning = Rect::from_xywh(600.0, 0.0, 500.0, 600.0);
+        assert_eq!(select_rect_monitor(&pair, spanning), Some(1));
+
+        // Off-screen rect overlapping nothing → None (the caller
+        // falls back to the primary and the crop reports the miss).
+        let offscreen = Rect::from_xywh(5000.0, 5000.0, 10.0, 10.0);
+        assert_eq!(select_rect_monitor(&pair, offscreen), None);
+        assert_eq!(select_rect_monitor(&[], inside), None);
+    }
+
+    #[test]
+    fn crop_virtual_rect_translates_clamps_and_reports_misses() {
+        let mut src = image::RgbaImage::new(800, 600);
+        src.put_pixel(10, 20, image::Rgba([7, 7, 7, 255]));
+
+        // Origin (0,0): the crop is the rect itself.
+        let crop = crop_virtual_rect(&src, Rect::from_xywh(10.0, 20.0, 300.0, 400.0), (0.0, 0.0))
+            .expect("interior rect crops");
+        assert_eq!(crop.dimensions(), (300, 400));
+        assert_eq!(crop.get_pixel(0, 0), &image::Rgba([7, 7, 7, 255]));
+
+        // A monitor origin translates virtual coords into image
+        // coords: virtual (110,70) with origin (100,50) → (10,20).
+        let shifted = crop_virtual_rect(
+            &src,
+            Rect::from_xywh(110.0, 70.0, 300.0, 400.0),
+            (100.0, 50.0),
+        )
+        .expect("translated rect crops");
+        assert_eq!(shifted.get_pixel(0, 0), &image::Rgba([7, 7, 7, 255]));
+
+        // Past the edges the crop clamps to what the image has.
+        let clamped =
+            crop_virtual_rect(&src, Rect::from_xywh(780.0, 590.0, 50.0, 50.0), (0.0, 0.0))
+                .expect("edge rect still crops the remainder");
+        assert_eq!(clamped.dimensions(), (20, 10));
+
+        // No intersection at all → None (never an empty image).
+        assert!(
+            crop_virtual_rect(&src, Rect::from_xywh(900.0, 0.0, 10.0, 10.0), (0.0, 0.0)).is_none()
+        );
+    }
+
+    #[test]
+    fn region_grab_abandons_when_superseded_before_the_grab() {
+        // Superseded before the handshake: no monitor is enumerated,
+        // no display is touched — the guard returns Ok(None).
+        let watch = SupersedeWatch::inert();
+        watch
+            .flag()
+            .store(true, std::sync::atomic::Ordering::Release);
+        let outcome = region_grab_prepared(
+            &watch,
+            flintshot_core::registered_backends()
+                .into_iter()
+                .next()
+                .as_ref()
+                .map(|b| b.as_ref() as &dyn flintshot_core::capture::Capturer)
+                .expect("the registry is never empty"),
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0),
+            Some(std::path::Path::new(
+                "/this/does/not/exist/flintshot-test-geom-superseded.sock",
+            )),
+            &flintshot_core::Config::default(),
+        )
+        .expect("an abandoned grab is Ok(None), not an error");
+        assert!(outcome.is_none(), "superseded → no grab at all");
+    }
 
     // ── Clipboard-copy persistence (recent-captures-v2 Task 004) ─
 
