@@ -16,7 +16,9 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use color_eyre::{eyre::Context, Result};
 use flintshot_core::ipc::Request;
-use flintshot_core::{BackendReport, Config, ImageMime, SessionKind, UploadContext, UploadOutcome};
+use flintshot_core::{
+    BackendReport, Config, ImageMime, OutputFormat, SessionKind, UploadContext, UploadOutcome,
+};
 use flintshot_record::RecordError;
 use image::ImageFormat;
 
@@ -106,7 +108,7 @@ pub struct DaemonArgs {
 /// "COMMON OPTIONS" section.
 #[derive(Debug, Args)]
 pub struct OutputArgs {
-    /// Write the PNG to `PATH` and skip the editor entirely
+    /// Write the capture to `PATH` and skip the editor entirely
     /// (headless / scripting path).
     ///
     /// When omitted, the captured screenshot is opened in the editor
@@ -114,10 +116,19 @@ pub struct OutputArgs {
     /// `--no-default-features` builds reject `capture` without
     /// `--out` with a clear error).
     ///
-    /// Format is always PNG regardless of the extension; a non-`.png`
-    /// path still yields valid PNG bytes.
+    /// The output format follows `PATH`'s extension: `.png` (also
+    /// the fallback for unknown or missing extensions), `.jpg` /
+    /// `.jpeg`, or `.webp` (lossless). `--format` overrides the
+    /// extension.
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
+    /// Output format override: `png`, `jpeg`, or `webp`. WebP is
+    /// lossless-only (the pure-Rust encoder has no lossy mode; the
+    /// JPEG quality knob does not apply). Wins over the `--out`
+    /// path's extension, with a one-line notice when the two
+    /// disagree.
+    #[arg(long, value_parser = ["png", "jpeg", "webp"], value_name = "FORMAT")]
+    pub format: Option<String>,
     /// Skip daemon detect-and-delegate: always run the capture + editor
     /// in this process, even if a daemon is running. Escape hatch for
     /// debugging (delegated captures centralise their `Event` stream;
@@ -699,7 +710,11 @@ fn native_capture_and_dispatch(
     };
 
     if let Some(path) = &output.out {
-        write_png(&img, path)?;
+        let (format, notice) = resolve_out_format(path, output.format.as_deref());
+        if let Some(notice) = notice {
+            eprintln!("{notice}");
+        }
+        write_out(&img, path, format)?;
         tracing::info!(path = %path.display(), "native capture saved");
         return Ok(());
     }
@@ -939,7 +954,11 @@ fn capture_and_dispatch(
     };
 
     if let Some(path) = &output.out {
-        write_png(&img, path)?;
+        let (format, notice) = resolve_out_format(path, output.format.as_deref());
+        if let Some(notice) = notice {
+            eprintln!("{notice}");
+        }
+        write_out(&img, path, format)?;
         tracing::info!(path = %path.display(), "{mode} capture saved");
     } else {
         if watch.superseded() {
@@ -1879,18 +1898,86 @@ fn session_str(session: SessionKind) -> &'static str {
     }
 }
 
-/// Encode `img` as PNG to `path`, creating parent directories as
-/// needed. Format is forced to PNG regardless of the path extension
-/// so `--out foo.bar` still produces a valid PNG.
-fn write_png(img: &image::RgbaImage, path: &std::path::Path) -> Result<()> {
+/// The `--out` path's format, from its extension: jpg/jpeg → JPEG,
+/// webp → WebP, anything else — including a missing extension —
+/// stays PNG.
+fn format_for_out_ext(path: &std::path::Path) -> OutputFormat {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => OutputFormat::Jpeg,
+        "webp" => OutputFormat::Webp,
+        _ => OutputFormat::Png,
+    }
+}
+
+/// Resolve the `--out` output format: the path's extension decides;
+/// an explicit `--format` wins, with a one-line notice when the two
+/// disagree (silent on agreement). `flag` arrives pre-validated by
+/// clap's value parser.
+fn resolve_out_format(out: &std::path::Path, flag: Option<&str>) -> (OutputFormat, Option<String>) {
+    let by_ext = format_for_out_ext(out);
+    let Some(flag) = flag else {
+        return (by_ext, None);
+    };
+    let format = match flag {
+        "jpeg" => OutputFormat::Jpeg,
+        "webp" => OutputFormat::Webp,
+        _ => OutputFormat::Png,
+    };
+    let notice = (format != by_ext).then(|| {
+        let ext = out.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        let ext_desc = if ext.is_empty() {
+            "the extension-less path".to_owned()
+        } else {
+            format!("the .{ext} extension")
+        };
+        format!("note: --format {flag} overrides {ext_desc}")
+    });
+    (format, notice)
+}
+
+/// Encode `img` to `path` in `format`, creating parent directories
+/// as needed. JPEG encodes at the configured `[output]`
+/// `jpeg-quality` (90 when config loading fails — the pixels are
+/// already in hand, a config read must not lose them); WebP is the
+/// lossless-only encoder.
+fn write_out(img: &image::RgbaImage, path: &std::path::Path, format: OutputFormat) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating output directory {}", parent.display()))?;
         }
     }
-    img.save_with_format(path, ImageFormat::Png)
-        .with_context(|| format!("writing PNG to {}", path.display()))
+    match format {
+        OutputFormat::Jpeg => {
+            let quality = Config::load().map_or(90, |c| c.output.jpeg_quality);
+            let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+            let file = std::fs::File::create(path)
+                .with_context(|| format!("creating {}", path.display()))?;
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                file,
+                u8::try_from(quality.clamp(1, 100)).unwrap_or(90),
+            );
+            rgb.write_with_encoder(encoder)
+                .with_context(|| format!("writing JPEG to {}", path.display()))?;
+        }
+        OutputFormat::Webp => {
+            let file = std::fs::File::create(path)
+                .with_context(|| format!("creating {}", path.display()))?;
+            let encoder = image::codecs::webp::WebPEncoder::new_lossless(file);
+            img.write_with_encoder(encoder)
+                .with_context(|| format!("writing WebP to {}", path.display()))?;
+        }
+        _ => {
+            img.save_with_format(path, ImageFormat::Png)
+                .with_context(|| format!("writing PNG to {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// `flintshot upload` — Phase 4.
@@ -2650,6 +2737,132 @@ mod tests {
         }
     }
 
+    /// `--out` is extension-driven: webp/jpg/jpeg map to their
+    /// formats; png, unknown, or missing extensions stay PNG.
+    #[test]
+    fn out_format_follows_the_extension() {
+        let cases = [
+            ("shot.webp", OutputFormat::Webp),
+            ("shot.jpg", OutputFormat::Jpeg),
+            ("shot.jpeg", OutputFormat::Jpeg),
+            ("shot.png", OutputFormat::Png),
+            ("shot", OutputFormat::Png),
+            ("shot.bar", OutputFormat::Png),
+        ];
+        for (name, want) in cases {
+            assert_eq!(
+                resolve_out_format(std::path::Path::new(name), None),
+                (want, None),
+                "{name}"
+            );
+        }
+    }
+
+    /// Pinned: `--format` wins over the `--out` extension, with a
+    /// one-line notice when the two disagree (silent on agreement).
+    #[test]
+    fn format_flag_overrides_the_extension_with_a_notice() {
+        let (format, notice) = resolve_out_format(std::path::Path::new("shot.png"), Some("webp"));
+        assert_eq!(format, OutputFormat::Webp);
+        let notice = notice.expect("disagreement yields the one-line notice");
+        assert!(
+            notice.contains("--format webp"),
+            "the notice names the flag: {notice}"
+        );
+
+        assert_eq!(
+            resolve_out_format(std::path::Path::new("shot.webp"), Some("webp")),
+            (OutputFormat::Webp, None),
+            "agreement stays silent"
+        );
+        assert_eq!(
+            resolve_out_format(std::path::Path::new("shot.png"), Some("png")),
+            (OutputFormat::Png, None),
+            "png agreement stays silent"
+        );
+    }
+
+    /// The headless write path encodes the format it resolved —
+    /// magic bytes per format.
+    #[test]
+    fn write_out_encodes_each_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 99, 199, 255]));
+        for (format, name) in [
+            (OutputFormat::Png, "shot.png"),
+            (OutputFormat::Jpeg, "shot.jpg"),
+            (OutputFormat::Webp, "shot.webp"),
+        ] {
+            let path = dir.path().join(name);
+            write_out(&img, &path, format).unwrap();
+            let mut head = [0u8; 12];
+            std::io::Read::read_exact(
+                &mut std::io::BufReader::new(std::fs::File::open(&path).unwrap()),
+                &mut head,
+            )
+            .unwrap();
+            match format {
+                OutputFormat::Png => {
+                    assert_eq!(&head[0..4], &[0x89, b'P', b'N', b'G'], "{name} magic");
+                }
+                OutputFormat::Jpeg => {
+                    assert_eq!(&head[0..3], &[0xFF, 0xD8, 0xFF], "{name} magic");
+                }
+                OutputFormat::Webp => {
+                    assert_eq!(&head[0..4], b"RIFF", "{name} magic");
+                    assert_eq!(&head[8..12], b"WEBP", "{name} tag");
+                }
+                _ => panic!("unreachable for this test's cases"),
+            }
+        }
+    }
+
+    /// `--format` parses with the pinned vocabulary and rejects
+    /// anything else (a typo is a clap error, not a silent PNG).
+    #[test]
+    fn capture_parses_and_rejects_format_values() {
+        let cli = Cli::parse_from([
+            "flintshot",
+            "capture",
+            "--out",
+            "/tmp/shot.png",
+            "--format",
+            "webp",
+        ]);
+        match cli.command {
+            Some(Command::Capture(args)) => {
+                assert_eq!(args.output.format.as_deref(), Some("webp"));
+            }
+            other => panic!("expected capture, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["flintshot", "capture", "--format", "avif"]).is_err(),
+            "unknown formats are rejected at parse time"
+        );
+    }
+
+    /// `capture --help` no longer claims PNG-always; the format copy
+    /// states the extension-driven rule and WebP's lossless-only
+    /// fact.
+    #[test]
+    fn capture_help_states_the_format_rules() {
+        let err = Cli::try_parse_from(["flintshot", "capture", "--help"])
+            .expect_err("--help renders as a clap error");
+        let help = err.to_string();
+        assert!(
+            !help.to_lowercase().contains("always png"),
+            "the PNG-always claim is gone"
+        );
+        assert!(
+            help.contains("extension"),
+            "the extension-driven rule is stated"
+        );
+        assert!(
+            help.contains("lossless"),
+            "WebP's lossless-only copy is stated"
+        );
+    }
+
     #[test]
     fn capture_parses_bare_and_interaction_flags() {
         let cli = Cli::parse_from(["flintshot", "capture"]);
@@ -2723,6 +2936,7 @@ mod tests {
             },
             output: OutputArgs {
                 out: None,
+                format: None,
                 standalone: false,
             },
         };
@@ -2760,6 +2974,7 @@ mod tests {
     fn after_flag_skips_daemon_delegation() {
         let output = OutputArgs {
             out: None,
+            format: None,
             standalone: false,
         };
         assert!(
@@ -3161,6 +3376,7 @@ mod tests {
         // flag must force the standalone path before any socket IO.
         let output = OutputArgs {
             out: None,
+            format: None,
             standalone: false,
         };
         assert!(

@@ -297,15 +297,19 @@ fn editor_section(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
     });
 }
 
-/// The Output & saving section: format, JPEG quality (jpeg only),
-/// the filename template draft, the save directory, and the
-/// copy-after-capture switch.
+/// The Output & saving section: format, JPEG quality (jpeg only —
+/// WebP is lossless, no knob), the filename template draft, the
+/// save directory, and the copy-after-capture switch.
 fn output_section(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
     section_card(ui, "Output & saving", |ui| {
         set_row(ui, "Format", |ui| {
-            let formats = ["png", "jpeg"];
+            let formats = ["png", "jpeg", "webp"];
             let current = parse_output_format(&page.config.output.format);
-            let idx = usize::from(current == OutputFormat::Jpeg);
+            let idx = match current {
+                OutputFormat::Jpeg => 1,
+                OutputFormat::Webp => 2,
+                _ => 0,
+            };
             if let Some(pick) = widgets::well_row(ui, egui::Id::new("set-format"), &formats, idx) {
                 set_str(&mut page.config.output.format, formats[pick]);
                 page.mark_dirty(now);
@@ -325,6 +329,10 @@ fn output_section(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
                     page.config.output.jpeg_quality = values[pick];
                     page.mark_dirty(now);
                 }
+            });
+        } else if parse_output_format(&page.config.output.format) == OutputFormat::Webp {
+            set_row(ui, "WebP quality", |ui| {
+                readonly_value(ui, "lossless — no quality knob");
             });
         }
         set_row(ui, "Filename template", |ui| {
@@ -751,7 +759,7 @@ mod tests {
             ("set-default-mode", 3),
             ("set-delay", 3),
             ("set-size-mode", 2),
-            ("set-format", 2),
+            ("set-format", 3),
         ];
         for (base, segments) in wells {
             for i in 0..segments {
@@ -780,6 +788,84 @@ mod tests {
                 .is_some(),
             "the locked guarantee display renders"
         );
+    }
+
+    /// The format picker spans three formats; the JPEG-quality row
+    /// stays JPEG-only — WebP gets the lossless note in its slot
+    /// (the encoder has no knob).
+    #[test]
+    fn format_picker_spans_three_and_quality_row_stays_jpeg_only() {
+        let mut jpeg_page = page();
+        jpeg_page.config.output.format = "jpeg".into();
+        let ctx = frame(&mut jpeg_page);
+        assert!(
+            ctx.read_response(egui::Id::new("set-quality").with(0))
+                .is_some(),
+            "jpeg shows the JPEG-quality row"
+        );
+
+        let mut webp_page = page();
+        webp_page.config.output.format = "webp".into();
+        let ctx = frame(&mut webp_page);
+        for i in 0..3 {
+            assert!(
+                ctx.read_response(egui::Id::new("set-format").with(i))
+                    .is_some(),
+                "set-format segment {i} renders"
+            );
+        }
+        assert!(
+            ctx.read_response(egui::Id::new("set-quality").with(0))
+                .is_none(),
+            "webp hides the JPEG-only quality row"
+        );
+        let shapes = frame_shapes(&mut webp_page);
+        assert!(
+            shapes.iter().any(|cs| matches!(&cs.shape,
+                egui::Shape::Text(t) if t.galley.job.text.contains("lossless"))),
+            "the webp slot states the lossless-only fact"
+        );
+    }
+
+    /// Picking the third well writes `webp` to the field (the
+    /// idx → string mapping, pinned through a click).
+    #[test]
+    fn format_picker_click_writes_the_format_field() {
+        let mut page = page();
+        let ctx = frame(&mut page);
+        let seg = ctx
+            .read_response(egui::Id::new("set-format").with(2))
+            .expect("webp segment renders");
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 900.0),
+            )),
+            events: {
+                let at = seg.rect.center();
+                vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]
+            },
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            SettingsPage::show(ui, &mut page, 0.0);
+        });
+        assert_eq!(page.config.output.format, "webp", "the click picked webp");
+        assert!(page.save_due(10.0), "an edit arms the save debounce");
     }
 
     /// Editable rows write their config field live (row→field

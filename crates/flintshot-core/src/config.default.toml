@@ -103,8 +103,10 @@ capture = "Ctrl+Shift+PrintScreen"
 default-backend = "imgur"
 
 [output]
-# Saved-image format: "png" (lossless) or "jpeg" (lossy, at
-# jpeg-quality). Unknown values resolve "png" with a warning.
+# Saved-image format: "png" (lossless), "jpeg" (lossy, at
+# jpeg-quality), or "webp" (lossless-only — the pure-Rust encoder
+# has no lossy mode; jpeg-quality does not apply). Unknown values
+# resolve "png" with a warning.
 format = "png"
 
 # JPEG quality, 1-100. Ignored for PNG.

@@ -540,8 +540,9 @@ fn default_default_mode() -> String {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub struct OutputConfig {
-    /// Saved-image format: `"png"` (default) or `"jpeg"`. Unknown
-    /// values resolve `png` with a warning.
+    /// Saved-image format: `"png"` (default), `"jpeg"`, or
+    /// `"webp"` (lossless-only — the pure-Rust encoder has no lossy
+    /// mode). Unknown values resolve `png` with a warning.
     #[serde(default = "default_output_format")]
     pub format: String,
     /// JPEG quality, 1–100 (default 90). Ignored for PNG.

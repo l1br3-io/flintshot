@@ -2341,7 +2341,8 @@ impl EditorApp {
     /// Save button / Ctrl+S handler: compose the image per the
     /// phase contract ([`compose_for_save`] — selection-aware while
     /// the selection-first phase is live), prompt for a path via
-    /// `rfd`, write PNG, publish `Saved(path)` on success.
+    /// `rfd` (format choosable at the dialog), write it in the
+    /// chosen path's format, publish `Saved(path)` on success.
     fn handle_save(&self, ctx: &Context) {
         // Direct save when a filename template is configured; the
         // file dialog otherwise.
@@ -2520,15 +2521,65 @@ fn save_dialog_dir(output: &flintshot_core::OutputConfig) -> std::path::PathBuf 
     output.resolve_save_dir()
 }
 
-/// Prompt for a PNG save path via `rfd`, prefilled with `dir`.
-/// Blocks on the native modal — the eframe event loop is already
-/// blocking, and the dialog is what the user is interacting with
-/// anyway. `None` when the user cancels.
-fn prompt_png_path(dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("PNG image", &["png"])
-        .set_directory(dir)
-        .set_file_name("flintshot.png")
+/// The save dialog's prefilled file name — `flintshot.<ext>` per
+/// the configured `[output] format`.
+fn save_dialog_file_name(output: &flintshot_core::OutputConfig) -> String {
+    format!(
+        "flintshot.{}",
+        flintshot_core::output_ext(flintshot_core::parse_output_format(&output.format))
+    )
+}
+
+/// The save dialog's filter set: the configured format's filter
+/// first (the dialog opens with the first filter selected, so
+/// `[output] format` picks the default), the other two after — the
+/// format stays choosable at the moment of save. WebP's filter
+/// label carries the lossless-only honesty copy.
+fn save_dialog_filters(
+    output: &flintshot_core::OutputConfig,
+) -> Vec<(&'static str, Vec<&'static str>)> {
+    let png = ("PNG image", vec!["png"]);
+    let jpeg = ("JPEG image", vec!["jpg", "jpeg"]);
+    let webp = ("WebP image (lossless)", vec!["webp"]);
+    match flintshot_core::parse_output_format(&output.format) {
+        flintshot_core::OutputFormat::Jpeg => vec![jpeg, png, webp],
+        flintshot_core::OutputFormat::Webp => vec![webp, png, jpeg],
+        _ => vec![png, jpeg, webp],
+    }
+}
+
+/// A save path's format, from its extension: the dialog's filter
+/// dropdown decided it (the prefill steered, this follows).
+/// jpg/jpeg → JPEG, webp → WebP, anything else — including a
+/// missing extension — stays PNG.
+fn format_for_save_path(path: &std::path::Path) -> flintshot_core::OutputFormat {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => flintshot_core::OutputFormat::Jpeg,
+        "webp" => flintshot_core::OutputFormat::Webp,
+        _ => flintshot_core::OutputFormat::Png,
+    }
+}
+
+/// Prompt for a save path via `rfd`, prefilled with `dir` and the
+/// configured format (its filter first, `flintshot.<ext>` as the
+/// file name). Blocks on the native modal — the eframe event loop
+/// is already blocking, and the dialog is what the user is
+/// interacting with anyway. `None` when the user cancels.
+fn prompt_save_path(
+    dir: &std::path::Path,
+    output: &flintshot_core::OutputConfig,
+) -> Option<std::path::PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_directory(dir);
+    for (name, exts) in save_dialog_filters(output) {
+        dialog = dialog.add_filter(name, &exts);
+    }
+    dialog
+        .set_file_name(save_dialog_file_name(output))
         .save_file()
 }
 
@@ -2600,20 +2651,56 @@ fn save_direct(
 /// case.
 ///
 /// # Errors
-/// Surfaces [`FlintshotError::Image`] if PNG encoding or the
+/// Surfaces [`FlintshotError::Image`] if the encode or the
 /// filesystem write fails.
 fn save_to_disk(
     state: &EditorState,
     selection_aware: bool,
     output: &flintshot_core::OutputConfig,
 ) -> flintshot_core::Result<Option<std::path::PathBuf>> {
-    let Some(path) = prompt_png_path(&save_dialog_dir(output)) else {
+    let Some(path) = prompt_save_path(&save_dialog_dir(output), output) else {
         return Ok(None);
     };
-    compose_for_save(selection_aware, state)
-        .save_with_format(&path, image::ImageFormat::Png)
-        .map_err(FlintshotError::from)?;
+    write_save_image(&compose_for_save(selection_aware, state), &path, output)?;
     Ok(Some(path))
+}
+
+/// Encode the composed image to the dialog-chosen `path` in the
+/// path's format ([`format_for_save_path`]): JPEG at the configured
+/// quality, lossless WebP, PNG otherwise. The path is written
+/// exactly — the dialog already asked.
+///
+/// # Errors
+/// Surfaces [`FlintshotError::Io`] on file creation and
+/// [`FlintshotError::Image`] on encode failure.
+fn write_save_image(
+    img: &image::RgbaImage,
+    path: &std::path::Path,
+    output: &flintshot_core::OutputConfig,
+) -> flintshot_core::Result<()> {
+    match format_for_save_path(path) {
+        flintshot_core::OutputFormat::Jpeg => {
+            let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+            let file = std::fs::File::create(path)?;
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                file,
+                u8::try_from(output.jpeg_quality.clamp(1, 100)).unwrap_or(90),
+            );
+            rgb.write_with_encoder(encoder)
+                .map_err(FlintshotError::from)?;
+        }
+        flintshot_core::OutputFormat::Webp => {
+            let file = std::fs::File::create(path)?;
+            let encoder = image::codecs::webp::WebPEncoder::new_lossless(file);
+            img.write_with_encoder(encoder)
+                .map_err(FlintshotError::from)?;
+        }
+        _ => {
+            img.save_with_format(path, image::ImageFormat::Png)
+                .map_err(FlintshotError::from)?;
+        }
+    }
+    Ok(())
 }
 
 /// The overlay's Save (Phase 5 Task 006):
@@ -2628,7 +2715,7 @@ fn save_to_disk(
 /// Returns `Ok(None)` when the user cancels the dialog.
 ///
 /// # Errors
-/// Surfaces [`FlintshotError::Image`] if PNG encoding or the
+/// Surfaces [`FlintshotError::Image`] if the encode or the
 /// filesystem write fails.
 pub(crate) fn save_region_to_disk(
     state: &EditorState,
@@ -3157,6 +3244,71 @@ mod tests {
         let mut config = Config::default();
         config.output = output;
         config
+    }
+
+    // ── Save dialog format set (export-webp Task EW3) ──
+
+    /// The dialog prefill and the filter order follow the configured
+    /// `[output] format`: the configured format's filter is first
+    /// (the dialog opens with the first filter selected), all three
+    /// formats stay choosable, and WebP's filter label carries the
+    /// lossless-only honesty copy.
+    #[test]
+    fn save_dialog_prefill_and_filters_follow_the_configured_format() {
+        for (configured, first_label, prefill) in [
+            ("png", "PNG image", "flintshot.png"),
+            ("jpeg", "JPEG image", "flintshot.jpg"),
+            ("webp", "WebP image (lossless)", "flintshot.webp"),
+        ] {
+            let mut output = flintshot_core::OutputConfig::default();
+            output.format = configured.to_owned();
+            assert_eq!(
+                save_dialog_file_name(&output),
+                prefill,
+                "prefill for {configured}"
+            );
+            let filters = save_dialog_filters(&output);
+            assert_eq!(
+                filters.len(),
+                3,
+                "all three formats stay choosable for {configured}"
+            );
+            assert_eq!(
+                filters[0].0, first_label,
+                "the configured format's filter is first for {configured}"
+            );
+            assert_eq!(
+                filters
+                    .iter()
+                    .filter(|(label, _)| *label == "WebP image (lossless)")
+                    .count(),
+                1,
+                "the webp filter carries the lossless copy"
+            );
+        }
+    }
+
+    /// A save path's format follows its extension (the dialog's
+    /// filter dropdown decided it); unknown or missing extensions
+    /// stay PNG.
+    #[test]
+    fn format_for_save_path_follows_the_extension() {
+        use flintshot_core::OutputFormat;
+        let cases = [
+            ("shot.webp", OutputFormat::Webp),
+            ("shot.jpg", OutputFormat::Jpeg),
+            ("shot.JPEG", OutputFormat::Jpeg),
+            ("shot.png", OutputFormat::Png),
+            ("shot", OutputFormat::Png),
+            ("shot.bar", OutputFormat::Png),
+        ];
+        for (name, want) in cases {
+            assert_eq!(
+                format_for_save_path(std::path::Path::new(name)),
+                want,
+                "{name}"
+            );
+        }
     }
 
     /// Off-flag: no file, `None` — the copy stays invisible history.
