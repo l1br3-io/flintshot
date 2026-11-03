@@ -1136,37 +1136,78 @@ impl Config {
             );
         }
         if let Some(out) = doc.get_mut("output").and_then(|i| i.as_table_mut()) {
-            set_value(
-                out,
-                "format",
-                toml_edit::Value::from(self.output.format.as_str()),
-            );
-            set_value(
-                out,
-                "jpeg-quality",
-                toml_edit::Value::from(i64::from(self.output.jpeg_quality)),
-            );
-            set_value(
-                out,
-                "filename-template",
-                toml_edit::Value::from(self.output.filename_template.as_str()),
-            );
-            set_value(
-                out,
-                "save-dir",
-                toml_edit::Value::from(self.output.save_dir.as_str()),
-            );
-            set_value(
-                out,
-                "save-clipboard-copies",
-                toml_edit::Value::from(self.output.save_clipboard_copies),
-            );
+            self.merge_output(out);
         }
         if let Some(ai) = doc.get_mut("ai").and_then(|i| i.as_table_mut()) {
             self.merge_ai(ai);
         }
 
         Ok(doc.to_string())
+    }
+
+    /// Write every `[output]` field into the existing `output`
+    /// table, including the nested `[output.watermark]` sub-table
+    /// (created when absent). Same GOTCHA as [`Self::merge_ai`]:
+    /// every field must be written here or settings edits to it
+    /// silently drop once `config.toml` exists — fenced by the
+    /// watermark merge test.
+    fn merge_output(&self, out: &mut toml_edit::Table) {
+        set_value(
+            out,
+            "format",
+            toml_edit::Value::from(self.output.format.as_str()),
+        );
+        set_value(
+            out,
+            "jpeg-quality",
+            toml_edit::Value::from(i64::from(self.output.jpeg_quality)),
+        );
+        set_value(
+            out,
+            "filename-template",
+            toml_edit::Value::from(self.output.filename_template.as_str()),
+        );
+        set_value(
+            out,
+            "save-dir",
+            toml_edit::Value::from(self.output.save_dir.as_str()),
+        );
+        set_value(
+            out,
+            "save-clipboard-copies",
+            toml_edit::Value::from(self.output.save_clipboard_copies),
+        );
+        let wm_entry = out
+            .entry("watermark")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(wm) = wm_entry.as_table_mut() else {
+            return;
+        };
+        set_value(
+            wm,
+            "enabled",
+            toml_edit::Value::from(self.output.watermark.enabled),
+        );
+        set_value(
+            wm,
+            "text",
+            toml_edit::Value::from(self.output.watermark.text.as_str()),
+        );
+        set_value(
+            wm,
+            "position",
+            toml_edit::Value::from(self.output.watermark.position.as_str()),
+        );
+        set_value(
+            wm,
+            "opacity",
+            toml_edit::Value::from(f64::from(self.output.watermark.opacity)),
+        );
+        set_value(
+            wm,
+            "scale",
+            toml_edit::Value::from(f64::from(self.output.watermark.scale)),
+        );
     }
 
     /// Write every `[ai]` field into the existing `ai` table.
@@ -2516,6 +2557,56 @@ base-url = \"\"
 
         let after = fs::read_to_string(&path).unwrap();
         assert_eq!(after, sentinel, "byte-identical after the call");
+    }
+
+    /// The watermark merge fence (same shape as the `[ai]` GOTCHA):
+    /// settings edits to `[output.watermark]` must survive a save
+    /// into an existing file — comments intact, nested table
+    /// created when absent.
+    #[test]
+    fn watermark_edits_merge_into_an_existing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let existing = "\
+# my flintshot config
+
+[output]
+# my format comment
+format = \"png\"
+
+[ui]
+default-color = \"#00ff00\"
+";
+        fs::write(&path, existing).unwrap();
+
+        let mut config = Config::load_from(&path).unwrap_or_default();
+        config.output.watermark.enabled = true;
+        config.output.watermark.text = "© me".into();
+        config.output.watermark.position = "top-left".into();
+        config.output.watermark.opacity = 0.35;
+        config.output.watermark.scale = 1.5;
+        config.save_to(&path).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("# my flintshot config"),
+            "header lost:\n{written}"
+        );
+        assert!(
+            written.contains("# my format comment"),
+            "output decor lost:\n{written}"
+        );
+        assert!(
+            written.contains("[output.watermark]"),
+            "the nested table is created:\n{written}"
+        );
+
+        let back = Config::load_from(&path).unwrap();
+        assert!(back.output.watermark.enabled);
+        assert_eq!(back.output.watermark.text, "© me");
+        assert_eq!(back.output.watermark.position, "top-left");
+        assert_eq!(back.output.watermark.opacity, 0.35);
+        assert_eq!(back.output.watermark.scale, 1.5);
     }
 
     // ── [output.watermark] section (watermark WM1) ────────────────

@@ -41,11 +41,12 @@ pub(crate) enum SettingsAction {
 }
 
 /// The settings page's state: the working config copy plus the
-/// draft of the filename-template text field (validated before it
-/// reaches the config).
+/// drafts of the filename-template and watermark-text fields
+/// (validated before they reach the config).
 pub(crate) struct SettingsApp {
     config: Config,
     template_draft: String,
+    watermark_text_draft: String,
     display_server: String,
     version: String,
     /// The fully-commented default TOML, snapshotted from the bridge
@@ -61,6 +62,9 @@ pub(crate) struct SettingsApp {
     /// When the first unsaved edit landed (the debounce clock's
     /// start). `None` when everything is persisted.
     dirty_since: Option<f64>,
+    /// The latest watermark-slider rects by id (egui sliders carry
+    /// no explicit id; the frame tests drag them by rect).
+    watermark_slider_rects: std::collections::HashMap<&'static str, egui::Rect>,
 }
 
 impl SettingsApp {
@@ -73,9 +77,11 @@ impl SettingsApp {
         wayland: bool,
     ) -> Self {
         let template_draft = config.output.filename_template.clone();
+        let watermark_text_draft = config.output.watermark.text.clone();
         Self {
             config,
             template_draft,
+            watermark_text_draft,
             display_server,
             version,
             default_toml,
@@ -83,6 +89,7 @@ impl SettingsApp {
             show_defaults: false,
             actions: Vec::new(),
             dirty_since: None,
+            watermark_slider_rects: std::collections::HashMap::new(),
         }
     }
 
@@ -386,34 +393,198 @@ fn output_section(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
                 page.mark_dirty(now);
             }
         });
-        set_row(ui, "Recent captures", |ui| {
-            // Preset wells (the page's mapping-table idiom): every
-            // pick is in-range by construction; out-of-range
-            // hand-edits clamp at use (the config accessor) and
-            // settle on the nearest preset once the user picks.
-            let limits = ["20", "50", "100", "200"];
-            let values = [20_u32, 50, 100, 200];
-            let idx = values
-                .iter()
-                .position(|v| *v == page.config.ui.recent_captures_limit)
-                .unwrap_or(1);
-            if let Some(pick) =
-                widgets::well_row(ui, egui::Id::new("set-recents-limit"), &limits, idx)
-            {
-                page.config.ui.recent_captures_limit = values[pick];
-                page.mark_dirty(now);
-            }
-        });
-        set_row(ui, "Copy after capture", |ui| {
-            let on = page.config.capture.after_grab == "clipboard";
-            let resp = widgets::switch(ui, egui::Id::new("set-copy-after"), on, false);
-            if resp.on != on {
-                let value = if resp.on { "clipboard" } else { "editor" };
-                set_str(&mut page.config.capture.after_grab, value);
-                page.mark_dirty(now);
-            }
-        });
+        watermark_block(ui, page, now);
+        history_and_post_capture_rows(ui, page, now);
     });
+}
+
+/// The Output card's trailing rows: the recents-cap preset wells and
+/// the copy-after-capture switch (post-capture history concerns,
+/// kept in the Output card they've always lived in).
+fn history_and_post_capture_rows(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
+    set_row(ui, "Recent captures", |ui| {
+        // Preset wells (the page's mapping-table idiom): every
+        // pick is in-range by construction; out-of-range
+        // hand-edits clamp at use (the config accessor) and
+        // settle on the nearest preset once the user picks.
+        let limits = ["20", "50", "100", "200"];
+        let values = [20_u32, 50, 100, 200];
+        let idx = values
+            .iter()
+            .position(|v| *v == page.config.ui.recent_captures_limit)
+            .unwrap_or(1);
+        if let Some(pick) = widgets::well_row(ui, egui::Id::new("set-recents-limit"), &limits, idx)
+        {
+            page.config.ui.recent_captures_limit = values[pick];
+            page.mark_dirty(now);
+        }
+    });
+    set_row(ui, "Copy after capture", |ui| {
+        let on = page.config.capture.after_grab == "clipboard";
+        let resp = widgets::switch(ui, egui::Id::new("set-copy-after"), on, false);
+        if resp.on != on {
+            let value = if resp.on { "clipboard" } else { "editor" };
+            set_str(&mut page.config.capture.after_grab, value);
+            page.mark_dirty(now);
+        }
+    });
+}
+
+/// The watermark block inside the Output card: the master toggle
+/// (always rendered), and — only while enabled — the text field,
+/// 9-grid position wells, opacity + scale sliders, and a live
+/// preview strip showing exactly what egress will produce. The
+/// canvas never shows the stamp (it's an egress render step), so
+/// this preview is the one place the user sees it.
+fn watermark_block(ui: &mut egui::Ui, page: &mut SettingsApp, now: f64) {
+    set_row(ui, "Watermark", |ui| {
+        let resp = widgets::switch(
+            ui,
+            egui::Id::new("set-watermark"),
+            page.config.output.watermark.enabled,
+            false,
+        );
+        if resp.on != page.config.output.watermark.enabled {
+            page.config.output.watermark.enabled = resp.on;
+            page.mark_dirty(now);
+        }
+    });
+    if !page.config.output.watermark.enabled {
+        return;
+    }
+    set_row(ui, "Text", |ui| {
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut page.watermark_text_draft)
+                .id(egui::Id::new("set-watermark-text"))
+                .desired_width(220.0)
+                .hint_text("© flintshot"),
+        );
+        if resp.changed() {
+            page.config
+                .output
+                .watermark
+                .text
+                .clone_from(&page.watermark_text_draft);
+            page.mark_dirty(now);
+        }
+    });
+    set_row(ui, "Position", |ui| {
+        // Compact 2-char wells over a 3×3 grid; every pick writes the
+        // canonical config string (unknown hand-edits sit on BR).
+        let labels = ["TL", "T", "TR", "L", "C", "R", "BL", "B", "BR"];
+        let values = [
+            "top-left",
+            "top",
+            "top-right",
+            "left",
+            "center",
+            "right",
+            "bottom-left",
+            "bottom",
+            "bottom-right",
+        ];
+        let idx = values
+            .iter()
+            .position(|v| *v == page.config.output.watermark.position)
+            .unwrap_or(values.len() - 1);
+        if let Some(pick) =
+            widgets::well_row(ui, egui::Id::new("set-watermark-position"), &labels, idx)
+        {
+            set_str(&mut page.config.output.watermark.position, values[pick]);
+            page.mark_dirty(now);
+        }
+    });
+    set_row(ui, "Opacity", |ui| {
+        let resp = ui.add(
+            egui::Slider::new(&mut page.config.output.watermark.opacity, 0.05..=1.0)
+                .step_by(0.05)
+                .fixed_decimals(2),
+        );
+        page.watermark_slider_rects
+            .insert("set-watermark-opacity", resp.rect);
+        if resp.changed() {
+            page.mark_dirty(now);
+        }
+    });
+    set_row(ui, "Scale", |ui| {
+        let resp = ui.add(
+            egui::Slider::new(&mut page.config.output.watermark.scale, 0.25..=4.0)
+                .step_by(0.25)
+                .fixed_decimals(2)
+                .text("×"),
+        );
+        page.watermark_slider_rects
+            .insert("set-watermark-scale", resp.rect);
+        if resp.changed() {
+            page.mark_dirty(now);
+        }
+    });
+    watermark_preview_row(ui, page);
+}
+
+/// The live-preview row: the sample strip with the working watermark
+/// applied, painted as a texture (the canvas never shows the stamp,
+/// so this is the one place the user sees it).
+fn watermark_preview_row(ui: &mut egui::Ui, page: &mut SettingsApp) {
+    set_row(ui, "Preview", |ui| {
+        let preview = watermark_preview(&page.config.output.watermark);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "texture dims come from the fixed 360×96 strip"
+        )]
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [preview.width() as usize, preview.height() as usize],
+            preview.as_raw(),
+        );
+        let tex = ui.ctx().load_texture(
+            "set-watermark-preview",
+            image,
+            egui::TextureOptions::default(),
+        );
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(360.0, 96.0), egui::Sense::hover());
+        ui.painter().image(
+            tex.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        let _ = ui.interact(
+            rect,
+            egui::Id::new("set-watermark-preview"),
+            egui::Sense::hover(),
+        );
+    });
+}
+
+/// The preview's sample strip: a horizontal light→dark gradient, so
+/// both light and dark glyph backgrounds are visible in one strip.
+/// Pure.
+fn watermark_sample_strip() -> image::RgbaImage {
+    let (w, h) = (360_u32, 96);
+    let mut img = image::RgbaImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "x·255/(w−1) ≤ 255 by construction"
+            )]
+            let v = (x * 255 / (w - 1)) as u8;
+            img.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+        }
+    }
+    img
+}
+
+/// The live watermark preview: the sample strip with the *current
+/// working* watermark applied — the same core helper every egress
+/// path composes, so the preview is exactly what leaves the app.
+/// Pure (a fontless host shows the unstamped strip — the same
+/// degrade egress takes).
+fn watermark_preview(cfg: &flintshot_core::WatermarkConfig) -> image::RgbaImage {
+    let sample = watermark_sample_strip();
+    flintshot_core::apply_watermark(&sample, cfg).into_owned()
 }
 
 /// The Shortcuts section: the real binding table, readonly — plus
@@ -1299,5 +1470,250 @@ mod tests {
         );
         assert_eq!(page.drain_action(), Some(SettingsAction::RebindShortcuts));
         assert!(page.drain_action().is_none(), "drained exactly once");
+    }
+
+    // ── Watermark block (WM4) ─────────────────────────────────────
+
+    /// The watermark tests' screen: taller than the stock frame —
+    /// the block sits at the bottom of the Output card, past the
+    /// stock 900-px screen, and pointer events never reach
+    /// off-screen rows.
+    fn watermark_screen() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 1600.0))
+    }
+
+    fn watermark_frame(page: &mut SettingsApp) -> egui::Context {
+        let ctx = egui::Context::default();
+        widgets::set_animations(&ctx, false);
+        theme::apply(&ctx);
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(watermark_screen()),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                SettingsPage::show(ui, page, 0.0);
+            },
+        );
+        ctx
+    }
+
+    fn watermark_raw(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(watermark_screen()),
+            events,
+            ..egui::RawInput::default()
+        }
+    }
+
+    /// A page with the watermark enabled (the detail rows' gate).
+    fn watermark_page() -> SettingsApp {
+        let mut page = page();
+        page.config.output.watermark.enabled = true;
+        page
+    }
+
+    /// The block renders when enabled — toggle, text field, 9-grid
+    /// wells, both sliders, the preview strip — and collapses to
+    /// just the toggle when disabled.
+    #[test]
+    fn watermark_rows_render_when_enabled() {
+        let mut on = watermark_page();
+        let ctx = watermark_frame(&mut on);
+        for id in [
+            "set-watermark",
+            "set-watermark-text",
+            "set-watermark-preview",
+        ] {
+            assert!(
+                ctx.read_response(egui::Id::new(id)).is_some(),
+                "{id} renders when enabled"
+            );
+        }
+        for slider in ["set-watermark-opacity", "set-watermark-scale"] {
+            assert!(
+                page_watermark_slider_rect(&on, slider).is_some(),
+                "{slider} slider renders"
+            );
+        }
+        for seg in 0..9 {
+            assert!(
+                ctx.read_response(egui::Id::new("set-watermark-position").with(seg))
+                    .is_some(),
+                "position well {seg} renders"
+            );
+        }
+
+        let mut off = page();
+        let ctx = watermark_frame(&mut off);
+        assert!(
+            ctx.read_response(egui::Id::new("set-watermark")).is_some(),
+            "the toggle always renders"
+        );
+        for id in ["set-watermark-text", "set-watermark-preview"] {
+            assert!(
+                ctx.read_response(egui::Id::new(id)).is_none(),
+                "{id} hidden when disabled"
+            );
+        }
+        assert!(
+            off.watermark_slider_rects.is_empty(),
+            "sliders hidden when disabled"
+        );
+    }
+
+    /// The page's recorded slider rect (egui sliders carry no
+    /// explicit id — the block records its rects for the tests).
+    fn page_watermark_slider_rect(page: &SettingsApp, id: &str) -> Option<egui::Rect> {
+        page.watermark_slider_rects.get(id).copied()
+    }
+
+    /// Flipping the toggle writes `enabled` and arms the save.
+    #[test]
+    fn watermark_switch_click_enables_the_block() {
+        let mut page = page();
+        assert!(!page.config.output.watermark.enabled, "default off");
+        let ctx = watermark_frame(&mut page);
+        let sw = ctx
+            .read_response(egui::Id::new("set-watermark"))
+            .expect("toggle renders");
+        let _ = ctx.run_ui(watermark_raw(click(sw.rect)), |ui| {
+            SettingsPage::show(ui, &mut page, 0.0);
+        });
+        assert!(
+            page.config.output.watermark.enabled,
+            "the click flipped the field"
+        );
+        assert!(page.save_due(10.0), "an edit arms the save debounce");
+    }
+
+    /// The 9-grid wells write the canonical position strings.
+    #[test]
+    fn watermark_position_wells_write_the_field() {
+        let mut page = watermark_page();
+        let ctx = watermark_frame(&mut page);
+        let seg = ctx
+            .read_response(egui::Id::new("set-watermark-position").with(0))
+            .expect("the top-left well renders");
+        let _ = ctx.run_ui(watermark_raw(click(seg.rect)), |ui| {
+            SettingsPage::show(ui, &mut page, 0.0);
+        });
+        assert_eq!(
+            page.config.output.watermark.position, "top-left",
+            "the well writes the canonical string"
+        );
+    }
+
+    /// Drag a slider across three frames (egui only reports
+    /// `dragged()` while the pointer is down *during* a pass, so a
+    /// press→move→release packed into one [`egui::RawInput`] is
+    /// never a drag): frame 1 presses at the gutter's right edge,
+    /// frame 2 sweeps left to `frac` of the gutter, frame 3
+    /// releases — a long leftward sweep, so smart-aim's
+    /// stay-near-the-old-value bias for tiny moves can't hold the
+    /// default. The drag stays inside the *gutter* — the response
+    /// rect also spans the trailing `DragValue` text, so fractions of
+    /// the full width overshoot.
+    fn drag_slider(ctx: &egui::Context, page: &mut SettingsApp, rect: egui::Rect, frac: f32) {
+        let y = rect.center().y;
+        // The gutter is `ui.spacing().slider_width` (default 100,
+        // handle-shrunk); the text follows. Stay left of both.
+        let gutter = rect.width().min(90.0);
+        let start = egui::pos2(rect.left() + gutter, y);
+        let end = egui::pos2(rect.left() + gutter * frac, y);
+        let button = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for events in [
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+            vec![egui::Event::PointerMoved(end)],
+            vec![button(end, false)],
+        ] {
+            let _ = ctx.run_ui(watermark_raw(events), |ui| {
+                SettingsPage::show(ui, page, 0.0);
+            });
+        }
+    }
+
+    /// One no-event pass so the layout settles (egui's opening pass
+    /// lays out with fallback font metrics; the recorded slider
+    /// rects must come from the settled layout).
+    fn settle(ctx: &egui::Context, page: &mut SettingsApp) {
+        let _ = ctx.run_ui(watermark_raw(Vec::new()), |ui| {
+            SettingsPage::show(ui, page, 0.0);
+        });
+    }
+
+    /// Both sliders write their config fields (a leftward sweep
+    /// drops each value below its default).
+    #[test]
+    fn watermark_sliders_write_their_fields() {
+        let mut page = watermark_page();
+        let ctx = watermark_frame(&mut page);
+        settle(&ctx, &mut page);
+        for (id, name) in [
+            ("set-watermark-opacity", "opacity"),
+            ("set-watermark-scale", "scale"),
+        ] {
+            let slider = page_watermark_slider_rect(&page, id)
+                .unwrap_or_else(|| panic!("{name} slider renders"));
+            drag_slider(&ctx, &mut page, slider, 0.1);
+        }
+        let (opacity, scale) = (
+            page.config.output.watermark.opacity,
+            page.config.output.watermark.scale,
+        );
+        assert!(
+            (0.05..0.6).contains(&opacity) && (0.25..1.0).contains(&scale),
+            "both swept low: opacity {opacity}, scale {scale}"
+        );
+        assert!(page.save_due(10.0), "slider edits arm the save");
+    }
+
+    /// Typing in the text field writes the config's text.
+    #[test]
+    fn watermark_text_field_writes_the_config() {
+        let mut page = watermark_page();
+        let ctx = watermark_frame(&mut page);
+        let edit = ctx
+            .read_response(egui::Id::new("set-watermark-text"))
+            .expect("text field renders")
+            .rect;
+        // Frame 1: focus the edit; frame 2: type.
+        let _ = ctx.run_ui(watermark_raw(click(edit)), |ui| {
+            SettingsPage::show(ui, &mut page, 0.0);
+        });
+        let _ = ctx.run_ui(watermark_raw(vec![egui::Event::Text("me".into())]), |ui| {
+            SettingsPage::show(ui, &mut page, 0.0);
+        });
+        assert!(
+            page.config.output.watermark.text.contains("me"),
+            "typed text reaches the config: {}",
+            page.config.output.watermark.text
+        );
+    }
+
+    /// The preview reflects state: disabled is the raw sample strip;
+    /// enabled stamps it (soft — fontless hosts skip); a different
+    /// corner moves the stamp.
+    #[test]
+    fn watermark_preview_reflects_state() {
+        let sample = watermark_sample_strip();
+        let off = watermark_preview(&flintshot_core::WatermarkConfig::default());
+        assert_eq!(off, sample, "disabled preview is the raw sample");
+
+        let mut wm = flintshot_core::WatermarkConfig::default();
+        wm.enabled = true;
+        let stamped = watermark_preview(&wm);
+        if stamped == sample {
+            eprintln!("skipping: no system font available");
+            return;
+        }
+        wm.position = "top-left".into();
+        let tl = watermark_preview(&wm);
+        assert_ne!(tl, stamped, "position drives the preview");
     }
 }
