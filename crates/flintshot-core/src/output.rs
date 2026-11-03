@@ -363,6 +363,7 @@ pub fn persist_clipboard_copy(img: &image::RgbaImage, output: &OutputConfig) -> 
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use image::GenericImageView;
@@ -382,7 +383,7 @@ mod tests {
         /// Measured block width per font px (`len × factor`).
         advance_per_px: f32,
         /// Calls seen by [`RecordingRectStamp::stamp`]:
-        /// (anchor, font_size, alpha).
+        /// (`anchor`, `font_size`, `alpha`).
         calls: Vec<(Point, f32, f32)>,
     }
 
@@ -405,17 +406,22 @@ mod tests {
             Some((self.advance_per_px * chars * font_size, font_size * 1.2))
         }
 
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "test seam: coordinates are clamped into the image; blends clamp to 0..=255"
+        )]
         fn stamp(
             &mut self,
             img: &mut image::RgbaImage,
             anchor: Point,
-            _text: &str,
+            text: &str,
             font_size: f32,
             alpha: f32,
         ) -> bool {
             self.calls.push((anchor, font_size, alpha));
             let (block_w, block_h) = self
-                .measure(_text, font_size)
+                .measure(text, font_size)
                 .expect("rect seam always measures");
             let x0 = anchor.x.round().clamp(0.0, dim_to_f32(img.width())) as u32;
             let y0 = anchor.y.round().clamp(0.0, dim_to_f32(img.height())) as u32;
@@ -541,9 +547,8 @@ mod tests {
             let img = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 255]));
             let mut seam = RecordingRectStamp::new(0.05);
             let out = apply_watermark_with(&img, &cfg, &mut seam);
-            let stamped = match out {
-                std::borrow::Cow::Owned(o) => o,
-                std::borrow::Cow::Borrowed(_) => panic!("{raw}: expected a stamp"),
+            let std::borrow::Cow::Owned(stamped) = out else {
+                panic!("{raw}: expected a stamp")
             };
             // Bounding box of stamped (non-black) pixels.
             let mut min = (u32::MAX, u32::MAX);
@@ -561,7 +566,7 @@ mod tests {
                 }
             }
             assert!(any, "{raw}: the stamp landed");
-            let center = ((min.0 + max.0) / 2, (min.1 + max.1) / 2);
+            let center = (min.0.midpoint(max.0), min.1.midpoint(max.1));
             assert_eq!(
                 (center.0 / (w / 3), center.1 / (h / 3)),
                 (col_third, row_third),
@@ -635,11 +640,11 @@ mod tests {
     /// The real system-font seam (render.rs rasterizer): with a font
     /// available, a solid-black background and white text at full
     /// opacity leave *exactly white* interior pixels (out =
-    /// 255·1·coverage + 0·(1−1·coverage) at coverage 1) — the
+    /// 255·1·`coverage` + 0·(1−1·`coverage`) at `coverage` 1) — the
     /// deterministic opacity math on the production path. The image
     /// is tall enough that `scale × h / 16` glyphs are chunky, so
-    /// coverage-1 interiors exist. Hosts with no sans-serif skip the
-    /// pixel leg gracefully (compose_final precedent); the identity
+    /// `coverage`-1 interiors exist. Hosts with no sans-serif skip the
+    /// pixel leg gracefully (`compose_final` precedent); the identity
     /// contract above never skips.
     #[test]
     fn apply_watermark_blends_interior_glyph_pixels_at_configured_opacity() {
@@ -647,14 +652,11 @@ mod tests {
         cfg.opacity = 1.0;
         let img = image::RgbaImage::from_pixel(400, 600, image::Rgba([0, 0, 0, 255]));
         let out = apply_watermark(&img, &cfg);
-        let stamped = match out {
-            std::borrow::Cow::Owned(o) => o,
-            std::borrow::Cow::Borrowed(_) => {
-                // No system font on this host (minimal CI container):
-                // the warn-and-degrade path already covered above.
-                eprintln!("skipping: no system font available");
-                return;
-            }
+        let std::borrow::Cow::Owned(stamped) = out else {
+            // No system font on this host (minimal CI container):
+            // the warn-and-degrade path already covered above.
+            eprintln!("skipping: no system font available");
+            return;
         };
         let white = stamped
             .pixels()
@@ -667,12 +669,9 @@ mod tests {
         cfg.opacity = 0.5;
         let img = image::RgbaImage::from_pixel(400, 600, image::Rgba([0, 0, 0, 255]));
         let out = apply_watermark(&img, &cfg);
-        let stamped = match out {
-            std::borrow::Cow::Owned(o) => o,
-            std::borrow::Cow::Borrowed(_) => {
-                eprintln!("skipping: no system font available");
-                return;
-            }
+        let std::borrow::Cow::Owned(stamped) = out else {
+            eprintln!("skipping: no system font available");
+            return;
         };
         let half = stamped
             .pixels()
@@ -690,9 +689,14 @@ mod tests {
     #[test]
     fn persist_clipboard_copy_stamps_when_watermark_enabled() {
         let dir = tempdir().unwrap();
-        let mut output = OutputConfig::default();
-        output.save_dir = dir.path().to_string_lossy().into_owned();
-        output.watermark.enabled = true;
+        let output = OutputConfig {
+            save_dir: dir.path().to_string_lossy().into_owned(),
+            watermark: WatermarkConfig {
+                enabled: true,
+                ..WatermarkConfig::default()
+            },
+            ..OutputConfig::default()
+        };
         let img = image::RgbaImage::from_pixel(400, 600, image::Rgba([0, 0, 0, 255]));
         let written = persist_clipboard_copy(&img, &output).expect("persist");
         let back = image::open(&written).expect("decodes").to_rgba8();
@@ -709,8 +713,10 @@ mod tests {
     #[test]
     fn persist_clipboard_copy_disabled_is_pixel_identical() {
         let dir = tempdir().unwrap();
-        let mut output = OutputConfig::default();
-        output.save_dir = dir.path().to_string_lossy().into_owned();
+        let output = OutputConfig {
+            save_dir: dir.path().to_string_lossy().into_owned(),
+            ..OutputConfig::default()
+        };
         let img = image::RgbaImage::from_pixel(40, 30, image::Rgba([1, 2, 3, 255]));
         let written = persist_clipboard_copy(&img, &output).expect("persist");
         let back = image::open(&written).expect("decodes").to_rgba8();

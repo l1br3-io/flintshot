@@ -20,6 +20,27 @@ Categories used below:
 
 ### Added
 
+- **Opt-in egress watermark** (effort `watermark`, module 5 of the
+  2026-11 feature batch). New `[output.watermark]` config — **off by
+  default**, absent table = today's byte-identical output — with
+  `text` (default `© flintshot`), `position` (9-grid, default
+  bottom-right), `opacity` (0.05–1.0, default 0.6), `scale` (font
+  size relative to image height, default 1.0 ≈ 1/16). When enabled,
+  the stamp lands on **everything that leaves the app**: Save-dialog
+  and direct saves, Copy (both the clipboard pixels and the
+  persisted recents copy — one stamp each), `capture --out`, and
+  `capture --stdout` (stamped before encoding, so the format is
+  orthogonal). The editing canvas and the session store's recovery
+  mirrors stay unstamped by construction; a missing system font,
+  degenerate image, or unshrinkable text degrades to unstamped
+  output with a warning — an export never fails on the watermark.
+  Settings → Output grows a Watermark block (toggle, text field,
+  9-grid wells, opacity + scale sliders) with a live preview strip
+  rendered through the same core helper egress uses. Known gap, per
+  the spec's "upload is covered transitively — it uploads
+  already-saved files" decision: `capture --after upload` and the
+  editor's Upload button compose their own in-memory PNG and do not
+  carry the stamp; only `flintshot upload <saved file>` does.
 - **`flintshot capture` becomes a first-class Unix citizen** (effort
   `cli-scripting`, module 4 of the 2026-11 feature batch).
   `capture --geometry x,y,w,h` grabs exactly that rectangle with no

@@ -2579,12 +2579,21 @@ default-color = \"#00ff00\"
 ";
         fs::write(&path, existing).unwrap();
 
-        let mut config = Config::load_from(&path).unwrap_or_default();
-        config.output.watermark.enabled = true;
-        config.output.watermark.text = "© me".into();
-        config.output.watermark.position = "top-left".into();
-        config.output.watermark.opacity = 0.35;
-        config.output.watermark.scale = 1.5;
+        let loaded = Config::load_from(&path).unwrap_or_default();
+        let config = Config {
+            output: OutputConfig {
+                watermark: WatermarkConfig {
+                    enabled: true,
+                    text: "© me".into(),
+                    position: "top-left".into(),
+                    opacity: 0.35,
+                    scale: 1.5,
+                    ..WatermarkConfig::default()
+                },
+                ..loaded.output.clone()
+            },
+            ..loaded
+        };
         config.save_to(&path).unwrap();
 
         let written = fs::read_to_string(&path).unwrap();
@@ -2690,13 +2699,13 @@ default-color = \"#00ff00\"
     /// so hand-edited extremes still land on a visible stamp.
     #[test]
     fn watermark_opacity_clamps_into_the_documented_band() {
-        let mut wm = WatermarkConfig::default();
-        wm.opacity = 0.0;
-        assert_eq!(wm.opacity_clamped(), 0.05, "floor");
-        wm.opacity = 2.0;
-        assert_eq!(wm.opacity_clamped(), 1.0, "ceiling");
-        wm.opacity = 0.6;
-        assert_eq!(wm.opacity_clamped(), 0.6, "in-band values pass through");
+        let at = |opacity: f32| WatermarkConfig {
+            opacity,
+            ..WatermarkConfig::default()
+        };
+        assert_eq!(at(0.0).opacity_clamped(), 0.05, "floor");
+        assert_eq!(at(2.0).opacity_clamped(), 1.0, "ceiling");
+        assert_eq!(at(0.6).opacity_clamped(), 0.6, "in-band passes through");
     }
 
     /// The stamp predicate: only an enabled config with non-blank

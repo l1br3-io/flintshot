@@ -2805,6 +2805,49 @@ just man    # renders packaging/man/flintshot.1 (recipe output)
 - Windows/macOS columns are N/A for the portal rows by design; the
   flags themselves parse everywhere (units).
 
+## Watermark — egress stamp, canvas clean
+
+Spec: `git log --grep='watermark'`. The placement/opacity/scale/clamp
+math, the per-egress wiring (save dialog, direct save, clipboard
+persist, `--out`, `--stdout`), the session-mirror-stays-unstamped
+invariant, and the settings block's frame tests all run under
+`cargo test`; **this section is the one visual row that needs a real
+session** — eyes on stamped output.
+
+### Test setup
+
+```sh
+cargo build --release
+# Enable the watermark: flintshot config → [output.watermark]
+# enabled = true (or Settings → Output → Watermark toggle).
+```
+
+### Test script
+
+1. **Egress carries the stamp, canvas stays clean (row 1, L2
+   designated)**: with the watermark enabled — editor **Save** (and a
+   template-configured direct save) writes a stamped file; **Copy**
+   pastes stamped pixels and its recents entry is stamped;
+   `flintshot capture --out /tmp/w.png` and
+   `flintshot capture --stdout > /tmp/w2.png` produce stamped images
+   (any format); the **editing canvas shows no stamp** at any point,
+   and a crash-recovered session (session store mirror) returns the
+   unstamped source.
+
+| Behavior                                        | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ----------------------------------------------- | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Egress stamped, canvas + mirrors clean (row 1)  | | PENDING | | | | N/A | N/A | N/A | N/A | |
+
+### Known caveats
+
+- The stamp needs a system sans-serif font; a fontless host degrades
+  to unstamped output with a warning (pinned headless).
+- `capture --after upload` and the editor's Upload compose their own
+  in-memory PNG and do **not** carry the stamp (the spec's "upload
+  covered transitively — it uploads already-saved files" decision);
+  only `flintshot upload <saved file>` does. Flagged in the module
+  closeout for a future revisit.
+
 ## Ask-the-shot live verification (Phase 7)
 
 Spec: `git log --grep='ai-streaming'`; design: ADR-0069. The streaming
