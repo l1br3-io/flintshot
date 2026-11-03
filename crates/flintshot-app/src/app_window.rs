@@ -51,7 +51,7 @@
 //! capped backoff curve, respawning it rate-limited, and
 //! re-announcing presence on reconnect (ADR-0066).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -202,6 +202,12 @@ struct Shared {
     /// `Default` resolves the platform dir, tests inject via
     /// [`Shared::with_session`].
     session: flintshot_core::SessionStore,
+    /// The dir `session` lives in — the same path `run` opened the
+    /// store on. The recovery family (`parked_dir`,
+    /// `parked_count`, `load_parked`) derives from it, so the
+    /// home bridge can answer park questions without a second
+    /// copy of the path drifting around.
+    session_dir: PathBuf,
 }
 
 #[derive(Default)]
@@ -278,12 +284,13 @@ struct SharedInner {
 }
 
 impl Shared {
-    /// Construct with an explicit session store (tests inject a
-    /// temp-dir store; production sweeps and opens the platform
-    /// dir in [`run`]).
-    fn with_session(session: flintshot_core::SessionStore) -> Self {
+    /// Construct with an explicit session store and the dir it
+    /// lives in (tests inject a temp-dir pair; production parks the
+    /// previous run and opens the platform dir in [`run`]).
+    fn with_session(session: flintshot_core::SessionStore, session_dir: PathBuf) -> Self {
         Self {
             session,
+            session_dir,
             ..Self::default()
         }
     }
@@ -1014,14 +1021,14 @@ pub(crate) fn run(initial: crate::worker::AppRoute, standalone: bool) -> eyre::R
     };
 
     let (cmd_tx, cmd_rx) = tokio_mpsc::channel::<PumpCommand>(8);
-    // A crashed run's session dir lingers in the runtime dir —
-    // sweep it before this process's store opens on the same path
-    // (no resume across restarts, by spec).
+    // A crashed run's session dir lingers in the runtime dir — park
+    // it (Home's recovery banner reads it back) and open this
+    // process's store on the freed path.
     let session_dir = flintshot_core::session_dir();
-    flintshot_core::SessionStore::sweep_stale(&session_dir);
-    let shared = Arc::new(Shared::with_session(flintshot_core::SessionStore::in_dir(
+    let shared = Arc::new(Shared::with_session(
+        open_session_store(session_dir.clone()),
         session_dir,
-    )));
+    ));
 
     let pump = std::thread::Builder::new()
         .name("flintshot-app-pump".into())
@@ -1100,12 +1107,28 @@ pub(crate) fn run(initial: crate::worker::AppRoute, standalone: bool) -> eyre::R
     drop(cmd_tx);
     let _ = pump.join();
 
-    // Graceful exit: the session dir was scratch space — every
-    // break path above falls through here (crashes skip it, and
-    // the next startup's sweep cleans up after them).
-    shared.session.clear();
+    graceful_exit(&shared);
 
     result
+}
+
+/// Startup session prep: park a crashed run's leftover dir (the
+/// recovery banner's source — see `flintshot_core::SessionStore::
+/// park_previous_run`) and open this process's store on the freed
+/// path. Replaces the old blind sweep.
+fn open_session_store(session_dir: PathBuf) -> flintshot_core::SessionStore {
+    flintshot_core::SessionStore::park_previous_run(&session_dir);
+    flintshot_core::SessionStore::in_dir(session_dir)
+}
+
+/// Graceful exit: the session dir was scratch space and every break
+/// path in [`run`] falls through here (crashes skip it — the next
+/// startup's park cleans up after them). The park goes too: a clean
+/// close leaves nothing for the next launch to offer recovery from
+/// (the no-false-positive path).
+fn graceful_exit(shared: &Shared) {
+    shared.session.clear();
+    flintshot_core::SessionStore::sweep_stale(&flintshot_core::parked_dir(&shared.session_dir));
 }
 
 /// An `OpenRequested` event's outcome, applied to the shared state
@@ -3065,6 +3088,57 @@ mod tests {
         assert!(shared.take_pending_editor().is_none());
     }
 
+    /// Startup parks a crashed run's leftover instead of blind-
+    /// sweeping it, and opens this process's store on a clean path.
+    #[test]
+    fn startup_parks_a_crashed_leftover_and_opens_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("0.png"), b"junk").unwrap();
+        std::fs::write(session.join("0.json"), b"junk").unwrap();
+
+        let store = open_session_store(session.clone());
+
+        let park = flintshot_core::parked_dir(&session);
+        assert!(
+            park.join("0.png").exists(),
+            "the leftover was parked, not swept — recovery's source"
+        );
+        assert!(session.is_dir(), "the live path is recreated for this run");
+        let live_files = std::fs::read_dir(&session).unwrap().flatten().count();
+        assert_eq!(live_files, 0, "the new run starts on a clean path");
+        assert!(store.list().is_empty());
+    }
+
+    /// Graceful exit clears everything — the live session dir *and*
+    /// any park — pinning the no-false-positive path: a clean close
+    /// leaves the next launch nothing to offer recovery from.
+    #[test]
+    fn graceful_exit_clears_the_session_and_the_park() {
+        let (shared, dir) = shared_with_session();
+        let session = dir.path().to_path_buf();
+        shared.session.insert(fixture_png_state((3, 3)).image, 1);
+        let park = flintshot_core::parked_dir(&session);
+        std::fs::create_dir_all(&park).unwrap();
+        std::fs::write(park.join("7.png"), b"junk").unwrap();
+        std::fs::write(park.join("7.json"), b"junk").unwrap();
+
+        graceful_exit(&shared);
+
+        assert!(
+            shared.session.list().is_empty(),
+            "the live entries are gone"
+        );
+        assert!(!session.exists(), "graceful exit removes the session dir");
+        assert!(!park.exists(), "the park goes too — nothing to recover");
+        assert_eq!(
+            flintshot_core::SessionStore::parked_count(&session),
+            0,
+            "no false positive: the next launch offers no banner"
+        );
+    }
+
     #[test]
     fn a_routed_grab_beats_the_stashed_restore() {
         // A forwarded grab that landed an image routes the editor
@@ -4464,9 +4538,10 @@ mod tests {
     /// never touch the platform runtime dir.
     fn shared_with_session() -> (Shared, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let shared = Shared::with_session(flintshot_core::SessionStore::in_dir(
+        let shared = Shared::with_session(
+            flintshot_core::SessionStore::in_dir(dir.path().to_path_buf()),
             dir.path().to_path_buf(),
-        ));
+        );
         (shared, dir)
     }
 
