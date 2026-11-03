@@ -984,10 +984,11 @@ impl Canvas for ImageCanvas {
                     text,
                     &outlined,
                     &font,
+                    1.0,
                 );
             }
         }
-        rasterize_text(&mut self.image, pos, text, style, &font);
+        rasterize_text(&mut self.image, pos, text, style, &font, 1.0);
     }
 
     /// Mirror `rasterize_text`'s horizontal advance using the same
@@ -996,38 +997,67 @@ impl Canvas for ImageCanvas {
     /// the brief moment before commit; `compose_final` doesn't call
     /// this since `pending` is excluded from saved output.
     fn measure_text(&self, text: &str, style: &TextStyle) -> TextMetrics {
-        use ab_glyph::{Font, ScaleFont};
-        let Some(font) = font_for(style.family, style.weight, style.style) else {
-            return TextMetrics::default();
-        };
-        let scaled = font.as_scaled(ab_glyph::PxScale::from(style.size));
-        let line_width = |line: &str| -> f32 {
-            line.chars()
-                .map(|ch| scaled.h_advance(scaled.glyph_id(ch)))
-                .sum()
-        };
-        // `split('\n')` yields one entry for a single-line run, so the
-        // common case keeps `width == last_line_width`.
-        let mut width = 0.0_f32;
-        let mut last_line_width = 0.0_f32;
-        let mut line_count = 0_usize;
-        for line in text.split('\n') {
-            let w = line_width(line);
-            width = width.max(w);
-            last_line_width = w;
-            line_count += 1;
-        }
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "line count is bounded by the draft length; ≤ 2^24, exact in f32"
-        )]
-        let height = line_count as f32 * style.size * style.line_spacing;
-        TextMetrics {
-            width,
-            height,
-            last_line_width,
-        }
+        measure_text_run(text, style).unwrap_or_default()
     }
+}
+
+/// Measure a text run with the resolved system font for `style` —
+/// the free-function core of [`ImageCanvas::measure_text`], shared
+/// with the watermark egress stamp (which measures without a canvas).
+/// Returns `None` when no system font is available.
+pub(crate) fn measure_text_run(text: &str, style: &TextStyle) -> Option<TextMetrics> {
+    use ab_glyph::{Font, ScaleFont};
+    let font = font_for(style.family, style.weight, style.style)?;
+    let scaled = font.as_scaled(ab_glyph::PxScale::from(style.size));
+    let line_width = |line: &str| -> f32 {
+        line.chars()
+            .map(|ch| scaled.h_advance(scaled.glyph_id(ch)))
+            .sum()
+    };
+    // `split('\n')` yields one entry for a single-line run, so the
+    // common case keeps `width == last_line_width`.
+    let mut width = 0.0_f32;
+    let mut last_line_width = 0.0_f32;
+    let mut line_count = 0_usize;
+    for line in text.split('\n') {
+        let w = line_width(line);
+        width = width.max(w);
+        last_line_width = w;
+        line_count += 1;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "line count is bounded by the draft length; ≤ 2^24, exact in f32"
+    )]
+    let height = line_count as f32 * style.size * style.line_spacing;
+    Some(TextMetrics {
+        width,
+        height,
+        last_line_width,
+    })
+}
+
+/// Stamp a text run into `img` at `pos` (top-left anchor) with every
+/// glyph's blend alpha scaled by `alpha_scale` — the watermark egress
+/// seam, so `opacity` composites as `out = color·(coverage·opacity) +
+/// bg·(1−coverage·opacity)`. Returns `false` (after a warn) when no
+/// system font is available; callers degrade, never fail.
+pub(crate) fn stamp_text(
+    img: &mut image::RgbaImage,
+    pos: Point,
+    text: &str,
+    style: &TextStyle,
+    alpha_scale: f32,
+) -> bool {
+    let Some(font) = font_for(style.family, style.weight, style.style) else {
+        tracing::warn!(
+            target: "flintshot::render",
+            "no system font available; watermark omitted from egress output"
+        );
+        return false;
+    };
+    rasterize_text(img, pos, text, style, &font, alpha_scale);
+    true
 }
 
 /// Stroke a thick line segment from `a` to `b` by stamping a filled
@@ -1292,7 +1322,8 @@ fn query_system_font(key: FontKey) -> Option<ab_glyph::FontArc> {
 /// `size * line_spacing` below the previous one. Lines are aligned per
 /// `style.align` relative to the widest line's advance. Glyphs are
 /// source-over alpha-composited so the text renders correctly over any
-/// background (annotation over screenshot).
+/// background (annotation over screenshot); `alpha_scale` multiplies
+/// every glyph's coverage (1.0 = full opacity, the annotation paths).
 ///
 /// Out-of-bounds glyph pixels are clipped (`ab_glyph` emits them for
 /// ascenders / descenders past the image edge); this is a no-op for
@@ -1310,6 +1341,7 @@ fn rasterize_text(
     text: &str,
     style: &TextStyle,
     font: &ab_glyph::FontArc,
+    alpha_scale: f32,
 ) {
     use ab_glyph::{Font, ScaleFont};
     let size = style.size;
@@ -1368,7 +1400,7 @@ fn rasterize_text(
                         reason = "see above"
                     )]
                     let py = min_y + gy as f32;
-                    blend_pixel(img, px, py, color, coverage);
+                    blend_pixel(img, px, py, color, coverage * alpha_scale);
                 });
             }
             pen_x += scaled.h_advance(glyph_id);

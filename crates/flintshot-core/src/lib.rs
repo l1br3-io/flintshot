@@ -72,7 +72,7 @@ pub use input::{DispatchOutcome, InputEvent, Modifiers};
 pub use inspector::{PropertyEditKind, SelectionCapabilities};
 pub use ipc::{socket_path, Event as IpcEvent, Request as IpcRequest};
 pub use output::{
-    chrono_date, chrono_time, clipboard_copy_stem, next_free_path, output_ext,
+    apply_watermark, chrono_date, chrono_time, clipboard_copy_stem, next_free_path, output_ext,
     persist_clipboard_copy, save_capture_image,
 };
 pub use render::{
