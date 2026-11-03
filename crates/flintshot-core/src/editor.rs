@@ -302,6 +302,85 @@ pub struct TextReeditSession {
     pub original: Annotation,
 }
 
+/// Which constraint family an in-progress drag belongs to (see
+/// [`constrain_drag`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragKind {
+    /// Rect / ellipse drags: both axes clamp to a common extent —
+    /// a square / circle at ratio 1:1.
+    Rectangular,
+    /// Line / arrow drags: the angle snaps to the 45° rose while the
+    /// drag length is preserved.
+    Linear,
+}
+
+/// Angle every Linear drag snaps to under Shift: 45° (the reference
+/// tools' default feel; a one-constant change to 15° if dogfooding
+/// wants finer steps — see the annotate-polish spec's open question).
+const SNAP_STEP_RAD: f32 = std::f32::consts::FRAC_PI_4;
+
+/// Constrain an in-progress drag under Shift: square/circle for
+/// rect/ellipse, 0/45/90° snapping for line/arrow. No-op without
+/// Shift — the shell's raw points pass through untouched.
+///
+/// `anchor` is the fixed point the drag started from (the begin
+/// press); `at` is the current drag position; both are in canvas
+/// physical px. `ratio` is the preset width:height for
+/// [`DragKind::Rectangular`] (1.0 = the Shift square/circle; the
+/// parameter exists so presets like 16:9 are additive later). A
+/// non-finite or non-positive ratio falls back to 1:1 rather than
+/// producing NaN geometry.
+///
+/// Pure by design: the dispatcher (and any shell previewing the
+/// constraint) calls this per drag event, so a modifier change
+/// mid-drag re-constrains live and release commits exactly what the
+/// last drag event rendered.
+#[must_use]
+pub fn constrain_drag(
+    kind: DragKind,
+    anchor: Point,
+    at: Point,
+    modifiers: crate::input::Modifiers,
+    ratio: f32,
+) -> Point {
+    if !modifiers.shift {
+        return at;
+    }
+    let dx = at.x - anchor.x;
+    let dy = at.y - anchor.y;
+    match kind {
+        DragKind::Rectangular => {
+            let ratio = if ratio.is_finite() && ratio > 0.0 {
+                ratio
+            } else {
+                1.0
+            };
+            // The common extent: how many ratio-widths fit in the
+            // drag's width, how many heights fit in its height — the
+            // smaller governs, and each delta keeps its sign so both
+            // drag directions constrain.
+            let extent = (dx.abs() / ratio).min(dy.abs());
+            Point::new(
+                anchor.x + extent * ratio * dx.signum(),
+                anchor.y + extent * dy.signum(),
+            )
+        }
+        DragKind::Linear => {
+            let len = (dx * dx + dy * dy).sqrt();
+            if len == 0.0 {
+                return at;
+            }
+            // Snap the drag angle to the nearest rose spoke, then
+            // walk the preserved drag length out along it.
+            let snapped = (dy.atan2(dx) / SNAP_STEP_RAD).round() * SNAP_STEP_RAD;
+            Point::new(
+                anchor.x + len * snapped.cos(),
+                anchor.y + len * snapped.sin(),
+            )
+        }
+    }
+}
+
 /// Full editor state: source image + committed annotations + history +
 /// active tool settings.
 ///
@@ -2936,6 +3015,222 @@ mod tests {
         let json = serde_json::to_string(&ann).expect("serialize");
         let back: Annotation = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(ann, back);
+    }
+
+    // ── Shift-constrained drawing (annotate-polish AP1) ──
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    /// Two-point approximate equality — snapped angles come back from
+    /// `atan2`/`sin`/`cos` with float dust, unlike the rect path whose
+    /// arithmetic is exact.
+    fn assert_pt_approx(actual: Point, expected: Point, what: &str) {
+        let eps = 1e-3;
+        assert!(
+            (actual.x - expected.x).abs() < eps && (actual.y - expected.y).abs() < eps,
+            "{what}: expected ≈{expected:?}, got {actual:?}"
+        );
+    }
+
+    /// Without Shift the raw drag point passes through untouched for
+    /// every constraint family — the shell's points are the editor's.
+    #[test]
+    fn constrain_without_shift_is_identity_for_every_kind() {
+        let none = Modifiers::default();
+        for kind in [DragKind::Rectangular, DragKind::Linear] {
+            for at in [
+                Point::new(40.0, 20.0),
+                Point::new(-3.0, 77.5),
+                Point::new(10.0, 10.0),
+            ] {
+                assert_eq!(
+                    constrain_drag(kind, Point::new(10.0, 10.0), at, none, 1.0),
+                    at,
+                    "{kind:?} without Shift must not move the point"
+                );
+            }
+        }
+    }
+
+    /// Shift + rect/ellipse: the longer axis clamps to the shorter —
+    /// a down-right drag that is wider than tall collapses to a square.
+    #[test]
+    fn constrain_shift_square_clamps_longer_axis_down_right() {
+        let out = constrain_drag(
+            DragKind::Rectangular,
+            Point::new(10.0, 10.0),
+            Point::new(40.0, 20.0),
+            shift(),
+            1.0,
+        );
+        assert_eq!(out, Point::new(20.0, 20.0), "30×10 clamps to 10×10");
+    }
+
+    /// Both drag directions hold: up-left and mixed-quadrant drags
+    /// keep each delta's sign while clamping to the shorter extent.
+    #[test]
+    fn constrain_shift_square_preserves_drag_direction() {
+        let anchor = Point::new(50.0, 50.0);
+        // Left + down: |dx|=20 < |dy|=30 → height clamps to 20.
+        assert_eq!(
+            constrain_drag(
+                DragKind::Rectangular,
+                anchor,
+                Point::new(30.0, 80.0),
+                shift(),
+                1.0
+            ),
+            Point::new(30.0, 70.0)
+        );
+        // Right + up, already square: unchanged.
+        assert_eq!(
+            constrain_drag(
+                DragKind::Rectangular,
+                anchor,
+                Point::new(80.0, 20.0),
+                shift(),
+                1.0
+            ),
+            Point::new(80.0, 20.0)
+        );
+    }
+
+    /// A zero-extent or purely axis-aligned Shift drag collapses onto
+    /// the anchor — the shorter extent is zero, matching every
+    /// drawing tool's square-constrain feel.
+    #[test]
+    fn constrain_shift_square_zero_extent_collapses_to_anchor() {
+        let anchor = Point::new(10.0, 10.0);
+        assert_eq!(
+            constrain_drag(DragKind::Rectangular, anchor, anchor, shift(), 1.0),
+            anchor,
+            "a click (no drag) stays put"
+        );
+        assert_eq!(
+            constrain_drag(
+                DragKind::Rectangular,
+                anchor,
+                Point::new(40.0, 10.0),
+                shift(),
+                1.0
+            ),
+            anchor,
+            "a purely horizontal Shift drag has zero-height extent"
+        );
+    }
+
+    /// The ratio parameter carries the preset grammar: ratio 2 means
+    /// width:height 2:1, so the common extent follows the wider axis.
+    #[test]
+    fn constrain_shift_ratio_two_keeps_width_double_height() {
+        let out = constrain_drag(
+            DragKind::Rectangular,
+            Point::new(0.0, 0.0),
+            Point::new(40.0, 30.0),
+            shift(),
+            2.0,
+        );
+        assert_eq!(out, Point::new(40.0, 20.0), "40×30 → 40×20 (2:1)");
+    }
+
+    /// A non-finite or non-positive ratio is unusable as a preset;
+    /// the constraint falls back to 1:1 instead of producing NaN.
+    #[test]
+    fn constrain_shift_invalid_ratio_falls_back_to_square() {
+        for ratio in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                constrain_drag(
+                    DragKind::Rectangular,
+                    Point::new(10.0, 10.0),
+                    Point::new(40.0, 20.0),
+                    shift(),
+                    ratio
+                ),
+                Point::new(20.0, 20.0),
+                "ratio {ratio} behaves as 1:1"
+            );
+        }
+    }
+
+    /// Shift + line/arrow: the drag angle snaps to the nearest of
+    /// {0, 45, 90, 135, …}° while the drag length is preserved.
+    #[test]
+    fn constrain_shift_snaps_to_the_forty_five_rose() {
+        // 26.57° (a 2:1 slope) snaps to 45°.
+        let out = constrain_drag(
+            DragKind::Linear,
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 5.0),
+            shift(),
+            1.0,
+        );
+        // Length √125 at 45° lands both axes at √125·cos45 = √62.5.
+        let c = (125.0_f32).sqrt() * std::f32::consts::FRAC_1_SQRT_2;
+        assert_pt_approx(out, Point::new(c, c), "2:1 slope snaps to 45°");
+        // 175° (nearly flat-left) snaps to 180°.
+        let out = constrain_drag(
+            DragKind::Linear,
+            Point::new(0.0, 0.0),
+            Point::new(-10.0, 0.9),
+            shift(),
+            1.0,
+        );
+        let len = (10.0_f32 * 10.0 + 0.9 * 0.9).sqrt();
+        assert_pt_approx(out, Point::new(-len, 0.0), "175° snaps to 180°");
+    }
+
+    /// Axis-aligned and exact-diagonal drags already sit on the rose
+    /// and come back unchanged (to float dust).
+    #[test]
+    fn constrain_shift_leaves_rose_angles_untouched() {
+        let anchor = Point::new(7.0, 7.0);
+        for delta in [
+            Point::new(10.0, 0.0),
+            Point::new(0.0, -10.0),
+            Point::new(-10.0, 0.0),
+            Point::new(0.0, 10.0),
+            Point::new(10.0, 10.0),
+            Point::new(-6.0, 6.0),
+        ] {
+            let at = Point::new(anchor.x + delta.x, anchor.y + delta.y);
+            let out = constrain_drag(DragKind::Linear, anchor, at, shift(), 1.0);
+            assert_pt_approx(out, at, "on-rose drag is a no-op");
+        }
+    }
+
+    /// Length preservation across the rose: whatever the input angle,
+    /// the constrained point stays exactly one drag-length from the
+    /// anchor.
+    #[test]
+    fn constrain_shift_snap_preserves_drag_length() {
+        let anchor = Point::new(3.0, -4.0);
+        for delta in [
+            Point::new(10.0, 3.0),
+            Point::new(-8.0, 12.0),
+            Point::new(2.0, -9.0),
+            Point::new(-1.0, -1.0),
+        ] {
+            let at = Point::new(anchor.x + delta.x, anchor.y + delta.y);
+            let out = constrain_drag(DragKind::Linear, anchor, at, shift(), 1.0);
+            let original = (delta.x * delta.x + delta.y * delta.y).sqrt();
+            let d = Point::new(out.x - anchor.x, out.y - anchor.y);
+            let constrained = (d.x * d.x + d.y * d.y).sqrt();
+            assert!(
+                (original - constrained).abs() < 1e-3,
+                "length drifted: {original} → {constrained} for delta {delta:?}"
+            );
+        }
+        // A zero-length drag (click) stays put.
+        assert_pt_approx(
+            constrain_drag(DragKind::Linear, anchor, anchor, shift(), 1.0),
+            anchor,
+            "zero-length drag",
+        );
     }
 
     /// `begin_annotation` then `update_annotation` should grow the
