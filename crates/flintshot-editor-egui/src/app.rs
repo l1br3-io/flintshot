@@ -2408,7 +2408,11 @@ impl EditorApp {
     /// reports the copy). Page mode keeps the single window open on
     /// every platform — the handle lives in `self.clipboard`.
     fn handle_copy(&mut self, ctx: &Context) {
-        match copy_to_clipboard(&self.state, &mut self.clipboard) {
+        match copy_to_clipboard(
+            &self.state,
+            &self.config.output.watermark,
+            &mut self.clipboard,
+        ) {
             Ok(()) => {
                 tracing::info!("editor copied to clipboard");
                 self.copied_at = Some(ctx.input(|i| i.time));
@@ -2628,6 +2632,7 @@ fn save_direct(
     );
     let format = parse_output_format(&output.format);
     let image = compose_for_save(selection_aware, state);
+    let image = flintshot_core::apply_watermark(&image, &output.watermark);
     save_capture_image(
         &output.resolve_save_dir(),
         &rendered,
@@ -2668,7 +2673,10 @@ fn save_to_disk(
 /// Encode the composed image to the dialog-chosen `path` in the
 /// path's format ([`format_for_save_path`]): JPEG at the configured
 /// quality, lossless WebP, PNG otherwise. The path is written
-/// exactly — the dialog already asked.
+/// exactly — the dialog already asked. The egress watermark is
+/// stamped first ([`flintshot_core::apply_watermark`] — a no-op
+/// pass-through when it's off), so every save format ships the same
+/// stamped pixels.
 ///
 /// # Errors
 /// Surfaces [`FlintshotError::Io`] on file creation and
@@ -2678,6 +2686,8 @@ fn write_save_image(
     path: &std::path::Path,
     output: &flintshot_core::OutputConfig,
 ) -> flintshot_core::Result<()> {
+    let stamped = flintshot_core::apply_watermark(img, &output.watermark);
+    let img: &image::RgbaImage = &stamped;
     match format_for_save_path(path) {
         flintshot_core::OutputFormat::Jpeg => {
             let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
@@ -2940,13 +2950,44 @@ fn os_owns_clipboard() -> bool {
 /// Surfaces [`FlintshotError::Shell`] for clipboard-creation or
 /// clipboard-set failures (clipboard occupied by another process,
 /// clipboard daemon unavailable on Linux, etc.).
+/// The pixels that leave through the system clipboard on Copy: the
+/// selection-aware compose, then the egress watermark
+/// ([`flintshot_core::apply_watermark`] — a no-op when it's off or
+/// blank). Factored out of [`copy_to_clipboard`] so the payload is
+/// headless-testable (the arboard write needs a session).
+pub(crate) fn clipboard_payload(
+    state: &EditorState,
+    watermark: &flintshot_core::WatermarkConfig,
+) -> image::RgbaImage {
+    let img = compose_selection_aware(state);
+    if !watermark.is_active() {
+        return img;
+    }
+    flintshot_core::apply_watermark(&img, watermark).into_owned()
+}
+
+/// The persisted watermark cfg for config-less callers (the
+/// overlay's Copy): loads with a warn-and-disabled fallback,
+/// mirroring [`save_region_to_disk`]'s prefill load.
+pub(crate) fn load_watermark_cfg() -> flintshot_core::WatermarkConfig {
+    match flintshot_core::Config::load() {
+        Ok(c) => c.output.watermark,
+        Err(e) => {
+            tracing::warn!(error = %e, "loading config for the clipboard watermark; using defaults");
+            flintshot_core::WatermarkConfig::default()
+        }
+    }
+}
+
 pub(crate) fn copy_to_clipboard(
     state: &EditorState,
+    watermark: &flintshot_core::WatermarkConfig,
     slot: &mut Option<arboard::Clipboard>,
 ) -> flintshot_core::Result<()> {
-    // Selection-aware output: crop the composed image to the active
-    // selection rect when one is present and non-degenerate.
-    let img = compose_selection_aware(state);
+    // Selection-aware output, watermarked at egress: crop the
+    // composed image to the active selection rect when one is
+    // present and non-degenerate, then stamp if configured.
+    let img = clipboard_payload(state, watermark);
     // Reuse the existing Clipboard handle, or create one if this is
     // the first copy this session.
     let mut clipboard = match slot.take() {
@@ -3351,6 +3392,101 @@ mod tests {
         let config = copy_persist_config(&blocker, true);
         let out = persist_clipboard_copy_side_effect(&blank_state(4, 4), &config);
         assert!(out.is_none(), "a failed save never fails the copy");
+    }
+
+    // ── egress watermark wiring (WM3) ─────────────────────────────
+
+    /// An enabled watermark cfg on top of the copy-persist helper
+    /// (blank text is a no-op guard, so build it explicitly).
+    fn watermark_enabled_config(dir: &std::path::Path) -> Config {
+        let mut config = copy_persist_config(dir, true);
+        config.output.watermark.enabled = true;
+        config
+    }
+
+    /// The clipboard payload (what actually leaves through the
+    /// system clipboard) with the watermark off is exactly the
+    /// composed image — Copy without a watermark moves today's
+    /// pixels.
+    #[test]
+    fn clipboard_payload_disabled_is_the_composed_image() {
+        let state = blank_state(400, 600);
+        let expected = compose_selection_aware(&state);
+        let payload = clipboard_payload(&state, &flintshot_core::WatermarkConfig::default());
+        assert_eq!(payload, expected, "no watermark, no change");
+    }
+
+    /// With the watermark on, the clipboard payload carries the
+    /// stamp (soft: needs a system font; fontless hosts skip — the
+    /// disabled contract above never skips).
+    #[test]
+    fn clipboard_payload_stamps_when_watermark_enabled() {
+        let state = blank_state(400, 600);
+        let mut watermark = flintshot_core::WatermarkConfig::default();
+        watermark.enabled = true;
+        let payload = clipboard_payload(&state, &watermark);
+        if payload == compose_selection_aware(&state) {
+            eprintln!("skipping: no system font available");
+            return;
+        }
+        assert!(
+            payload.pixels().any(|p| p.0 != [0, 0, 0, 255]),
+            "the clipboard-bound pixels carry the stamp"
+        );
+    }
+
+    /// The Save-dialog write with the watermark off is pixel-identical
+    /// to the composed image (never surprise-stamp).
+    #[test]
+    fn write_save_image_disabled_is_pixel_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = image::RgbaImage::from_pixel(40, 30, image::Rgba([7, 8, 9, 255]));
+        let path = dir.path().join("shot.png");
+        write_save_image(&img, &path, &flintshot_core::OutputConfig::default()).expect("writes");
+        let back = image::open(&path).expect("decodes").to_rgba8();
+        assert_eq!(back, img, "no watermark, no change");
+    }
+
+    /// The Save-dialog write stamps when the watermark is on (soft —
+    /// fontless hosts skip).
+    #[test]
+    fn write_save_image_stamps_when_watermark_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut output = flintshot_core::OutputConfig::default();
+        output.watermark.enabled = true;
+        let img = image::RgbaImage::from_pixel(400, 600, image::Rgba([0, 0, 0, 255]));
+        let path = dir.path().join("shot.png");
+        write_save_image(&img, &path, &output).expect("writes");
+        let back = image::open(&path).expect("decodes").to_rgba8();
+        if back == img {
+            eprintln!("skipping: no system font available");
+            return;
+        }
+        assert!(
+            back.pixels().any(|p| p.0 != [0, 0, 0, 255]),
+            "the saved file carries the stamp"
+        );
+    }
+
+    /// The direct-save path (template-configured Save) stamps too —
+    /// every saved-file egress composes the same stamp (soft —
+    /// fontless hosts skip).
+    #[test]
+    fn save_direct_stamps_when_watermark_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = watermark_enabled_config(dir.path());
+        config.output.filename_template = "shot".into();
+        let written = save_direct(&blank_state(400, 600), false, &config.output).expect("saves");
+        let back = image::open(&written).expect("decodes").to_rgba8();
+        let pristine = compose_final(&blank_state(400, 600));
+        if back == pristine {
+            eprintln!("skipping: no system font available");
+            return;
+        }
+        assert!(
+            back.pixels().any(|p| p.0 != [0, 0, 0, 255]),
+            "the direct-saved file carries the stamp"
+        );
     }
 
     /// The save dialog prefills the resolved save dir (configured,

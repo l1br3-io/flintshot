@@ -144,8 +144,9 @@ use flintshot_core::{
 };
 
 use crate::app::{
-    compose_and_write_upload, copy_to_clipboard, dispatch_text_input, save_region_to_disk,
-    spawn_upload_worker, tool_for_key, translate_modifiers, ClipboardSlot, OutcomeSlot,
+    compose_and_write_upload, copy_to_clipboard, dispatch_text_input, load_watermark_cfg,
+    save_region_to_disk, spawn_upload_worker, tool_for_key, translate_modifiers, ClipboardSlot,
+    OutcomeSlot,
 };
 use crate::canvas::{EguiCanvas, EguiTexture};
 use crate::magnifier::Magnifier;
@@ -881,7 +882,7 @@ impl OverlayApp {
     /// lingers past window close holding it (see
     /// `run_overlay_blocking`).
     fn accept_as_copy(&mut self, ctx: &Context) {
-        match copy_to_clipboard(&self.state, &mut self.clipboard) {
+        match copy_to_clipboard(&self.state, &load_watermark_cfg(), &mut self.clipboard) {
             Ok(()) => {
                 tracing::info!("overlay accepted; region copied to clipboard");
                 if let Some(handle) = self.clipboard.take() {

@@ -890,7 +890,7 @@ fn dispatch_native_grab(
         if let Some(notice) = notice {
             eprintln!("{notice}");
         }
-        write_out(&img, path, format)?;
+        write_out(&img, path, format, &cfg_for_post_grab().output.watermark)?;
         report_capture_json(
             output,
             &CaptureJsonReport {
@@ -930,14 +930,21 @@ fn dispatch_native_grab(
             // selection — alive while its window is open; a
             // supersede skip exits right after the copy, no worse
             // than the window-less flow this replaces.
-            copy_image_to_clipboard(&img)?;
+            //
+            // Two egresses leave this arm — the clipboard pixels and
+            // the persisted copy — so each stamps its own copy from
+            // the pristine grab (exactly one stamp per egress, no
+            // double-stamping through reuse).
+            let cfg = cfg_for_post_grab();
+            let stamped = flintshot_core::apply_watermark(&img, &cfg.output.watermark);
+            copy_image_to_clipboard(&stamped)?;
             fire_capture_notification("Capture copied to clipboard");
             tracing::info!("native capture copied to clipboard");
             // The copy is history too when save-clipboard-copies is
             // on (default): persist to the resolved save dir and
             // record into recents — best-effort by the helper's
             // contract, never a capture failure.
-            if let Some(path) = persist_clipboard_capture(&img, &cfg_for_post_grab()) {
+            if let Some(path) = persist_clipboard_capture(&img, &cfg) {
                 tracing::info!(path = %path.display(), "clipboard capture persisted");
                 flintshot_core::recents::record(&path, crate::capture_flow::recents_limit());
             }
@@ -1150,7 +1157,7 @@ fn capture_and_dispatch(
         if let Some(notice) = notice {
             eprintln!("{notice}");
         }
-        write_out(&img, path, format)?;
+        write_out(&img, path, format, &cfg_for_post_grab().output.watermark)?;
         report_capture_json(
             output,
             &CaptureJsonReport {
@@ -2220,14 +2227,34 @@ fn encode_bytes(img: &image::RgbaImage, format: OutputFormat) -> Result<Vec<u8>>
 
 /// Encode `img` to `path` in `format`, creating parent directories
 /// as needed. See [`encode_bytes`] for the per-format policies.
-fn write_out(img: &image::RgbaImage, path: &std::path::Path, format: OutputFormat) -> Result<()> {
+/// The one egress encoder for the headless paths (`--out`,
+/// `--stdout`): the watermark stamped onto the pixels **before**
+/// encoding (when enabled), so the stamp is format-orthogonal by
+/// construction — any format encodes the same stamped image. With
+/// the watermark off this is exactly [`encode_bytes`] (no extra
+/// copy: `apply_watermark` passes the buffer through).
+fn egress_bytes(
+    img: &image::RgbaImage,
+    format: OutputFormat,
+    watermark: &flintshot_core::WatermarkConfig,
+) -> Result<Vec<u8>> {
+    let stamped = flintshot_core::apply_watermark(img, watermark);
+    encode_bytes(&stamped, format)
+}
+
+fn write_out(
+    img: &image::RgbaImage,
+    path: &std::path::Path,
+    format: OutputFormat,
+    watermark: &flintshot_core::WatermarkConfig,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating output directory {}", parent.display()))?;
         }
     }
-    let bytes = encode_bytes(img, format)?;
+    let bytes = egress_bytes(img, format, watermark)?;
     std::fs::write(path, &bytes).with_context(|| {
         format!(
             "writing {} to {}",
@@ -2261,7 +2288,7 @@ fn resolve_stdout_format(flag: Option<&str>, cfg_format: &str) -> OutputFormat {
 fn write_stdout(img: &image::RgbaImage, output: &OutputArgs, ctx: &GrabCtx) -> Result<()> {
     let cfg = cfg_for_post_grab();
     let format = resolve_stdout_format(output.format.as_deref(), &cfg.output.format);
-    let bytes = encode_bytes(img, format)?;
+    let bytes = egress_bytes(img, format, &cfg.output.watermark)?;
     {
         let mut out = std::io::stdout().lock();
         std::io::Write::write_all(&mut out, &bytes)
@@ -3089,18 +3116,21 @@ mod tests {
     }
 
     /// The headless write path encodes the format it resolved —
-    /// magic bytes per format.
+    /// magic bytes per format. The watermark is off (default), so
+    /// this also pins that `--out` with no watermark writes today's
+    /// bytes.
     #[test]
     fn write_out_encodes_each_format() {
         let dir = tempfile::tempdir().unwrap();
         let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 99, 199, 255]));
+        let watermark = flintshot_core::WatermarkConfig::default();
         for (format, name) in [
             (OutputFormat::Png, "shot.png"),
             (OutputFormat::Jpeg, "shot.jpg"),
             (OutputFormat::Webp, "shot.webp"),
         ] {
             let path = dir.path().join(name);
-            write_out(&img, &path, format).unwrap();
+            write_out(&img, &path, format, &watermark).unwrap();
             let mut head = [0u8; 12];
             std::io::Read::read_exact(
                 &mut std::io::BufReader::new(std::fs::File::open(&path).unwrap()),
@@ -3115,12 +3145,82 @@ mod tests {
                     assert_eq!(&head[0..3], &[0xFF, 0xD8, 0xFF], "{name} magic");
                 }
                 OutputFormat::Webp => {
-                    assert_eq!(&head[0..4], b"RIFF", "{name} magic");
+                    assert_eq!(&head[0..4], b"RIFF", "{name} riff magic");
                     assert_eq!(&head[8..12], b"WEBP", "{name} tag");
                 }
                 _ => panic!("unreachable for this test's cases"),
             }
         }
+    }
+
+    // ── egress watermark wiring (WM3) ─────────────────────────────
+
+    /// The egress core (shared by `--out` and `--stdout`) with the
+    /// watermark disabled is byte-identical to the plain encoding —
+    /// the never-surprise-stamp contract on every headless path and
+    /// format.
+    #[test]
+    fn egress_bytes_disabled_is_byte_identical_to_plain_encoding() {
+        let img = image::RgbaImage::from_pixel(64, 48, image::Rgba([9, 99, 199, 255]));
+        let watermark = flintshot_core::WatermarkConfig::default();
+        for format in [OutputFormat::Png, OutputFormat::Jpeg, OutputFormat::Webp] {
+            assert_eq!(
+                egress_bytes(&img, format, &watermark).expect("encodes"),
+                encode_bytes(&img, format).expect("plain encodes"),
+                "{format:?}: disabled watermark must not move a byte"
+            );
+        }
+    }
+
+    /// With the watermark on, the egress payload carries the stamp in
+    /// every format (the stamp lands before encoding, so it is
+    /// format-orthogonal). Soft: needs a system font; fontless hosts
+    /// skip the pixel leg (the disabled contract above never skips).
+    #[test]
+    fn egress_bytes_stamps_in_every_format_when_enabled() {
+        let mut watermark = flintshot_core::WatermarkConfig::default();
+        watermark.enabled = true;
+        let img = image::RgbaImage::from_pixel(400, 600, image::Rgba([0, 0, 0, 255]));
+        for format in [OutputFormat::Png, OutputFormat::Jpeg, OutputFormat::Webp] {
+            let stamped = egress_bytes(&img, format, &watermark).expect("encodes");
+            let plain = encode_bytes(&img, format).expect("plain encodes");
+            if stamped == plain {
+                eprintln!("skipping {format:?}: no system font available");
+                continue;
+            }
+            // Lossless formats decode back to visibly stamped pixels.
+            if format != OutputFormat::Jpeg {
+                let back = image::load_from_memory(&stamped)
+                    .expect("decodes")
+                    .to_rgba8();
+                assert!(
+                    back.pixels().any(|p| p.0 != [0, 0, 0, 255]),
+                    "{format:?}: the stamp is in the pixels"
+                );
+            }
+        }
+    }
+
+    /// `--out` composes the egress core: the written file decodes
+    /// with the stamp when the watermark is on (soft — fontless
+    /// hosts skip).
+    #[test]
+    fn write_out_stamps_the_file_when_watermark_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut watermark = flintshot_core::WatermarkConfig::default();
+        watermark.enabled = true;
+        let img = image::RgbaImage::from_pixel(400, 600, image::Rgba([0, 0, 0, 255]));
+        let path = dir.path().join("shot.png");
+        write_out(&img, &path, OutputFormat::Png, &watermark).expect("writes");
+        let back = image::open(&path).expect("decodes").to_rgba8();
+        if back == img {
+            eprintln!("skipping: no system font available");
+            return;
+        }
+        assert!(
+            back.pixels().any(|p| p.0 != [0, 0, 0, 255]),
+            "the written file carries the stamp"
+        );
     }
 
     /// `--format` parses with the pinned vocabulary and rejects

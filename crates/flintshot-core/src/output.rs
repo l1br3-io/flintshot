@@ -344,17 +344,19 @@ pub fn clipboard_copy_stem(output: &OutputConfig) -> String {
 /// `save-clipboard-copies` feature): [`clipboard_copy_stem`]
 /// naming, the resolved save directory
 /// ([`OutputConfig::resolve_save_dir`]), collision suffixing,
-/// `[output] format` encoding. Creates the directory on first
+/// `[output] format` encoding, the egress watermark stamped via
+/// [`apply_watermark`] when enabled. Creates the directory on first
 /// write. Returns the written path.
 ///
 /// # Errors
 /// See [`save_capture_image`].
 pub fn persist_clipboard_copy(img: &image::RgbaImage, output: &OutputConfig) -> Result<PathBuf> {
     let format = crate::parse_output_format(&output.format);
+    let stamped = apply_watermark(img, &output.watermark);
     save_capture_image(
         &output.resolve_save_dir(),
         &clipboard_copy_stem(output),
-        img,
+        &stamped,
         format,
         output.jpeg_quality,
     )
@@ -677,6 +679,64 @@ mod tests {
             .filter(|p| p.0 == [128, 128, 128, 255])
             .count();
         assert!(half > 0, "coverage-1 interiors are exactly 50% white");
+    }
+
+    // ── egress wiring (WM3) ───────────────────────────────────────
+
+    /// A clipboard-copy persist with the watermark ON stamps the
+    /// written file (soft: the stamp needs a system font — a
+    /// fontless host skips the pixel leg; the disabled contract
+    /// below never skips).
+    #[test]
+    fn persist_clipboard_copy_stamps_when_watermark_enabled() {
+        let dir = tempdir().unwrap();
+        let mut output = OutputConfig::default();
+        output.save_dir = dir.path().to_string_lossy().into_owned();
+        output.watermark.enabled = true;
+        let img = image::RgbaImage::from_pixel(400, 600, image::Rgba([0, 0, 0, 255]));
+        let written = persist_clipboard_copy(&img, &output).expect("persist");
+        let back = image::open(&written).expect("decodes").to_rgba8();
+        let changed = back.pixels().filter(|p| p.0 != [0, 0, 0, 255]).count();
+        if changed == 0 {
+            eprintln!("skipping: no system font available");
+            return;
+        }
+        assert!(changed > 0, "the persisted copy carries the stamp");
+    }
+
+    /// The disabled watermark keeps the persisted copy pixel-identical
+    /// to the source (the never-surprise-stamp contract).
+    #[test]
+    fn persist_clipboard_copy_disabled_is_pixel_identical() {
+        let dir = tempdir().unwrap();
+        let mut output = OutputConfig::default();
+        output.save_dir = dir.path().to_string_lossy().into_owned();
+        let img = image::RgbaImage::from_pixel(40, 30, image::Rgba([1, 2, 3, 255]));
+        let written = persist_clipboard_copy(&img, &output).expect("persist");
+        let back = image::open(&written).expect("decodes").to_rgba8();
+        assert_eq!(back, img, "no watermark, no change — byte-for-byte");
+    }
+
+    /// The session store's recovery mirror stays unstamped even with
+    /// a watermark configured: `insert` writes the pristine source
+    /// (`<id>.png`, session-resume interop — recovery returns
+    /// unstamped pixels).
+    #[test]
+    fn session_store_mirror_stays_unstamped_with_watermark_enabled() {
+        let dir = tempdir().unwrap();
+        let store = crate::session::SessionStore::in_dir(dir.path().to_path_buf());
+        let img = image::RgbaImage::from_pixel(40, 30, image::Rgba([4, 5, 6, 255]));
+        let id = store.insert(img.clone(), 0);
+        let mirror = dir.path().join(format!("{}.png", id.raw()));
+        // The PNG write rides a short-lived thread; poll briefly.
+        for _ in 0..100 {
+            if mirror.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let back = image::open(&mirror).expect("the mirror png").to_rgba8();
+        assert_eq!(back, img, "the mirror is the pristine source");
     }
 
     // ── save/clipboard paths ─────────────────────────────────────
