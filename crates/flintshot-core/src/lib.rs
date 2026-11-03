@@ -74,8 +74,9 @@ pub use input::{DispatchOutcome, InputEvent, Modifiers};
 pub use inspector::{PropertyEditKind, SelectionCapabilities};
 pub use ipc::{socket_path, Event as IpcEvent, Request as IpcRequest};
 pub use ocr::{
-    resolve_engine, OcrAvailabilityProbe, OcrEngine, OcrEngineChoice, OcrEngineKind, OcrError,
-    OcrOutput, SystemOcrProbe, TesseractEngine,
+    resolve_engine, ModelDownloader, ModelFileSpec, OcrAvailabilityProbe, OcrEngine,
+    OcrEngineChoice, OcrEngineKind, OcrError, OcrOutput, OcrsEngine, SystemOcrProbe,
+    TesseractEngine, DETECTION_MODEL_URL, MODEL_SPECS, RECOGNITION_MODEL_URL,
 };
 pub use output::{
     apply_watermark, chrono_date, chrono_time, clipboard_copy_stem, next_free_path, output_ext,

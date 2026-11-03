@@ -15,8 +15,13 @@
 //! the cure (install/config guidance). Engine implementations live in
 //! `ocrs.rs` and `tesseract.rs`.
 
+pub mod ocrs;
 pub mod tesseract;
 
+pub use ocrs::{
+    fetch_models_into, ModelDownloader, ModelFileSpec, OcrsEngine, DETECTION_MODEL_URL,
+    MODEL_SPECS, RECOGNITION_MODEL_URL,
+};
 pub use tesseract::TesseractEngine;
 
 use std::path::Path;
@@ -125,11 +130,14 @@ pub trait OcrAvailabilityProbe {
 #[derive(Debug, Default)]
 pub struct SystemOcrProbe;
 
-/// Upstream `ocrs` model file names inside a model dir. Verified
-/// against the ocrs docs when the fetch path landed (`ocrs.rs`).
-pub(crate) const DETECTION_MODEL_FILE: &str = "text-detection.rten";
+/// Upstream `ocrs` model file names inside a model dir. Pinned to
+/// the `ocrs`-CLI's own defaults (`text-detection.onnx` /
+/// `text-recognition.onnx` on the project's S3 bucket — see
+/// `ocrs.rs`); `rten::Model::load_file` loads the ONNX form
+/// directly.
+pub(crate) const DETECTION_MODEL_FILE: &str = "text-detection.onnx";
 /// See [`DETECTION_MODEL_FILE`].
-pub(crate) const RECOGNITION_MODEL_FILE: &str = "text-recognition.rten";
+pub(crate) const RECOGNITION_MODEL_FILE: &str = "text-recognition.onnx";
 /// Model dir under `dirs::cache_dir()` — where a consented fetch
 /// writes (`~/.cache/flintshot/ocrs`).
 pub(crate) const OCRS_MODEL_CACHE_SUBDIR: &str = "flintshot/ocrs";
@@ -146,14 +154,20 @@ pub(crate) const TESSERACT_INSTALL_CURE: &str =
 
 /// Both model files present in `dir` (one file is not enough — the
 /// engine needs detection *and* recognition).
-fn models_present_in(dir: &Path) -> bool {
+pub(crate) fn models_present_in(dir: &Path) -> bool {
     dir.join(DETECTION_MODEL_FILE).is_file() && dir.join(RECOGNITION_MODEL_FILE).is_file()
+}
+
+/// The model cache dir under an XDG-style `base` (`None` when the
+/// platform has no cache dir).
+pub(crate) fn cache_subdir_under(base: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    base.map(|b| b.join(OCRS_MODEL_CACHE_SUBDIR))
 }
 
 impl OcrAvailabilityProbe for SystemOcrProbe {
     fn ocrs_models_present(&self) -> bool {
-        let cached = dirs::cache_dir()
-            .is_some_and(|base| models_present_in(&base.join(OCRS_MODEL_CACHE_SUBDIR)));
+        let cached =
+            cache_subdir_under(dirs::cache_dir()).is_some_and(|dir| models_present_in(&dir));
         cached || models_present_in(Path::new(OCRS_MODEL_PRESEED_DIR))
     }
 

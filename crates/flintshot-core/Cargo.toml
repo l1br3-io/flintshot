@@ -26,6 +26,10 @@ keyring = { workspace = true }
 # ocr-region plan (SPEC-ocr-region.md "Tech Stack").
 ocrs = "0.13"
 postcard = { workspace = true }
+# Direct edge onto ocrs's own NN runtime (same 0.26 the lockfile
+# already resolves via ocrs): the engine loader names
+# rten::Model/LoadError when feeding OcrEngineParams.
+rten = "0.26"
 serde = { workspace = true }
 # Session-capture sidecars (<id>.json); already in the lockfile via
 # the former dev-dependency — no new crate.

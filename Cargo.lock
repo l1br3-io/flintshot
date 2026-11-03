@@ -2528,6 +2528,7 @@ dependencies = [
  "keyring",
  "ocrs",
  "postcard",
+ "rten",
  "serde",
  "serde_json",
  "tempfile",
