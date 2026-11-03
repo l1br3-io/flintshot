@@ -2835,6 +2835,7 @@ mod tests {
         });
         state.dispatch_input(&CoreEvent::PointerDrag {
             pos: flintshot_core::Point::new(24.0, 24.0),
+            modifiers: flintshot_core::input::Modifiers::default(),
         });
         state.dispatch_input(&CoreEvent::PointerUp);
         state.selected = vec![0];

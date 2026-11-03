@@ -744,6 +744,26 @@ impl EditorState {
         }
     }
 
+    /// Apply the Shift drag constraint to an in-progress annotation
+    /// drag (annotate-polish): the pending variant picks the
+    /// [`DragKind`], its begin anchor (rect corner / endpoint `a`)
+    /// fixes the constraint origin, and [`constrain_drag`] does the
+    /// math. Every other pending kind (blur, freehand, text, number)
+    /// and every non-Shift drag passes the raw point through — the
+    /// spec's four tools are rect, ellipse, line, arrow.
+    fn constrained_pending_drag(&self, at: Point, modifiers: crate::input::Modifiers) -> Point {
+        let (kind, anchor) = match self.pending.as_ref() {
+            Some(Annotation::Rect { rect, .. } | Annotation::Ellipse { rect, .. }) => {
+                (DragKind::Rectangular, rect.min)
+            }
+            Some(Annotation::Line { a, .. } | Annotation::Arrow { a, .. }) => {
+                (DragKind::Linear, *a)
+            }
+            _ => return at,
+        };
+        constrain_drag(kind, anchor, at, modifiers, 1.0)
+    }
+
     /// Commit the in-flight annotation to `anns`.
     ///
     /// Pushes a snapshot of the current `anns` onto `undo`, clears
@@ -1437,7 +1457,7 @@ impl EditorState {
                 }
                 DispatchOutcome::Continue
             }
-            InputEvent::PointerDrag { pos } => {
+            InputEvent::PointerDrag { pos, modifiers } => {
                 if self.tool == Tool::Crop {
                     self.update_crop_region(*pos);
                 } else if self.tool == Tool::Select {
@@ -1452,7 +1472,8 @@ impl EditorState {
                     // defensively so synthetic state can't mutate
                     // annotations.
                 } else {
-                    self.update_annotation(*pos);
+                    let at = self.constrained_pending_drag(*pos, *modifiers);
+                    self.update_annotation(at);
                 }
                 DispatchOutcome::Continue
             }
@@ -3233,6 +3254,125 @@ mod tests {
         );
     }
 
+    // ── Shift routing through the dispatcher (annotate-polish AP2) ──
+
+    /// A Shift drag dispatched while a rect is pending constrains the
+    /// live geometry to a square — the constraint rides the drag
+    /// events, not the press.
+    #[test]
+    fn dispatch_shift_rect_drag_constrains_pending_square() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Rect;
+        let _ = s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+            modifiers: Modifiers::default(),
+        });
+        let _ = s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(40.0, 20.0),
+            modifiers: shift(),
+        });
+        match &s.pending {
+            Some(Annotation::Rect { rect, .. }) => {
+                assert_eq!(rect.min, Point::new(10.0, 10.0), "anchor preserved");
+                assert_eq!(rect.max, Point::new(20.0, 20.0), "Shift square in flight");
+            }
+            other => panic!("expected pending Rect, got {other:?}"),
+        }
+    }
+
+    /// Without Shift the same drag sequence is raw passthrough —
+    /// the pre-existing behavior, byte-for-byte.
+    #[test]
+    fn dispatch_plain_rect_drag_stays_raw() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Rect;
+        let _ = s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+            modifiers: Modifiers::default(),
+        });
+        let _ = s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(40.0, 20.0),
+            modifiers: Modifiers::default(),
+        });
+        match &s.pending {
+            Some(Annotation::Rect { rect, .. }) => {
+                assert_eq!(rect.max, Point::new(40.0, 20.0), "no Shift, no clamp");
+            }
+            other => panic!("expected pending Rect, got {other:?}"),
+        }
+    }
+
+    /// Shift is read per drag event: releasing it mid-drag returns
+    /// the live geometry to the raw point (every drawing tool's
+    /// modifier feel).
+    #[test]
+    fn dispatch_shift_released_mid_drag_returns_to_raw() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Arrow;
+        let _ = s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(0.0, 0.0),
+            modifiers: shift(),
+        });
+        let _ = s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(10.0, 10.0),
+            modifiers: shift(),
+        });
+        let _ = s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(30.0, 4.0),
+            modifiers: Modifiers::default(),
+        });
+        match &s.pending {
+            Some(Annotation::Arrow { b, .. }) => {
+                assert_eq!(*b, Point::new(30.0, 4.0), "unshifted drag is raw");
+            }
+            other => panic!("expected pending Arrow, got {other:?}"),
+        }
+    }
+
+    /// The constraint covers exactly the spec's four tools: blur (a
+    /// rect-drag tool the spec leaves out) and the freehand tools
+    /// pass through untouched under Shift.
+    #[test]
+    fn dispatch_shift_leaves_blur_and_freehand_drags_unconstrained() {
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Blur;
+        let _ = s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(10.0, 10.0),
+            modifiers: shift(),
+        });
+        let _ = s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(40.0, 20.0),
+            modifiers: shift(),
+        });
+        match &s.pending {
+            Some(Annotation::Blur { rect, .. }) => {
+                assert_eq!(rect.max, Point::new(40.0, 20.0), "blur drags stay raw");
+            }
+            other => panic!("expected pending Blur, got {other:?}"),
+        }
+
+        let mut s = EditorState::new(blank_image());
+        s.tool = Tool::Marker;
+        let _ = s.dispatch_input(&InputEvent::PointerDown {
+            pos: Point::new(0.0, 0.0),
+            modifiers: shift(),
+        });
+        let _ = s.dispatch_input(&InputEvent::PointerDrag {
+            pos: Point::new(40.0, 20.0),
+            modifiers: shift(),
+        });
+        match &s.pending {
+            Some(Annotation::Marker { points, .. }) => {
+                assert_eq!(
+                    points.last(),
+                    Some(&Point::new(40.0, 20.0)),
+                    "freehand points append raw"
+                );
+            }
+            other => panic!("expected pending Marker, got {other:?}"),
+        }
+    }
+
     /// `begin_annotation` then `update_annotation` should grow the
     /// pending annotation's geometry without committing.
     #[test]
@@ -3383,7 +3523,10 @@ mod tests {
     /// committing a non-degenerate annotation on release.
     fn drag_commit(s: &mut EditorState, from: Point, to: Point) {
         s.dispatch_input(&down(from));
-        s.dispatch_input(&InputEvent::PointerDrag { pos: to });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: to,
+            modifiers: Modifiers::default(),
+        });
         s.dispatch_input(&InputEvent::PointerUp);
     }
 
@@ -3708,7 +3851,10 @@ mod tests {
     /// Drag a marquee from `from` to `to` under Select and release.
     fn marquee(s: &mut EditorState, from: Point, to: Point) {
         s.dispatch_input(&down(from));
-        s.dispatch_input(&InputEvent::PointerDrag { pos: to });
+        s.dispatch_input(&InputEvent::PointerDrag {
+            pos: to,
+            modifiers: Modifiers::default(),
+        });
         s.dispatch_input(&InputEvent::PointerUp);
     }
 
@@ -3740,6 +3886,7 @@ mod tests {
         });
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(30.0, 75.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.selected, vec![0], "shift marquee selects ann 0");
@@ -3747,6 +3894,7 @@ mod tests {
         s.dispatch_input(&ctrl_down(Point::new(55.0, 45.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(100.0, 75.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(
@@ -3759,6 +3907,7 @@ mod tests {
         s.dispatch_input(&ctrl_down(Point::new(55.0, 45.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(100.0, 75.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.selected, vec![0, 1, 2], "merge never toggles members out");
@@ -3805,6 +3954,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 45.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.moving.is_none(), "Hand press starts no drag");
@@ -3986,6 +4136,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 60.0),
+            modifiers: Modifiers::default(),
         });
         assert_eq!(
             s.dispatch_input(&InputEvent::PointerUp),
@@ -4022,6 +4173,7 @@ mod tests {
         let mut s = EditorState::new(blank_image());
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(5.0, 5.0),
+            modifiers: Modifiers::default(),
         });
         assert!(s.pending.is_none());
         assert_eq!(s.anns.len(), 0);
@@ -4043,6 +4195,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 60.0),
+            modifiers: Modifiers::default(),
         });
         assert_eq!(
             s.dispatch_input(&InputEvent::PointerUp),
@@ -5092,6 +5245,7 @@ mod tests {
         assert!(s.moving.is_none(), "the armed drag-grab was neutralized");
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 60.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.anns.is_empty(), "nothing moved");
@@ -6493,6 +6647,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(30.0, 25.0))); // select the rect
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(35.0, 30.0),
+            modifiers: Modifiers::default(),
         }); // in-flight move
         assert!(s.pending.is_some());
         assert!(!s.selected.is_empty());
@@ -6531,6 +6686,7 @@ mod tests {
         );
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 60.0),
+            modifiers: Modifiers::default(),
         });
         match s.crop_region {
             Some(r) => {
@@ -6549,6 +6705,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(50.0, 60.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(10.0, 10.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         match s.crop_region {
@@ -6568,6 +6725,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(10.0, 10.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 50.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         s.dispatch_input(&InputEvent::Key {
@@ -6825,6 +6983,7 @@ mod tests {
         // releasing) must not crash or conjure extra annotations.
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 60.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.anns.len(), 1, "still exactly one bubble");
@@ -6904,6 +7063,7 @@ mod tests {
         // cursor − grab offset = (40, 30).
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 45.0),
+            modifiers: Modifiers::default(),
         });
         match &s.anns[0] {
             Annotation::Rect { rect, .. } => {
@@ -6931,6 +7091,7 @@ mod tests {
         for x in [35.0, 45.0, 55.0] {
             s.dispatch_input(&InputEvent::PointerDrag {
                 pos: Point::new(x, 25.0),
+                modifiers: Modifiers::default(),
             });
         }
         s.dispatch_input(&InputEvent::PointerUp);
@@ -6960,6 +7121,7 @@ mod tests {
         // Same-position drag: zero movement, no snapshot.
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(30.0, 25.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.undo.is_empty(), "no movement = no snapshot");
@@ -6977,6 +7139,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 45.0),
+            modifiers: Modifiers::default(),
         });
         assert!(s.moving.is_some());
         s.dispatch_input(&InputEvent::Key {
@@ -6996,6 +7159,7 @@ mod tests {
         // A stray drag after the cancel must not move anything.
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(90.0, 90.0),
+            modifiers: Modifiers::default(),
         });
         match &s.anns[0] {
             Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
@@ -7020,6 +7184,7 @@ mod tests {
         // The drag extends the region, not the annotation.
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(90.0, 80.0),
+            modifiers: Modifiers::default(),
         });
         match &s.anns[0] {
             Annotation::Rect { rect, .. } => assert_eq!(rect.min, Point::new(10.0, 10.0)),
@@ -7062,6 +7227,7 @@ mod tests {
         assert!(s.moving.is_some(), "near-segment press grabs the line");
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 32.0),
+            modifiers: Modifiers::default(),
         });
         match &s.anns[0] {
             Annotation::Line { a, b, .. } => {
@@ -7098,6 +7264,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(70.0, 70.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(90.0, 80.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.moving.is_none());
@@ -7135,6 +7302,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 45.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert!(s.moving.is_none());
@@ -7327,6 +7495,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 45.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.selected, vec![0], "fixture: selected after release");
@@ -7384,6 +7553,7 @@ mod tests {
         // geometry.
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(40.0, 40.0),
+            modifiers: Modifiers::default(),
         });
         assert!(s.anns.is_empty());
     }
@@ -7435,6 +7605,7 @@ mod tests {
         assert!(s.moving.is_none(), "toggle-out starts no drag");
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(60.0, 45.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         match &s.anns[0] {
@@ -7582,9 +7753,11 @@ mod tests {
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(40.0, 25.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 35.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         for (i, expected_min) in [(0, Point::new(30.0, 20.0)), (1, Point::new(80.0, 20.0))] {
@@ -7621,6 +7794,7 @@ mod tests {
         for x in [35.0, 45.0, 55.0] {
             s.dispatch_input(&InputEvent::PointerDrag {
                 pos: Point::new(x, 25.0),
+                modifiers: Modifiers::default(),
             });
         }
         s.dispatch_input(&InputEvent::PointerUp);
@@ -7652,6 +7826,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(30.0, 25.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(50.0, 35.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.anns.len(), 3, "degenerate member survived untouched");
@@ -7799,6 +7974,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(5.0, 5.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(8.0, 8.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         assert_eq!(s.undo.last().unwrap().kind, EditKind::Move { count: 1 });
@@ -7874,6 +8050,7 @@ mod tests {
         s.dispatch_input(&down(Point::new(5.0, 5.0)));
         s.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(7.0, 7.0),
+            modifiers: Modifiers::default(),
         });
         s.dispatch_input(&InputEvent::PointerUp);
         s.selected = vec![0];
@@ -8018,6 +8195,7 @@ mod tests {
         jumped.dispatch_input(&down(Point::new(5.0, 5.0)));
         jumped.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(8.0, 8.0),
+            modifiers: Modifiers::default(),
         });
         // The drag's lazy push means the live history depth isn't 3 —
         // chord-step the exact entry count restore_to will pop.

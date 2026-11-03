@@ -104,6 +104,12 @@ pub enum InputEvent {
     PointerDrag {
         /// Position in canvas-physical px.
         pos: Point,
+        /// Modifier state for this drag event. Shift constrains the
+        /// in-progress annotation drag (see
+        /// [`constrain_drag`](crate::constrain_drag)); per-event state
+        /// means a modifier pressed or released mid-drag re-constrains
+        /// the live geometry immediately.
+        modifiers: Modifiers,
     },
     /// Pointer primary button was released.
     ///

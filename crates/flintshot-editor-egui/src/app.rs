@@ -1390,7 +1390,7 @@ impl EditorApp {
             if self.drag_in_pending_text {
                 self.drag_pending_text_to(ctx, view, at);
             } else {
-                pointer_events.push(InputEvent::PointerDrag { pos: at });
+                pointer_events.push(InputEvent::PointerDrag { pos: at, modifiers });
             }
         }
         for event in pointer_events {
@@ -3786,6 +3786,7 @@ mod tests {
         });
         let _ = state.dispatch_input(&InputEvent::PointerDrag {
             pos: Point::new(max.0, max.1),
+            modifiers: Modifiers::default(),
         });
         let _ = state.dispatch_input(&InputEvent::PointerUp);
     }
@@ -3818,6 +3819,153 @@ mod tests {
             "the editor default is untouched"
         );
         assert!(!app.phase_active(), "no request → no phase");
+    }
+
+    // --- Shift-constrained drawing (annotate-polish AP2) ---
+
+    /// An editor app on `tool` with the canvas pinned (the
+    /// `pannable_app` contract): logic-only frames drive pointer
+    /// input against a stable view, so screen positions derived
+    /// through the app's own canvas view map exactly.
+    fn drawing_app(tool: Tool) -> (egui::Context, EditorApp) {
+        let ctx = egui::Context::default();
+        let mut state = blank_state(64, 64);
+        state.set_tool(tool);
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        app.canvas_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 380.0),
+        ));
+        app.update_fit(&ctx);
+        (ctx, app)
+    }
+
+    /// The screen-logical position of image-physical `p` through the
+    /// app's own pinned canvas view.
+    fn screen_at(app: &EditorApp, p: (f32, f32)) -> egui::Pos2 {
+        let canvas = app.canvas_rect.expect("fixture: canvas rect pinned");
+        app.canvas
+            .view_over(canvas)
+            .image_to_logical(Point::new(p.0, p.1))
+    }
+
+    /// One logic-only frame (the `logic_frame` shape) with the
+    /// frame's modifier state pinned — the Shift-constraint tests
+    /// must not depend on how egui carries modifiers across
+    /// synthetic passes.
+    fn logic_frame_with_mods(
+        ctx: &egui::Context,
+        app: &mut EditorApp,
+        modifiers: egui::Modifiers,
+        events: Vec<egui::Event>,
+    ) {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(600.0, 380.0),
+            )),
+            modifiers,
+            events,
+            ..egui::RawInput::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            app.logic_impl(ui.ctx());
+        });
+        app.update_fit(ctx);
+    }
+
+    /// Shift held through a real editor frame sequence (press → drag
+    /// → release) commits a square: the shell routes the per-frame
+    /// modifiers into the drag events, and the dispatcher constrains
+    /// the pending rect.
+    #[test]
+    fn shift_rect_drag_through_frames_commits_a_square() {
+        let (ctx, mut app) = drawing_app(Tool::Rect);
+        let press = screen_at(&app, (10.0, 10.0));
+        let drag = screen_at(&app, (40.0, 20.0));
+        let shift = egui::Modifiers::SHIFT;
+        logic_frame_with_mods(
+            &ctx,
+            &mut app,
+            shift,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: shift,
+                },
+            ],
+        );
+        // Drag frame: Shift still held, pointer far wider than tall.
+        logic_frame_with_mods(&ctx, &mut app, shift, vec![egui::Event::PointerMoved(drag)]);
+        // Release without Shift: commit takes the last dragged
+        // (constrained) geometry.
+        logic_frame_with_mods(
+            &ctx,
+            &mut app,
+            egui::Modifiers::default(),
+            vec![egui::Event::PointerButton {
+                pos: drag,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        match app.state.anns.as_slice() {
+            [Annotation::Rect { rect, .. }] => {
+                assert_eq!(
+                    *rect,
+                    Rect::new(Point::new(10.0, 10.0), Point::new(20.0, 20.0)),
+                    "the committed rect is the Shift square"
+                );
+            }
+            other => panic!("expected one committed Rect, got {other:?}"),
+        }
+    }
+
+    /// The same frame sequence without Shift commits the raw drag —
+    /// the pre-existing behavior through the full shell path.
+    #[test]
+    fn plain_rect_drag_through_frames_commits_raw_geometry() {
+        let (ctx, mut app) = drawing_app(Tool::Rect);
+        let press = screen_at(&app, (10.0, 10.0));
+        let drag = screen_at(&app, (40.0, 20.0));
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        logic_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(drag)]);
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: drag,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        match app.state.anns.as_slice() {
+            [Annotation::Rect { rect, .. }] => {
+                assert_eq!(
+                    *rect,
+                    Rect::new(Point::new(10.0, 10.0), Point::new(40.0, 20.0)),
+                    "no Shift: the raw 30×10 drag commits"
+                );
+            }
+            other => panic!("expected one committed Rect, got {other:?}"),
+        }
     }
 
     // --- Hand-tool hover / grab chrome (prominent-move) ---

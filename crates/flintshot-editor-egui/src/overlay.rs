@@ -1068,7 +1068,7 @@ impl OverlayApp {
                         );
                         self.state.text_drag_to_char(idx);
                     } else {
-                        pointer_events.push(InputEvent::PointerDrag { pos: at });
+                        pointer_events.push(InputEvent::PointerDrag { pos: at, modifiers });
                     }
                 }
                 Gesture::Move { offset } => {
@@ -3135,7 +3135,10 @@ mod tests {
     }
 
     fn drag(s: &mut EditorState, at: Point) {
-        let _ = s.dispatch_input(&InputEvent::PointerDrag { pos: at });
+        let _ = s.dispatch_input(&InputEvent::PointerDrag {
+            pos: at,
+            modifiers: Modifiers::default(),
+        });
     }
 
     fn release(s: &mut EditorState) {

@@ -811,6 +811,7 @@ mod tests {
         });
         let _ = s.dispatch_input(&crate::input::InputEvent::PointerDrag {
             pos: Point::new(8.0, 8.0),
+            modifiers: crate::input::Modifiers::default(),
         });
         let _ = s.dispatch_input(&crate::input::InputEvent::PointerUp);
         s.set_selected_color(Color::rgb(2, 2, 2));
