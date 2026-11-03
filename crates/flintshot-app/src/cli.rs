@@ -140,6 +140,13 @@ pub struct OutputArgs {
     /// on stderr — stdout stays payload-only.
     #[arg(long)]
     pub json: bool,
+    /// Write the image bytes to stdout (`flinshot capture --stdout >
+    /// shot.png`) instead of any file. Conflicts with `--out` (one
+    /// destination). Format follows `--format` / `[output] format`;
+    /// with `--json`, the result line rides stderr so the bytes stay
+    /// a pure payload.
+    #[arg(long, conflicts_with = "out")]
+    pub stdout: bool,
 }
 
 /// Per-invocation interaction-mode override flags (Phase 5). Mutually
@@ -311,9 +318,10 @@ pub struct CaptureArgs {
     /// Run the selection UI, print `X,Y,W,H` to stdout, exit 0 — the
     /// slurp contract: `flintshot capture --geometry "$(flintshot
     /// capture --print-geometry)"`. Writes no image and implies
-    /// no-editor semantics (`--out` and `--after` are conflicts —
-    /// there is no image to write and nothing grabbed to route).
-    #[arg(long, conflicts_with_all = ["out", "after"])]
+    /// no-editor semantics (`--out`, `--stdout`, `--json`, and
+    /// `--after` are conflicts — the geometry line owns stdout and
+    /// there is no image to write or route).
+    #[arg(long, conflicts_with_all = ["out", "stdout", "json", "after"])]
     pub print_geometry: bool,
     /// Post-grab action on the native path: `editor` (default),
     /// `clipboard` (copy the grab, no windows), or `upload` (default
@@ -856,6 +864,10 @@ fn dispatch_native_grab(
         tracing::info!(path = %path.display(), "native capture saved");
         return Ok(());
     }
+    if output.stdout {
+        write_stdout(&img, output, ctx)?;
+        return Ok(());
+    }
 
     match post_grab {
         PostGrabAction::Editor => {
@@ -1110,6 +1122,8 @@ fn capture_and_dispatch(
             },
         );
         tracing::info!(path = %path.display(), "{mode} capture saved");
+    } else if output.stdout {
+        write_stdout(&img, output, ctx)?;
     } else {
         if watch.superseded() {
             tracing::info!("{mode} worker superseded before the shell; exiting cancelled");
@@ -2132,11 +2146,39 @@ fn report_capture_json(output: &OutputArgs, report: &CaptureJsonReport) {
     }
 }
 
+/// Encode `img` to in-memory bytes in `format` — the shared encoding
+/// core of the `--out` write and the `--stdout` stream. JPEG encodes
+/// at the configured `[output]` `jpeg-quality` (90 when config
+/// loading fails — the pixels are already in hand, a config read
+/// must not lose them); WebP is the lossless-only encoder.
+fn encode_bytes(img: &image::RgbaImage, format: OutputFormat) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    match format {
+        OutputFormat::Jpeg => {
+            let quality = Config::load().map_or(90, |c| c.output.jpeg_quality);
+            let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut bytes,
+                u8::try_from(quality.clamp(1, 100)).unwrap_or(90),
+            );
+            rgb.write_with_encoder(encoder)
+                .with_context(|| "encoding JPEG")?;
+        }
+        OutputFormat::Webp => {
+            let encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut bytes);
+            img.write_with_encoder(encoder)
+                .with_context(|| "encoding WebP")?;
+        }
+        _ => {
+            img.write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+                .with_context(|| "encoding PNG")?;
+        }
+    }
+    Ok(bytes)
+}
+
 /// Encode `img` to `path` in `format`, creating parent directories
-/// as needed. JPEG encodes at the configured `[output]`
-/// `jpeg-quality` (90 when config loading fails — the pixels are
-/// already in hand, a config read must not lose them); WebP is the
-/// lossless-only encoder.
+/// as needed. See [`encode_bytes`] for the per-format policies.
 fn write_out(img: &image::RgbaImage, path: &std::path::Path, format: OutputFormat) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -2144,31 +2186,62 @@ fn write_out(img: &image::RgbaImage, path: &std::path::Path, format: OutputForma
                 .with_context(|| format!("creating output directory {}", parent.display()))?;
         }
     }
-    match format {
-        OutputFormat::Jpeg => {
-            let quality = Config::load().map_or(90, |c| c.output.jpeg_quality);
-            let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
-            let file = std::fs::File::create(path)
-                .with_context(|| format!("creating {}", path.display()))?;
-            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                file,
-                u8::try_from(quality.clamp(1, 100)).unwrap_or(90),
-            );
-            rgb.write_with_encoder(encoder)
-                .with_context(|| format!("writing JPEG to {}", path.display()))?;
-        }
-        OutputFormat::Webp => {
-            let file = std::fs::File::create(path)
-                .with_context(|| format!("creating {}", path.display()))?;
-            let encoder = image::codecs::webp::WebPEncoder::new_lossless(file);
-            img.write_with_encoder(encoder)
-                .with_context(|| format!("writing WebP to {}", path.display()))?;
-        }
-        _ => {
-            img.save_with_format(path, ImageFormat::Png)
-                .with_context(|| format!("writing PNG to {}", path.display()))?;
+    let bytes = encode_bytes(img, format)?;
+    std::fs::write(path, &bytes).with_context(|| {
+        format!(
+            "writing {} to {}",
+            output_format_name(format),
+            path.display()
+        )
+    })
+}
+
+/// Resolve the `--stdout` output format: an explicit `--format` wins
+/// (clap pre-validated the vocabulary), else the `[output] format`
+/// config value through the core parser (unknown values warn and
+/// stay PNG). No path extension exists on this destination to
+/// consult.
+fn resolve_stdout_format(flag: Option<&str>, cfg_format: &str) -> OutputFormat {
+    match flag {
+        Some("jpeg") => OutputFormat::Jpeg,
+        Some("webp") => OutputFormat::Webp,
+        Some("png") => OutputFormat::Png,
+        // Unreachable for other flags (clap's value parser rejects
+        // them); `None` defers to the config value.
+        _ => flintshot_core::parse_output_format(cfg_format),
+    }
+}
+
+/// Stream the grab to stdout as the pure payload (`--stdout`):
+/// encoded bytes in the resolved format, locked and flushed so
+/// nothing interleaves. When `--json` composes, the result line
+/// rides **stderr** (`path: "-"`) — the image owns stdout under
+/// payload-only discipline.
+fn write_stdout(img: &image::RgbaImage, output: &OutputArgs, ctx: &GrabCtx) -> Result<()> {
+    let cfg = cfg_for_post_grab();
+    let format = resolve_stdout_format(output.format.as_deref(), &cfg.output.format);
+    let bytes = encode_bytes(img, format)?;
+    {
+        let mut out = std::io::stdout().lock();
+        std::io::Write::write_all(&mut out, &bytes)
+            .with_context(|| "writing the capture to stdout")?;
+        std::io::Write::flush(&mut out).with_context(|| "flushing stdout")?;
+    }
+    if output.json {
+        let report = CaptureJsonReport {
+            path: "-".to_owned(),
+            width: img.width(),
+            height: img.height(),
+            format: output_format_name(format),
+            backend: ctx.backend,
+            geometry: ctx.geometry.clone(),
+        };
+        match serde_json::to_string(&report) {
+            Ok(line) => eprintln!("{line}"),
+            Err(e) => tracing::warn!(error = %e, "serializing the --json result line"),
         }
     }
+    tracing::info!("capture streamed to stdout");
     Ok(())
 }
 
@@ -3124,6 +3197,64 @@ mod tests {
         );
     }
 
+    /// One destination rule: `--stdout` and `--out` are mutually
+    /// exclusive, and neither combines with `--print-geometry`
+    /// (whose stdout line is the payload there) — nor does `--json`,
+    /// which would print a second line into that payload.
+    #[test]
+    fn stdout_conflict_matrix_is_enforced_at_parse_level() {
+        assert!(
+            Cli::try_parse_from(["flintshot", "capture", "--stdout", "--out", "/tmp/shot.png"])
+                .is_err(),
+            "--stdout + --out must not parse (one destination)"
+        );
+        for flag in ["--stdout", "--json"] {
+            assert!(
+                Cli::try_parse_from(["flintshot", "capture", "--print-geometry", flag]).is_err(),
+                "--print-geometry + {flag} must not parse (one stdout payload)"
+            );
+        }
+    }
+
+    /// `--stdout` format resolution: the flag wins, else `[output]
+    /// format` (unknown config values warn and stay PNG, the core
+    /// parser's string-tolerant policy).
+    #[test]
+    fn stdout_format_follows_flag_then_config() {
+        use flintshot_core::OutputFormat;
+        assert_eq!(
+            resolve_stdout_format(Some("webp"), "png"),
+            OutputFormat::Webp
+        );
+        assert_eq!(resolve_stdout_format(None, "webp"), OutputFormat::Webp);
+        assert_eq!(resolve_stdout_format(None, "jpeg"), OutputFormat::Jpeg);
+        assert_eq!(resolve_stdout_format(None, "png"), OutputFormat::Png);
+        assert_eq!(
+            resolve_stdout_format(None, "bogus"),
+            OutputFormat::Png,
+            "unknown config values resolve PNG (string-tolerant)"
+        );
+    }
+
+    /// The headless stdout-bytes seam: encoded bytes carry their
+    /// format's magic, so `--stdout > shot.png` decodes downstream.
+    #[test]
+    fn encode_bytes_carries_each_formats_magic() {
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([9, 99, 199, 255]));
+        let png = encode_bytes(&img, OutputFormat::Png).expect("png encodes");
+        assert_eq!(&png[0..4], &[0x89, b'P', b'N', b'G'], "png magic");
+        let jpeg = encode_bytes(&img, OutputFormat::Jpeg).expect("jpeg encodes");
+        assert_eq!(&jpeg[0..3], &[0xFF, 0xD8, 0xFF], "jpeg magic");
+        let webp = encode_bytes(&img, OutputFormat::Webp).expect("webp encodes");
+        assert_eq!(&webp[0..4], b"RIFF", "webp riff magic");
+        assert_eq!(&webp[8..12], b"WEBP", "webp tag");
+
+        // The format-interop row (EW landed): webp bytes decode as a
+        // WebP image with the grabbed dimensions.
+        let decoded = image::load_from_memory(&webp).expect("webp round-trips a decode");
+        assert_eq!((decoded.width(), decoded.height()), (4, 4));
+    }
+
     /// `--json` parses and composes with `--out` (the flag pair the
     /// e2e exercises against the real binary).
     #[test]
@@ -3260,6 +3391,7 @@ mod tests {
                 format: None,
                 standalone: true,
                 json: false,
+                stdout: false,
             },
         };
         run_capture(&args).expect("the geometry grab + write succeed");
@@ -3310,6 +3442,7 @@ mod tests {
                 format: None,
                 standalone: false,
                 json: false,
+                stdout: false,
             },
         };
         assert!(run_capture(&args).is_err());
@@ -3349,6 +3482,7 @@ mod tests {
             format: None,
             standalone: false,
             json: false,
+            stdout: false,
         };
         assert!(
             !delegate_to_daemon(
@@ -3752,6 +3886,7 @@ mod tests {
             format: None,
             standalone: false,
             json: false,
+            stdout: false,
         };
         assert!(
             !delegate_to_daemon(
