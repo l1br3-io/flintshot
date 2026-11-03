@@ -32,6 +32,12 @@ pub enum EditKind {
         /// How many annotations the gesture moved.
         count: usize,
     },
+    /// A point-handle drag reshaped `tool`'s annotation (endpoint or
+    /// bezier control).
+    Reshape {
+        /// The tool that owns (produced) the annotation.
+        tool: Tool,
+    },
     /// A delete removed `count` selected annotations.
     Delete {
         /// How many annotations were removed.
@@ -60,6 +66,7 @@ impl fmt::Display for EditKind {
             Self::Add { tool } => write!(f, "Added {}", tool_noun(*tool)),
             Self::AddNumber => f.write_str("Added number"),
             Self::Move { count } => write!(f, "Moved {} {}", count, item_word(*count)),
+            Self::Reshape { tool } => write!(f, "Reshaped {}", tool_noun(*tool)),
             Self::Delete { count } => write!(f, "Deleted {} {}", count, item_word(*count)),
             Self::Crop => f.write_str("Cropped"),
             Self::Resize => f.write_str("Resized"),

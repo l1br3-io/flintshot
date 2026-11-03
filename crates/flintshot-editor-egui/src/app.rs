@@ -1049,6 +1049,12 @@ impl EditorApp {
                 ),
             );
         }
+        // Point handles ride on top of the selection outline: the
+        // draggable points of every selected annotation that carries
+        // them (annotate-polish).
+        for (_, _, point) in crate::chrome::selected_point_handles(&self.state) {
+            crate::chrome::paint_point_handle(painter, view.image_to_logical(point));
+        }
     }
 }
 
@@ -1252,6 +1258,28 @@ impl EditorApp {
         true
     }
 
+    /// Point-handle press interception (annotate-polish): when the
+    /// press lands within a handle glyph's hit radius of a selected
+    /// annotation's point handle, begin a reshape drag in core and
+    /// report interception — the caller dispatches no `PointerDown`
+    /// for this press, so selection / drawing never sees it. The hit
+    /// test runs in screen-logical space (the glyph is a UI
+    /// affordance), so the grab zone is zoom-independent.
+    fn intercept_handle_press(&mut self, view: crate::canvas::CanvasView, pos: egui::Pos2) -> bool {
+        // Mid-drag strays: a second press while reshaping re-arms
+        // nothing — swallow it so it can't start a draw underneath.
+        if self.state.handle_drag.is_some() {
+            return true;
+        }
+        let radius = crate::chrome::HANDLE_RADIUS + crate::chrome::HANDLE_HIT_SLACK;
+        for (index, handle, point) in crate::chrome::selected_point_handles(&self.state) {
+            if view.image_to_logical(point).distance(pos) <= radius {
+                return self.state.begin_handle_drag(index, handle);
+            }
+        }
+        false
+    }
+
     /// Extend the selection to the drag position, clamped to the
     /// block edge when the pointer leaves the text (dragging off the
     /// block extends to its boundary, never cancels). No-op when the
@@ -1352,14 +1380,17 @@ impl EditorApp {
             } else {
                 self.canvas_drag_active = true;
                 if !annotation_gated {
-                    // Press-interception contract (text-selection-highlight):
-                    // while a text draft is being edited, a press the
-                    // resolver maps inside the pending text is consumed
-                    // here — no `PointerDown` dispatches, so the
-                    // commit-and-move-on path is bypassed and the caret
-                    // repositions instead. Presses resolving outside
-                    // behave exactly as before.
-                    if !self.intercept_text_press(ctx, view, at, &mut pointer_events) {
+                    // Press-interception contracts, first-match wins:
+                    // a press on a selected annotation's point-handle
+                    // glyph (annotate-polish) starts a reshape drag,
+                    // and a press resolving inside a pending text
+                    // (text-selection-highlight) repositions the caret
+                    // — neither dispatches a `PointerDown`, so the
+                    // select / draw path is bypassed. Presses that
+                    // miss both behave exactly as before.
+                    let intercepted = self.intercept_handle_press(view, pos)
+                        || self.intercept_text_press(ctx, view, at, &mut pointer_events);
+                    if !intercepted {
                         self.drag_in_pending_text = false;
                         pointer_events.push(InputEvent::PointerDown { pos: at, modifiers });
                         // Double-click synthesis (text-select-edit): fed only
@@ -1383,11 +1414,17 @@ impl EditorApp {
         } else if primary_released && self.canvas_drag_active {
             self.canvas_drag_active = false;
             self.drag_in_pending_text = false;
-            if !annotation_gated {
+            // A live reshape ends here — no `PointerUp` dispatches
+            // for handle drags (the press never dispatched either).
+            if self.state.handle_drag.is_some() {
+                self.state.end_handle_drag();
+            } else if !annotation_gated {
                 pointer_events.push(InputEvent::PointerUp);
             }
         } else if primary_down && self.canvas_drag_active && !annotation_gated {
-            if self.drag_in_pending_text {
+            if self.state.handle_drag.is_some() {
+                self.state.update_handle_drag(at);
+            } else if self.drag_in_pending_text {
                 self.drag_pending_text_to(ctx, view, at);
             } else {
                 pointer_events.push(InputEvent::PointerDrag { pos: at, modifiers });
@@ -3259,6 +3296,7 @@ pub(crate) fn tool_for_key(key: egui::Key) -> Option<Tool> {
         egui::Key::R => Some(Tool::Rect),
         egui::Key::E => Some(Tool::Ellipse),
         egui::Key::A => Some(Tool::Arrow),
+        egui::Key::W => Some(Tool::CurvedArrow),
         egui::Key::L => Some(Tool::Line),
         egui::Key::M => Some(Tool::Marker),
         egui::Key::P => Some(Tool::Pencil),
@@ -3568,6 +3606,7 @@ mod tests {
             (egui::Key::R, Tool::Rect),
             (egui::Key::E, Tool::Ellipse),
             (egui::Key::A, Tool::Arrow),
+            (egui::Key::W, Tool::CurvedArrow),
             (egui::Key::L, Tool::Line),
             (egui::Key::M, Tool::Marker),
             (egui::Key::P, Tool::Pencil),
@@ -3822,6 +3861,148 @@ mod tests {
     }
 
     // --- Shift-constrained drawing (annotate-polish AP2) ---
+
+    // --- Point-handle reshape through the shell (annotate-polish AP5) ---
+
+    /// A pinned-canvas editor app over a selected `CurvedArrow`, with
+    /// the pointer positions the drag gesture needs.
+    fn curved_arrow_selected_app() -> (egui::Context, EditorApp) {
+        let ctx = egui::Context::default();
+        let mut state = blank_state(64, 64);
+        state.anns.push(Annotation::CurvedArrow {
+            a: Point::new(5.0, 5.0),
+            control: Point::new(20.0, 8.0),
+            b: Point::new(35.0, 5.0),
+            stroke: flintshot_core::Stroke::new(flintshot_core::Color::RED, 3.0),
+            head_size: 5.0,
+        });
+        state.set_tool(Tool::Select);
+        state.selected = vec![0];
+        let mut app = EditorApp::new(state, &ctx, Rc::new(RefCell::new(None)), false);
+        app.canvas_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(600.0, 380.0),
+        ));
+        app.update_fit(&ctx);
+        (ctx, app)
+    }
+
+    fn ctrl_z() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            // The winit-shaped chord (ctrl+command) — the shell's
+            // translation reads `command`, so plain `Modifiers::CTRL`
+            // would arrive as an unmodified z.
+            modifiers: ctrl_as_winit_reports_it(),
+        }
+    }
+
+    fn curved_points_of(ann: &Annotation) -> (Point, Point, Point) {
+        let Annotation::CurvedArrow { a, control, b, .. } = ann else {
+            panic!("expected a CurvedArrow, got {ann:?}")
+        };
+        (*a, *control, *b)
+    }
+
+    /// A press on the selected `CurvedArrow`'s control-handle glyph
+    /// starts a reshape drag (no selection / draw dispatch), the drag
+    /// moves exactly the control point, and Ctrl+Z through the shell
+    /// undoes the reshape.
+    #[test]
+    fn control_handle_drag_through_frames_moves_the_control_and_undoes() {
+        let (ctx, mut app) = curved_arrow_selected_app();
+        let press = screen_at(&app, (20.0, 8.0));
+        let drag_to = screen_at(&app, (20.0, 30.0));
+
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(app.state.handle_drag.is_some(), "the handle press grabs");
+
+        logic_frame(&ctx, &mut app, vec![egui::Event::PointerMoved(drag_to)]);
+        {
+            let (a, control, b) = curved_points_of(&app.state.anns[0]);
+            assert_eq!(
+                control,
+                Point::new(20.0, 30.0),
+                "the control follows the drag"
+            );
+            assert_eq!(a, Point::new(5.0, 5.0), "the tail stays put");
+            assert_eq!(b, Point::new(35.0, 5.0), "the head stays put");
+        }
+        assert_eq!(app.state.undo.len(), 1, "one reshape gesture, one entry");
+
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: drag_to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.state.handle_drag.is_none(), "release ends the gesture");
+        assert_eq!(
+            app.state.selected,
+            vec![0],
+            "the selection survives the reshape"
+        );
+
+        // Ctrl+Z through the shell's shortcut path restores the point
+        // (the frame's modifier state must carry the chord — that is
+        // what the shortcut translation reads).
+        let ctrl = ctrl_as_winit_reports_it();
+        logic_frame_with_mods(&ctx, &mut app, ctrl, vec![ctrl_z()]);
+        let (_, control, _) = curved_points_of(&app.state.anns[0]);
+        assert_eq!(control, Point::new(20.0, 8.0), "undo restores the control");
+        assert_eq!(app.state.redo.len(), 1, "the reshape redo re-arms");
+    }
+
+    /// A press near but outside the handle radius behaves as a plain
+    /// Select press — the interception stays affordance-sized.
+    #[test]
+    fn press_off_the_handles_is_a_plain_select_press() {
+        let (ctx, mut app) = curved_arrow_selected_app();
+        // The curve's interior between control and head — on the
+        // ink (a move grab) but ~8 image px from both handle
+        // glyphs, outside the 7 px logical hit radius at any scale.
+        let press = screen_at(&app, (27.5, 6.5));
+        logic_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(press),
+                egui::Event::PointerButton {
+                    pos: press,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(
+            app.state.handle_drag.is_none(),
+            "a miss on the glyphs dispatches as a normal press"
+        );
+        assert!(
+            app.state.moving.is_some(),
+            "the press grabbed the annotation for a move"
+        );
+    }
 
     /// An editor app on `tool` with the canvas pinned (the
     /// `pannable_app` contract): logic-only frames drive pointer
@@ -6006,6 +6187,7 @@ mod tests {
             egui::Key::R,
             egui::Key::E,
             egui::Key::A,
+            egui::Key::W,
             egui::Key::L,
             egui::Key::M,
             egui::Key::P,

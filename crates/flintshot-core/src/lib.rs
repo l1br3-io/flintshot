@@ -61,7 +61,8 @@ pub use config::{
     PANEL_MIN_WIDTH,
 };
 pub use editor::{
-    Annotation, BlurKind, EditorState, Snapshot, Tool, NUMBER_MAX_DIAMETER, NUMBER_MIN_DIAMETER,
+    constrain_drag, Annotation, BlurKind, DragKind, EditorState, HandleDrag, PointHandle, Snapshot,
+    Tool, NUMBER_MAX_DIAMETER, NUMBER_MIN_DIAMETER,
 };
 pub use error::{FlintshotError, Result};
 pub use freehand::{smooth_polyline, MARKER_ALPHA};

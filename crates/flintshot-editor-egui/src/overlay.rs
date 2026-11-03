@@ -1771,6 +1771,7 @@ mod tests {
             (egui::Key::R, Tool::Rect),
             (egui::Key::E, Tool::Ellipse),
             (egui::Key::A, Tool::Arrow),
+            (egui::Key::W, Tool::CurvedArrow),
             (egui::Key::L, Tool::Line),
             (egui::Key::M, Tool::Marker),
             (egui::Key::P, Tool::Pencil),

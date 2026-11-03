@@ -150,6 +150,61 @@ pub(crate) fn paint_selected_chrome(painter: &egui::Painter, rect: egui::Rect) {
     }
 }
 
+// --- Point handles (annotate-polish) ---
+
+/// Logical-px radius of a point-handle glyph, and of its press
+/// target: a UI affordance, so it lives in logical (not image)
+/// space — the dot stays finger-sized at any zoom.
+pub(crate) const HANDLE_RADIUS: f32 = 5.0;
+
+/// Slack added to [`HANDLE_RADIUS`] for the press target, so the
+/// grab zone reads as "on the dot" rather than pixel-exact.
+pub(crate) const HANDLE_HIT_SLACK: f32 = 2.0;
+
+/// The point handles of every selected annotation that carries
+/// them, as `(index, handle, image-px point)` in stable selection
+/// order. Read-only like the rest of this module: the shell paints
+/// these as glyph dots and intercepts presses that land on them
+/// (routing to `begin_handle_drag`), instead of dispatching the
+/// press.
+#[must_use]
+pub(crate) fn selected_point_handles(
+    state: &EditorState,
+) -> Vec<(usize, flintshot_core::PointHandle, Point)> {
+    if !matches!(state.tool, Tool::Select | Tool::Text) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for &index in &state.selected {
+        let Some(ann) = state.anns.get(index) else {
+            continue;
+        };
+        for handle in [
+            flintshot_core::PointHandle::Tail,
+            flintshot_core::PointHandle::Head,
+            flintshot_core::PointHandle::Control,
+        ] {
+            if let Some(point) = ann.handle_point(handle) {
+                out.push((index, handle, point));
+            }
+        }
+    }
+    out
+}
+
+/// Paint one point-handle glyph (screen-logical, shell-transformed):
+/// a gold dot with a forest ring — accent over the annotation's own
+/// ink, matching the selection chrome's forest. Editor-only chrome,
+/// never in composed output.
+pub(crate) fn paint_point_handle(painter: &egui::Painter, at: egui::Pos2) {
+    painter.circle(
+        at,
+        HANDLE_RADIUS,
+        theme::palette::GOLD,
+        egui::Stroke::new(1.5, theme::palette::FOREST_DEEP),
+    );
+}
+
 /// Dash segments along an axis-aligned rect's perimeter: each edge
 /// dashed independently (edges start on a dash; corners may end on a
 /// gap — the standard marching-ants look).
@@ -216,6 +271,66 @@ mod tests {
         s.tool = tool;
         s.anns = anns.to_vec();
         s
+    }
+
+    // --- Point handles (annotate-polish AP5) ---
+
+    fn curved_arrow_ann() -> Annotation {
+        use flintshot_core::{Color, Point, Stroke};
+        Annotation::CurvedArrow {
+            a: Point::new(0.0, 0.0),
+            control: Point::new(10.0, -10.0),
+            b: Point::new(20.0, 0.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 5.0,
+        }
+    }
+
+    /// Under Select, a selected `CurvedArrow` offers all three handles
+    /// in stable order; an unselected one offers none; a rect offers
+    /// none even when selected; and a non-selection-owning tool
+    /// offers none even for a selected `CurvedArrow`.
+    #[test]
+    fn point_handles_follow_selection_tool_and_kind() {
+        let mut s = state_with(Tool::Select, &[curved_arrow_ann()]);
+        s.selected = vec![0];
+        let handles = selected_point_handles(&s);
+        let kinds: Vec<_> = handles.iter().map(|(_, h, _)| *h).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                flintshot_core::PointHandle::Tail,
+                flintshot_core::PointHandle::Head,
+                flintshot_core::PointHandle::Control,
+            ],
+            "stable Tail / Head / Control order"
+        );
+        assert_eq!(
+            handles[0].2,
+            Point::new(0.0, 0.0),
+            "the tail handle sits at a"
+        );
+
+        s.selected.clear();
+        assert!(
+            selected_point_handles(&s).is_empty(),
+            "unselected → no handles (they are selection chrome)"
+        );
+
+        let mut rect_state = state_with(Tool::Select, &[rect_ann(0.0, 0.0, 5.0, 5.0)]);
+        rect_state.selected = vec![0];
+        assert!(
+            selected_point_handles(&rect_state).is_empty(),
+            "a rect carries no point handles"
+        );
+
+        let mut off_tool = state_with(Tool::Select, &[curved_arrow_ann()]);
+        off_tool.selected = vec![0];
+        off_tool.tool = Tool::Pencil;
+        assert!(
+            selected_point_handles(&off_tool).is_empty(),
+            "a non-selection-owning tool paints no handles"
+        );
     }
 
     #[test]

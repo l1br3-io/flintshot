@@ -108,6 +108,12 @@ const SHAPES_POD: &[ToolSpec] = &[
         key: "A",
         glyph: g_arrow,
     },
+    ToolSpec {
+        tool: Tool::CurvedArrow,
+        name: "Curved arrow",
+        key: "W",
+        glyph: g_curved_arrow,
+    },
 ];
 
 const FREEHAND_POD: &[ToolSpec] = &[
@@ -352,6 +358,14 @@ fn g_line(p: &egui::Painter, r: egui::Rect, c: Color32) {
 fn g_arrow(p: &egui::Painter, r: egui::Rect, c: Color32) {
     seg(p, r, (-6.0, 6.0), (6.0, -6.0), c, 2.0);
     arrowhead(p, pt(r, 6.0, -6.0), Vec2::new(1.0, -1.0), c);
+}
+
+/// A bent shaft with the head at the top-right — the two-segment
+/// polyline reads as "arrow that curves" next to the straight Arrow.
+fn g_curved_arrow(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    seg(p, r, (-6.0, 6.0), (-6.0, -2.0), c, 2.0);
+    seg(p, r, (-6.0, -2.0), (6.0, -6.0), c, 2.0);
+    arrowhead(p, pt(r, 6.0, -6.0), Vec2::new(1.0, -0.5), c);
 }
 
 fn g_marker(p: &egui::Painter, r: egui::Rect, c: Color32) {
@@ -629,7 +643,13 @@ mod tests {
             ("selection", &[Tool::Select, Tool::Hand, Tool::Crop]),
             (
                 "shapes",
-                &[Tool::Rect, Tool::Ellipse, Tool::Line, Tool::Arrow],
+                &[
+                    Tool::Rect,
+                    Tool::Ellipse,
+                    Tool::Line,
+                    Tool::Arrow,
+                    Tool::CurvedArrow,
+                ],
             ),
             ("freehand", &[Tool::Pencil, Tool::Marker]),
             ("labels", &[Tool::Text, Tool::Number]),
@@ -652,6 +672,7 @@ mod tests {
             Tool::Ellipse,
             Tool::Line,
             Tool::Arrow,
+            Tool::CurvedArrow,
             Tool::Marker,
             Tool::Pencil,
             Tool::Text,
@@ -672,6 +693,23 @@ mod tests {
         assert_eq!(flat.first(), Some(&Tool::Select));
         assert_eq!(flat.get(1), Some(&Tool::Hand));
         assert_eq!(flat.get(2), Some(&Tool::Crop));
+    }
+
+    /// The curved arrow rides the shapes pod right after the
+    /// straight arrow, under W (annotate-polish AP5).
+    #[test]
+    fn curved_arrow_chip_sits_in_shapes_with_w() {
+        let flat = flat();
+        let idx = flat
+            .iter()
+            .position(|t| t.tool == Tool::Arrow)
+            .expect("Arrow rides the rail");
+        let next = flat
+            .get(idx + 1)
+            .expect("a chip follows Arrow in the shapes pod");
+        assert_eq!(next.tool, Tool::CurvedArrow);
+        assert_eq!(next.name, "Curved arrow");
+        assert_eq!(next.key, "W", "the shortcut is W (A belongs to Arrow)");
     }
 
     #[test]
@@ -705,7 +743,7 @@ mod tests {
             }
             fns.push(spec.key);
         }
-        assert_eq!(fns.len(), 12, "the full vocabulary rides the rail");
+        assert_eq!(fns.len(), 13, "the full vocabulary rides the rail");
     }
 
     #[test]

@@ -304,6 +304,38 @@ pub struct AnnotationDrag {
     pub moved: bool,
 }
 
+/// One draggable point of an annotation, offered while it is
+/// selected (see [`EditorState::begin_handle_drag`]). The set grows
+/// with annotation kinds that expose editable points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointHandle {
+    /// Tail endpoint (`a`).
+    Tail,
+    /// Head endpoint (`b`).
+    Head,
+    /// The bezier control point (`Annotation::CurvedArrow`).
+    Control,
+}
+
+/// An in-flight single-point edit over a committed annotation
+/// (see [`EditorState::handle_drag`]).
+///
+/// Mirrors [`AnnotationDrag`]'s lazy-undo contract: the snapshot is
+/// pushed on the first drag event with actual movement, so a
+/// handle press without a drag records nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HandleDrag {
+    /// Index into [`EditorState::anns`] of the annotation being
+    /// reshaped. Stable for the whole drag — reshaping never
+    /// reorders `anns`.
+    pub index: usize,
+    /// Which point the press grabbed.
+    pub handle: PointHandle,
+    /// Whether the drag has produced actual movement yet (the lazy
+    /// undo-snapshot arm).
+    pub moved: bool,
+}
+
 /// A lift-out re-edit session over a committed text (text-select-edit
 /// spec).
 ///
@@ -508,6 +540,13 @@ pub struct EditorState {
     /// While set, Hand-tool `PointerDrag`s translate the grabbed
     /// annotation.
     pub moving: Option<AnnotationDrag>,
+    /// In-flight single-point reshape (press on a selected
+    /// annotation's point handle — see [`PointHandle`]). `None`
+    /// when no handle drag is active. While set, drag events routed
+    /// by the shell to [`update_handle_drag`](Self::update_handle_drag)
+    /// move that one point; undo/redo and the history timeline pick
+    /// the gesture up through the annotation list like every edit.
+    pub handle_drag: Option<HandleDrag>,
     /// Selected annotation indices (the Hand / Text-tool selection
     /// set).
     ///
@@ -609,6 +648,7 @@ impl EditorState {
             next_number: 1,
             number_diameter: NUMBER_DEFAULT_DIAMETER,
             moving: None,
+            handle_drag: None,
             selected: Vec::new(),
             text_cursor: 0,
             text_anchor: None,
@@ -1105,7 +1145,90 @@ impl EditorState {
     /// stays applied.
     fn end_move(&mut self) {
         self.moving = None;
+        self.handle_drag = None;
         self.selected.clear();
+    }
+
+    // --- Point-handle reshape (selected annotations) ---
+
+    /// Begin dragging the [`PointHandle`] of the annotation at
+    /// `index`. Returns `false` — nothing started — when the
+    /// annotation does not carry that handle (only
+    /// [`Annotation::CurvedArrow`] exposes point handles today).
+    ///
+    /// Shells call this when a press lands on a painted handle glyph
+    /// of a **selected** annotation, instead of dispatching the
+    /// press; subsequent pointer moves go to
+    /// [`update_handle_drag`](Self::update_handle_drag) and the
+    /// release to [`end_handle_drag`](Self::end_handle_drag).
+    pub fn begin_handle_drag(&mut self, index: usize, handle: PointHandle) -> bool {
+        let supported = self
+            .anns
+            .get(index)
+            .and_then(|ann| ann.handle_point(handle))
+            .is_some();
+        if supported {
+            self.handle_drag = Some(HandleDrag {
+                index,
+                handle,
+                moved: false,
+            });
+        }
+        supported
+    }
+
+    /// Move the dragged point to `at`. No-op when no handle drag is
+    /// live. Pushes the undo snapshot lazily on the first movement
+    /// (one gesture = one undo entry; a press without a drag
+    /// records nothing), clears `redo`, then relocates exactly that
+    /// point — every other field of the annotation is untouched.
+    ///
+    /// A stale drag (the annotation vanished or lost the handle
+    /// mid-gesture) ends the gesture instead of mutating anything.
+    pub fn update_handle_drag(&mut self, at: Point) {
+        let Some(drag) = self.handle_drag else {
+            return;
+        };
+        if self
+            .anns
+            .get(drag.index)
+            .and_then(|ann| ann.handle_point(drag.handle))
+            .is_none()
+        {
+            self.handle_drag = None;
+            return;
+        }
+        if !drag.moved {
+            let tool = self
+                .anns
+                .get(drag.index)
+                .map_or(Tool::CurvedArrow, owning_tool);
+            self.undo.push(Snapshot::anns_only(
+                EditKind::Reshape { tool },
+                self.elapsed(),
+                self.anns.clone(),
+                self.next_number,
+            ));
+            self.redo.clear();
+            self.last_edit_kind = None;
+        }
+        if let Some(Annotation::CurvedArrow { a, control, b, .. }) = self.anns.get_mut(drag.index) {
+            match drag.handle {
+                PointHandle::Tail => *a = at,
+                PointHandle::Head => *b = at,
+                PointHandle::Control => *control = at,
+            }
+        }
+        self.handle_drag = Some(HandleDrag {
+            moved: true,
+            ..drag
+        });
+    }
+
+    /// End the in-flight handle drag. The moved point stays moved;
+    /// history owns reverting it.
+    pub fn end_handle_drag(&mut self) {
+        self.handle_drag = None;
     }
 
     /// Remove every selected annotation in one pass.
@@ -1521,8 +1644,11 @@ impl EditorState {
                     // the press selected the annotation (persistent
                     // selection); Del / a miss press / tool switch own
                     // deselecting. A live marquee resolves into the
-                    // set.
+                    // set. Handle drags are shell-intercepted and end
+                    // via `end_handle_drag`; this is the defensive
+                    // backstop for synthetic state.
                     self.moving = None;
+                    self.handle_drag = None;
                     self.finish_marquee();
                 } else if self.tool == Tool::Hand {
                     // Pan-only contract (see PointerDrag).
@@ -2076,8 +2202,10 @@ impl EditorState {
         };
         // GOTCHA: the gesture's second press may have armed a
         // drag-grab under Select; the lift-out vacates the index the
-        // grab references, so it must not survive the removal.
+        // grab references, so it must not survive the removal. Same
+        // for a live handle drag over the same slot.
         self.moving = None;
+        self.handle_drag = None;
         let original = self.anns.remove(index);
         self.text_reedit = Some(TextReeditSession {
             index,
@@ -2482,6 +2610,22 @@ fn scale_strength(strength: u8, factor: f32) -> u8 {
 }
 
 impl Annotation {
+    /// The canvas-physical position of `handle` on this annotation,
+    /// or `None` when the annotation does not carry it. Drives the
+    /// shell's handle-glyph painting and press interception (see
+    /// [`EditorState::begin_handle_drag`]).
+    #[must_use]
+    pub fn handle_point(&self, handle: PointHandle) -> Option<Point> {
+        let Annotation::CurvedArrow { a, control, b, .. } = self else {
+            return None;
+        };
+        match handle {
+            PointHandle::Tail => Some(*a),
+            PointHandle::Head => Some(*b),
+            PointHandle::Control => Some(*control),
+        }
+    }
+
     /// Deserialize an annotation list from already-parsed JSON
     /// values, skipping every entry this build cannot decode — an
     /// unknown annotation kind (a newer session file read by an
@@ -3706,6 +3850,147 @@ mod tests {
         });
         assert_eq!(s.hit_test(Point::new(10.0, -5.0)), Some(0), "apex hit");
         assert_eq!(s.hit_test(Point::new(10.0, 0.0)), None, "chord-only miss");
+    }
+
+    // ── Point-handle editing (annotate-polish AP5) ──
+
+    fn committed_curved_arrow(s: &mut EditorState) {
+        s.anns.push(Annotation::CurvedArrow {
+            a: Point::new(0.0, 0.0),
+            control: Point::new(10.0, -10.0),
+            b: Point::new(20.0, 0.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 5.0,
+        });
+        s.selected = vec![0];
+    }
+
+    fn curved_points(ann: &Annotation) -> (Point, Point, Point) {
+        let Annotation::CurvedArrow { a, control, b, .. } = ann else {
+            panic!("expected a CurvedArrow, got {ann:?}")
+        };
+        (*a, *control, *b)
+    }
+
+    /// The three handles resolve to their defining points; tools
+    /// without point handles (a rect, a straight arrow) resolve
+    /// none.
+    #[test]
+    fn handle_point_resolves_the_curved_arrows_points() {
+        let ann = Annotation::CurvedArrow {
+            a: Point::new(1.0, 2.0),
+            control: Point::new(3.0, 4.0),
+            b: Point::new(5.0, 6.0),
+            stroke: Stroke::new(Color::RED, 3.0),
+            head_size: 5.0,
+        };
+        assert_eq!(
+            ann.handle_point(PointHandle::Tail),
+            Some(Point::new(1.0, 2.0))
+        );
+        assert_eq!(
+            ann.handle_point(PointHandle::Control),
+            Some(Point::new(3.0, 4.0))
+        );
+        assert_eq!(
+            ann.handle_point(PointHandle::Head),
+            Some(Point::new(5.0, 6.0))
+        );
+        assert_eq!(
+            rect_ann(0.0, 0.0, 5.0, 5.0).handle_point(PointHandle::Tail),
+            None
+        );
+        assert_eq!(
+            arrow_ann(0.0, 0.0, 5.0, 5.0).handle_point(PointHandle::Control),
+            None,
+            "straight arrows have no control point"
+        );
+    }
+
+    /// `begin_handle_drag` refuses annotations without the handle and
+    /// leaves no drag state behind.
+    #[test]
+    fn begin_handle_drag_rejects_unsupported_handles() {
+        let mut s = EditorState::new(blank_image());
+        s.anns.push(rect_ann(0.0, 0.0, 5.0, 5.0));
+        assert!(!s.begin_handle_drag(0, PointHandle::Tail));
+        assert!(s.handle_drag.is_none(), "no drag state on refusal");
+    }
+
+    /// Dragging the control handle moves only the control point;
+    /// tail and head ride untouched. One gesture — any event count —
+    /// is exactly one undo entry, and undo restores the point.
+    #[test]
+    fn control_handle_drag_moves_only_control_and_undo_restores() {
+        let mut s = EditorState::new(blank_image());
+        committed_curved_arrow(&mut s);
+        assert!(s.begin_handle_drag(0, PointHandle::Control));
+
+        s.update_handle_drag(Point::new(12.0, 3.0));
+        s.update_handle_drag(Point::new(14.0, 1.0));
+        {
+            let (a, control, b) = curved_points(&s.anns[0]);
+            assert_eq!(a, Point::new(0.0, 0.0), "the tail stays put");
+            assert_eq!(
+                control,
+                Point::new(14.0, 1.0),
+                "the control follows the drag"
+            );
+            assert_eq!(b, Point::new(20.0, 0.0), "the head stays put");
+        }
+        assert_eq!(s.undo.len(), 1, "one gesture is one undo entry");
+        assert!(s.redo.is_empty(), "the gesture clears redo");
+
+        s.end_handle_drag();
+        s.undo();
+        let (_, control, _) = curved_points(&s.anns[0]);
+        assert_eq!(
+            control,
+            Point::new(10.0, -10.0),
+            "undo restores the control"
+        );
+        assert!(s.handle_drag.is_none());
+    }
+
+    /// A handle press without movement records nothing — matching
+    /// the move-drag's lazy snapshot contract.
+    #[test]
+    fn handle_drag_click_without_movement_records_nothing() {
+        let mut s = EditorState::new(blank_image());
+        committed_curved_arrow(&mut s);
+        assert!(s.begin_handle_drag(0, PointHandle::Head));
+        s.end_handle_drag();
+        assert!(s.undo.is_empty(), "a click on a handle pushes no snapshot");
+    }
+
+    /// The endpoint handles move their endpoints.
+    #[test]
+    fn endpoint_handles_move_their_endpoints() {
+        let mut s = EditorState::new(blank_image());
+        committed_curved_arrow(&mut s);
+        assert!(s.begin_handle_drag(0, PointHandle::Tail));
+        s.update_handle_drag(Point::new(-4.0, 7.0));
+        s.end_handle_drag();
+        let (a, _, _) = curved_points(&s.anns[0]);
+        assert_eq!(a, Point::new(-4.0, 7.0));
+
+        assert!(s.begin_handle_drag(0, PointHandle::Head));
+        s.update_handle_drag(Point::new(30.0, 2.0));
+        s.end_handle_drag();
+        let (_, _, b) = curved_points(&s.anns[0]);
+        assert_eq!(b, Point::new(30.0, 2.0));
+        assert_eq!(s.undo.len(), 2, "two gestures, two entries");
+    }
+
+    /// A live handle drag does not survive a crop (the index may
+    /// have been dropped) — the same defensive clear `moving` gets.
+    #[test]
+    fn crop_drops_a_live_handle_drag() {
+        let mut s = EditorState::new(blank_image());
+        committed_curved_arrow(&mut s);
+        assert!(s.begin_handle_drag(0, PointHandle::Control));
+        s.crop(Rect::from_xywh(0.0, 0.0, 1.0, 1.0));
+        assert!(s.handle_drag.is_none(), "crop ends the gesture");
     }
 
     /// `begin_annotation` then `update_annotation` should grow the
