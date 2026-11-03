@@ -62,6 +62,13 @@ pub enum Command {
     Open(OpenArgs),
     /// Upload an image to a backend and print the resulting URL. [Phase 4]
     Upload(UploadArgs),
+    /// Recognize text in an image and print it to stdout (payload
+    /// only — logs go to stderr). `-` reads the image from stdin, so
+    /// `flinshot capture --stdout | flinshot ocr -` works.
+    ///
+    /// Exit codes: 0 success · 1 other failure (decode, stdin) ·
+    /// 2 no engine (the error names the cure) · 3 engine failure
+    Ocr(OcrArgs),
     /// Record the screen to an MP4 file (video-only, H.264):
     /// the whole `--monitor` or a `--geometry` rectangle, stopped
     /// with Ctrl-C or `--duration`.
@@ -102,7 +109,131 @@ pub enum Command {
     Man,
 }
 
-/// Arguments for `flintshot completions`.
+/// Arguments for `flinshot ocr`.
+#[derive(Debug, Args)]
+pub struct OcrArgs {
+    /// Image to read: a file path, or `-` for stdin.
+    pub image: String,
+    /// Engine override: `auto`, `ocrs` (built-in), or `tesseract`.
+    /// Default: the `[ocr] engine` config key.
+    #[arg(long, value_enum)]
+    pub engine: Option<OcrEngineFlag>,
+    /// Tesseract-only language code (`eng`, `deu`, …). Default: the
+    /// `[ocr] lang` config key. The built-in engine ignores it.
+    #[arg(long)]
+    pub lang: Option<String>,
+    /// Fetch the built-in engine's model files (≈tens of MB, from
+    /// the URLs the consent flow prints), then exit. This flag is
+    /// the explicit consent for the download.
+    #[arg(long)]
+    pub fetch_models: bool,
+}
+
+/// `--engine` values, mapped onto core's choice enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OcrEngineFlag {
+    /// Built-in if its models are present, else tesseract.
+    Auto,
+    /// The built-in pure-Rust engine (models must be fetched).
+    Ocrs,
+    /// The system tesseract binary.
+    Tesseract,
+}
+
+impl From<OcrEngineFlag> for flintshot_core::OcrEngineChoice {
+    fn from(flag: OcrEngineFlag) -> Self {
+        match flag {
+            OcrEngineFlag::Auto => Self::Auto,
+            OcrEngineFlag::Ocrs => Self::Ocrs,
+            OcrEngineFlag::Tesseract => Self::Tesseract,
+        }
+    }
+}
+
+/// Process exit code for a failed `flinshot ocr`, documented on the
+/// verb: the no-engine state is curable (install/fetch), so it gets
+/// its own code. `no_engine` is the arrival event's
+/// `missing_models`-style flag — the guidance already named the cure
+/// on stderr.
+#[must_use]
+pub fn ocr_exit_code(no_engine: bool) -> i32 {
+    if no_engine {
+        2
+    } else {
+        3
+    }
+}
+
+/// Read the image source: `-` drains `stdin` (the
+/// `capture --stdout` composition), anything else reads the file.
+fn read_image_source(spec: &str, stdin: &mut dyn std::io::Read) -> Result<Vec<u8>> {
+    if spec == "-" {
+        let mut bytes = Vec::new();
+        stdin
+            .read_to_end(&mut bytes)
+            .with_context(|| "reading the image from stdin")?;
+        Ok(bytes)
+    } else {
+        std::fs::read(spec).with_context(|| format!("reading image {spec}"))
+    }
+}
+
+/// `flinshot ocr <image>` — recognize text, print it to stdout.
+///
+/// Payload-only discipline: recognized text is the only thing on
+/// stdout; the fetch path's progress and all diagnostics go to
+/// stderr. Engine work runs through the same pass helper the editor
+/// page uses ([`crate::app_window::run_ocr_pass`]) — one
+/// resolve+recognize path for both surfaces.
+pub fn run_ocr(args: &OcrArgs) -> Result<()> {
+    use std::io::Write as _;
+    if args.fetch_models {
+        return match crate::app_window::run_ocr_model_fetch() {
+            flintshot_editor_egui::OcrEvent::ModelsFetched => {
+                eprintln!("OCR models fetched");
+                Ok(())
+            }
+            flintshot_editor_egui::OcrEvent::ModelsFetchFailed(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+            // A fetch produces only fetch events.
+            _ => unreachable!("unexpected event from the model fetch"),
+        };
+    }
+    let bytes = read_image_source(&args.image, &mut std::io::stdin().lock())?;
+    let image = image::load_from_memory(&bytes)
+        .with_context(|| format!("decoding image {:?}", args.image))?
+        .to_rgba8();
+
+    let config = flintshot_core::Config::load().unwrap_or_default();
+    let choice = args.engine.map_or_else(
+        || config.ocr.choice(),
+        flintshot_core::OcrEngineChoice::from,
+    );
+    let lang = args.lang.clone().unwrap_or_else(|| config.ocr.lang.clone());
+
+    match crate::app_window::run_ocr_pass(&image, choice, &lang) {
+        flintshot_editor_egui::OcrEvent::Done { text, .. } => {
+            // Payload only. Engines already trimmed the trailing
+            // newline packaging; writeln supplies the final one.
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "{text}").with_context(|| "writing the recognized text")?;
+            Ok(())
+        }
+        flintshot_editor_egui::OcrEvent::Failed {
+            message,
+            missing_models,
+        } => {
+            eprintln!("{message}");
+            std::process::exit(ocr_exit_code(missing_models));
+        }
+        // A pass produces only pass events.
+        _ => unreachable!("unexpected event from an OCR pass"),
+    }
+}
+
+/// Arguments for `flinshot completions`.
 #[derive(Debug, Args)]
 pub struct CompletionsArgs {
     /// The target shell.
@@ -4769,4 +4900,84 @@ async fn run_record_flow(args: &RecordArgs) -> std::result::Result<(PathBuf, u64
     let path = handle.stop()?;
     let bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
     Ok((path, bytes))
+}
+
+// ── OCR verb (ocr-region OR6) ─────────────────────────────────────
+
+#[cfg(test)]
+mod ocr_tests {
+    use super::*;
+
+    /// Full flag surface parses; `-` is a legal image source (the
+    /// `capture --stdout` composition).
+    #[test]
+    fn ocr_verb_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "flintshot",
+            "ocr",
+            "-",
+            "--engine",
+            "tesseract",
+            "--lang",
+            "deu",
+        ])
+        .expect("full flag set parses");
+        let Some(Command::Ocr(args)) = cli.command else {
+            panic!("ocr is a verb");
+        };
+        assert_eq!(args.image, "-");
+        assert_eq!(args.engine, Some(OcrEngineFlag::Tesseract));
+        assert_eq!(args.lang.as_deref(), Some("deu"));
+        assert!(!args.fetch_models);
+        // Defaults: config decides the engine; no lang override; no
+        // fetch.
+        let plain =
+            Cli::try_parse_from(["flintshot", "ocr", "shot.png"]).expect("bare invocation parses");
+        let Some(Command::Ocr(args)) = plain.command else {
+            panic!("ocr is a verb");
+        };
+        assert_eq!(args.image, "shot.png");
+        assert_eq!(args.engine, None, "no flag: the [ocr] config decides");
+        assert_eq!(args.lang, None);
+        assert!(!args.fetch_models);
+        // Unknown engines refuse to parse (clap's value enum).
+        assert!(Cli::try_parse_from(["flinshot", "ocr", "x.png", "--engine", "turbo"]).is_err());
+    }
+
+    /// The engine flags map onto core's choice enum.
+    #[test]
+    fn ocr_engine_flag_maps_to_core_choice() {
+        use flintshot_core::OcrEngineChoice;
+        let map = |flag: OcrEngineFlag| OcrEngineChoice::from(flag);
+        assert_eq!(map(OcrEngineFlag::Auto), OcrEngineChoice::Auto);
+        assert_eq!(map(OcrEngineFlag::Ocrs), OcrEngineChoice::Ocrs);
+        assert_eq!(map(OcrEngineFlag::Tesseract), OcrEngineChoice::Tesseract);
+    }
+
+    /// Exit codes: 2 no-engine (the actionable, curable state), 3
+    /// engine-failure (a real pass failed), documented on the verb.
+    #[test]
+    fn ocr_exit_code_distinguishes_engine_states() {
+        assert_eq!(ocr_exit_code(true), 2);
+        assert_eq!(ocr_exit_code(false), 3);
+    }
+
+    /// `-` reads the image from the given reader (stdin in
+    /// production); anything else reads the file.
+    #[test]
+    fn ocr_image_source_reads_file_and_dash_from_reader() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, b"file-bytes").expect("write file");
+        assert_eq!(
+            read_image_source(path.to_str().expect("utf8 path"), &mut std::io::empty())
+                .expect("file arm reads"),
+            b"file-bytes"
+        );
+        let mut stdin = std::io::Cursor::new(b"stdin-bytes".to_vec());
+        assert_eq!(
+            read_image_source("-", &mut stdin).expect("stdin arm reads"),
+            b"stdin-bytes"
+        );
+    }
 }

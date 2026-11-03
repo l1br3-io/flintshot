@@ -2898,7 +2898,7 @@ impl EditorPageBridge for PageBridge {
 /// against the machine, load and run the engine, map the outcome.
 /// Recognition failure surfaces the same actionable copy the
 /// resolution failure would (the guidance names the cure).
-fn run_ocr_pass(
+pub(crate) fn run_ocr_pass(
     image: &image::RgbaImage,
     choice: flintshot_core::OcrEngineChoice,
     lang: &str,
@@ -2943,7 +2943,7 @@ fn ocr_failure(e: &flintshot_core::OcrError) -> flintshot_editor_egui::OcrEvent 
 
 /// The consented model fetch: download the pair into the XDG cache
 /// over reqwest (the click consented; nothing else calls this).
-fn run_ocr_model_fetch() -> flintshot_editor_egui::OcrEvent {
+pub(crate) fn run_ocr_model_fetch() -> flintshot_editor_egui::OcrEvent {
     use flintshot_editor_egui::OcrEvent;
     let Some(dir) = flintshot_core::model_cache_dir() else {
         return OcrEvent::ModelsFetchFailed("no cache directory on this platform".into());
