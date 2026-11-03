@@ -24,6 +24,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,11 +36,26 @@ use crate::ipc_server::SubscriberBus;
 /// `stopped` line) before the SIGKILL fallback.
 pub const STOP_GRACE: Duration = Duration::from_secs(10);
 
+/// Post-exit grace the reaper grants the reader to deliver the
+/// worker's final line before declaring a crash: the child's **exit
+/// status becoming visible** and the reader **consuming the last
+/// pipe line** are separate events, and a scheduling-late reader
+/// must not turn a healthy finalize into `RecordingFailed`. The flag
+/// is set the moment the line is parsed (before the broadcast), so
+/// this grace only ever waits on thread scheduling — 2 s is orders
+/// beyond any healthy drain.
+const READER_GRACE: Duration = Duration::from_secs(2);
+
 /// A running record worker.
 #[derive(Clone)]
 struct Running {
     pid: u32,
     child: Arc<Mutex<Option<Child>>>,
+    /// Set by the reader thread the moment a final (`stopped` /
+    /// `failed`) line arrives. The reaper's crash decision waits on
+    /// this — not on the gate — so the gate can be cleared promptly
+    /// on exit while the crash verdict still honors a slow reader.
+    finalized: Arc<AtomicBool>,
 }
 
 /// The daemon-wide record dispatch context. Cloneable handle; the
@@ -148,15 +164,17 @@ impl RecordDispatch {
             .take()
             .ok_or_else(|| "record worker spawned without stdout".to_string())?;
         let child = Arc::new(Mutex::new(Some(child)));
+        let finalized = Arc::new(AtomicBool::new(false));
         *gate = Some(Running {
             pid,
             child: Arc::clone(&child),
+            finalized: Arc::clone(&finalized),
         });
         drop(gate);
 
         if let Some(bus) = &self.inner.bus {
             let bus = Arc::clone(bus);
-            std::thread::spawn(move || read_worker_lines(stdout, &bus));
+            std::thread::spawn(move || read_worker_lines(stdout, &bus, &finalized));
         } else {
             std::thread::spawn(move || {
                 // Drain anyway so the worker's pipe never fills.
@@ -187,6 +205,7 @@ impl RecordDispatch {
             Running {
                 pid: running.pid,
                 child: Arc::clone(&running.child),
+                finalized: Arc::clone(&running.finalized),
             }
         };
         sigterm(running.pid);
@@ -216,8 +235,15 @@ impl RecordDispatch {
 }
 
 /// Parse the worker's json-events lines, broadcasting the matching
-/// IPC events and clearing the gate on the final ones.
-fn read_worker_lines(stdout: std::process::ChildStdout, bus: &SubscriberBus) {
+/// IPC events. `finalized` is set (before the broadcast, so the
+/// reaper can never observe a final event without its flag) the
+/// moment a final `stopped`/`failed` line arrives — the reaper's
+/// crash verdict keys off it.
+fn read_worker_lines(
+    stdout: std::process::ChildStdout,
+    bus: &SubscriberBus,
+    finalized: &AtomicBool,
+) {
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
@@ -230,6 +256,7 @@ fn read_worker_lines(stdout: std::process::ChildStdout, bus: &SubscriberBus) {
                     .and_then(|p| p.as_str())
                     .map(PathBuf::from)
                     .unwrap_or_default();
+                finalized.store(true, Ordering::Release);
                 bus.broadcast(finalize_event(&path));
             }
             Some("failed") => {
@@ -242,6 +269,7 @@ fn read_worker_lines(stdout: std::process::ChildStdout, bus: &SubscriberBus) {
                     .and_then(|m| m.as_str())
                     .unwrap_or("recording failed")
                     .to_string();
+                finalized.store(true, Ordering::Release);
                 bus.broadcast(IpcEvent::RecordingFailed {
                     code: i32::try_from(code).unwrap_or(1),
                     message,
@@ -267,18 +295,32 @@ fn reap_worker(inner: &Inner, pid: u32, child: &Arc<Mutex<Option<Child>>>) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Clear the gate if the final line never came (it normally
-    // clears via the stopped/failed broadcast path).
+    // Clear the gate promptly on exit (a new recording may start),
+    // but defer the crash verdict: the worker's exit status becoming
+    // visible and the reader consuming its final pipe line are
+    // separate events, so grant the reader READER_GRACE to deliver
+    // the final line before declaring "exited without finalizing".
+    // Without this, a scheduling-late reader turned healthy
+    // finalizes into RecordingFailed (observed as a full-suite
+    // flake: the reaper's 50 ms exit poll regularly beat the reader
+    // under load).
     let mut gate = inner.gate.lock().expect("record gate poisoned");
     let crashed = gate.as_ref().is_some_and(|r| r.pid == pid);
     if crashed {
+        let finalized = Arc::clone(&gate.as_ref().expect("checked pid").finalized);
         *gate = None;
         drop(gate);
-        if let Some(bus) = &inner.bus {
-            bus.broadcast(IpcEvent::RecordingFailed {
-                code: 1,
-                message: "the record worker exited without finalizing".into(),
-            });
+        let deadline = Instant::now() + READER_GRACE;
+        while !finalized.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if !finalized.load(Ordering::Acquire) {
+            if let Some(bus) = &inner.bus {
+                bus.broadcast(IpcEvent::RecordingFailed {
+                    code: 1,
+                    message: "the record worker exited without finalizing".into(),
+                });
+            }
         }
     }
 }
