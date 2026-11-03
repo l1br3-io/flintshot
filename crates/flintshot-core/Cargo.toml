@@ -20,6 +20,11 @@ fontdb = "0.23"
 image = { workspace = true }
 imageproc = { workspace = true }
 keyring = { workspace = true }
+# Pure-Rust OCR engine (author's own RTen NN runtime — no C linkage,
+# no system deps). Models are NOT embedded and never fetched silently:
+# loading is consent-gated (see src/ocr/). Pre-approved in the
+# ocr-region plan (SPEC-ocr-region.md "Tech Stack").
+ocrs = "0.13"
 postcard = { workspace = true }
 serde = { workspace = true }
 # Session-capture sidecars (<id>.json); already in the lockfile via
