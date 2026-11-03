@@ -1297,6 +1297,8 @@ fn run_generation(
             Box::new(PageBridge {
                 shared: Arc::clone(shared),
                 ai: AiHost::default(),
+                screen_pick_probe: None,
+                screen_pick_rx: None,
             }),
             Box::new(RouteHostBridge {
                 shared: Arc::clone(shared),
@@ -2291,6 +2293,11 @@ struct PageBridge {
     /// Ask-the-shot host state: the live worker's channel plus
     /// immediate-failure events (unconfigured requests never spawn).
     ai: AiHost,
+    /// Portal screen pick (eyedropper ED3): the one-time probe
+    /// answer (bus round-trip on first ask, cached after) and the
+    /// in-flight round-trip's arrival channel.
+    screen_pick_probe: Option<bool>,
+    screen_pick_rx: Option<std::sync::mpsc::Receiver<Result<flintshot_core::Color, String>>>,
 }
 
 /// The bridge's AI plumbing. One stream at a time: a second request
@@ -2809,6 +2816,33 @@ impl EditorPageBridge for PageBridge {
             base_url: flight.base_url,
             result: result.map_err(|err| crate::ai::worker::ai_error_copy(&err, "")),
         })
+    }
+
+    // ── Portal screen pick (eyedropper ED3) ──
+
+    fn screen_color_pick_available(&mut self) -> bool {
+        // Probed once (the bus round-trip is milliseconds but not
+        // free); the cached answer serves every later frame.
+        *self
+            .screen_pick_probe
+            .get_or_insert_with(crate::color_pick::portal_reachable)
+    }
+
+    fn request_screen_color_pick(&mut self) {
+        // One flight at a time: a re-click replaces the receiver and
+        // the prior worker's send dies with its channel (the portal
+        // dialog is modal anyway — this is defensive).
+        self.screen_pick_rx = Some(crate::color_pick::spawn_screen_color_pick());
+    }
+
+    fn poll_screen_color_pick(&mut self) -> Option<Result<flintshot_core::Color, String>> {
+        // Non-blocking; the arrival is terminal (the channel drops
+        // with the receiver, the worker thread exits after its send).
+        let arrived = self.screen_pick_rx.as_ref()?.try_recv().ok();
+        if arrived.is_some() {
+            self.screen_pick_rx = None;
+        }
+        arrived
     }
 }
 
@@ -4810,6 +4844,8 @@ mod tests {
         let mut bridge = PageBridge {
             shared: std::sync::Arc::clone(&shared),
             ai: AiHost::default(),
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
 
         bridge.report_outcome(&EditorOutcome::Saved(std::path::PathBuf::from(
@@ -4839,6 +4875,8 @@ mod tests {
                 config_override: Some(flintshot_core::Config::default()),
                 ..AiHost::default()
             },
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
 
         // Default config: no model set ⇒ unconfigured, and the
@@ -4878,6 +4916,8 @@ mod tests {
                 config_override: Some(config),
                 ..AiHost::default()
             },
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -4935,6 +4975,8 @@ mod tests {
                 config_path: Some(path),
                 ..AiHost::default()
             },
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
 
         // Startup fired nothing (no save yet ⇒ no flight).
@@ -5011,6 +5053,8 @@ mod tests {
                 config_path: Some(path.clone()),
                 ..AiHost::default()
             },
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
         bridge.save_config(&config);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -5033,6 +5077,8 @@ mod tests {
                 config_path: Some(path),
                 ..AiHost::default()
             },
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
         let reloaded = flintshot_core::Config::load_from(&dir.path().join("config.toml"))
             .expect("the verdict persisted");
@@ -5083,6 +5129,8 @@ mod tests {
                 config_path: Some(path.clone()),
                 ..AiHost::default()
             },
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
         bridge.save_config(&config);
 
@@ -5113,6 +5161,8 @@ mod tests {
         let mut bridge = PageBridge {
             shared: std::sync::Arc::new(shared),
             ai: AiHost::default(),
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
         bridge.ai.config_override = Some(flintshot_core::Config::default());
         (bridge, vec![session])
@@ -5234,6 +5284,8 @@ mod tests {
         let mut bridge = PageBridge {
             shared: std::sync::Arc::new(shared),
             ai: AiHost::default(),
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -5273,6 +5325,8 @@ mod tests {
                 config_path: Some(path),
                 ..AiHost::default()
             },
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
         (bridge, mockito::Server::new(), dir)
     }
@@ -5407,6 +5461,8 @@ mod tests {
                 config_path: Some(path.clone()),
                 ..AiHost::default()
             },
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
 
         let mut config = flintshot_core::Config::default();
@@ -5449,6 +5505,8 @@ mod tests {
         let mut bridge = PageBridge {
             shared: std::sync::Arc::clone(&shared),
             ai: AiHost::default(),
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
 
         for outcome in [
@@ -5479,6 +5537,8 @@ mod tests {
         let mut bridge = PageBridge {
             shared: std::sync::Arc::clone(&shared),
             ai: AiHost::default(),
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
 
         let anns = vec![test_line_ann()];
@@ -5526,6 +5586,8 @@ mod tests {
                 config_override: Some(flintshot_core::Config::default()),
                 ..AiHost::default()
             },
+            screen_pick_probe: None,
+            screen_pick_rx: None,
         };
         let _ = &mut bridge;
         (bridge, stop)

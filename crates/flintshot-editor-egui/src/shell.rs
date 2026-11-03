@@ -278,6 +278,30 @@ pub trait EditorPageBridge {
     fn poll_models(&mut self) -> Option<ModelsArrival> {
         None
     }
+
+    /// Whether the host can pick a colour from the **screen** via the
+    /// XDG `PickColor` portal (probed once by the page at
+    /// construction — the screen chip's visibility). Worker windows
+    /// have no bridge and never see the chip. Default: unavailable.
+    fn screen_color_pick_available(&mut self) -> bool {
+        false
+    }
+
+    /// Fire a portal screen-colour pick (the screen chip's click; an
+    /// explicit user action — never fired on hover, focus, or open).
+    /// The host owns the async round-trip; the answer arrives on
+    /// [`Self::poll_screen_color_pick`]. Default no-op (headless
+    /// tests: requests just never answer).
+    fn request_screen_color_pick(&mut self) {}
+
+    /// Take the arrived portal pick, if any: `Ok` = the picked colour
+    /// to apply through the same path a canvas pick takes; `Err` =
+    /// one-line toast copy (denial, timeout, transport — advisory,
+    /// never a dialog). One arrival per fired request. Default:
+    /// always `None`.
+    fn poll_screen_color_pick(&mut self) -> Option<Result<flintshot_core::Color, String>> {
+        None
+    }
 }
 
 /// One arrived vision-probe result: the persisted verdict + triple

@@ -107,6 +107,10 @@ const TAB_VOCABULARY: [PanelTab; 3] = [PanelTab::Properties, PanelTab::History, 
 /// Panel state that persists across frames: the active tab, the
 /// collapse flag, the live width mirror, and the (lazily created)
 /// grain texture handle.
+// The four bools are independent per-frame flags (collapse,
+// popover-bracketing ×2, portal probe), not a combinational state
+// machine — same call as EditorApp's bools.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct PanelState {
     /// The active tab (Properties by default).
     tab: PanelTab,
@@ -132,6 +136,12 @@ pub(crate) struct PanelState {
     color_pop_live: bool,
     /// Same bracketing flag for the text-style popover.
     text_pop_live: bool,
+    /// Whether the colour cluster offers the portal screen chip —
+    /// the host's one-time probe answer, seeded by the app at
+    /// construction (worker windows and unreachable portals keep
+    /// the chip hidden; default false). `pub(crate)` for the app's
+    /// one-time seed.
+    pub(crate) screen_pick_available: bool,
 }
 
 /// Who owns the panel's collapsed state right now — the responsive
@@ -263,6 +273,7 @@ impl Default for PanelState {
             grain: None,
             color_pop_live: false,
             text_pop_live: false,
+            screen_pick_available: false,
         }
     }
 }
@@ -723,8 +734,12 @@ fn properties_body(
         widgets::section(ui, id, title, true, |body| match section {
             Section::Stroke if inspector => selection_stroke(body, state, caps, panel),
             Section::Stroke => {
-                if let Some(evt) = swatch_row(body, &mut state.color, popover::ColorTarget::Stroke)
-                {
+                if let Some(evt) = swatch_row(
+                    body,
+                    &mut state.color,
+                    popover::ColorTarget::Stroke,
+                    panel.screen_pick_available,
+                ) {
                     action = evt.into();
                 }
                 stroke_chips(body, state);
@@ -738,7 +753,12 @@ fn properties_body(
             Section::Text if inspector => selection_text(body, state, panel),
             Section::Text => {
                 text_style_row(body, state);
-                if let Some(evt) = popover::pod_button(body, state, popover::ColorTarget::Text) {
+                if let Some(evt) = popover::pod_button(
+                    body,
+                    state,
+                    popover::ColorTarget::Text,
+                    panel.screen_pick_available,
+                ) {
                     action = evt.into();
                 }
             }
@@ -1209,6 +1229,12 @@ pub(crate) enum ToolbarAction {
         /// Which colour slot the pick applies to.
         target: popover::ColorTarget,
     },
+    /// The colour cluster's screen chip: fire the portal `PickColor`
+    /// round-trip for this target (eyedropper).
+    StartScreenColorPick {
+        /// Which colour slot the picked colour applies to.
+        target: popover::ColorTarget,
+    },
     /// The hex field's copy gesture; the payload is the formatted
     /// `#rrggbb` (eyedropper).
     CopyHexToClipboard(String),
@@ -1218,6 +1244,7 @@ impl From<popover::ColorBayEvent> for ToolbarAction {
     fn from(evt: popover::ColorBayEvent) -> Self {
         match evt {
             popover::ColorBayEvent::Pick(target) => Self::StartColorPick { target },
+            popover::ColorBayEvent::ScreenPick(target) => Self::StartScreenColorPick { target },
             popover::ColorBayEvent::CopyHex(hex) => Self::CopyHexToClipboard(hex),
         }
     }
@@ -1468,16 +1495,19 @@ pub(crate) fn copy_chip(ui: &mut egui::Ui, copied: bool) -> egui::Response {
 }
 
 /// The swatch row + the custom-color chip + the eyedropper cluster
-/// (canvas-pick chip, hex copy chip), flowing left-to-right and
-/// wrapping when the body narrows (the section body itself is a
-/// justified top-down column — without this wrapper every swatch
-/// stacks on its own row). The cluster reports through
+/// (canvas-pick chip, portal screen chip, hex copy chip), flowing
+/// left-to-right and wrapping when the body narrows (the section
+/// body itself is a justified top-down column — without this wrapper
+/// every swatch stacks on its own row). The cluster reports through
 /// [`popover::ColorBayEvent`]; the caller decides what acting on it
-/// means (the shell owns pick mode).
+/// means (the shell owns pick mode). `screen_pick` gates the portal
+/// chip (the host's probe answer — hidden without a reachable
+/// portal).
 pub(crate) fn swatch_row(
     ui: &mut egui::Ui,
     color: &mut Color,
     target: popover::ColorTarget,
+    screen_pick: bool,
 ) -> Option<popover::ColorBayEvent> {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -1491,6 +1521,9 @@ pub(crate) fn swatch_row(
         if eyedropper_chip(ui) {
             return Some(popover::ColorBayEvent::Pick(target));
         }
+        if screen_pick && screen_chip(ui) {
+            return Some(popover::ColorBayEvent::ScreenPick(target));
+        }
         if hex_chip(ui, *color) {
             return Some(popover::ColorBayEvent::CopyHex(
                 flintshot_core::serde_util::format_color(color),
@@ -1499,6 +1532,39 @@ pub(crate) fn swatch_row(
         None
     })
     .inner
+}
+
+/// The cluster's portal screen chip: a display glyph — the
+/// anywhere-on-screen pick. Shown only when the host probed the
+/// portal reachable; the round-trip is the host's job.
+fn screen_chip(ui: &mut egui::Ui) -> bool {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
+    let resp = ui
+        .interact(rect, egui::Id::new("screen_pick"), Sense::click())
+        .on_hover_text("Pick a colour from anywhere on screen (portal)");
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(4),
+        theme::palette::PAPER_CREAM,
+        theme::HAIRLINE_STROKE,
+        StrokeKind::Middle,
+    );
+    g_screen(ui.painter(), rect, theme::palette::INK);
+    resp.clicked()
+}
+
+/// A monitor glyph: the screen chip's pick affordance.
+fn g_screen(p: &egui::Painter, r: egui::Rect, c: Color32) {
+    for (a, b) in [
+        ((-5.0, -4.5), (5.0, -4.5)),
+        ((5.0, -4.5), (5.0, 2.5)),
+        ((5.0, 2.5), (-5.0, 2.5)),
+        ((-5.0, 2.5), (-5.0, -4.5)),
+        ((0.0, 2.5), (0.0, 5.0)),
+        ((-3.0, 5.5), (3.0, 5.5)),
+    ] {
+        crate::rail::seg(p, r, a, b, c, 1.6);
+    }
 }
 
 /// The cluster's canvas-pick chip: a crosshair over a cutout square.

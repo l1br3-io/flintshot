@@ -280,6 +280,13 @@ pub(crate) struct EditorApp {
     /// selection-first phase — the popover only requests it. Esc
     /// cancels with no state change; the magnifier rides along.
     color_pick: Option<crate::popover::ColorTarget>,
+    /// Whether the portal screen pick is offered (the host bridge's
+    /// one-time probe, seeded at construction; worker windows and
+    /// unreachable portals keep the screen chip hidden).
+    screen_pick_available: bool,
+    /// The pending portal screen pick's apply target while the
+    /// host-owned round-trip is in flight (eyedropper ED3).
+    screen_pick_flight: Option<crate::popover::ColorTarget>,
     /// The editor surface's transient toast (eyedropper hex-copy
     /// feedback; the screen-pick denial notice). Painted every frame
     /// in [`Self::ui_impl`]; expires on egui's frame time.
@@ -415,18 +422,23 @@ impl EditorApp {
             floating_rects: Vec::new(),
             resize_menu: topbar::ResizeMenu::default(),
             color_pick: None,
+            screen_pick_available: false,
+            screen_pick_flight: None,
             toast: None,
             flushed_anns,
         };
         // Ask-the-shot snapshot (page mode): the saved-transform list
         // and the configured gate come from the host bridge — it owns
         // config + keyring. Worker windows keep the defaults (no AI
-        // there; the dialog's Run is inert without a bridge).
+        // there; the dialog's Run is inert without a bridge). The
+        // portal screen pick probes here too — once, the host's call.
         if let Some(bridge) = app.page.as_ref() {
             let mut borrowed = bridge.borrow_mut();
             app.ai_transforms = borrowed.ai_transforms();
             app.ai_configured = borrowed.ai_configured();
+            app.screen_pick_available = borrowed.screen_color_pick_available();
         }
+        app.panel.screen_pick_available = app.screen_pick_available;
         app
     }
 
@@ -1105,6 +1117,9 @@ impl EditorApp {
         // even mid-text-draft, and idle pages keep a slow heartbeat so
         // they do.
         self.poll_page_directives(ctx);
+        // The portal screen pick's arrival (page mode): the host owns
+        // the round-trip, this frame-poll applies or toasts it.
+        self.poll_screen_color_pick(ctx);
 
         // Translate egui's input events to the toolkit-agnostic
         // `InputEvent` and feed them through `state.dispatch_input`.
@@ -1547,6 +1562,34 @@ impl EditorApp {
         }
     }
 
+    /// The portal screen pick's frame poll (page mode). While a
+    /// flight is pending, a bounded repaint heartbeat keeps the poll
+    /// running on an otherwise idle page; the arrival applies through
+    /// the same path a canvas pick takes, or raises the host's toast
+    /// copy — advisory, the popover stays.
+    fn poll_screen_color_pick(&mut self, ctx: &Context) {
+        if self.screen_pick_flight.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let Some(target) = self.screen_pick_flight else {
+            return;
+        };
+        let Some(bridge) = self.page.clone() else {
+            return;
+        };
+        let Some(result) = bridge.borrow_mut().poll_screen_color_pick() else {
+            return;
+        };
+        self.screen_pick_flight = None;
+        match result {
+            Ok(color) => self.apply_picked_color(target, color),
+            Err(msg) => {
+                let now = ctx.input(|i| i.time);
+                self.toast = Some(crate::toast::Toast::new(msg, now));
+            }
+        }
+    }
+
     /// Translate this frame's shortcut keypress (one per frame) and
     /// perform its outcome side effect. Returns `true` when the
     /// outcome ended the frame (close / save / copy), so
@@ -1925,19 +1968,26 @@ impl EditorApp {
         self.handle_ai_actions(ui.ctx());
 
         // Handle toolbar actions outside the toolbar drawing code so
-        // we can borrow `&self.outcome` cleanly. Each handler runs the
-        // corresponding output pipeline (save / copy) and either
-        // publishes the matching `EditorOutcome` + closes the window,
-        // or logs + closes on failure. Dialog-cancel keeps the editor
-        // open (no outcome published).
-        match panel_action {
-            // The panel only fires Delete today (the Selection
-            // section); Save/Copy/Upload live on the topbar. Delete
-            // replays the same dispatch a Del keypress would produce
-            // (the dispatcher owns all state mutation).
-            // Ctrl+Z / Ctrl+Y / Del keypress would produce (the
-            // dispatcher owns all state mutation); their outcomes are
-            // always `Continue`.
+        // we can borrow `&self.outcome` cleanly (see
+        // `handle_panel_action`).
+        self.handle_panel_action(panel_action, ui);
+        // The editor surface's toast (hex-copy feedback, screen-pick
+        // denial): painted last so it floats over the panels.
+        crate::toast::show(ui, &mut self.toast);
+        self.flush_committed_annotations();
+    }
+}
+
+impl EditorApp {
+    /// Act on the panel's fired [`ToolbarAction`]. Each handler runs
+    /// outside the panel's drawing code so borrows of `&self.outcome`
+    /// stay clean. History + Delete replay the same dispatches a
+    /// Ctrl+Z / Ctrl+Y / Del keypress would produce (the dispatcher
+    /// owns all state mutation; outcomes are always `Continue`);
+    /// Save / Copy / Upload / `NewCapture` are unreachable from the
+    /// panel today — the topbar owns them.
+    fn handle_panel_action(&mut self, action: ToolbarAction, ui: &mut egui::Ui) {
+        match action {
             ToolbarAction::Undo => {
                 let _ = self.state.dispatch_input(&InputEvent::Key {
                     key: Key::Char('z'),
@@ -1962,12 +2012,21 @@ impl EditorApp {
                     modifiers: Modifiers::default(),
                 });
             }
-            // Save / Copy / Upload / NewCapture are unreachable from
-            // the panel today — the topbar owns them.
             ToolbarAction::StartColorPick { target } => {
                 // The popover/panel chip only asked; this app owns the
                 // mode (see `color_pick`).
                 self.color_pick = Some(target);
+            }
+            ToolbarAction::StartScreenColorPick { target } => {
+                // The screen chip's click is the explicit user action
+                // the portal round-trip requires (spec boundary: never
+                // fire it on hover/open). Page mode only — worker
+                // windows hide the chip, so this arm is unreachable
+                // there; the guard keeps a stray action inert anyway.
+                if let Some(bridge) = self.page.clone() {
+                    bridge.borrow_mut().request_screen_color_pick();
+                    self.screen_pick_flight = Some(target);
+                }
             }
             ToolbarAction::CopyHexToClipboard(hex) => {
                 let now = ui.input(|i| i.time);
@@ -1975,14 +2034,8 @@ impl EditorApp {
             }
             _ => {}
         }
-        // The editor surface's toast (hex-copy feedback, screen-pick
-        // denial): painted last so it floats over the panels.
-        crate::toast::show(ui, &mut self.toast);
-        self.flush_committed_annotations();
     }
-}
 
-impl EditorApp {
     /// Apply a topbar action (worker windows; the router forwards
     /// routed-page actions here too). Open / Paste have no worker
     /// bridge and stay disabled; Settings delegates through the
@@ -4215,6 +4268,146 @@ mod tests {
         );
     }
 
+    // --- Portal screen pick (eyedropper ED3) ---
+
+    /// A full editor frame (production order: logic then ui) over the
+    /// wide synthetic screen the panel needs.
+    fn screen_pick_frame(ctx: &egui::Context, app: &mut EditorApp, events: Vec<egui::Event>) {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1024.0, 768.0),
+                )),
+                events,
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                app.logic_impl(ui.ctx());
+                app.ui_impl(ui);
+            },
+        );
+    }
+
+    /// A page-mode app over a recording bridge with the portal
+    /// screen pick available (or not), plus a click on the named
+    /// chip after the section fold settles.
+    fn screen_pick_app_clicked(
+        available: bool,
+        chip: &'static str,
+    ) -> (egui::Context, EditorApp, RecordingPageBridge) {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let bridge = RecordingPageBridge::default();
+        bridge
+            .screen_available
+            .store(available, std::sync::atomic::Ordering::Relaxed);
+        let slot: PageBridgeSlot = Rc::new(RefCell::new(Box::new(bridge.clone())));
+        let mut app = EditorApp::new_page(
+            blank_state(400, 300),
+            &ctx,
+            Rc::new(RefCell::new(None)),
+            false,
+            slot,
+        );
+        app.state.set_tool(Tool::Rect);
+        // Settle the fold spring so the colour row owns its hits.
+        for _ in 0..30 {
+            screen_pick_frame(&ctx, &mut app, vec![]);
+        }
+        let at = ctx
+            .read_response(egui::Id::new(chip))
+            .unwrap_or_else(|| panic!("{chip} registers"))
+            .rect
+            .center();
+        screen_pick_frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        (ctx, app, bridge)
+    }
+
+    /// Without a reachable portal the screen chip never shows — the
+    /// probe answer, not the display server, decides.
+    #[test]
+    fn popover_screen_pick_chip_hidden_without_the_portal() {
+        let (ctx, _app, _bridge) = screen_pick_app_clicked(false, "eyedropper_pick");
+        assert!(
+            ctx.read_response(egui::Id::new("screen_pick")).is_none(),
+            "no probe → no screen chip"
+        );
+    }
+
+    /// The screen chip's click fires exactly one portal request (the
+    /// explicit user action the round-trip requires) and arms the
+    /// flight for the click's target.
+    #[test]
+    fn popover_screen_pick_chip_click_fires_one_request() {
+        let (_ctx, app, bridge) = screen_pick_app_clicked(true, "screen_pick");
+        assert_eq!(
+            *bridge.screen_requests.lock().expect("requests mutex"),
+            1,
+            "the click fired one portal round-trip"
+        );
+        assert_eq!(
+            app.screen_pick_flight,
+            Some(crate::popover::ColorTarget::Stroke),
+            "the flight carries the click's target"
+        );
+    }
+
+    /// The portal's answer applies through the same path a canvas
+    /// pick takes (f64 unit channels already mapped by the host);
+    /// denial toasts the host's copy and touches nothing.
+    #[test]
+    fn popover_screen_pick_arrival_applies_and_denial_toasts() {
+        // Ok arm: the colour lands, the flight ends.
+        let (ctx, mut app, bridge) = screen_pick_app_clicked(true, "screen_pick");
+        bridge
+            .screen_arrivals
+            .lock()
+            .expect("arrivals mutex")
+            .push_back(Ok(flintshot_core::Color::rgb(9, 8, 7)));
+        screen_pick_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.state.color,
+            flintshot_core::Color::rgb(9, 8, 7),
+            "the picked colour applied to the stroke slot"
+        );
+        assert!(app.screen_pick_flight.is_none(), "the flight ended");
+
+        // Err arm: the toast carries the host's copy; state untouched.
+        let before = app.state.color;
+        app.screen_pick_flight = Some(crate::popover::ColorTarget::Stroke);
+        bridge
+            .screen_arrivals
+            .lock()
+            .expect("arrivals mutex")
+            .push_back(Err("Screen colour pick cancelled".into()));
+        screen_pick_frame(&ctx, &mut app, vec![]);
+        assert_eq!(
+            app.toast.as_ref().expect("denial raised a toast").message(),
+            "Screen colour pick cancelled",
+            "the denial toast carries the host's copy"
+        );
+        assert_eq!(app.state.color, before, "denial changed nothing");
+    }
+
     // --- Point-handle reshape through the shell (annotate-polish AP5) ---
 
     /// A pinned-canvas editor app over a selected `CurvedArrow`, with
@@ -5064,6 +5257,12 @@ mod tests {
     struct RecordingPageBridge {
         rec: Arc<Mutex<PageRecorder>>,
         pending: Arc<Mutex<VecDeque<HomeDirective>>>,
+        /// Screen-pick seams (eyedropper ED3): probe answer, request
+        /// count, replayable arrivals. Default false/empty — the chip
+        /// stays hidden exactly like a worker window's.
+        screen_available: Arc<std::sync::atomic::AtomicBool>,
+        screen_requests: Arc<Mutex<usize>>,
+        screen_arrivals: Arc<Mutex<VecDeque<Result<flintshot_core::Color, String>>>>,
     }
 
     impl EditorPageBridge for RecordingPageBridge {
@@ -5111,6 +5310,22 @@ mod tests {
                 .expect("recorder mutex")
                 .committed
                 .push(anns.to_vec());
+        }
+
+        fn screen_color_pick_available(&mut self) -> bool {
+            self.screen_available
+                .load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        fn request_screen_color_pick(&mut self) {
+            *self.screen_requests.lock().expect("requests mutex") += 1;
+        }
+
+        fn poll_screen_color_pick(&mut self) -> Option<Result<flintshot_core::Color, String>> {
+            self.screen_arrivals
+                .lock()
+                .expect("arrivals mutex")
+                .pop_front()
         }
     }
 

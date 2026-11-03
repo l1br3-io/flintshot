@@ -1351,6 +1351,7 @@ impl OverlayApp {
             // popover — surfaces the overlay never shows — so its
             // actions can't arise here; exhaustive for the compiler.
             ToolbarAction::StartColorPick { .. }
+            | ToolbarAction::StartScreenColorPick { .. }
             | ToolbarAction::CopyHexToClipboard(_)
             | ToolbarAction::None => {}
         }

@@ -12,6 +12,8 @@ mod ambient;
 mod app_window;
 mod capture_flow;
 mod cli;
+#[cfg(feature = "egui")]
+mod color_pick;
 mod config_edit;
 mod config_watcher;
 mod daemon;

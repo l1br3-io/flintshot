@@ -43,9 +43,12 @@ arboard = { version = "3", default-features = false, features = ["image-data", "
 # global_shortcuts is the Phase 6 portal interface; screencast is the
 # record engine's Wayland source (xdg ScreenCast; spec'd ask-first,
 # enabled per the E6 task — pure D-Bus, serde_repr was already in
-# the lock, so no new crates). zbus is pure Rust, so this adds no
-# system deps (CI stays green unchanged).
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts", "screencast"] }
+# the lock, so no new crates). screenshot compiles the eyedropper's
+# PickColor client (eyedropper ED3): same pinned crate, feature-gated
+# module whose only dep is serde_repr (already in the lock via
+# screencast) — no new crates, no system deps. zbus is pure Rust, so
+# this adds no system deps (CI stays green unchanged).
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts", "screencast", "screenshot"] }
 # Data-URL payload for AI vision message parts (flintshot-core); tiny,
 # no transitive deps beyond itself.
 base64 = "0.22"

@@ -33,6 +33,9 @@ pub(crate) enum ColorBayEvent {
     /// Enter canvas pick mode for this target — crosshair over the
     /// canvas, click samples, Esc cancels back untouched.
     Pick(ColorTarget),
+    /// Fire a portal screen pick for this target (the screen chip —
+    /// shown only when the host bridge reports the portal reachable).
+    ScreenPick(ColorTarget),
     /// Copy the shown `#rrggbb` value (the "colour destined
     /// elsewhere" affordance).
     CopyHex(String),
@@ -44,11 +47,13 @@ const POD_ID: &str = "color-stroke-pod";
 /// Draw the picker pod button: a cutout chip whose leading square
 /// shows the live color, labeled `Color · Stroke`. Opens the
 /// popover on click. Returns the bay's eyedropper-cluster event, if
-/// one fired inside the popover this frame.
+/// one fired inside the popover this frame. `screen_pick` gates the
+/// portal screen chip (the host's probe answer).
 pub(crate) fn pod_button(
     ui: &mut egui::Ui,
     state: &mut EditorState,
     target: ColorTarget,
+    screen_pick: bool,
 ) -> Option<ColorBayEvent> {
     // The pod's chip shows — and the popover edits — the same source
     // the panel's Text section reads (session draft > selection >
@@ -70,7 +75,7 @@ pub(crate) fn pod_button(
                 .stroke(theme::HAIRLINE_STROKE)
                 .show(ui, |ui| {
                     ui.vertical(|ui| match target {
-                        ColorTarget::Text => event = text_color_bay(ui, state),
+                        ColorTarget::Text => event = text_color_bay(ui, state, screen_pick),
                         // The Stroke target has no popover: its cluster
                         // lives in the properties row itself.
                         ColorTarget::Stroke => {}
@@ -85,11 +90,16 @@ pub(crate) fn pod_button(
 /// edits (session draft > selection > defaults), one discrete gesture
 /// per pick. Split out of `pod_button` so the interaction is drivable
 /// at the root ui (the popup machinery is orthogonal to the retarget).
-pub(crate) fn text_color_bay(ui: &mut egui::Ui, state: &mut EditorState) -> Option<ColorBayEvent> {
+/// `screen_pick` gates the portal screen chip.
+pub(crate) fn text_color_bay(
+    ui: &mut egui::Ui,
+    state: &mut EditorState,
+    screen_pick: bool,
+) -> Option<ColorBayEvent> {
     let before = panel::effective_text_style(state).color;
     let mut picked = before;
     let event = ui
-        .horizontal(|ui| panel::swatch_row(ui, &mut picked, ColorTarget::Text))
+        .horizontal(|ui| panel::swatch_row(ui, &mut picked, ColorTarget::Text, screen_pick))
         .inner;
     if picked != before {
         let mut st = panel::effective_text_style(state);
@@ -179,7 +189,7 @@ mod tests {
     fn opened_popup_over(s: &mut EditorState, target: ColorTarget) -> egui::Context {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(screen(), |ui| {
-            pod_button(ui, s, target);
+            pod_button(ui, s, target, false);
         });
         let pod = ctx
             .read_response(egui::Id::new(POD_ID))
@@ -205,7 +215,7 @@ mod tests {
                 ..screen()
             },
             |ui| {
-                pod_button(ui, s, target);
+                pod_button(ui, s, target, false);
             },
         );
         ctx
@@ -264,7 +274,7 @@ mod tests {
         s.selected = vec![0];
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(screen(), |ui| {
-            text_color_bay(ui, &mut s);
+            text_color_bay(ui, &mut s, false);
         });
         // A swatch distinct from the annotation's blue.
         let pick = *theme::palette::SWATCHES
@@ -289,7 +299,7 @@ mod tests {
                 ..screen()
             },
             |ui| {
-                text_color_bay(ui, &mut s);
+                text_color_bay(ui, &mut s, false);
             },
         );
         let _ = ctx.run_ui(
@@ -298,7 +308,7 @@ mod tests {
                 ..screen()
             },
             |ui| {
-                text_color_bay(ui, &mut s);
+                text_color_bay(ui, &mut s, false);
             },
         );
         let want = flintshot_core::Color::rgb(pick.r(), pick.g(), pick.b());
@@ -325,7 +335,7 @@ mod tests {
         id: &'static str,
     ) -> Option<ColorBayEvent> {
         let _ = ctx.run_ui(screen(), |ui| {
-            text_color_bay(ui, s);
+            text_color_bay(ui, s, false);
         });
         let at = ctx
             .read_response(egui::Id::new(id))
@@ -344,7 +354,7 @@ mod tests {
                 ..screen()
             },
             |ui| {
-                text_color_bay(ui, s);
+                text_color_bay(ui, s, false);
             },
         );
         // `run_ui` hands back the full output, not the closure's
@@ -356,7 +366,7 @@ mod tests {
                 events: vec![press(at, false)],
                 ..screen()
             },
-            |ui| *fired.borrow_mut() = text_color_bay(ui, s),
+            |ui| *fired.borrow_mut() = text_color_bay(ui, s, false),
         );
         fired.into_inner()
     }
@@ -368,7 +378,7 @@ mod tests {
         let mut s = state();
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(screen(), |ui| {
-            text_color_bay(ui, &mut s);
+            text_color_bay(ui, &mut s, false);
         });
         assert!(
             ctx.read_response(egui::Id::new("eyedropper_pick"))
