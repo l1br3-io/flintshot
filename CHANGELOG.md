@@ -20,6 +20,27 @@ Categories used below:
 
 ### Added
 
+- **QR decode — region → payloads → clipboard** (effort `qr-decode`,
+  module 9 of the 2026-11 feature batch; flameshot #511). A new **QR
+  tool beside OCR** in the editor (`Q`): drag a region — or press
+  **Enter** for the whole image — and every code inside it decodes
+  (pure-Rust `rqrr`; barcode-beyond-QR stays out: every mature
+  barcode decoder is C/C++). The largest code's payload lands on the
+  clipboard with a toast, and the result card lists every payload
+  with per-row **Copy** — plus **Open** on rows that parse as an
+  absolute http(s) URL, and only there: the click (never the decode
+  itself) hands the URL to the system's handler, so unknown schemes
+  can never dispatch a registered handler on screen content. A code
+  too small or skewed to read is honest about it — the card's copy
+  names the cure (a closer re-capture); nothing found is a friendly
+  failure, a detected-but-undecodable code is an error. `flinshot qr
+  <image>` prints one payload per line, largest first, payload-only;
+  `-` reads stdin (`flinshot capture --stdout | flinshot qr -`), exit
+  codes 0/1/2/3 (success / other / no code found / decode error).
+  Multi-code ordering is area, largest first (the code you framed
+  leads). `cargo test -p flintshot-core qr` + `cargo test -p
+  flintshot-editor-egui qr` + `cargo test -p flintshot-app qr` pin
+  it; live rows in `docs/TEST_MATRIX.md`.
 - **OCR — region → text → clipboard** (effort `ocr-region`, module 8
   of the 2026-11 feature batch; flameshot #702, the oldest ask in
   the queue). A new **OCR tool beside Crop** in the editor (`O`):

@@ -3078,6 +3078,68 @@ cargo build --release
   `cargo test -p flintshot-core ocr::ocrs -- --ignored`; CI stays
   offline.
 
+## QR — region → payloads → clipboard
+
+Spec: `git log --grep='qr-decode'`. The decode seam (exact payload
+round-trips over generated fixtures, multi-code largest-first
+ordering, corner-flush codes, region-crop isolation, damaged-code →
+unreadable — never a silent empty), the http(s)-only URL allowlist,
+the editor tool's frames (region-crop-before-decode by request dims,
+clipboard + toast + card with per-row Copy, Open click-only on vetted
+URLs — pinned), and the CLI verb's parse/exit-code/stdout units all
+run under `cargo test -p flintshot-core qr` + `cargo test -p
+flintshot-editor-egui qr` + `cargo test -p flintshot-app qr`;
+**this section is the live pass** — real codes on a real screen,
+the small-code failure feel, and the browser actually opening need a
+graphical session.
+
+### Test setup
+
+```sh
+cargo build --release
+# Any QR code on screen (a phone ticket, a payment code, a URL
+# QR) — or generate one and show it on a second display.
+```
+
+### Test script
+
+1. **Editor drag → clipboard + card (row 1, L2)**: open an editor on
+   a capture with a QR on screen; select the QR tool (rail, beside
+   OCR; `Q`); drag a region around the code — release decodes, a
+   "Copied QR payload" toast appears, pasting elsewhere yields
+   exactly the payload, and the panel's QR result card lists it with
+   Copy — and Open when the payload is a URL. Click Open: the
+   browser opens it. A plain-text payload shows no Open.
+2. **Small-code failure copy (row 2, L2)**: frame a code too small /
+   too far to read — the card shows the re-capture cure (never a
+   raw error, never a fake success); re-capturing closer decodes.
+3. **Enter whole image + CLI (row 3, L2)**: with the QR tool armed
+   and no drag, press Enter — every code in the image decodes (the
+   card lists them; the clipboard takes the largest). Then
+   `flinshot qr shot.png` prints the payloads one per line and
+   `flinshot capture --stdout | flinshot qr -` composes; exit codes:
+   2 with no code found, 3 on a detected-but-unreadable code.
+
+| Behavior                                   | L1 | L2 | L3 | L4 | L5 | M1 | M2 | W1 | W2 | XV1 |
+| ------------------------------------------ | -- | -- | -- | -- | -- | -- | -- | -- | -- | --- |
+| Editor drag → clipboard + toast + card, Open click-only (row 1) | | PENDING | | | | N/A | N/A | N/A | N/A | |
+| Small-code failure copy names the cure (row 2) | | PENDING | | | | N/A | N/A | N/A | N/A | |
+| Enter whole image + CLI payload/exit codes (row 3) | | PENDING | | | | N/A | N/A | N/A | N/A | |
+
+### Known caveats
+
+- QR only: barcode-beyond-QR is rejected on record (every mature
+  barcode decoder is C/C++; linking one breaks the pure-Rust
+  principle — the spec's scope honesty).
+- Small or skewed codes can fail — that's screen-capture reality,
+  not a bug; the failure copy says so and the cure is a closer
+  re-capture.
+- Open is http(s)-only by design (the allowlist is the security
+  boundary against scheme-handler dispatch) and fires only on the
+  explicit click — a decode never opens anything.
+- Worker editor windows and the frozen-capture overlay have no QR
+  (the bridge-only seam, same as OCR).
+
 ## Ask-the-shot live verification (Phase 7)
 
 Spec: `git log --grep='ai-streaming'`; design: ADR-0069. The streaming
