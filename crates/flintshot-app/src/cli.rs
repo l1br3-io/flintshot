@@ -1278,9 +1278,11 @@ pub fn run_open(args: &OpenArgs) -> Result<()> {
 
 /// Try to hand a capture `request` to a running daemon. Returns `true`
 /// if delegated (the caller should exit). Skipped when `--standalone`
-/// is set, when `--out` is given (the PNG-write path is headless and
-/// must run in-process; the daemon's worker would open an editor
-/// instead), when an explicit `--overlay`/`--editor` flag is set (the
+/// is set, when `--out`, `--stdout`, or `--json` is given (their
+/// payload contracts are honored in-process; the IPC request cannot
+/// carry them, so delegating would exit with empty stdout while the
+/// daemon's worker opens an editor), when an explicit
+/// `--overlay`/`--editor` flag is set (the
 /// IPC request cannot carry it, so honoring the flag means running
 /// here), or when `ipc_incompatible_flag` is set (`--after`: same
 /// cannot-carry-it rationale). A delegation failure falls back to
@@ -1292,7 +1294,7 @@ fn delegate_to_daemon(
     interaction: Option<InteractionMode>,
     ipc_incompatible_flag: bool,
 ) -> bool {
-    if output.standalone || output.out.is_some() {
+    if output.standalone || output.out.is_some() || output.stdout || output.json {
         return false;
     }
     if ipc_incompatible_flag {
@@ -4317,6 +4319,34 @@ mod tests {
             ),
             "an explicit mode flag must not delegate to the daemon"
         );
+    }
+
+    #[test]
+    fn payload_flags_skip_daemon_delegation() {
+        // `Request::Capture` cannot carry `--stdout` or `--json`, and
+        // both are machine-surface contracts read from this process's
+        // stdout: delegating would exit with empty stdout while the
+        // daemon's worker opens an editor. Each flag alone must force
+        // the standalone path; they also compose with each other.
+        for (json, stdout) in [(true, false), (false, true), (true, true)] {
+            let output = OutputArgs {
+                out: None,
+                format: None,
+                standalone: false,
+                json,
+                stdout,
+            };
+            assert!(
+                !delegate_to_daemon(
+                    &Request::Capture { delay_ms: 0 },
+                    &output,
+                    "capture",
+                    None,
+                    false,
+                ),
+                "--json={json} --stdout={stdout} must not delegate to the daemon"
+            );
+        }
     }
 
     // ── Phase 5 Task 002: shell state construction ────────────────
